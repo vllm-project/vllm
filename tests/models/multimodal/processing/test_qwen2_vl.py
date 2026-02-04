@@ -42,7 +42,11 @@ def test_processor_override(
     prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
     mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
 
     # Ensure we have the right number of placeholders per num_crops size
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -83,7 +87,11 @@ def test_get_image_size_with_most_features(
     prompt = "<|vision_start|><|image_pad|><|vision_end|>"
     for asset in image_assets:
         mm_data = {"image": [asset.pil_image]}
-        processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        processed_inputs = processor.apply(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
         grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"].tolist()
         t, h, w = grid_thw[0]
         tokens = (t * h * w) // (merge_size**2)

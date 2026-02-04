@@ -279,7 +279,7 @@ def find_loaded_library(lib_name: str) -> str | None:
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
-    a loaded library.
+    loaded library.
     """  # noqa
     found_line = None
     with open("/proc/self/maps") as f:

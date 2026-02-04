@@ -107,6 +107,9 @@ class Worker(WorkerBase):
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner", scope="global")
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -277,8 +280,8 @@ class Worker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def reload_weights(self) -> None:
-        self.model_runner.reload_weights()
+    def reload_weights(self, *args, **kwargs) -> None:
+        self.model_runner.reload_weights(*args, **kwargs)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -327,7 +330,7 @@ class Worker(WorkerBase):
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
+        assert self.init_snapshot.free_memory >= free_gpu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
             f"current free memory {format_gib(free_gpu_memory)} GiB. "
@@ -535,6 +538,9 @@ class Worker(WorkerBase):
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

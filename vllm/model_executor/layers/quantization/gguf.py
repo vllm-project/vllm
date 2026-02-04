@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 import gguf
 import torch
@@ -77,7 +77,7 @@ class GGUFConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping

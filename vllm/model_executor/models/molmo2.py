@@ -611,6 +611,7 @@ class ImagePoolingAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
             )
 
     def forward_sdpa(
@@ -1860,6 +1861,12 @@ def get_frame_times_and_chosen_fps(
 
 
 class Molmo2ProcessingInfo(BaseProcessingInfo):
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_hf_processor(self, **kwargs: object) -> Molmo2ProcessorWrapper:
         processor = self.ctx.get_hf_processor(**kwargs)
         hf_config = self.ctx.get_hf_config()
@@ -2182,9 +2189,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             prompt_tokens = [bos_token_id] + prompt_tokens
 
         return prompt_tokens
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
 
     def _call_hf_processor(
         self,

@@ -231,24 +231,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.variance_size_override is not None:
-            return self.forward_native(x, residual)
-
-        from vllm._ipex_ops import ipex_ops as ops
-
-        if residual is not None:
-            ops.fused_add_rms_norm(
-                x,
-                residual,
-                self.weight.data,
-                self.variance_epsilon,
-            )
-            return x, residual
-        return ops.rms_norm(
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
+        return self.forward_cuda(x, residual)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
