@@ -121,7 +121,7 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         lower_bound, upper_bound = custom_ar_range
         # Use symm_mem for small sizes (≤ lower_bound) and large sizes (≥ upper_bound)
         # Use custom_AR (not symm_mem) for mid-range sizes
-        return not (lower_bound < tensor_size < upper_bound)
+        return tensor_size <= lower_bound or tensor_size >= upper_bound
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
 
 
