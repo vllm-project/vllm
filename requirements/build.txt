@@ -4,9 +4,9 @@ ninja
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
-torch==2.9.1
+torch
 wheel
-jinja2>=3.1.6
+jinja2
 regex
 build
 protobuf >= 6.33.5

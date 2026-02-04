@@ -1,13 +1,15 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba #unpined numba # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
-ray[cgraph]>=2.48.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
-torch==2.9.1
-torchaudio==2.9.1
-# These must be updated alongside torch
-torchvision==0.24.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
-# FlashInfer should be updated together with the Dockerfile
-flashinfer-python==0.6.1
+ray[default] >= 2.9
+nvidia-ml-py >= 12.560.30 # for pynvml package
+
+# in NVIDIA branches, torch/torchvision/xformers (and anything else that depends on PyT)
+# should remain unpinned, as we build them ourselves at all matching versions
+torch
+torchaudio
+torchvision  # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+xformers
