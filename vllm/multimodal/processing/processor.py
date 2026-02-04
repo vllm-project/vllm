@@ -991,8 +991,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if hasattr(self, "_get_data_parser"):
             raise ValueError(
                 "BaseMultiModalProcessor._get_data_parser has been "
-                "moved to `info.build_data_parser in v0.16. "
-                "You should override `info.build_data_parser` instead."
+                "moved to `BaseProcessingInfo.build_data_parser` in v0.16. "
+                "You should override `BaseProcessingInfo.build_data_parser` instead."
             )
 
         self.data_parser = self.info.get_data_parser()
