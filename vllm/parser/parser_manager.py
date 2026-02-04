@@ -24,9 +24,7 @@ class ParserManager:
     """
     Central registry for Parser implementations.
 
-    Supports two registration modes:
-      - Eager registration via `register_module`
-      - Lazy registration via `register_lazy_module`
+    All registrations are lazy - modules are only imported when first accessed.
     """
 
     parsers: dict[str, type[Parser]] = {}
@@ -35,7 +33,9 @@ class ParserManager:
     @classmethod
     def get_parser_internal(cls, name: str) -> type[Parser]:
         """
-        Retrieve a registered or lazily registered Parser class.
+        Retrieve a registered Parser class.
+
+        The parser will be imported and cached on first access.
 
         Args:
             name: The registered name of the parser.
@@ -80,91 +80,56 @@ class ParserManager:
             raise
 
     @classmethod
-    def _register_module(
+    def register_module(
         cls,
-        module: type[Parser],
-        module_name: str | list[str] | None = None,
-        force: bool = True,
-    ) -> None:
-        """Register a Parser class immediately."""
-        from vllm.parser.abstract_parser import Parser
-
-        if not issubclass(module, Parser):
-            raise TypeError(
-                f"module must be subclass of Parser, but got {type(module)}"
-            )
-
-        if module_name is None:
-            module_names = [module.__name__]
-        elif isinstance(module_name, str):
-            module_names = [module_name]
-        elif is_list_of(module_name, str):
-            module_names = module_name
-        else:
-            raise TypeError("module_name must be str, list[str], or None.")
-
-        for name in module_names:
-            if not force and name in cls.parsers:
-                existed = cls.parsers[name]
-                raise KeyError(f"{name} is already registered at {existed.__module__}")
-            cls.parsers[name] = module
-
-    @classmethod
-    def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
+        name: str | list[str],
+        module_path: str | None = None,
+        class_name: str | None = None,
+    ) -> type[Parser] | Callable[[type[Parser]], type[Parser]]:
         """
-        Register a lazy module mapping for delayed import.
+        Register a Parser lazily.
 
-        Example:
-            ParserManager.register_lazy_module(
+        Can be used as a decorator or called directly with module path strings.
+
+        Usage as decorator:
+            @ParserManager.register_module("my_parser")
+            class MyParser(Parser):
+                ...
+
+        Usage as direct call:
+            ParserManager.register_module(
                 name="minimax_m2",
                 module_path="vllm.parser.minimax_m2_parser",
                 class_name="MiniMaxM2Parser",
             )
         """
-        cls.lazy_parsers[name] = (module_path, class_name)
+        # Direct call with module_path and class_name
+        if module_path is not None and class_name is not None:
+            if isinstance(name, str):
+                names = [name]
+            elif is_list_of(name, str):
+                names = name
+            else:
+                raise TypeError("name must be str or list[str].")
 
-    @classmethod
-    def register_module(
-        cls,
-        name: str | list[str] | None = None,
-        force: bool = True,
-        module: type[Parser] | None = None,
-    ) -> type[Parser] | Callable[[type[Parser]], type[Parser]]:
-        """
-        Register a Parser class.
-
-        Can be used as a decorator or called directly.
-
-        Usage:
-            @ParserManager.register_module("my_parser")
-            class MyParser(Parser):
-                ...
-
-        Or:
-            ParserManager.register_module(module=MyParser)
-        """
-        if not isinstance(force, bool):
-            raise TypeError(f"force must be a boolean, but got {type(force)}")
-
-        # Immediate registration
-        if module is not None:
-            cls._register_module(module=module, module_name=name, force=force)
-            return module
+            for n in names:
+                cls.lazy_parsers[n] = (module_path, class_name)
+            return None  # type: ignore[return-value]
 
         # Decorator usage
         def _decorator(obj: type[Parser]) -> type[Parser]:
-            module_path = obj.__module__
-            class_name = obj.__name__
+            obj_module_path = obj.__module__
+            obj_class_name = obj.__name__
 
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
                 names = name
             else:
-                names = [class_name]
+                names = [obj_class_name]
 
             for n in names:
-                cls.lazy_parsers[n] = (module_path, class_name)
+                cls.lazy_parsers[n] = (obj_module_path, obj_class_name)
 
             return obj
 

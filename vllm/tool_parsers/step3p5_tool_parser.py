@@ -25,7 +25,6 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 
 logger = init_logger(__name__)
@@ -1352,7 +1351,6 @@ class StreamingXMLToolCallParser:
         self.deferred_param_raw_value = ""
 
 
-@ToolParserManager.register_module("step3p5")
 class Step3p5ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)

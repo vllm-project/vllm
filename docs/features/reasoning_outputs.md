@@ -304,7 +304,7 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
                 A tuple containing the reasoning content and the content.
             """
     # Register the reasoning parser
-    ReasoningParserManager.register_lazy_module(
+    ReasoningParserManager.register_module(
         name="example",
         module_path="vllm.reasoning.example_reasoning_parser",
         class_name="ExampleParser",
