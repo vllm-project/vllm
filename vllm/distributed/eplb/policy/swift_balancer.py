@@ -290,7 +290,8 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                 if expert_id != -1:
                     num_per_existing_expert[expert_id] += 1
 
-        update_workload = np.zeros(self.num_original_experts, dtype=np.float32)
+        update_workload = np.full(self.num_original_experts, 
+                                  fill_value=-1, dtype=np.float32)
         for expert_id, weight in initial_weights:
             assert num_per_existing_expert[expert_id] != 0
             update_workload[expert_id] = weight / num_per_existing_expert[expert_id]
