@@ -118,7 +118,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
-        q_pad_num_heads = mla_args.get("q_pad_num_heads", MAX_HEADS)
         super().__init__(
             num_heads,
             head_size,
@@ -130,7 +129,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             logits_soft_cap,
             attn_type,
             kv_sharing_target_layer_name,
-            q_pad_num_heads=q_pad_num_heads,
+            q_pad_num_heads=MAX_HEADS,
             **mla_args,
         )
 
