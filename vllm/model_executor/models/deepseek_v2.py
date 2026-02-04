@@ -94,7 +94,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 from vllm.forward_context import AFDMetadata
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled, dbo_yield
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled, dbo_yield, apply_dbo_yield
 
 
 class DeepseekAttention(nn.Module):
@@ -1169,8 +1169,7 @@ class DeepseekV2Model(nn.Module):
             )
             afd_connector.send_attn_output(current_hidden, metadata, ubatch_idx=afd_metadata.afd_stage_idx)
 
-            if dbo_enabled():
-                dbo_yield()
+            current_hidden = apply_dbo_yield(current_hidden)
 
         hidden_states = afd_connector.recv_ffn_output(ubatch_idx=afd_metadata.afd_stage_idx)
 
