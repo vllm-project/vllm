@@ -230,10 +230,9 @@ class TokenizeParams:
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
-
-        # This prevents tokenization from taking up more resources than necessary
-        # while still failing `self._token_len_check` as expected by users
-        if max_length is None and self.max_input_tokens is not None:
+        elif max_length is None and self.max_input_tokens is not None:
+            # This prevents tokenization from taking up more resources than necessary
+            # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
 
         return dict(
@@ -270,10 +269,7 @@ class TokenizeParams:
 
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
-        if self.do_lower_case:
-            text = text.lower()
-
-        return text
+        return text.lower() if self.do_lower_case else text
 
     def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
