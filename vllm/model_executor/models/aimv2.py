@@ -130,7 +130,7 @@ class AIMv2Attention(nn.Module):
             self.num_heads_per_partition,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

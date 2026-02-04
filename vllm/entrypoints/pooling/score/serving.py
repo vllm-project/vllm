@@ -27,12 +27,12 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponseData,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    ScoreContentPartParam,
-    ScoreMultiModalParam,
+    ScoreData,
+    ScoreInputs,
     _cosine_similarity,
-    _validate_score_input_lens,
     compress_token_type_ids,
     get_score_prompt,
+    validate_score_input,
 )
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -65,15 +65,32 @@ class ServingScores(OpenAIServing):
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
+        self.is_cross_encoder = self.model_config.is_cross_encoder
+        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.architecture = self.model_config.architecture
+
+        if self.is_cross_encoder:
+            self._score_func = self._cross_encoding_score
+        else:
+            self._score_func = self._embedding_score
+
     async def _embedding_score(
         self,
-        data_1: list[str],
-        data_2: list[str],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
+        input_texts: list[str] = []
+        for text in data_1 + data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Embedding scores currently do not support multimodal input."
+                )
+            input_texts.append(text)
+
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
 
@@ -81,8 +98,6 @@ class ServingScores(OpenAIServing):
             tokenizer.encode,
             executor=self._tokenizer_executor,
         )
-
-        input_texts = data_1 + data_2
 
         tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
         tokenized_prompts = await asyncio.gather(
@@ -157,60 +172,30 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
-    def _preprocess_score(
-        self,
-        request: RerankRequest | ScoreRequest,
-        tokenizer: TokenizerLike,
-        tokenization_kwargs: dict[str, Any],
-        data_1: str | ScoreContentPartParam,
-        data_2: str | ScoreContentPartParam,
-    ) -> tuple[str, TokensPrompt]:
-        model_config = self.model_config
-
-        full_prompt, engine_prompt = get_score_prompt(
-            model_config=model_config,
-            data_1=data_1,
-            data_2=data_2,
-            tokenizer=tokenizer,
-            tokenization_kwargs=tokenization_kwargs,
-            score_template=self.score_template,
-        )
-        self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
-        if request.mm_processor_kwargs is not None:
-            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
-
-        return full_prompt, engine_prompt
-
     async def _cross_encoding_score(
         self,
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError("MistralTokenizer not supported for cross-encoding")
 
-        request_prompts: list[str] = []
-        engine_prompts: list[TokensPrompt] = []
+        model_config = self.model_config
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError("MistralTokenizer not supported for cross-encoding")
-
         tok_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
-
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
-
         preprocess_async = make_async(
             self._preprocess_score,
             executor=self._tokenizer_executor,
         )
-
         preprocessed_prompts = await asyncio.gather(
             *(
                 preprocess_async(
@@ -224,6 +209,8 @@ class ServingScores(OpenAIServing):
             )
         )
 
+        request_prompts: list[str] = []
+        engine_prompts: list[TokensPrompt] = []
         for full_prompt, engine_prompt in preprocessed_prompts:
             request_prompts.append(full_prompt)
             engine_prompts.append(engine_prompt)
@@ -278,10 +265,33 @@ class ServingScores(OpenAIServing):
 
         return [out for out in final_res_batch if out is not None]
 
+    def _preprocess_score(
+        self,
+        request: RerankRequest | ScoreRequest,
+        tokenizer: TokenizerLike,
+        tokenization_kwargs: dict[str, Any],
+        data_1: ScoreData,
+        data_2: ScoreData,
+    ) -> tuple[str, TokensPrompt]:
+        model_config = self.model_config
+        full_prompt, engine_prompt = get_score_prompt(
+            model_config=model_config,
+            data_1=data_1,
+            data_2=data_2,
+            tokenizer=tokenizer,
+            tokenization_kwargs=tokenization_kwargs,
+            score_template=self.score_template,
+        )
+        self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return full_prompt, engine_prompt
+
     async def _run_scoring(
         self,
-        data_1: list[str] | str | ScoreMultiModalParam,
-        data_2: list[str] | str | ScoreMultiModalParam,
+        data_1: ScoreInputs,
+        data_2: ScoreInputs,
         request: ScoreRequest | RerankRequest,
         request_id: str,
         raw_request: Request | None = None,
@@ -294,44 +304,21 @@ class ServingScores(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        if not self.model_config.is_multimodal_model and (
-            isinstance(data_1, dict) or isinstance(data_2, dict)
-        ):
-            raise ValueError(
-                f"MultiModalParam is not supported for {self.model_config.architecture}"  # noqa: E501
-            )
+        score_data_1, score_data_2 = validate_score_input(
+            data_1,
+            data_2,
+            is_multimodal_model=self.is_multimodal_model,
+            architecture=self.architecture,
+        )
 
-        if isinstance(data_1, str):
-            data_1 = [data_1]
-        elif isinstance(data_1, dict):
-            data_1 = data_1.get("content")  # type: ignore[assignment]
-
-        if isinstance(data_2, str):
-            data_2 = [data_2]
-        elif isinstance(data_2, dict):
-            data_2 = data_2.get("content")  # type: ignore[assignment]
-
-        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
-
-        if self.model_config.is_cross_encoder:
-            return await self._cross_encoding_score(
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
-
-        else:
-            return await self._embedding_score(
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
+        return await self._score_func(
+            data_1=score_data_1,
+            data_2=score_data_2,
+            request=request,
+            request_id=request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+        )
 
     async def create_score(
         self,
@@ -391,15 +378,6 @@ class ServingScores(OpenAIServing):
 
         request_id = f"rerank-{self._base_request_id(raw_request)}"
         documents = request.documents
-        top_n = (
-            request.top_n
-            if request.top_n > 0
-            else (
-                len(documents)
-                if isinstance(documents, list)
-                else len(documents["content"])
-            )
-        )
 
         try:
             final_res_batch = await self._run_scoring(
@@ -411,6 +389,8 @@ class ServingScores(OpenAIServing):
             )
             if isinstance(final_res_batch, ErrorResponse):
                 return final_res_batch
+
+            top_n = request.top_n if request.top_n > 0 else len(final_res_batch)
 
             return self.request_output_to_rerank_response(
                 final_res_batch,
@@ -465,22 +445,32 @@ class ServingScores(OpenAIServing):
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         model_name: str,
-        documents: list[str] | ScoreMultiModalParam,
+        documents: ScoreInputs,
         top_n: int,
     ) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
+
+        if not isinstance(documents, list):
+            documents = [documents]
+
         results: list[RerankResult] = []
         num_prompt_tokens = 0
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
+            document = documents[idx]
+            if isinstance(document, str):
+                rerank_document = RerankDocument(text=document)
+            else:
+                rerank_document = RerankDocument(
+                    multi_modal=document.get("content", [])
+                )
+
             result = RerankResult(
                 index=idx,
-                document=RerankDocument(text=documents[idx])
-                if isinstance(documents, list)
-                else RerankDocument(multi_modal=documents["content"][idx]),
+                document=rerank_document,
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
