@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.metrics.stats import (
     CompletedTiming,
     IterationStats,
+    LoRARequestStates,
     PromptTokenStats,
     RequestStateStats,
     ScheduledTiming,
@@ -215,6 +216,67 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def test_no_tokens_generated_during_prefill_no_timestamp_update():
+    """When prefill produces no tokens (e.g., KV load failure), don't update timestamps.
+
+    This can happen when is_prefilling=True but the request fails to generate
+    tokens due to KV-cache load failures or other errors.
+    """
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+    lora_states = LoRARequestStates(log_stats=False)
+
+    # call update_from_output with is_prefilling=True but no tokens
+    stats.update_from_output(
+        output=EngineCoreOutput(request_id="test-req", new_token_ids=[]),
+        engine_core_timestamp=200.0,
+        is_prefilling=True,
+        prompt_len=100,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    # regression assertions
+    assert req_stats.first_token_ts == 0.0, (
+        "first_token_ts should not be set when no tokens are generated"
+    )
+    assert req_stats.last_token_ts == 0.0, (
+        "last_token_ts should not be set when no tokens are generated"
+    )
+    assert len(stats.time_to_first_tokens_iter) == 0, (
+        "No TTFT should be recorded when no tokens are generated"
+    )
+
+
+def test_no_tokens_generated_during_decode_no_itl():
+    """When decode produces no tokens, don't calculate ITL or update timestamps."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=100.0)
+    req_stats.first_token_ts = 150.0  # Already got first token
+    req_stats.last_token_ts = 150.0
+    lora_states = LoRARequestStates(log_stats=False)
+
+    # call update_from_output with is_prefilling=False (decode) but no tokens
+    stats.update_from_output(
+        output=EngineCoreOutput(request_id="test-req", new_token_ids=[]),
+        engine_core_timestamp=200.0,
+        is_prefilling=False,
+        prompt_len=100,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    # regression assertions
+    assert req_stats.last_token_ts == 150.0, (
+        "last_token_ts should not change when no tokens are generated"
+    )
+    assert len(stats.inter_token_latencies_iter) == 0, (
+        "No ITL should be recorded when no tokens are generated"
+    )
 
 
 def test_timing_reflects_request_progress():

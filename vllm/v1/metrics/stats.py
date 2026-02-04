@@ -371,6 +371,10 @@ class IterationStats:
                 prompt_len=prompt_len,
             )
 
+        # Only record first token latency when a token was actually generated.
+        # is_prefilling can be True even when no tokens are produced (e.g.,
+        # KV-cache load failures, aborts during prefill).
+        if is_prefilling and num_new_generation_tokens > 0:
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
             req_stats.first_token_latency = first_token_latency
@@ -397,14 +401,16 @@ class IterationStats:
                 lora_name,
             )
 
-        # Process the batch-level "new tokens" engine core event
-        if is_prefilling:
-            req_stats.first_token_ts = engine_core_timestamp
-        else:
-            itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+        # Process the batch-level "new tokens" engine core event.
+        # Only update timestamps when tokens were actually generated.
+        if num_new_generation_tokens > 0:
+            if is_prefilling:
+                req_stats.first_token_ts = engine_core_timestamp
+            else:
+                itl = engine_core_timestamp - req_stats.last_token_ts
+                self.inter_token_latencies_iter.append(itl)
 
-        req_stats.last_token_ts = engine_core_timestamp
+            req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(
         self,
