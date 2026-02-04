@@ -333,22 +333,40 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
+
+        When specialize_active_lora is enabled, uses num_active_loras instead
+        of max_loras for virtual expert calculation, and virtual_expert_id
+        encodes lora_slot (not lora_id) as: lora_slot * num_experts + expert_id.
+
+        Returns:
+            tuple of (sorted_ids, expert_ids, num_tokens_post_pad)
+            token_lora_mapping and lora_ids are available from meta_args().
         """
-        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
-            self.token_mapping_meta.meta_args(
-                num_tokens, self.lora_config.specialize_active_lora
-            )
+        (
+            token_lora_mapping,
+            _,
+            _,
+            _,
+            lora_ids,
+            _,
+            num_loras,
+            lora_id_to_slot,
+        ) = self.token_mapping_meta.meta_args(
+            num_tokens, self.lora_config.specialize_active_lora
         )
         if naive_block_assignment:
             expert_ids = topk_ids.reshape(-1)
             sorted_ids = None
             num_tokens_post_pad = None
         else:
-            num_virtual_experts = num_experts * max_loras
+            # When specialize_active_lora is enabled, num_loras is
+            # num_active_loras; otherwise it's max_loras + 1.
+            # Use max_loras for allocation to ensure sufficient space.
+            num_virtual_experts = num_experts * num_loras
             max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
                 block_size - 1
             )
@@ -375,8 +393,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 lora_ids,
                 adapter_enabled,
                 token_lora_mapping,
+                lora_id_to_slot,
                 num_virtual_experts,
-                max_loras,
+                num_loras,
                 block_size,
                 sorted_ids,
                 expert_ids,
@@ -384,7 +403,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 expert_map,
             )
 
-        return token_lora_mapping, sorted_ids, expert_ids, num_tokens_post_pad
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -404,27 +423,27 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
         fully_sharded: bool = False,
         offset: int = 0,
-        token_lora_mapping: torch.Tensor | None = None,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
 
         Uses combined virtual expert indexing where expert_ids contains:
-            virtual_expert_id = lora_id * num_experts + expert_id
+            virtual_expert_id = lora_slot * num_experts + expert_id
+        The Triton kernel decodes lora_slot and uses lora_ids to get lora_id.
         """
+        # Get token_lora_mapping and lora_ids (active_lora_ids) from meta_args
         (
-            token_lora_mapping_meta,
+            token_lora_mapping,
             _,
             _,
             _,
+            lora_ids,
             _,
             _,
             _,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,
@@ -435,6 +454,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expert_ids,
             num_tokens_post_padded,
             token_lora_mapping,
+            lora_ids,
             max_lora_rank,
             top_k_num,
             adapter_enabled,

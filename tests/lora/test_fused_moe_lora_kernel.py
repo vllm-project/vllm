@@ -155,13 +155,28 @@ def use_fused_moe_lora_kernel(
     adapter_enabled = torch.ones(
         (max_loras + 1,), dtype=torch.int32, device=topk_ids.device
     )
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device=topk_ids.device)
+
+    # Generate random permutation for lora_ids (slot -> lora_id mapping)
+    # IMPORTANT: Only permute valid lora_ids [0, max_loras), not [0, max_loras]
+    # Valid lora_ids in token_lora_mapping are [0, max_loras-1]
+    # If we permute max_loras+1 values, a valid lora_id could map to slot=max_loras,
+    # causing virtual_expert >= num_virtual_experts (num_experts * max_loras)
+    lora_ids = torch.randperm(max_loras, dtype=torch.int32, device=topk_ids.device)
+
+    # Build inverse mapping: lora_id_to_slot[lora_id] = slot
+    lora_id_to_slot = torch.full(
+        (max_loras,), -1, dtype=torch.int32, device=topk_ids.device
+    )
+    for slot in range(max_loras):
+        lora_id = lora_ids[slot].item()
+        lora_id_to_slot[lora_id] = slot
 
     ops.moe_lora_align_block_size(
         topk_ids,
         lora_ids,
         adapter_enabled,
         token_lora_mapping,
+        lora_id_to_slot,
         num_virtual_experts,
         max_loras,
         block_size,
@@ -193,6 +208,7 @@ def use_fused_moe_lora_kernel(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         max_lora_rank,
         top_k_num,
         adapter_enabled,
@@ -376,6 +392,10 @@ def use_fused_moe_lora_kernel_naive(
 
     adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
 
+    # Generate random permutation for lora_ids (slot -> lora_id mapping)
+    # IMPORTANT: Only permute valid lora_ids [0, max_loras)
+    lora_ids = torch.randperm(max_loras, dtype=torch.int32, device=topk_ids.device)
+
     fused_moe_lora(
         output,
         hidden_states,
@@ -386,6 +406,7 @@ def use_fused_moe_lora_kernel_naive(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         max_lora_rank,
         top_k_num,
         adapter_enabled,

@@ -53,6 +53,7 @@ def _fused_moe_lora_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     token_lora_mapping_ptr,
+    lora_ids_ptr,  # Mapping from lora_slot to lora_id
     # Matrix dimensions
     N,
     K,
@@ -61,7 +62,7 @@ def _fused_moe_lora_kernel(
     num_experts,
     top_k_num,
     adapter_enabled,
-    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
+    max_loras,  # Used for bounds checking lora_id in weight tensor
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -136,12 +137,15 @@ def _fused_moe_lora_kernel(
         lora_id = tl.load(token_lora_mapping_ptr + token_idx)
         expert_id = tl.load(expert_ids_ptr + pid_m)
     else:
-        # Non-naive mode: combined encoding
+        # Non-naive mode: combined encoding uses lora_slot
+        # expert_ids contains: lora_slot * num_experts + expert_id
         expert_id_lora = tl.load(expert_ids_ptr + pid_m)
         if expert_id_lora == -1:
             return
-        lora_id = expert_id_lora // num_experts
+        lora_slot = expert_id_lora // num_experts
         expert_id = expert_id_lora % num_experts
+        # Decode lora_slot to actual lora_id using lora_ids lookup
+        lora_id = tl.load(lora_ids_ptr + lora_slot)
 
     if lora_id == -1:
         return
@@ -256,6 +260,7 @@ def _fused_moe_lora_shrink(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     top_k_num: int,
     adapter_enabled: torch.Tensor,
     ## adding for kernel
@@ -307,6 +312,7 @@ def _fused_moe_lora_shrink(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         N,
         K,
         EM,
@@ -349,6 +355,7 @@ def _fused_moe_lora_expand(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     top_k_num: int,
     adapter_enabled: torch.Tensor,
     ## adding for kernel
@@ -413,6 +420,7 @@ def _fused_moe_lora_expand(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         N,
         K,
         EM,
@@ -458,6 +466,7 @@ def _fused_moe_lora(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     max_lora_rank: int,
     top_k_num: int,
     adapter_enabled: torch.Tensor,
@@ -523,6 +532,7 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         top_k_num,
         adapter_enabled,
         ## adding for kernel
@@ -567,6 +577,7 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         top_k_num,
         adapter_enabled,
         ## adding for kernel
@@ -603,6 +614,7 @@ def _fused_moe_lora_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,
     max_lora_rank: int,
     top_k_num: int,
     adapter_enabled: torch.Tensor,
@@ -636,6 +648,7 @@ def _fused_moe_lora_shrink_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,
     top_k_num: int,
     adapter_enabled: torch.Tensor,
     device: torch.device,
@@ -662,13 +675,13 @@ def _fused_moe_lora_shrink_fake(
 def _fused_moe_lora_expand_fake(
     output: torch.Tensor,
     a_intermediate_cache1: torch.Tensor,
-    b_intermediate_cache1: torch.Tensor,
     lora_b_stacked: list[torch.Tensor],
     topk_weights: torch.Tensor,
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,
     top_k_num: int,
     adapter_enabled: torch.Tensor,
     device: torch.device,

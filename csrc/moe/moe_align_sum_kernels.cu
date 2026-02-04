@@ -320,10 +320,11 @@ __global__ void moe_lora_align_block_size_kernel(
     const int32_t* __restrict__ token_lora_mapping,
     const int32_t* __restrict__ lora_ids,
     const int32_t* __restrict__ adapter_enabled,
+    const int32_t* __restrict__ lora_id_to_slot,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int32_t* __restrict__ num_tokens_post_pad,
     const int32_t* __restrict__ expert_map, int32_t num_experts,
-    int32_t num_virtual_experts, int32_t max_loras,
+    int32_t num_virtual_experts, int32_t num_loras,
     int32_t padded_num_virtual_experts, int32_t experts_per_warp,
     int32_t block_size, size_t numel, int32_t* __restrict__ cumsum,
     int32_t max_num_tokens_padded, int32_t topk_num, bool has_expert_map) {
@@ -362,7 +363,11 @@ __global__ void moe_lora_align_block_size_kernel(
 
     // reject invalid
     if (expert < 0 || expert >= num_experts) continue;
-    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
+    if (lora < 0 || adapter_enabled[lora] == 0) continue;
+
+    // Convert lora_id to lora_slot using inverse map
+    int32_t lora_slot = lora_id_to_slot[lora];
+    if (lora_slot < 0 || lora_slot >= num_loras) continue;
 
     // apply expert_map on physical expert id if needed
     if (has_expert_map) {
@@ -372,8 +377,9 @@ __global__ void moe_lora_align_block_size_kernel(
       if (expert < 0 || expert >= num_experts) continue;
     }
 
-    // virtual expert id in [0, num_virtual_experts)
-    int32_t virtual_expert = lora * num_experts + expert;
+    // virtual expert id uses lora_slot (not lora_id) in [0,
+    // num_virtual_experts)
+    int32_t virtual_expert = lora_slot * num_experts + expert;
 
     // safety
     if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
@@ -473,9 +479,10 @@ __global__ void moe_lora_count_and_sort_kernel(
     const scalar_t* __restrict__ topk_ids,
     const int32_t* __restrict__ token_lora_mapping,
     const int32_t* __restrict__ adapter_enabled,
+    const int32_t* __restrict__ lora_id_to_slot,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
     const int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
-    int32_t num_virtual_experts, int32_t max_loras,
+    int32_t num_virtual_experts, int32_t num_loras,
     int32_t max_num_tokens_padded, int32_t topk_num, bool has_expert_map) {
   const size_t tid = blockIdx.y * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.y;
@@ -487,7 +494,11 @@ __global__ void moe_lora_count_and_sort_kernel(
     int32_t token_idx = (int32_t)(i / topk_num);
     int32_t lora = token_lora_mapping[token_idx];
 
-    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
+    if (lora < 0 || adapter_enabled[lora] == 0) continue;
+
+    // Convert lora_id to lora_slot using inverse map
+    int32_t lora_slot = lora_id_to_slot[lora];
+    if (lora_slot < 0 || lora_slot >= num_loras) continue;
 
     if (has_expert_map) {
       expert = expert_map[expert];
@@ -495,7 +506,8 @@ __global__ void moe_lora_count_and_sort_kernel(
       if (expert < 0 || expert >= num_experts) continue;
     }
 
-    int32_t virtual_expert = lora * num_experts + expert;
+    // virtual expert id uses lora_slot (not lora_id)
+    int32_t virtual_expert = lora_slot * num_experts + expert;
 
     if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
@@ -511,10 +523,11 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     const scalar_t* __restrict__ topk_ids,
     const int32_t* __restrict__ token_lora_mapping,
     const int32_t* __restrict__ adapter_enabled,
+    const int32_t* __restrict__ lora_id_to_slot,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int32_t* __restrict__ total_tokens_post_pad,
     const int32_t* __restrict__ expert_map, int32_t num_experts,
-    int32_t num_virtual_experts, int32_t max_loras, int32_t block_size,
+    int32_t num_virtual_experts, int32_t num_loras, int32_t block_size,
     size_t numel, int32_t max_num_tokens_padded, int32_t topk_num,
     bool has_expert_map) {
   const int32_t max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size);
@@ -558,7 +571,11 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     int32_t lora = token_lora_mapping[token_idx];
 
     // Check lora validity and adapter enabled
-    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
+    if (lora < 0 || adapter_enabled[lora] == 0) continue;
+
+    // Convert lora_id to lora_slot using inverse map
+    int32_t lora_slot = lora_id_to_slot[lora];
+    if (lora_slot < 0 || lora_slot >= num_loras) continue;
 
     // Apply expert_map if needed
     if (has_expert_map) {
@@ -567,8 +584,8 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
       if (expert < 0 || expert >= num_experts) continue;
     }
 
-    // Compute virtual expert id
-    int32_t virtual_expert = lora * num_experts + expert;
+    // Compute virtual expert id using lora_slot (not lora_id)
+    int32_t virtual_expert = lora_slot * num_experts + expert;
     if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
     ++tokens_cnts[(tid + 1) * num_virtual_experts + virtual_expert];
@@ -623,7 +640,11 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     int32_t token_idx = (int32_t)(i / topk_num);
     int32_t lora = token_lora_mapping[token_idx];
 
-    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
+    if (lora < 0 || adapter_enabled[lora] == 0) continue;
+
+    // Convert lora_id to lora_slot using inverse map
+    int32_t lora_slot = lora_id_to_slot[lora];
+    if (lora_slot < 0 || lora_slot >= num_loras) continue;
 
     if (has_expert_map) {
       expert = expert_map[expert];
@@ -631,7 +652,8 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
       if (expert < 0 || expert >= num_experts) continue;
     }
 
-    int32_t virtual_expert = lora * num_experts + expert;
+    // virtual expert id uses lora_slot (not lora_id)
+    int32_t virtual_expert = lora_slot * num_experts + expert;
     if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
     int32_t rank_post_pad =
@@ -812,18 +834,16 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
   }
 }
 
-void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
-                               torch::Tensor adapter_enabled,
-                               torch::Tensor token_lora_mapping,
-                               int64_t num_virtual_experts, int64_t max_loras,
-                               int64_t block_size,
-                               torch::Tensor sorted_token_ids,
-                               torch::Tensor expert_ids,
-                               torch::Tensor num_tokens_post_pad,
-                               std::optional<torch::Tensor> maybe_expert_map) {
+void moe_lora_align_block_size(
+    torch::Tensor topk_ids, torch::Tensor lora_ids,
+    torch::Tensor adapter_enabled, torch::Tensor token_lora_mapping,
+    torch::Tensor lora_id_to_slot, int64_t num_virtual_experts,
+    int64_t num_loras, int64_t block_size, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_pad,
+    std::optional<torch::Tensor> maybe_expert_map) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  int64_t num_experts = num_virtual_experts / max_loras;
+  int64_t num_experts = num_virtual_experts / num_loras;
   int64_t topk_num = topk_ids.size(1);
 
   int64_t padded_num_virtual_experts =
@@ -885,11 +905,12 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(),
               adapter_enabled.data_ptr<int32_t>(),
+              lora_id_to_slot.data_ptr<int32_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
               expert_ids.data_ptr<int32_t>(),
               num_tokens_post_pad.data_ptr<int32_t>(),
               expert_map.data_ptr<int32_t>(), (int32_t)num_experts,
-              (int32_t)num_virtual_experts, (int32_t)max_loras,
+              (int32_t)num_virtual_experts, (int32_t)num_loras,
               (int32_t)block_size, (size_t)topk_ids.numel(),
               (int32_t)sorted_token_ids.size(0), (int32_t)topk_num,
               has_expert_map);
@@ -912,11 +933,12 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(),
               lora_ids.data_ptr<int32_t>(), adapter_enabled.data_ptr<int32_t>(),
+              lora_id_to_slot.data_ptr<int32_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
               expert_ids.data_ptr<int32_t>(),
               num_tokens_post_pad.data_ptr<int32_t>(),
               expert_map.data_ptr<int32_t>(), (int32_t)num_experts,
-              (int32_t)num_virtual_experts, (int32_t)max_loras,
+              (int32_t)num_virtual_experts, (int32_t)num_loras,
               (int32_t)padded_num_virtual_experts, (int32_t)experts_per_warp,
               (int32_t)block_size, (size_t)topk_ids.numel(),
               cumsum_buffer.data_ptr<int32_t>(),
@@ -937,10 +959,11 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(),
               adapter_enabled.data_ptr<int32_t>(),
+              lora_id_to_slot.data_ptr<int32_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
               cumsum_buffer.data_ptr<int32_t>(), expert_map.data_ptr<int32_t>(),
               (size_t)topk_ids.numel(), (int32_t)num_experts,
-              (int32_t)num_virtual_experts, (int32_t)max_loras,
+              (int32_t)num_virtual_experts, (int32_t)num_loras,
               (int32_t)sorted_token_ids.size(0), (int32_t)topk_num,
               has_expert_map);
         }

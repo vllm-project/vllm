@@ -59,7 +59,9 @@ def test_moe_lora_align_block_size(
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
     num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device="cuda")
     adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device="cuda")
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device="cuda")
+    lora_ids = torch.arange(max_loras + 1, dtype=torch.int32, device="cuda")
+    # Build lora_id_to_slot inverse map (identity since lora_ids = [0,1,2,...])
+    lora_id_to_slot = torch.arange(max_loras + 1, dtype=torch.int32, device="cuda")
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -67,6 +69,7 @@ def test_moe_lora_align_block_size(
         lora_ids,
         adapter_enabled,
         token_lora_mapping,
+        lora_id_to_slot,
         num_virtual_experts,
         max_loras,
         block_size,
