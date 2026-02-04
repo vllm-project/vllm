@@ -518,7 +518,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_sml_(const int K, const int Kap, const int Kbp,
+__global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
                                  const int M, const int Bx, const int By,
                                  const scalar_t* B,
                                  const scalar_t* __restrict__ A,
@@ -754,7 +754,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_(const int K, const int Kap, const int Kbp,
+__global__ void wvSplitK_hf_(const int K, const int Kbp, const int Kap,
                              const int M, const int Bx, const int By,
                              const scalar_t* B, const scalar_t* __restrict__ A,
                              const scalar_t* __restrict__ BIAS, scalar_t* C,
@@ -1100,7 +1100,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_big_(const int K, const int Kap, const int Kbp,
+__global__ void wvSplitK_hf_big_(const int K, const int Kbp, const int Kap,
                                  const int M, const int Bx, const int By,
                                  const scalar_t* B,
                                  const scalar_t* __restrict__ A,
@@ -1159,12 +1159,12 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   {                                                                           \
     dim3 block(64, 16);                                                       \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, 16);                       \
-    if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
+    if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
       wvSplitK_hf_sml_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>                  \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
-    else if (Kap_in * N_in <= max_lds_len * 1.2)                              \
+    else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
       wvSplitK_hf_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>                      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
@@ -1178,7 +1178,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 
 #define WVSPLIT_TILE(_sYT, __N)                           \
   {                                                       \
-    bool fit_lds = (Kap_in * N_in <= max_lds_len);        \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
       WVSPLITK(1, 4, __N)                                 \
     else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
