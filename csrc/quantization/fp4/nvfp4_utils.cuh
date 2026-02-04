@@ -20,13 +20,6 @@
 #include <cuda_fp8.h>
 #include "../cuda_type_utils.cuh"
 
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
-     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
-  #define ELTS_PER_THREAD 16
-#else
-  #define ELTS_PER_THREAD 8
-#endif
-
 namespace vllm {
 
 template <typename Int>

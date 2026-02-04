@@ -8,9 +8,11 @@
 // Conditional compilation for FP4 element packing size
 #if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
      defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
+  #define ELTS_PER_THREAD 16
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
 constexpr bool CVT_FP4_PACK16 = true;
 #else
+  #define ELTS_PER_THREAD 8
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
 constexpr bool CVT_FP4_PACK16 = false;
 #endif
