@@ -27,6 +27,7 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -34,6 +35,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+ar_draft_model_dir = "amd/PARD-Llama-3.2-1B"  # Compatible with parallel and AR drafting
 
 
 def _create_proposer(
@@ -41,11 +43,19 @@ def _create_proposer(
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     speculative_token_tree: list[tuple[int, ...]] | None = None,
+    parallel_drafting: bool = False,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
 
-    # Choose model directory based on method
-    draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
+    # Method-dependent setup
+    if method == "eagle":
+        draft_model_dir = eagle_dir
+    elif method == "eagle3":
+        draft_model_dir = eagle3_dir
+    elif method == "draft_model":
+        draft_model_dir = ar_draft_model_dir
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
     spec_token_tree_str = None
     if speculative_token_tree is not None:
@@ -59,13 +69,18 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
+        parallel_drafting=parallel_drafting,
     )
+    if parallel_drafting:
+        # Overwrite pard_token to avoid crash during init
+        speculative_config.draft_model_config.hf_config.pard_token = 0
 
+    device = current_platform.device_type
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=CacheConfig(),
         speculative_config=speculative_config,
-        device_config=DeviceConfig(device=current_platform.device_type),
+        device_config=DeviceConfig(device=device),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
         scheduler_config=SchedulerConfig(
@@ -75,7 +90,10 @@ def _create_proposer(
         attention_config=AttentionConfig(backend=attention_backend),
     )
 
-    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
+    if "eagle" in method:
+        return EagleProposer(vllm_config=vllm_config, device=device)
+    else:
+        return DraftModelProposer(vllm_config=vllm_config, device=device)
 
 
 def test_prepare_next_token_ids():
@@ -448,16 +466,8 @@ def test_set_inputs_first_pass_draft_model():
 
     # Create a proposer configured as a draft model (pass_hidden_states=False)
     # We need to mock this since _create_proposer defaults to EAGLE
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer("draft_model", num_speculative_tokens)
 
-    # Manually override to simulate draft model behavior
-    # In real code, this would be set by using method="draft_model"
-    proposer.pass_hidden_states_to_model = False
-    proposer.is_draft_model = True
-    proposer.parallel_drafting = False
-    proposer.extra_slots_per_request = 1
-    proposer.net_num_new_slots_per_request = 1  # +1 for bonus, no -1 for shift
-    proposer.needs_extra_input_slots = True
     proposer.parallel_drafting_token_id = 0
     proposer.is_rejected_token_mask = torch.zeros(
         proposer.max_num_tokens, dtype=torch.bool, device=device
@@ -508,6 +518,9 @@ def test_set_inputs_first_pass_draft_model():
         num_rejected_tokens_gpu=num_rejected_tokens_gpu,
     )
 
+    assert proposer.net_num_new_slots_per_request == 1
+    assert proposer.needs_extra_input_slots
+
     # total_output_tokens = total_input_tokens + net_num_new_slots * batch_size
     assert num_tokens == 7
 
@@ -532,21 +545,14 @@ def test_set_inputs_first_pass_draft_model():
     )
 
     # Verify rejection mask
-    expected_is_rejected = torch.tensor(
-        [False, False, False, True, False, False, False],
-        dtype=torch.bool,
-        device=device,
-    )
+    expected_is_rejected = torch.zeros(7, dtype=torch.bool, device=device)
+    expected_is_rejected[3] = True  # padding token at index 3
     assert torch.equal(
         proposer.is_rejected_token_mask[:num_tokens], expected_is_rejected
     )
 
     # Verify masked token mask (should all be False for non-parallel drafting)
-    expected_is_masked = torch.tensor(
-        [False, False, False, False, False, False, False],
-        dtype=torch.bool,
-        device=device,
-    )
+    expected_is_masked = torch.zeros(7, dtype=torch.bool, device=device)
     assert torch.equal(proposer.is_masked_token_mask[:num_tokens], expected_is_masked)
 
     # Verify last_token_indices (bonus tokens at indices 2 and 6)
@@ -594,16 +600,9 @@ def test_set_inputs_first_pass_parallel_drafting():
     num_speculative_tokens = 3
     block_size = 16
 
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer("eagle", num_speculative_tokens, parallel_drafting=True)
 
     # Override to simulate parallel drafting behavior
-    proposer.pass_hidden_states_to_model = True
-    proposer.parallel_drafting = True
-    proposer.extra_slots_per_request = num_speculative_tokens  # 3
-    proposer.net_num_new_slots_per_request = (
-        num_speculative_tokens - 1
-    )  # 2 (due to shift)
-    proposer.needs_extra_input_slots = True
     proposer.parallel_drafting_token_id = -2
     proposer.parallel_drafting_hidden_state_tensor = torch.zeros(
         proposer.hidden_size, dtype=proposer.dtype, device=device
@@ -684,47 +683,18 @@ def test_set_inputs_first_pass_parallel_drafting():
     )
 
     # Verify rejection mask
-    expected_is_rejected = torch.tensor(
-        [
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-        ],
-        dtype=torch.bool,
-        device=device,
-    )
+    expected_is_rejected = torch.zeros(12, dtype=torch.bool, device=device)
+    expected_is_rejected[5] = True
     assert torch.equal(
         proposer.is_rejected_token_mask[:num_tokens], expected_is_rejected
     )
 
     # Verify masked token mask (parallel drafting slots should be masked)
-    expected_is_masked = torch.tensor(
-        [
-            False,
-            False,
-            False,
-            True,
-            True,
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
-            True,
-        ],
-        dtype=torch.bool,
-        device=device,
-    )
+    expected_is_masked = torch.zeros(12, dtype=torch.bool, device=device)
+    expected_is_masked[3] = True
+    expected_is_masked[4] = True
+    expected_is_masked[10] = True
+    expected_is_masked[11] = True
     assert torch.equal(proposer.is_masked_token_mask[:num_tokens], expected_is_masked)
 
     # Verify last_token_indices (bonus + parallel drafting tokens)
