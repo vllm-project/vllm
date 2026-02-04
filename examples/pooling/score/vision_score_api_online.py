@@ -92,6 +92,44 @@ def main(args):
     response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
 
+    print("Query: string & Document: text + image url")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[0], documents[1]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: list")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": [
+            document,
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: list & Document: list")
+    data = [
+        document,
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+    prompt = {
+        "model": model,
+        "queries": data,
+        "documents": data,
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
 
 if __name__ == "__main__":
     args = parse_args()
