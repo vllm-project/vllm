@@ -168,6 +168,11 @@ class Mxfp8LinearOp:
         in_features: int | None = None,
         weight_scale_2d: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Validate weight_scale dtype and shape
+        assert weight_scale.dtype == MXFP8_SCALE_DTYPE
+        # ndim will be 1 if scale is swizzled
+        assert weight_scale.ndim == 1 or weight_scale.ndim == 2
+
         if self.backend == Mxfp8Backend.FLASHINFER_CUTLASS:
             return self._apply_flashinfer(
                 input,
@@ -189,20 +194,16 @@ class Mxfp8LinearOp:
         out_dtype: torch.dtype,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out_features, in_features = weight.shape
-        scale_k = in_features // MXFP8_BLOCK_SIZE
-
         if weight_scale.ndim == 2:
+            # 2D weight_scale
             weight_scale_2d = weight_scale
-            if weight_scale_2d.dtype != MXFP8_SCALE_DTYPE:
-                weight_scale_2d = weight_scale_2d.view(MXFP8_SCALE_DTYPE)
         else:
-            weight_scale_uint8 = weight_scale.view(MXFP8_SCALE_DTYPE)
-            out_features_padded = (out_features + 127) // 128 * 128
-            weight_scale_2d_padded = weight_scale_uint8.view(
-                out_features_padded, scale_k
+            # 1D weight_scale (swizzled layout)
+            assert weight_scale.ndim == 1, f"Invalid {weight_scale.ndim=}"
+            out_features, in_features = weight.shape
+            weight_scale_2d = unswizzle_mxfp8_scale(
+                weight_scale, M=out_features, K=in_features
             )
-            weight_scale_2d = weight_scale_2d_padded[:out_features, :]
 
         weight_bf16 = dequant_mxfp8_to_bf16(weight, weight_scale_2d)
 
