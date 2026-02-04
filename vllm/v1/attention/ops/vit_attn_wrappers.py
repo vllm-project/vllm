@@ -115,13 +115,16 @@ def apply_sdpa(
     k: torch.Tensor,
     v: torch.Tensor,
     scale: float | None = None,
+    enable_gqa: bool = False,
 ) -> torch.Tensor:
     """
     Input shape:
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, scale=scale)
+    output = F.scaled_dot_product_attention(
+        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+    )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -134,6 +137,7 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    enable_gqa: bool = False,
 ) -> torch.Tensor:
     # Never remove the contiguous logic for ROCm
     # Without it, hallucinations occur with the backend
@@ -143,7 +147,7 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale)
+        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa)
 
     outputs = []
 
@@ -152,7 +156,7 @@ def torch_sdpa_wrapper(
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
     for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-        output_i = apply_sdpa(q_i, k_i, v_i, scale=scale)
+        output_i = apply_sdpa(q_i, k_i, v_i, scale=scale, enable_gqa=enable_gqa)
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
     return context_layer
@@ -164,6 +168,7 @@ def torch_sdpa_wrapper_fake(
     v: torch.Tensor,
     scale: float | None,
     cu_seqlens: torch.Tensor | None,
+    enable_gqa: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -181,5 +186,8 @@ def vit_torch_sdpa_wrapper(
     v: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, scale, cu_seqlens)
+    return torch.ops.vllm.torch_sdpa_wrapper(
+        q, k, v, scale, cu_seqlens, enable_gqa=enable_gqa
+    )
