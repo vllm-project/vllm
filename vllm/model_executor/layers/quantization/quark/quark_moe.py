@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
-    FusedMoERouter,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -373,15 +372,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 rocm_aiter_fused_experts,
@@ -410,7 +404,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
-                router_logits,
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
@@ -566,15 +559,10 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             rocm_aiter_fused_experts,
         )
@@ -775,15 +763,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         if not self.emulate:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 rocm_aiter_fused_experts,

@@ -307,8 +307,9 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens,
             self.max_model_len,
         )
+        num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
-            total_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            num_tokens_main_model + num_lookahead_tokens,
             self.max_model_len,
         )
 
@@ -329,6 +330,7 @@ class KVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
+            num_tokens_main_model=num_tokens_main_model,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -349,7 +351,10 @@ class KVCacheManager:
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_encoder_tokens
+            request.request_id,
+            num_tokens_need_slot,
+            num_tokens_main_model,
+            num_encoder_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from

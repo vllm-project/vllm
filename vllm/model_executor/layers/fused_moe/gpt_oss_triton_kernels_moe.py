@@ -9,12 +9,16 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
@@ -415,8 +419,43 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_expert_map(self) -> bool:
         return True
@@ -471,19 +510,9 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -568,19 +597,9 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
 
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
