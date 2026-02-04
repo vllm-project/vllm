@@ -39,7 +39,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "ipex",
     "petit_nvfp4",
 ]
 
