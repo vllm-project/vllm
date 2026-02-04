@@ -988,6 +988,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
+        # TODO: Remove in v0.18
         if hasattr(self, "_get_data_parser"):
             raise ValueError(
                 "BaseMultiModalProcessor._get_data_parser has been "
