@@ -479,7 +479,7 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
 
 class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
         self.model = InternS1ProMoeLLMModel(
