@@ -150,13 +150,9 @@ class RayDistributedExecutor(Executor):
 
     def _update_noset_device_env_vars(self, ray_remote_kwargs):
         runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
-        runtime_env.update(
-            {
-                "env_vars": {
-                    env_var: "1"
-                    for env_var in current_platform.ray_noset_device_env_vars
-                }
-            }
+        env_vars = runtime_env.setdefault("env_vars", {})
+        env_vars.update(
+            {env_var: "1" for env_var in current_platform.ray_noset_device_env_vars}
         )
         return ray_remote_kwargs
 
