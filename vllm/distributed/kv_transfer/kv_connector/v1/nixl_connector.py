@@ -1258,9 +1258,12 @@ class NixlConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                if req_meta := self._recving_metadata.get(req_id):
-                    self._invalid_block_ids.update(req_meta.local_block_ids)
-                self._failed_recv_reqs.add(req_id)
+                # Use lock to safely update shared state that is read by
+                # get_finished() and get_block_ids_with_load_errors()
+                with self._handshake_lock:
+                    if req_meta := self._recving_metadata.get(req_id):
+                        self._invalid_block_ids.update(req_meta.local_block_ids)
+                    self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -1884,17 +1887,24 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
-        # add requests that skipped transfer to done_recving
-        done_recving.update(self._failed_recv_reqs)
-        self._failed_recv_reqs.clear()
+        # Atomically swap _failed_recv_reqs to avoid race with background
+        # handshake thread adding failures between copy() and clear()
+        with self._handshake_lock:
+            failed_recv_reqs = self._failed_recv_reqs
+            self._failed_recv_reqs = set()
+
+        # Add failed requests to done_recving for scheduler tracking
+        # (blocks are already marked invalid, scheduler will handle recompute)
+        done_recving.update(failed_recv_reqs)
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving",
+                "and %s requests done recving (%s failed)",
                 self.tp_rank,
                 len(done_sending),
                 len(done_recving),
+                len(failed_recv_reqs),
             )
 
         block_ids_for_blocksize_post_process = defaultdict(list)
@@ -1902,6 +1912,16 @@ class NixlConnectorWorker:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
+
+            # Skip KV sync and post-processing for failed requests
+            # (handshake or transfer failed - no valid KV data to process)
+            if req_id in failed_recv_reqs:
+                logger.debug(
+                    "Skipping KV post-processing for failed request %s",
+                    req_id,
+                )
+                continue
+
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
@@ -2437,8 +2457,10 @@ class NixlConnectorWorker:
         This is called by the scheduler to identify blocks that need
         to be retried after a NIXL transfer failure.
         """
-        result = self._invalid_block_ids
-        self._invalid_block_ids = set()
+        # Atomically swap to avoid race with background handshake thread
+        with self._handshake_lock:
+            result = self._invalid_block_ids
+            self._invalid_block_ids = set()
         return result
 
     def __del__(self):
