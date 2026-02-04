@@ -1073,7 +1073,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=self.num_experts,
                 routed_scaling_factor=None,
-                routing_method_type=1 if layer.renormalize else 0,
+                routing_method_type=layer.routing_method_type,
                 do_finalize=True,
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]

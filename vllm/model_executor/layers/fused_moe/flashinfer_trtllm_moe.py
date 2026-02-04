@@ -64,6 +64,7 @@ def _supports_routing_method(
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
         return routing_method in [
+            RoutingMethodType.Default,
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,

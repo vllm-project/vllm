@@ -129,6 +129,16 @@ def fused_topk_bias(
     )
 
 
+def _resolve_sigmoid_routing_method(top_k: int) -> RoutingMethodType:
+    return RoutingMethodType.Llama4 if top_k == 1 else RoutingMethodType.DeepSeekV3
+
+
+def _resolve_softmax_routing_method(renormalize: bool) -> RoutingMethodType:
+    return (
+        RoutingMethodType.RenormalizeNaive if renormalize else RoutingMethodType.Default
+    )
+
+
 class FusedTopKBiasRouter(BaseRouter):
     """Router using fused top-k with e_score_correction_bias."""
 
@@ -158,11 +168,9 @@ class FusedTopKBiasRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
-        )
+        if self.scoring_func == "sigmoid":
+            return _resolve_sigmoid_routing_method(self.top_k)
+        return _resolve_softmax_routing_method(self.renormalize)
 
     def _compute_routing(
         self,

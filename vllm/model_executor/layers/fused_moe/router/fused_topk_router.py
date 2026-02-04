@@ -110,6 +110,16 @@ def fused_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
 
+def _resolve_sigmoid_routing_method(top_k: int) -> RoutingMethodType:
+    return RoutingMethodType.Llama4 if top_k == 1 else RoutingMethodType.DeepSeekV3
+
+
+def _resolve_softmax_routing_method(renormalize: bool) -> RoutingMethodType:
+    return (
+        RoutingMethodType.RenormalizeNaive if renormalize else RoutingMethodType.Default
+    )
+
+
 class FusedTopKRouter(BaseRouter):
     """Default router using standard fused top-k routing."""
 
@@ -135,11 +145,9 @@ class FusedTopKRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
-        )
+        if self.scoring_func == "sigmoid":
+            return _resolve_sigmoid_routing_method(self.top_k)
+        return _resolve_softmax_routing_method(self.renormalize)
 
     def _compute_routing(
         self,
