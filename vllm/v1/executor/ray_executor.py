@@ -317,8 +317,22 @@ class RayDistributedExecutor(Executor):
             )
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables: list[dict] = [
-            {} for _ in worker_node_and_gpu_ids
+        # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
+        # This is needed because:
+        # 1. Ray's compiled DAG needs to find the allocated GPU in
+        #    CUDA_VISIBLE_DEVICES. 
+        # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
+        #    all GPUs for P2P checks and communication setup. Though if it was 
+        #    just this reason, we could have also just kept the visible devices 
+        #    unset.
+        # Each worker will use local_rank to index into the visible devices.
+        all_args_to_update_environment_variables = [
+            {
+                current_platform.device_control_env_var: ",".join(
+                    map(str, node_gpus[node_id])
+                ),
+            }
+            for (node_id, _) in worker_node_and_gpu_ids
         ]
 
         # Environment variables to copy from driver to workers
