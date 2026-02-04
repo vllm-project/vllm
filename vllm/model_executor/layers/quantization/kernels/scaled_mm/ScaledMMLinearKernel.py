@@ -149,7 +149,8 @@ class FP4ScaledMMLinearKernel(
         )
 
         # Derive output shape from weight tensor dimensions
-        output_size = [*x.shape[:-1], weight.shape[1]]
+        # Weight shape is (out_features, in_features / 2) due to FP4 packing
+        output_size = [*x.shape[:-1], weight.shape[0]]
 
         # Delegate to the scaled matrix multiplication implementation
         return self.apply_fp4_mm(

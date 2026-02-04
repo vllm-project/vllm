@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 
 import torch
 
@@ -66,7 +67,12 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 class FlashInferFP4ScaledMMLinearKernel(FP4ScaledMMLinearKernel):
     """FlashInfer FP4 GEMM kernel implementation"""
 
-    def __init__(self, c, layer_param_names, backend: str = "cutlass"):
+    def __init__(
+        self,
+        c: FP4ScaledMMLinearLayerConfig,
+        layer_param_names: Sequence[str],
+        backend: str = "cutlass",
+    ):
         """
         Args:
             c: Configuration for the FP4 layer
