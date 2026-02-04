@@ -34,13 +34,8 @@ if not aiter_available:
     pytest.skip("These tests require AITER to run", allow_module_level=True)
 
 
-def test_rocm_aiter_biased_grouped_topk_custom_op_registration(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_rocm_aiter_biased_grouped_topk_custom_op_registration():
     """Test that the custom op is correctly registered."""
-    importlib.reload("vllm._aiter_ops")
-    importlib.reload("torch.ops.vllm")
-    importlib.reload("vllm")
     # Check if the op exists in torch.ops.vllm
     assert hasattr(torch.ops.vllm, "rocm_aiter_biased_grouped_topk")
 
