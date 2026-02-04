@@ -44,78 +44,101 @@ class ModelBackendTestCase(NamedTuple):
 
 
 # E2E model test cases
-MODELS_FP8: list[ModelBackendTestCase] = []
-MODELS_FP4: list[ModelBackendTestCase] = []
-MODELS: list[ModelBackendTestCase] = []  # tp-only (unquantized)
+DUMMY_MODELS_FP8: list[ModelBackendTestCase] = []
+DUMMY_MODELS_FP4: list[ModelBackendTestCase] = []
+DUMMY_MODELS: list[ModelBackendTestCase] = []  # tp-only (unquantized)
 MODELS_GROUP_FP8: list[ModelBackendTestCase] = []
 
 if current_platform.is_cuda():
-    MODELS_FP8 = [
+    DUMMY_MODELS_FP8 = [
         ModelBackendTestCase(
             # Use smaller model for L40s in CI
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
-            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            model_kwargs=dict(
+                max_model_len=1024,
+                kv_cache_dtype="fp8",
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
-                attention_fusion=32,
-                allreduce_fusion=65,
-                sequence_parallel=65,
-                async_tp=128,
+                attention_fusion=4,
+                allreduce_fusion=9,
+                sequence_parallel=9,
+                async_tp=16,
             ),
         ),
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            model_kwargs=dict(
+                max_model_len=1024,
+                kv_cache_dtype="fp8",
+                hf_overrides={"text_config": {"num_hidden_layers": 4}},
+                load_format="dummy",
+            ),
             # TODO FlashInfer attn broken on Hopper with kvcache=fp8:
             # https://github.com/vllm-project/vllm/issues/28568
             backend=AttentionBackendEnum.FLASHINFER
             if is_blackwell()
             else AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
-                attention_fusion=48,
-                allreduce_fusion=96,
-                sequence_parallel=96,
-                async_tp=95,  # mlp is moe, no fusion there
+                attention_fusion=4,
+                allreduce_fusion=8,
+                sequence_parallel=8,
+                async_tp=8,  # mlp is moe, no fusion there
             ),
         ),
     ]
 
-    MODELS_FP4 = [
+    DUMMY_MODELS_FP4 = [
         ModelBackendTestCase(
             model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
-            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            model_kwargs=dict(
+                max_model_len=1024,
+                kv_cache_dtype="fp8",
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.FLASHINFER,
             matches=Matches(
-                attention_fusion=32,
-                allreduce_fusion=65,
-                sequence_parallel=65,
-                async_tp=128,
+                attention_fusion=4,
+                allreduce_fusion=9,
+                sequence_parallel=9,
+                async_tp=16,
             ),
         ),
     ]
 
-    # TP only (unquantized models)
-    MODELS = [
+    # TP only
+    DUMMY_MODELS = [
         ModelBackendTestCase(
             model_name="meta-llama/Llama-3.1-8B-Instruct",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(
+                max_model_len=1024,
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=0,
-                allreduce_fusion=65,
-                sequence_parallel=65,
-                async_tp=128,
+                allreduce_fusion=9,
+                sequence_parallel=9,
+                async_tp=16,
             ),
         ),
         ModelBackendTestCase(
             model_name="Qwen/Qwen3-30B-A3B",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(
+                max_model_len=1024,
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=0,
-                allreduce_fusion=97,
-                sequence_parallel=97,
-                async_tp=96,  # MLP is MoE, half the fusions of dense
+                allreduce_fusion=9,
+                sequence_parallel=9,
+                async_tp=8,  # MLP is MoE, half the fusions of dense
             ),
         ),
     ]
@@ -132,24 +155,36 @@ if current_platform.is_cuda():
     ]
 
 elif current_platform.is_rocm():
-    MODELS_FP8 = [
+    DUMMY_MODELS_FP8 = [
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(
+                max_model_len=1024,
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.TRITON_ATTN,
-            matches=Matches(attention_fusion=32),
+            matches=Matches(attention_fusion=4),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(
+                max_model_len=1024,
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.ROCM_ATTN,
-            matches=Matches(attention_fusion=32),
+            matches=Matches(attention_fusion=4),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(
+                max_model_len=1024,
+                hf_overrides={"num_hidden_layers": 4},
+                load_format="dummy",
+            ),
             backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-            matches=Matches(attention_fusion=32),
+            matches=Matches(attention_fusion=4),
         ),
     ]
 

@@ -11,8 +11,8 @@ import torch._dynamo
 from tests.compile.backend import LazyInitPass, TestBackend
 from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_FP8,
-    MODELS_FP4,
-    MODELS_FP8,
+    DUMMY_MODELS_FP4,
+    DUMMY_MODELS_FP8,
     Matches,
     has_cuda_graph_wrapper_metadata,
     is_blackwell,
@@ -506,9 +506,9 @@ def test_attention_quant_pattern(
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
-    list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
+    list(flat_product(DUMMY_MODELS_FP8, CUSTOM_OPS_FP8))
     # quant_fp4 only has the custom impl
-    + list(flat_product(MODELS_FP4, [""])),
+    + list(flat_product(DUMMY_MODELS_FP4, [""])),
 )
 @pytest.mark.parametrize(
     "inductor_graph_partition",

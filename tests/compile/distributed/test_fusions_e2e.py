@@ -13,9 +13,9 @@ from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_FP8,
     CUSTOM_OPS_QUANT_RMS_NORM,
     CUSTOM_OPS_RMS_NORM,
-    MODELS,
-    MODELS_FP4,
-    MODELS_FP8,
+    DUMMY_MODELS,
+    DUMMY_MODELS_FP4,
+    DUMMY_MODELS_FP8,
     MODELS_GROUP_FP8,
     Matches,
     custom_ops_product,
@@ -37,11 +37,11 @@ from ...utils import flat_product, multi_gpu_test
     # Toggle RMSNorm and QuantFP8 for FP8 models
     list(
         flat_product(
-            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
+            DUMMY_MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
         )
     )
     # Toggle RMSNorm for FP4 models and unquant models
-    + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
+    + list(flat_product(DUMMY_MODELS_FP4 + DUMMY_MODELS, CUSTOM_OPS_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
 @pytest.mark.skipif(
@@ -145,11 +145,11 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     # Toggle RMSNorm and QuantFP8 for FP8 models
     list(
         flat_product(
-            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
+            DUMMY_MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
         )
     )
     # Toggle RMSNorm for FP4 models and unquant models
-    + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
+    + list(flat_product(DUMMY_MODELS_FP4 + DUMMY_MODELS, CUSTOM_OPS_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
 @pytest.mark.skipif(
