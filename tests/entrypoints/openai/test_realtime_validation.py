@@ -24,7 +24,7 @@ MISTRAL_FORMAT_ARGS = [
     "mistral",
 ]
 
-MODEL_NAME = "mistralai/Voxtral-Mini-3B-Realtime-2602"
+MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 
 
 def _audio_to_base64_pcm16(path: str, target_sr: int = 16000) -> str:
@@ -126,8 +126,8 @@ async def test_multi_chunk_streaming(
             assert event["type"] == "transcription.done"
             assert event["text"] == full_text
             assert full_text == (
-                " He has first words I spoke in the original phonograph."
+                " First words I spoke in the original phonograph."
                 " A little piece of practical poetry. Mary had a little lamb,"
-                " it squeaked with quite a flow, and everywhere that Mary went,"
+                " it sleeps with quite a flow, and everywhere that Mary went,"
                 " the lamb was sure to go"
             )
