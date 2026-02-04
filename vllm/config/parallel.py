@@ -46,6 +46,18 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",
 ]
 
+MoEBackend = Literal[
+    "auto",
+    "triton",
+    "deep_gemm",
+    "cutlass",
+    "flashinfer_trtllm",
+    "flashinfer_cutlass",
+    "flashinfer_cutedsl",
+    "marlin",
+    "aiter",
+]
+
 
 @config
 class EPLBConfig:
@@ -157,6 +169,19 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+
+    moe_backend: MoEBackend = "auto"
+    """Backend for MoE expert computation kernels. Available options:
+
+    - "auto": Automatically select the best backend based on model and hardware\n
+    - "triton": Use Triton-based fused MoE kernels\n
+    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)\n
+    - "cutlass": Use vLLM CUTLASS kernels\n
+    - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels\n
+    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels\n
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)\n
+    - "marlin": Use Marlin kernels (weight-only quantization)\n
+    - "aiter": Use AMD AITer kernels (ROCm only)"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
