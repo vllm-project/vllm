@@ -52,7 +52,6 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
     task = "embed"
     model_config = ModelConfig(
         model_info.name,
-        task="auto",
         tokenizer=model_info.name,
         tokenizer_mode="auto",
         trust_remote_code=False,
