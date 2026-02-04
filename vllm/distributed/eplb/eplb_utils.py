@@ -22,10 +22,22 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
 
-    # Override NCCL_MAX_CTAS to overcome hangs when using async EPLB with
-    # DeepEP low latency mode. We reduce the number of SMs used by NCCL so
-    # that weight exchange in async EPLB doesn't block the cooperative launch
-    # of DeepEP LL kernels.
+    # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
+    # DeepEP low-latency backend.
+    #
+    # The hang happens when two ranks interleave kernel launches differently
+    # between NCCL collectives (used by async EPLB weight exchange) and DeepEP
+    # low-latency (LL) kernels. DeepEP LL uses a cooperative launch and tries
+    # to reserve a large fraction of the GPU's SMs; if those SMs are currently
+    # occupied by NCCL, the DeepEP LL launch blocks until enough SMs are
+    # freed.
+    #
+    # If rank A enters DeepEP LL in main thread while rank B is still executing
+    # NCCL in async thread, rank A can block waiting for SMs, while rank B can
+    # block inside NCCL waiting for rank A to participate in the collective.
+    # This circular wait causes a deadlock.
+    # Limiting NCCL occupancy via NCCL_MAX_CTAS leaves space for the DeepEP
+    # cooperative kernel to launch and complete, breaking the deadlock.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
     if is_data_parallel and is_eplb_enabled and is_deepep_ll and async_eplb:
         current_value_str = os.getenv("NCCL_MAX_CTAS")
