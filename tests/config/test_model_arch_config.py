@@ -14,6 +14,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "XiaomiMiMo/MiMo-7B-RL",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
@@ -83,7 +84,10 @@ def _assert_model_arch_config(
     assert model_arch_config.is_deepseek_mla == expected["is_deepseek_mla"]
 
     torch_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        model_config.hf_config, model_config.model, revision=model_config.revision
+        model_config.hf_config,
+        model_config.model,
+        revision=model_config.revision,
+        config_format="hf",
     )
     assert str(torch_dtype) == expected["dtype"]
 

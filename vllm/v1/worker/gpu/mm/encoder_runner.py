@@ -23,13 +23,26 @@ class EncoderRunner:
         self.device = device
 
         self.inputs_embeds = torch.zeros(
-            max_num_tokens,
-            hidden_size,
-            dtype=dtype,
-            device=device,
+            max_num_tokens, hidden_size, dtype=dtype, device=device
         )
         self.req_id_to_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         self.encoder_cache: dict[str, torch.Tensor] = {}
+
+    def reset_mm_cache(self) -> None:
+        """
+        Clear the multi-modal cache that was used during profiling,
+        but no longer needed during inference.
+        """
+        # TODO: Implement MM budget for encoder dummy run
+        pass
+
+    def reset_encoder_cache(self) -> None:
+        """Clear the GPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
 
     def add_request(self, req_id: str, mm_features: list[MultiModalFeatureSpec]):
         self.req_id_to_mm_features[req_id] = mm_features
@@ -41,8 +54,7 @@ class EncoderRunner:
         self.req_id_to_mm_features.pop(req_id, None)
 
     def prepare_mm_inputs(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        self, scheduled_encoder_inputs: dict[str, list[int]]
     ) -> tuple[list[str], list[tuple[str, MultiModalKwargsItem]]]:
         mm_hashes: list[str] = []
         mm_kwargs: list[tuple[str, MultiModalKwargsItem]] = []
@@ -69,20 +81,16 @@ class EncoderRunner:
 
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
-            mm_kwargs,
-            device=self.device,
-            pin_memory=False,
+            mm_kwargs, device=self.device, pin_memory=False
         ):
             curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=num_items,
+                curr_group_outputs, expected_num_items=num_items
             )
             encoder_outputs.extend(curr_group_outputs)
 
         # Cache the encoder outputs by mm_hash
-        for mm_hash, output in zip(mm_hashes, encoder_outputs):
-            self.encoder_cache[mm_hash] = output
+        self.encoder_cache.update(zip(mm_hashes, encoder_outputs))
         return encoder_outputs
 
     def gather_mm_embeddings(
@@ -99,9 +107,7 @@ class EncoderRunner:
         if all_decode:
             # All decode requests, so no need to gather any embeddings.
             return [], torch.zeros(
-                total_num_scheduled_tokens,
-                dtype=torch.bool,
-                device=self.device,
+                total_num_scheduled_tokens, dtype=torch.bool, device=self.device
             )
 
         query_start = computed_prefill_lens.tolist()
@@ -109,10 +115,7 @@ class EncoderRunner:
 
         mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens,
-            dtype=torch.bool,
-            device="cpu",
-            pin_memory=True,
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu", pin_memory=True
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
@@ -173,9 +176,7 @@ class EncoderRunner:
         is_mm_embed: torch.Tensor,
     ) -> torch.Tensor:
         x = model.embed_input_ids(
-            input_ids,
-            multimodal_embeddings=mm_embeds,
-            is_multimodal=is_mm_embed,
+            input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
         )
         # Copy to the pre-allocated buffer for CUDA graphs.
         self.inputs_embeds[: x.shape[0]] = x
