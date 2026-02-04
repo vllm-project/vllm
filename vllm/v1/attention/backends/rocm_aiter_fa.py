@@ -682,6 +682,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [16, 32]
@@ -728,6 +732,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -746,6 +751,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             logits_soft_cap = 0.0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.sinks = sinks
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -814,6 +820,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes=self.alibi_slopes,
             return_lse=False,
             out=output,
+            sink_ptr=self.sinks,
         )
 
     def extend_forward(
@@ -863,6 +870,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
+            sink_ptr=self.sinks,
         )
         assert attn_metadata.extend_metadata is not None
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
@@ -910,6 +918,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
+                sink_ptr=self.sinks,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1068,6 +1077,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
+                    sink_ptr=self.sinks,
                 )
 
             # calculate for extends
@@ -1110,10 +1120,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for decodes
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
-                if self.sliding_window[0] != -1:
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Sliding window with shuffle layout is not supported yet."
-                    )
+                # Use unified_attention for sliding window OR sinks
+                # (pa_fwd_asm and paged_attention_v1 don't support sinks)
+                if self.sliding_window[0] != -1 or self.sinks is not None:
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
                     )
@@ -1140,6 +1149,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         q_descale=None,
                         k_descale=layer._k_scale.expand(descale_shape),
                         v_descale=layer._v_scale.expand(descale_shape),
+                        sinks=self.sinks,
                     )
                     return
                 assert attn_metadata.decode_metadata is not None

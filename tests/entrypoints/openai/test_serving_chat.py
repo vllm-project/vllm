@@ -10,7 +10,8 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
-from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm._aiter_ops import is_aiter_found, is_aiter_found_and_supported
+from vllm.platforms import current_platform
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -99,10 +100,26 @@ def default_server_args(
     return args
 
 
+def _is_aiter_available() -> bool:
+    """Check if AITER can be used (without requiring VLLM_ROCM_USE_AITER to be set)."""
+    if not current_platform.is_rocm() or not is_aiter_found():
+        return False
+    try:
+        from vllm.platforms.rocm import on_gfx9
+        return on_gfx9()
+    except ImportError:
+        return False
+
+
 @pytest.fixture(scope="class")
 def gptoss_server(default_server_args: list[str]):
-    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
-    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+    aiter_available = _is_aiter_available()
+    attention_backend = "ROCM_AITER_FA" if aiter_available else "TRITON_ATTN"
+    server_args = default_server_args + [f"--attention-backend={attention_backend}"]
+    env_dict = {"VLLM_ROCM_USE_AITER": "1"} if aiter_available else None
+    with RemoteOpenAIServer(
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
