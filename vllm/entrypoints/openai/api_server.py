@@ -189,12 +189,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
         register_generate_api_routers(app)
 
-        from vllm.entrypoints.openai.generative_scores.api_router import (
-            register_generative_scores_api_routers,
-        )
-
-        register_generative_scores_api_routers(app)
-
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (
             attach_router as register_translations_api_router,
@@ -213,6 +207,11 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
         from vllm.entrypoints.pooling import register_pooling_api_routers
 
         register_pooling_api_routers(app, supported_tasks)
+    elif "generate" in supported_tasks:
+        # For CausalLM models, register score routes to enable generative scoring
+        from vllm.entrypoints.pooling.score.api_router import router as score_router
+
+        app.include_router(score_router)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -323,14 +322,6 @@ async def init_app_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 
-        from vllm.entrypoints.openai.generative_scores.api_router import (
-            init_generative_scores_state,
-        )
-
-        await init_generative_scores_state(
-            engine_client, state, args, request_logger, supported_tasks
-        )
-
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (
             init_transcription_state,
@@ -349,6 +340,27 @@ async def init_app_state(
         from vllm.entrypoints.pooling import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+    elif "generate" in supported_tasks:
+        # For CausalLM models, initialize score state for generative scoring
+        from vllm.entrypoints.pooling.score.generative_scores import (
+            OpenAIServingGenerativeScores,
+        )
+        from vllm.entrypoints.pooling.score.serving import ServingScores
+
+        generative_scores_handler = OpenAIServingGenerativeScores(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+        )
+        state.openai_serving_scores = ServingScores(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            score_template=None,
+            log_error_stack=args.log_error_stack,
+            generative_scores_handler=generative_scores_handler,
+        )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

@@ -86,10 +86,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreTextRequest,
 )
-from vllm.entrypoints.openai.generative_scores.protocol import (
-    GenerativeScoreRequest,
-    GenerativeScoreResponse,
-)
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
@@ -170,7 +166,6 @@ AnyRequest: TypeAlias = (
     | ResponsesRequest
     | IOProcessorRequest
     | GenerateRequest
-    | GenerativeScoreRequest
 )
 
 AnyResponse: TypeAlias = (
@@ -184,7 +179,6 @@ AnyResponse: TypeAlias = (
     | ClassificationResponse
     | ScoreResponse
     | GenerateResponse
-    | GenerativeScoreResponse
 )
 
 

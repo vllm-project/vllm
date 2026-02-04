@@ -18,12 +18,12 @@ import pytest
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.generative_scores.protocol import (
+from vllm.entrypoints.pooling.score.generative_scores import (
     GenerativeScoreItemResult,
     GenerativeScoreRequest,
     GenerativeScoreResponse,
 )
-from vllm.entrypoints.openai.generative_scores.serving import (
+from vllm.entrypoints.pooling.score.generative_scores import (
     OpenAIServingGenerativeScores,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath

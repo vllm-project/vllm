@@ -54,6 +54,9 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+    from vllm.entrypoints.pooling.score.generative_scores import (
+        OpenAIServingGenerativeScores,
+    )
     from vllm.entrypoints.pooling.score.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
@@ -101,6 +104,22 @@ def init_pooling_state(
         if "classify" in supported_tasks
         else None
     )
+
+    # Initialize generative scores handler for CausalLM models
+    # This handler is used to route /v1/score requests to generative scores
+    # when the model architecture is CausalLM
+    generative_scores_handler = None
+    if "embed" in supported_tasks or "score" in supported_tasks:
+        # Check if we should create the generative scores handler
+        # by checking if generate task is supported (CausalLM models)
+        if "generate" in supported_tasks:
+            generative_scores_handler = OpenAIServingGenerativeScores(
+                engine_client,
+                state.openai_serving_models,
+                request_logger=request_logger,
+                log_error_stack=args.log_error_stack,
+            )
+
     state.openai_serving_scores = (
         ServingScores(
             engine_client,
@@ -108,6 +127,7 @@ def init_pooling_state(
             request_logger=request_logger,
             score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
+            generative_scores_handler=generative_scores_handler,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)
         else None

@@ -1432,6 +1432,18 @@ class ModelConfig:
         )
 
     @property
+    def is_causal_lm(self) -> bool:
+        """Check if the model architecture is a CausalLM model.
+        
+        Returns True if any architecture in hf_config.architectures matches
+        the pattern .*ForCausalLM.* (e.g., LlamaForCausalLM, Qwen2ForCausalLM).
+        """
+        import re
+        architectures = getattr(self.hf_config, "architectures", [])
+        pattern = re.compile(r".*ForCausalLM.*")
+        return any(pattern.match(arch) for arch in architectures)
+
+    @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
 

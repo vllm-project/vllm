@@ -28,6 +28,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    label_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "List of token IDs to compute probabilities for when using "
+            "CausalLM models. Required for generative scoring."
+        ),
+    )
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):

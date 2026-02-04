@@ -1,41 +1,162 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Serving class for the Generative Scores API.
+"""Generative Scores implementation for CausalLM models.
 
-This module implements the OpenAIServingGenerativeScores class which handles
-requests to compute the probability of specified token IDs appearing as the
-next token after a given query+item prompt.
+This module implements generative scoring functionality that computes the
+probability of specified token IDs appearing as the next token after a
+given query+item prompt. This is used internally by the score endpoint
+when the model architecture is a CausalLM.
 """
 
 import asyncio
 import math
 import time
 from collections.abc import AsyncGenerator, Mapping
+from typing import Literal
 
 from fastapi import Request
+from pydantic import Field
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.generative_scores.protocol import (
-    GenerativeScoreItemResult,
-    GenerativeScoreRequest,
-    GenerativeScoreResponse,
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorResponse,
+    OpenAIBaseModel,
+    UsageInfo,
 )
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
 
+# ============================================================================
+# Protocol definitions
+# ============================================================================
+
+
+class GenerativeScoreRequest(OpenAIBaseModel):
+    """Request for computing generative scores.
+
+    This is used internally when routing score requests to CausalLM models.
+
+    Attributes:
+        model: The model to use for scoring. Optional, follows existing patterns.
+        query: The query text or pre-tokenized query token IDs.
+        items: The item text(s) or pre-tokenized item token IDs.
+        label_token_ids: List of token IDs to compute probabilities for.
+        apply_softmax: Whether to normalize probabilities using softmax over only
+            the label_token_ids (True) or return true model probabilities over
+            the full vocab for those ids (False).
+        item_first: If True, prepend items to query. Otherwise append items to query.
+        temperature: Temperature for logits. Default 0.0 for scoring (greedy).
+        top_k: Top-k filtering. Default 0 (disabled) for scoring.
+        top_p: Top-p filtering. Default 1.0 (disabled) for scoring.
+        add_special_tokens: Whether to add special tokens when tokenizing.
+    """
+
+    model: str | None = None
+    query: str | list[int] = Field(
+        ...,
+        description="The query text or pre-tokenized query token IDs.",
+    )
+    items: list[str] | list[list[int]] = Field(
+        ...,
+        description="List of item texts or pre-tokenized item token IDs.",
+    )
+    label_token_ids: list[int] = Field(
+        ...,
+        description="List of token IDs to compute probabilities for.",
+    )
+    apply_softmax: bool = Field(
+        default=True,
+        description=(
+            "If True, normalize probabilities using softmax over only the "
+            "label_token_ids. If False, return the true model probabilities "
+            "over the full vocab for those ids."
+        ),
+    )
+    item_first: bool = Field(
+        default=False,
+        description="If True, prepend items to query. Otherwise append items to query.",
+    )
+    temperature: float | None = Field(
+        default=0.0,
+        description="Temperature for logits. Default 0.0 for scoring.",
+    )
+    top_k: int | None = Field(
+        default=0,
+        description="Top-k filtering. Default 0 (disabled) for scoring.",
+    )
+    top_p: float | None = Field(
+        default=1.0,
+        description="Top-p filtering. Default 1.0 (disabled) for scoring.",
+    )
+    add_special_tokens: bool = Field(
+        default=True,
+        description="Whether to add special tokens when tokenizing.",
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0)."
+        ),
+    )
+    request_id: str = Field(
+        default_factory=random_uuid,
+        description="The request_id related to this request.",
+    )
+
+
+class GenerativeScoreItemResult(OpenAIBaseModel):
+    """Result for a single item in the generative scores response.
+
+    Attributes:
+        index: The index of this item in the input items list.
+        token_probs: Dictionary mapping token IDs (as strings) to their probabilities.
+    """
+
+    index: int
+    token_probs: dict[str, float] = Field(
+        description="Mapping of token ID (as string) to probability."
+    )
+
+
+class GenerativeScoreResponse(OpenAIBaseModel):
+    """Response from the generative scores computation.
+
+    Attributes:
+        id: Unique identifier for this response.
+        object: Type of object, always "generative_score".
+        created: Unix timestamp of when the response was created.
+        model: The model used for scoring.
+        results: List of scoring results, one per input item.
+        usage: Token usage information.
+    """
+
+    id: str = Field(default="")
+    object: Literal["generative_score"] = "generative_score"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    results: list[GenerativeScoreItemResult]
+    usage: UsageInfo
+
+
+# ============================================================================
+# Serving class
+# ============================================================================
+
+
 class OpenAIServingGenerativeScores(OpenAIServing):
-    """Serving class for the Generative Scores API.
+    """Serving class for generative scores computation.
 
     This class handles computing the probability of specified token IDs 
     appearing as the next token after concatenating query and item prompts.
