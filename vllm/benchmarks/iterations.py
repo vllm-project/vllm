@@ -416,7 +416,17 @@ async def run_benchmark(
         if profiling_started and prefix:
             await call_debug_endpoint(session, rotator, "/debug/profile/stop")
             logger.info("Stopped profiling")
-            await fetch_traces(session, rotator, prefix, "traces")
+            # Wait for traces to be written to disk (async in torch profiler)
+            await asyncio.sleep(2.0)
+            downloaded = await fetch_traces(session, rotator, prefix, "traces")
+            if downloaded:
+                logger.info("Downloaded %d trace files to ./traces/", len(downloaded))
+            else:
+                logger.warning(
+                    "No trace files found matching prefix '%s'. "
+                    "Check server profiler directory.",
+                    prefix,
+                )
 
     return results, server_config
 
