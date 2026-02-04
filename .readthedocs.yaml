@@ -16,9 +16,9 @@ build:
         if [ "$READTHEDOCS_VERSION_TYPE" != "external" ] || ! git diff --quiet origin/main -- \
             docs/ \
             examples/ \
-            .readthedocs.yaml \
             '*.md' \
-            requirements/docs.txt;
+            requirements/docs.txt \
+            $(python tools/fetch_api_files.py);
         then
           # changes detected, proceed with doc generation
           exit 0;
