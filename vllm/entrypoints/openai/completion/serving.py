@@ -3,7 +3,7 @@
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
@@ -124,6 +124,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Request | None = None,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         """Completion API similar to OpenAI's API.
 
@@ -133,6 +134,10 @@ class OpenAIServingCompletion(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - suffix (the language models we currently support do not support
             suffix)
+
+        Args:
+            on_output: Optional synchronous callback for each RequestOutput.
+                Runs in the generation loop - keep it fast to avoid blocking.
         """
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
@@ -261,12 +266,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
+                on_output=on_output,
             )
 
         # Non-streaming response
         final_res_batch: list[RequestOutput | None] = [None] * num_prompts
         try:
             async for i, res in result_generator:
+                if on_output is not None:
+                    on_output(res)
                 final_res_batch[i] = res
 
             for i, final_res in enumerate(final_res_batch):
@@ -321,6 +329,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -337,6 +346,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             async for prompt_idx, res in result_generator:
+                if on_output is not None:
+                    on_output(res)
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
