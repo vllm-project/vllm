@@ -77,7 +77,6 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
             from vllm.config import get_current_vllm_config
-
             vllm_config = get_current_vllm_config()
             model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
             if model_type == "gpt_oss":
@@ -792,8 +791,10 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
     def process_weights_after_loading(self, layer):
         if self.emulate:
             return
-
         from aiter.utility.fp4_utils import e8m0_shuffle
+        from aiter.ops.shuffle import shuffle_weight
+        from vllm.platforms.rocm import on_gfx950
+        _is_shuffle_moe_mxfp4 = on_gfx950()
 
         # Pre-shuffle weight scales
         s0, s1, _ = layer.w13_weight_scale.shape
@@ -806,6 +807,16 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         w2_weight_scale = e8m0_shuffle(w2_weight_scale)
         layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
         torch.cuda.empty_cache()
+                # Pre-shuffle weight
+        if _is_shuffle_moe_mxfp4:
+            layer.w13_weight.data = shuffle_weight(
+                layer.w13_weight.contiguous(), (16, 16)
+            )
+            layer.w2_weight.data = shuffle_weight(
+                layer.w2_weight.contiguous(), (16, 16)
+            )
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -852,6 +863,10 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
             else:
                 w13_weight = layer.w13_weight
                 w2_weight = layer.w2_weight
+
+            if hasattr(layer.w13_weight, "is_shuffled"):
+                w13_weight.is_shuffled = True
+                w2_weight.is_shuffled = True
 
             out = fused_moe(
                 x,
@@ -1164,7 +1179,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
             )
-        print(f' Inside apply of QuarkW4MXFp4MoEMethod_OSS with envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4: {envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4}')
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
             from aiter import moe_cktile2stages_gemm1, moe_cktile2stages_gemm2
             from aiter.fused_moe import fused_topk, moe_sorting
