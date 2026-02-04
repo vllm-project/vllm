@@ -47,10 +47,7 @@ def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
     set_weight_attrs(new, attrs_to_set)
 
 
-class MoeQuantizationCallbacks(ABC):
-    """Abstract base class defining callbacks that MoE quantization methods
-    must implement for online weight loading and quantization."""
-
+class MoeOnlineQuantizer(ABC):
     @abstractmethod
     def create_scale_tensors(
         self,
@@ -59,31 +56,16 @@ class MoeQuantizationCallbacks(ABC):
         intermediate_size_per_partition: int,
         hidden_size: int,
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
-        """Create scale tensors for quantization.
-
-        Returns:
-            Tuple of (w13_weight_scale, w2_weight_scale) parameters
-        """
         raise NotImplementedError
 
     @abstractmethod
     def get_quantized_dtype(self) -> torch.dtype:
-        """Return the target dtype for quantized weights (e.g., int8, fp8)."""
         raise NotImplementedError
 
     @abstractmethod
     def quantize_expert(
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize a single expert's weight tensor.
-
-        Args:
-            weight: Weight tensor of shape [out_features, in_features]
-
-        Returns:
-            Tuple of (quantized_weight, scale) where scale shape depends on
-            the quantization method (per-tensor or per-channel).
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -95,7 +77,6 @@ class MoeQuantizationCallbacks(ABC):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        """Setup the kernel after quantization is complete."""
         raise NotImplementedError
 
 
@@ -104,7 +85,7 @@ class MoeOnlineWeightLoader:
     Handles weight loading and quantization for MoE layers.
     """
 
-    def __init__(self, moe_quant_callbacks: MoeQuantizationCallbacks):
+    def __init__(self, moe_quant_callbacks: MoeOnlineQuantizer):
         self.moe_quant_callbacks = moe_quant_callbacks
 
     def create_weights(

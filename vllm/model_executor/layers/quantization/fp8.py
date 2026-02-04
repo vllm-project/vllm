@@ -72,8 +72,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     CopyNumelCounter,
+    MoeOnlineQuantizer,
     MoeOnlineWeightLoader,
-    MoeQuantizationCallbacks,
     _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1009,7 +1009,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeQuantizationCallbacks):
+class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeOnlineQuantizer):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after

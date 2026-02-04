@@ -28,8 +28,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
+    MoeOnlineQuantizer,
     MoeOnlineWeightLoader,
-    MoeQuantizationCallbacks,
 )
 
 logger = init_logger(__name__)
@@ -71,7 +71,7 @@ class ExpertsInt8Config(QuantizationConfig):
         return None
 
 
-class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeQuantizationCallbacks):
+class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
     def __init__(
         self,
         quant_config: ExpertsInt8Config,
