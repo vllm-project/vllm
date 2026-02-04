@@ -70,16 +70,14 @@ In addition, we have the following custom APIs:
     - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API](#classification-api) (`/classify`)
     - Only applicable to [classification models](../models/pooling_models.md).
-- [Score API](#score-api) (`/score`)
-    - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
+- [Score API](#score-api) (`/score`, `/v1/score`)
+    - Applicable to [embedding models, cross-encoder models](../models/pooling_models.md), and [CausalLM models](../models/generative_models.md).
+    - For CausalLM models, computes next-token probabilities for specified `label_token_ids`.
 - [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
     - Only applicable to [cross-encoder models](../models/pooling_models.md).
-- [Generative Scores API](#generative-scores-api) (`/v1/generative-scores`)
-    - Computes next-token probabilities for specified token IDs.
-    - Only applicable to [text generation models](../models/generative_models.md).
 
 ## Chat Template
 
@@ -829,8 +827,13 @@ these extra parameters are supported instead:
 
 ### Score API
 
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
-Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
+Our Score API provides a unified interface for computing similarity or relevance scores:
+
+- **Embedding models**: Computes cosine similarity between embeddings.
+- **Cross-encoder models**: Predicts relevance scores for sentence pairs.
+- **CausalLM models**: Computes next-token probabilities for specified `label_token_ids` (requires the `label_token_ids` parameter).
+
+For embedding and cross-encoder models, the score typically represents similarity on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
@@ -1059,6 +1062,66 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
+#### CausalLM Models (Generative Scoring)
+
+When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the endpoint computes the probability of specified token IDs appearing as the next token. This is useful for classification tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens.
+
+**Requirements for CausalLM models:**
+
+- The `label_token_ids` parameter is **required** and specifies which token IDs to compute probabilities for.
+- The score returned is the probability of the first token in `label_token_ids`.
+
+##### Example: Classification with CausalLM
+
+```bash
+curl -X POST http://localhost:8000/v1/score \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "queries": "Is this city the capital of France?",
+    "documents": ["Paris", "London", "Berlin"],
+    "label_token_ids": [9454, 2753]
+  }'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "score-abc123",
+      "object": "list",
+      "created": 1234567890,
+      "model": "Qwen/Qwen3-0.6B",
+      "data": [
+        {"index": 0, "object": "score", "score": 0.95},
+        {"index": 1, "object": "score", "score": 0.12},
+        {"index": 2, "object": "score", "score": 0.08}
+      ],
+      "usage": {"prompt_tokens": 45, "total_tokens": 48, "completion_tokens": 3}
+    }
+    ```
+
+##### How it works
+
+1. **Prompt Construction**: For each document, builds `prompt = query + document`
+2. **Forward Pass**: Runs the model to get next-token logits
+3. **Probability Extraction**: Extracts probabilities for specified `label_token_ids`
+4. **Softmax Normalization**: Applies softmax over only the label tokens (probabilities sum to 1 over label tokens)
+5. **Score Selection**: Returns the probability of the first token in `label_token_ids` as the score
+
+##### Finding Token IDs
+
+To find the token IDs for your labels, use the tokenizer:
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+yes_id = tokenizer.encode("Yes", add_special_tokens=False)[0]
+no_id = tokenizer.encode("No", add_special_tokens=False)[0]
+print(f"Yes: {yes_id}, No: {no_id}")
+```
+
 ### Re-rank API
 
 Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
@@ -1149,87 +1212,6 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
-
-### Generative Scores API
-
-The Generative Scores API computes the probability of specified token IDs appearing as the next token after a given query+item prompt. This is useful for classification tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens without generating them.
-
-Unlike traditional logprobs which are limited to top-k tokens, this API:
-- Returns probabilities for any specified token IDs in the vocabulary
-- Supports batch scoring of multiple items against a single query
-- Offers both subset softmax (normalize over label tokens only) and true model probabilities
-
-#### Example: Sentiment Classification
-
-```python
-import requests
-
-# Token IDs for "Yes" and "No" (model-specific)
-YES_TOKEN_ID = 2332
-NO_TOKEN_ID = 1223
-
-response = requests.post(
-    "http://localhost:8000/v1/generative-scores",
-    json={
-        "model": "meta-llama/Meta-Llama-3-8B-Instruct",
-        "query": "<|user|>Is the following city the capital of France? ",
-        "items": [
-            "Paris <|assistant|>",
-            "London <|assistant|>",
-            "Berlin <|assistant|>"
-        ],
-        "label_token_ids": [YES_TOKEN_ID, NO_TOKEN_ID],
-        "apply_softmax": True,
-        "item_first": False
-    }
-)
-
-# Response:
-# {
-#   "results": [
-#     {"index": 0, "token_probs": {"2332": 0.95, "1223": 0.05}},  # Paris: Yes=95%
-#     {"index": 1, "token_probs": {"2332": 0.10, "1223": 0.90}},  # London: No=90%
-#     {"index": 2, "token_probs": {"2332": 0.05, "1223": 0.95}}   # Berlin: No=95%
-#   ]
-# }
-```
-
-#### Request Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `model` | string | null | Model to use for scoring. |
-| `query` | string \| list[int] | required | Query text or pre-tokenized token IDs. |
-| `items` | list[string] \| list[list[int]] | required | Items to score against the query. |
-| `label_token_ids` | list[int] | required | Token IDs to compute probabilities for. |
-| `apply_softmax` | bool | true | If true, normalize over label tokens. If false, return true model probs. |
-| `item_first` | bool | false | If true, prepend items to query. Otherwise append. |
-| `temperature` | float | 0.0 | Temperature for logits (0.0 = greedy). |
-| `top_k` | int | 0 | Top-k filtering (0 = disabled for scoring). |
-| `top_p` | float | 1.0 | Top-p filtering (1.0 = disabled for scoring). |
-| `add_special_tokens` | bool | true | Whether to add special tokens when tokenizing. |
-
-#### Probability Computation
-
-The endpoint computes probabilities from the model's next-token distribution:
-
-1. **Prompt Construction**: For each item, build `prompt = query + item` (or `item + query` if `item_first=True`)
-2. **Forward Pass**: Run the model to get next-token logits
-3. **Probability Extraction**: Get logprobs for specified `label_token_ids`
-
-The `apply_softmax` parameter controls normalization:
-
-- **`apply_softmax=True`** (default): Softmax over only the label tokens
-  ```
-  P(token_i | prompt) = exp(logit_i) / Σ exp(logit_j) for j in label_token_ids
-  ```
-  Probabilities sum to 1 over the label tokens.
-
-- **`apply_softmax=False`**: True model probabilities
-  ```
-  P(token_i | prompt) = exp(logprob_i)  # logprob is already normalized over full vocab
-  ```
-  Probabilities are the actual model confidence over the full vocabulary.
 
 ## Ray Serve LLM
 
