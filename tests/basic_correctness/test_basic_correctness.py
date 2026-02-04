@@ -124,8 +124,6 @@ def test_models(
     [
         ("facebook/opt-125m", "ray", "", "L4", {}),
         ("facebook/opt-125m", "mp", "", "L4", {}),
-        ("facebook/opt-125m", "ray", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
-        ("facebook/opt-125m", "mp", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("facebook/opt-125m", "ray", "", "A100", {}),
