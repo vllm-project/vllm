@@ -32,7 +32,7 @@ else:
     DataclassInstance = Any
 
 ConfigType = type[DataclassInstance]
-ConfigT = TypeVar("ConfigT", bound=ConfigType)
+ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 CompileFactors = dict[str, object]
 
 
