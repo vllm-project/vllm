@@ -49,7 +49,7 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
     # [query_len, doc_len]
     token_scores = torch.matmul(q_emb, d_emb.T)
     # Max over document tokens, sum over query tokens
-    return token_scores.max(dim=-1).values.sum()
+    return token_scores.amax(dim=-1).sum()
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
