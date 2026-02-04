@@ -390,22 +390,22 @@ def test_set_inputs_first_pass_default_eagle():
     )
     next_token_ids = torch.tensor([100, 200, 300], dtype=torch.int32, device=device)
 
-    num_tokens, last_token_indices, output_cad = proposer.set_inputs_first_pass(
+    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
         target_token_ids=target_token_ids,
         next_token_ids=next_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         cad=common_attn_metadata,
         num_rejected_tokens_gpu=None,
     )
 
     assert num_tokens == 9  # Total tokens unchanged
 
-    expected_last_token_indices = torch.tensor(
+    expected_token_indices_to_sample = torch.tensor(
         [2, 4, 8], dtype=torch.int32, device=device
     )
-    assert torch.equal(last_token_indices, expected_last_token_indices)
+    assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
     assert output_cad is common_attn_metadata
 
@@ -508,12 +508,12 @@ def test_set_inputs_first_pass_draft_model():
 
     num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=device)
 
-    num_tokens, last_token_indices, output_cad = proposer.set_inputs_first_pass(
+    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
         target_token_ids=target_token_ids,
         next_token_ids=next_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         cad=common_attn_metadata,
         num_rejected_tokens_gpu=num_rejected_tokens_gpu,
     )
@@ -555,9 +555,11 @@ def test_set_inputs_first_pass_draft_model():
     expected_is_masked = torch.zeros(7, dtype=torch.bool, device=device)
     assert torch.equal(proposer.is_masked_token_mask[:num_tokens], expected_is_masked)
 
-    # Verify last_token_indices (bonus tokens at indices 2 and 6)
-    expected_last_token_indices = torch.tensor([2, 6], dtype=torch.int32, device=device)
-    assert torch.equal(last_token_indices, expected_last_token_indices)
+    # Verify token_indices_to_sample (bonus tokens at indices 2 and 6)
+    expected_token_indices_to_sample = torch.tensor(
+        [2, 6], dtype=torch.int32, device=device
+    )
+    assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
     # Verify the new CAD has updated query_start_loc
     # Original: [0, 3, 5] -> New: [0, 4, 7] (each request gains 1 slot)
@@ -648,12 +650,12 @@ def test_set_inputs_first_pass_parallel_drafting():
 
     num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=device)
 
-    num_tokens, last_token_indices, output_cad = proposer.set_inputs_first_pass(
+    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
         target_token_ids=target_token_ids,
         next_token_ids=next_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         cad=common_attn_metadata,
         num_rejected_tokens_gpu=num_rejected_tokens_gpu,
     )
@@ -697,13 +699,13 @@ def test_set_inputs_first_pass_parallel_drafting():
     expected_is_masked[11] = True
     assert torch.equal(proposer.is_masked_token_mask[:num_tokens], expected_is_masked)
 
-    # Verify last_token_indices (bonus + parallel drafting tokens)
+    # Verify token_indices_to_sample (bonus + parallel drafting tokens)
     # Request 0: bonus at 2, parallel at 3, 4
     # Request 1: bonus at 9, parallel at 10, 11
-    expected_last_token_indices = torch.tensor(
+    expected_token_indices_to_sample = torch.tensor(
         [2, 3, 4, 9, 10, 11], dtype=torch.int32, device=device
     )
-    assert torch.equal(last_token_indices, expected_last_token_indices)
+    assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
     # Verify the new CAD has updated query_start_loc
     # Original query_lens: [4, 4] -> Output: [6, 6]
@@ -979,7 +981,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )
@@ -1137,7 +1139,7 @@ def test_propose_tree(spec_token_tree):
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )

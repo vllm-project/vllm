@@ -378,7 +378,7 @@ class SpecDecodeBaseProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -396,13 +396,13 @@ class SpecDecodeBaseProposer:
             )
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        num_tokens, last_token_indices, common_attn_metadata = (
+        num_tokens, token_indices_to_sample, common_attn_metadata = (
             self.set_inputs_first_pass(
                 target_token_ids=target_token_ids,
                 next_token_ids=next_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
-                last_token_indices=last_token_indices,
+                token_indices_to_sample=token_indices_to_sample,
                 cad=common_attn_metadata,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
@@ -489,7 +489,7 @@ class SpecDecodeBaseProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
 
-        sample_hidden_states = last_hidden_states[last_token_indices]
+        sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
@@ -498,18 +498,18 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
-            positions = self.mrope_positions[:, last_token_indices]
+            positions = self.mrope_positions[:, token_indices_to_sample]
         else:
-            positions = self.positions[last_token_indices]
+            positions = self.positions[token_indices_to_sample]
         if self.method in (
             "deepseek_mtp",
             "ernie_mtp",
             "longcat_flash_mtp",
             "pangu_ultra_moe_mtp",
         ):
-            hidden_states = self.hidden_states[last_token_indices]
+            hidden_states = self.hidden_states[token_indices_to_sample]
         else:
-            hidden_states = hidden_states[last_token_indices]
+            hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -703,7 +703,7 @@ class SpecDecodeBaseProposer:
         next_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
@@ -711,8 +711,8 @@ class SpecDecodeBaseProposer:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
             # Inserting the next token ids at the last slot in each request.
-            if last_token_indices is None:
-                last_token_indices = cad.query_start_loc[1:] - 1
+            if token_indices_to_sample is None:
+                token_indices_to_sample = cad.query_start_loc[1:] - 1
 
             num_tokens = target_token_ids.shape[0]
             # Shift the input ids by one token.
@@ -720,7 +720,7 @@ class SpecDecodeBaseProposer:
             self.input_ids[: num_tokens - 1] = target_token_ids[1:]
             # Replace the last token with the next token.
             # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-            self.input_ids[last_token_indices] = next_token_ids
+            self.input_ids[token_indices_to_sample] = next_token_ids
 
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
@@ -729,7 +729,7 @@ class SpecDecodeBaseProposer:
 
             self.hidden_states[:num_tokens] = target_hidden_states
 
-            return num_tokens, last_token_indices, cad
+            return num_tokens, token_indices_to_sample, cad
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -754,7 +754,7 @@ class SpecDecodeBaseProposer:
                 self.net_num_new_slots_per_request * batch_size
             )
 
-            last_token_indices = torch.empty(
+            token_indices_to_sample = torch.empty(
                 batch_size * self.extra_slots_per_request,
                 dtype=torch.int32,
                 device=self.device,
@@ -781,7 +781,7 @@ class SpecDecodeBaseProposer:
                 out_positions_ptr=self.positions,  # Doesn't support mrope for now
                 out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
                 out_is_masked_token_mask_ptr=self.is_masked_token_mask,
-                out_new_token_indices_ptr=last_token_indices,
+                out_new_token_indices_ptr=token_indices_to_sample,
                 out_hidden_state_mapping_ptr=out_hidden_state_mapping,
                 # Input metadata
                 query_start_loc_ptr=query_start_loc,
@@ -834,7 +834,7 @@ class SpecDecodeBaseProposer:
                 new_slot_mapping=new_slot_mapping,
             )
 
-            return total_num_output_tokens, last_token_indices, new_cad
+            return total_num_output_tokens, token_indices_to_sample, new_cad
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
