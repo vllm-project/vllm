@@ -56,7 +56,8 @@ class DPCoordinator:
     """
 
     def __init__(
-        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
+        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True,
+        shutdown_timeout: float = 5.0
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -92,7 +93,7 @@ class DPCoordinator:
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
-        self._finalizer = weakref.finalize(self, shutdown, [self.proc])
+        self._finalizer = weakref.finalize(self, shutdown, [self.proc], shutdown_timeout)
 
     def get_stats_publish_address(self) -> str:
         return self.stats_publish_address

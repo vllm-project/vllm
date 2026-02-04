@@ -443,6 +443,7 @@ class EngineArgs:
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
+    shutdown_timeout: float = 5.0
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
@@ -1202,6 +1203,13 @@ class EngineArgs:
             action="store_true",
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
+        )
+
+        parser.add_argument(
+            "--shutdown-timeout",
+            type=float,
+            default=EngineArgs.shutdown_timeout,
+            help="Timeout in seconds for graceful shutdown of processes.",
         )
         return parser
 
