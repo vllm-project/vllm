@@ -22,6 +22,8 @@
 #include "../cuda_compat.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
 
@@ -325,7 +327,8 @@ __device__ float warpReduceMax(float val) {
 // clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE>
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE,
+          bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -776,18 +779,20 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  // write out partition max_logits and exp_sum
-  if (threadIdx.x < GQA_RATIO) {
-    const int qhead_idx = lane16id;
-    const int64_t offset = static_cast<int64_t>(seq_idx) *
-                               static_cast<int64_t>(total_num_heads) *
-                               static_cast<int64_t>(max_num_partitions) +
-                           (static_cast<int64_t>(wg_start_head_idx) +
-                            static_cast<int64_t>(qhead_idx)) *
-                               static_cast<int64_t>(max_num_partitions) +
-                           static_cast<int64_t>(partition_idx);
-    max_logits[offset] = partition_qk_max;
-    exp_sums[offset] = partition_exp_sum;
+  // write out partition max_logits and exp_sum (only needed for multi-partition)
+  if constexpr (!SINGLE_PARTITION) {
+    if (threadIdx.x < GQA_RATIO) {
+      const int qhead_idx = lane16id;
+      const int64_t offset = static_cast<int64_t>(seq_idx) *
+                                 static_cast<int64_t>(total_num_heads) *
+                                 static_cast<int64_t>(max_num_partitions) +
+                             (static_cast<int64_t>(wg_start_head_idx) +
+                              static_cast<int64_t>(qhead_idx)) *
+                                 static_cast<int64_t>(max_num_partitions) +
+                             static_cast<int64_t>(partition_idx);
+      max_logits[offset] = partition_qk_max;
+      exp_sums[offset] = partition_exp_sum;
+    }
   }
 
   __syncthreads();
@@ -900,19 +905,36 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         }
       }
 
-      const int64_t hsz_maxp_mult =
-          static_cast<int64_t>(HEAD_SIZE * max_num_partitions);
-      scalar_t* out_ptr = out + seq_idx * total_num_heads * hsz_maxp_mult +
-                          partition_idx * HEAD_SIZE;
-      for (int h = 0; h < GQA_RATIO4; h++) {
-        const int local_head_idx = 4 * h + rowid;
-        if (local_head_idx < GQA_RATIO) {
-          const int64_t out_head_idx =
-              static_cast<int64_t>(wg_start_head_idx + local_head_idx);
-          scalar_t* out_ptr2 = out_ptr + out_head_idx * hsz_maxp_mult;
-          scalar_t* out_ptr3 = out_ptr2 + head_elem_idx;
-          _B16x8* out_ptr_B16x8 = reinterpret_cast<_B16x8*>(out_ptr3);
-          *out_ptr_B16x8 = vout[h];
+      if constexpr (SINGLE_PARTITION) {
+        // Write directly to final_out - layout: [num_seqs, num_heads, head_size]
+        for (int h = 0; h < GQA_RATIO4; h++) {
+          const int local_head_idx = 4 * h + rowid;
+          if (local_head_idx < GQA_RATIO) {
+            const int64_t out_head_idx =
+                static_cast<int64_t>(wg_start_head_idx + local_head_idx);
+            OUTT* final_ptr = final_out +
+                              static_cast<int64_t>(seq_idx) * total_num_heads * HEAD_SIZE +
+                              out_head_idx * HEAD_SIZE + head_elem_idx;
+            _B16x8* final_ptr_B16x8 = reinterpret_cast<_B16x8*>(final_ptr);
+            *final_ptr_B16x8 = vout[h];
+          }
+        }
+      } else {
+        // Original path: write to tmp_out
+        const int64_t hsz_maxp_mult =
+            static_cast<int64_t>(HEAD_SIZE * max_num_partitions);
+        scalar_t* out_ptr = out + seq_idx * total_num_heads * hsz_maxp_mult +
+                            partition_idx * HEAD_SIZE;
+        for (int h = 0; h < GQA_RATIO4; h++) {
+          const int local_head_idx = 4 * h + rowid;
+          if (local_head_idx < GQA_RATIO) {
+            const int64_t out_head_idx =
+                static_cast<int64_t>(wg_start_head_idx + local_head_idx);
+            scalar_t* out_ptr2 = out_ptr + out_head_idx * hsz_maxp_mult;
+            scalar_t* out_ptr3 = out_ptr2 + head_elem_idx;
+            _B16x8* out_ptr_B16x8 = reinterpret_cast<_B16x8*>(out_ptr3);
+            *out_ptr_B16x8 = vout[h];
+          }
         }
       }
     }
@@ -926,7 +948,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -1313,11 +1335,14 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       global_exp_sum +=
           shared_exp_sum[w][head_idx] * __expf(warp_qk_max[w] - global_qk_max);
     }
-    if (head_idx < GQA_RATIO) {
-      max_logits_ptr[(wg_start_head_idx + head_idx) * max_num_partitions] =
-          global_qk_max;
-      exp_sums_ptr[(wg_start_head_idx + head_idx) * max_num_partitions] =
-          global_exp_sum;
+    // Write partition stats only for multi-partition (used by reduce kernel)
+    if constexpr (!SINGLE_PARTITION) {
+      if (head_idx < GQA_RATIO) {
+        max_logits_ptr[(wg_start_head_idx + head_idx) * max_num_partitions] =
+            global_qk_max;
+        exp_sums_ptr[(wg_start_head_idx + head_idx) * max_num_partitions] =
+            global_exp_sum;
+      }
     }
     const float global_inv_sum_scale = __fdividef(1.f, global_exp_sum + 1e-6f) *
                                        __expf(qk_max[h] - global_qk_max);
@@ -1401,20 +1426,39 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       }
     }
 
-    scalar_t* out_ptr = out +
-                        seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-                        partition_idx * HEAD_SIZE;
-    const int out_num_partitions = max_num_partitions;
-    bit16_t* out_ptr_b16 = reinterpret_cast<bit16_t*>(out_ptr);
-    for (int qh = 0; qh < QHLOOP; qh++) {
-      for (int vh = 0; vh < VHELOOP; vh++) {
-        const int head_size_elem = vh * WARP_SIZE + laneid;
-        for (int i = 0; i < 4; i++) {
-          const int head_idx = 4 * qh + i;
-          if (head_idx < GQA_RATIO) {
-            out_ptr_b16[(wg_start_head_idx + head_idx) * out_num_partitions *
-                            HEAD_SIZE +
-                        head_size_elem] = vout[qh][vh][i];
+    if constexpr (SINGLE_PARTITION) {
+      // Write directly to final_out - layout: [num_seqs, num_heads, head_size]
+      OUTT* final_ptr = final_out + seq_idx * num_heads * HEAD_SIZE;
+      bit16_t* final_ptr_b16 = reinterpret_cast<bit16_t*>(final_ptr);
+      for (int qh = 0; qh < QHLOOP; qh++) {
+        for (int vh = 0; vh < VHELOOP; vh++) {
+          const int head_size_elem = vh * WARP_SIZE + laneid;
+          for (int i = 0; i < 4; i++) {
+            const int head_idx = 4 * qh + i;
+            if (head_idx < GQA_RATIO) {
+              final_ptr_b16[(wg_start_head_idx + head_idx) * HEAD_SIZE +
+                            head_size_elem] = vout[qh][vh][i];
+            }
+          }
+        }
+      }
+    } else {
+      // Original path: write to tmp_out
+      scalar_t* out_ptr = out +
+                          seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
+                          partition_idx * HEAD_SIZE;
+      const int out_num_partitions = max_num_partitions;
+      bit16_t* out_ptr_b16 = reinterpret_cast<bit16_t*>(out_ptr);
+      for (int qh = 0; qh < QHLOOP; qh++) {
+        for (int vh = 0; vh < VHELOOP; vh++) {
+          const int head_size_elem = vh * WARP_SIZE + laneid;
+          for (int i = 0; i < 4; i++) {
+            const int head_idx = 4 * qh + i;
+            if (head_idx < GQA_RATIO) {
+              out_ptr_b16[(wg_start_head_idx + head_idx) * out_num_partitions *
+                              HEAD_SIZE +
+                          head_size_elem] = vout[qh][vh][i];
+            }
           }
         }
       }
@@ -1727,7 +1771,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2164,7 +2208,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2495,7 +2539,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2897,7 +2941,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -3127,7 +3171,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO, MFMAType MFMA_TYPE>
+          int GQA_RATIO, MFMAType MFMA_TYPE, bool SINGLE_PARTITION = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -3218,6 +3262,29 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
+// Single-partition variants - write directly to final_out, skip reduce kernel
+#define LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(GQA_RATIO)                        \
+  paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
+                                          HEAD_SIZE, NTHR, ALIBI_ENABLED,       \
+                                          GQA_RATIO, MFMA_TYPE, true>           \
+      <<<grid, block, 0, stream>>>(                                             \
+          query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,       \
+          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                  \
+          max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride,  \
+          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,   \
+          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+
+#define LAUNCH_CUSTOM_ATTENTION_MFMA4_SINGLE(GQA_RATIO)                         \
+  paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,    \
+                                         HEAD_SIZE, NTHR, ALIBI_ENABLED,        \
+                                         GQA_RATIO, true>                       \
+      <<<grid, block, 0, stream>>>(                                             \
+          query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,       \
+          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                  \
+          max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride,  \
+          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,   \
+          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
                                       PARTITION_SIZE, NPAR_LOOPS>           \
@@ -3290,6 +3357,34 @@ void paged_attention_custom_launcher(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  // Check if single-partition optimization applies (seq_len <= 256)
+  const bool use_single_partition = (max_num_partitions == 1) && is_fused_short_seq_enabled();
+
+  if (use_single_partition) {
+    // Single partition path: write directly to final_out, skip reduce kernel
+    switch (gqa_ratio) {
+      case 1:  LAUNCH_CUSTOM_ATTENTION_MFMA4_SINGLE(1);  break;
+      case 2:  LAUNCH_CUSTOM_ATTENTION_MFMA4_SINGLE(2);  break;
+      case 3:  LAUNCH_CUSTOM_ATTENTION_MFMA4_SINGLE(3);  break;
+      case 4:  LAUNCH_CUSTOM_ATTENTION_MFMA4_SINGLE(4);  break;
+      case 5:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(5);  break;
+      case 6:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(6);  break;
+      case 7:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(7);  break;
+      case 8:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(8);  break;
+      case 9:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(9);  break;
+      case 10: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(10); break;
+      case 11: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(11); break;
+      case 12: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(12); break;
+      case 13: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(13); break;
+      case 14: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(14); break;
+      case 15: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(15); break;
+      case 16: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(16); break;
+      default: TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio); break;
+    }
+    return;  // Skip reduce kernel
+  }
+
+  // Multi-partition path (original): write to tmp_out, then reduce
   // mfma4 kernel is faster than mfma16 for gqa_ratio <= 4
   switch (gqa_ratio) {
     case 1:
@@ -3439,6 +3534,35 @@ void paged_attention_custom_launcher_navi(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  // Check if single-partition optimization applies (seq_len <= 256)
+  const bool use_single_partition = (max_num_partitions == 1) && is_fused_short_seq_enabled();
+
+  if (use_single_partition) {
+    // Single partition path: write directly to final_out, skip reduce kernel
+    // Navi uses mfma16 for all GQA ratios
+    switch (gqa_ratio) {
+      case 1:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(1);  break;
+      case 2:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(2);  break;
+      case 3:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(3);  break;
+      case 4:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(4);  break;
+      case 5:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(5);  break;
+      case 6:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(6);  break;
+      case 7:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(7);  break;
+      case 8:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(8);  break;
+      case 9:  LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(9);  break;
+      case 10: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(10); break;
+      case 11: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(11); break;
+      case 12: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(12); break;
+      case 13: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(13); break;
+      case 14: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(14); break;
+      case 15: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(15); break;
+      case 16: LAUNCH_CUSTOM_ATTENTION_MFMA16_SINGLE(16); break;
+      default: TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio); break;
+    }
+    return;  // Skip reduce kernel
+  }
+
+  // Multi-partition path (original)
   switch (gqa_ratio) {
     case 1:
       LAUNCH_CUSTOM_ATTENTION_MFMA16(1);
@@ -3627,6 +3751,18 @@ void paged_attention_custom_launcher_navi(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);    \
       break;                                                       \
   }
+
+// Check if fused short-seq optimization is enabled via environment variable
+// When enabled (default), single-partition sequences skip the reduce kernel
+inline bool is_fused_short_seq_enabled() {
+  static int cached = -1;
+  if (cached == -1) {
+    const char* env = std::getenv("VLLM_ROCM_FUSED_SHORT_SEQ");
+    // Enabled by default (env not set or "1")
+    cached = (env == nullptr || std::strcmp(env, "1") == 0) ? 1 : 0;
+  }
+  return cached == 1;
+}
 
 bool is_navi_gpu() {
   static bool is_cached = false;
