@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.model_arch import (
@@ -97,8 +96,7 @@ AttnTypeStr = Literal[
 ]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -877,7 +875,6 @@ class ModelConfig:
             overrides = [
                 "gptq_marlin",
                 "awq_marlin",
-                "ipex",
                 "inc",
                 "moe_wna16",
                 "modelopt",
