@@ -206,7 +206,7 @@ class SHMConnector(ECConnectorBase):
                         )
                     else:
                         logger.error(
-                            "Broadcast Incomplete: %s might be missing on some workers.",
+                            "Broadcast Incomplete: %s might be missing.",
                             feat_key,
                         )
 
