@@ -212,7 +212,7 @@ class ClassifyRequestMixin(OpenAIBaseModel):
 
     def to_pooling_params(self):
         return PoolingParams(
-            task="embed",
+            task="classify",
             use_activation=self.use_activation,
             truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )
