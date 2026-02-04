@@ -13,7 +13,6 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -27,6 +26,7 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -306,9 +306,15 @@ def test_prepare_inputs_padded():
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
-    output_metadata, token_indices_to_sample = proposer.prepare_inputs_padded(
-        common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+    output_metadata, token_indices_to_sample, num_rejected_tokens_gpu = (
+        proposer.prepare_inputs_padded(
+            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+        )
     )
+
+    # Verify num_rejected_tokens_gpu is calculated correctly
+    expected_num_rejected = torch.tensor([1, 0, 2], dtype=torch.int32, device=device)
+    assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
 
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)

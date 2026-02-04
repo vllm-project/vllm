@@ -38,6 +38,8 @@ Encoder engines should be launched with the following flags:
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
 
+- `--mm-encoder-only` **(Optional)** - If possible, skips the language model during initialization to reduce device memory usage.
+
 ## Local media inputs
 
 To support local image inputs (from your ```MEDIA_PATH``` directory), add the following flag to the encoder instance:

@@ -105,6 +105,9 @@ def _lazy_import_wrapper(
 
 
 # Create lazy wrappers for each function
+flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "trtllm_bf16_moe"
+)
 flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"
 )
@@ -126,12 +129,11 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
-    "flashinfer", "nvfp4_block_scale_interleave"
+    "flashinfer.fp4_quantization", "block_scale_interleave"
 )
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
@@ -193,6 +195,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -305,18 +308,7 @@ def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     if force_use_trtllm_attention() is False:
         return False
     has_trtllm = supports_trtllm_attention()
-    # num_kv_heads=1 is not supported due to TMA descriptor building limitations.
-    # When num_kv_heads=1, the KV cache strides become degenerate (stride_heads ==
-    # stride_batch), which causes CUDA's cuTensorMapEncodeTiled to fail because
-    # TMA descriptors cannot handle degenerate 4D tensors with singleton dimensions.
-    # See: https://fburl.com/352mrydz
-    if has_trtllm and num_kv_heads == 1:
-        logger.warning_once(
-            "TRTLLM attention does not support num_kv_heads=1. "
-            "This configuration causes TMA descriptor building to fail due to "
-            "degenerate tensor strides. Falling back to FlashInfer attention."
-        )
-    return has_trtllm and (num_qo_heads % num_kv_heads == 0) and (num_kv_heads != 1)
+    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
 
 def use_trtllm_attention(
@@ -363,15 +355,6 @@ def use_trtllm_attention(
                 "TRTLLM attention is not supported for this combination of "
                 "query and key heads, but --attention-config.use_trtllm_attention is "
                 "set to 1"
-            )
-        return False
-
-    # num_kv_heads=1 is not supported
-    if num_kv_heads == 1:
-        if force_use_trtllm:
-            logger.warning_once(
-                "TRTLLM attention does not support num_kv_heads=1, "
-                "but --attention-config.use_trtllm_attention is set to 1"
             )
         return False
 
@@ -426,12 +409,21 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         g_scale: torch.Tensor,
         dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
         backend: str,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
         return flashinfer_mm_fp4_(
-            A, B, A_scale, B_scale, g_scale, dtype, block_size=16, backend=backend
+            A,
+            B,
+            A_scale,
+            B_scale,
+            g_scale,
+            dtype,
+            block_size=16,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
         )
 
     @torch.library.register_fake(
@@ -444,6 +436,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         g_scale: torch.Tensor,
         dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
         backend: str,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
@@ -480,6 +473,39 @@ if has_flashinfer():
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
         )
 
+    @torch.library.custom_op(
+        "vllm::flashinfer_nvfp4_quantize",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_nvfp4_quantize(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import nvfp4_quantize as nvfp4_quantize_
+
+        return nvfp4_quantize_(
+            a, a_global_sf, sfLayout=SfLayout.layout_8x4, do_shuffle=False
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_nvfp4_quantize",
+    )
+    def flashinfer_nvfp4_quantize_fake(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, n = a.shape
+
+        round_up = lambda x, y: (x + y - 1) // y * y
+
+        rounded_m = round_up(m, 8)
+        scale_n = n // 16
+        rounded_n = round_up(scale_n, 4)
+
+        return torch.empty(m, n // 2, dtype=torch.uint8, device=a.device), torch.empty(
+            rounded_m, rounded_n, dtype=torch.uint8, device=a.device
+        )
+
 
 def flashinfer_scaled_fp4_mm(
     a: torch.Tensor,
@@ -495,9 +521,11 @@ def flashinfer_scaled_fp4_mm(
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
 
-    if backend == "cutlass":
+    if backend in ("cutlass", "cudnn"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
+
+    use_8x4_sf_layout = True if backend == "trtllm" and a.shape[0] <= 32 else False  # noqa: SIM210
 
     return flashinfer_mm_fp4(
         a,
@@ -506,6 +534,7 @@ def flashinfer_scaled_fp4_mm(
         block_scale_b.t(),
         alpha,
         out_dtype,
+        use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
     )
 
@@ -540,6 +569,65 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+def flashinfer_quant_nvfp4_8x4_sf_layout(
+    a: torch.Tensor, a_global_sf: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return flashinfer_nvfp4_quantize(a, a_global_sf)
+
+
+flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
+    "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
+)
+
+
+@functools.cache
+def has_flashinfer_fp8_blockscale_gemm() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is available."""
+    return (
+        has_flashinfer()
+        and current_platform.is_device_capability(90)
+        and hasattr(_get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90")
+    )
+
+
+@functools.cache
+def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is supported."""
+    return (
+        envs.VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+        and has_flashinfer_fp8_blockscale_gemm()
+    )
+
+
+def should_use_flashinfer_for_blockscale_fp8_gemm(
+    is_flashinfer_supported: bool,
+    output_dtype: torch.dtype,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+):
+    if not is_flashinfer_supported:
+        return False
+
+    # Verify DeepGEMM N/K dims requirements
+    # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
+    # test inside kernels/quatization/test_block_fp8.py
+    N_MULTIPLE = 64
+    K_MULTIPLE = 128
+
+    weight_dtype = weight.dtype
+    input_dtype = input.dtype
+
+    should_use_flashinfer = (
+        output_dtype == torch.bfloat16
+        and input_dtype == torch.bfloat16
+        and weight_dtype == torch.float8_e4m3fn
+        and weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
+    )
+
+    return should_use_flashinfer
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -556,10 +644,15 @@ __all__ = [
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_quant_nvfp4_8x4_sf_layout",
+    "flashinfer_fp8_blockscale_gemm",
+    "should_use_flashinfer_for_blockscale_fp8_gemm",
+    "is_flashinfer_fp8_blockscale_gemm_supported",
 ]

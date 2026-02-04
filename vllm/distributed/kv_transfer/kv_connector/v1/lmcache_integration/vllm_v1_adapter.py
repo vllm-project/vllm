@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from lmcache import utils
@@ -36,7 +36,6 @@ except ImportError:
         PluginLauncher as RuntimePluginLauncher,
     )
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -54,6 +53,7 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_
 from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -233,7 +233,10 @@ class RequestTracker:
         elif isinstance(new_block_ids, list):
             pass
         else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
+            raise ValueError(
+                f"Unsupported new_block_ids type {type(new_block_ids)}: "
+                f"should be None[list[int], ...], tuple or list[int]."
+            )
         self.allocated_block_ids.extend(new_block_ids)
 
         # When a request is scheduled again, and the number of new tokens
@@ -271,7 +274,7 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
-    ) -> Optional["ReqMeta"]:
+    ) -> "ReqMeta | None":
         """Create the request metadata from a request tracker.
 
         Args:
@@ -782,6 +785,16 @@ class LMCacheConnectorV1Impl:
     ####################
     # Worker side APIs
     ####################
+    @_lmcache_nvtx_annotate
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.info("Registering KV caches")
+        # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
+        #  not called, we should consider removing it.
+        assert len(self.kv_caches) == 0 and len(kv_caches) > 0
+        self.kv_caches = kv_caches
+        if self.lmcache_engine is not None:
+            kvcaches = list(self.kv_caches.values())
+            self.lmcache_engine.post_init(kvcaches=kvcaches)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:

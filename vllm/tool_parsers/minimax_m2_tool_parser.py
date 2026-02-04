@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -138,37 +140,164 @@ class MinimaxM2ToolParser(ToolParser):
         return name_str
 
     def _convert_param_value(self, value: str, param_type: str) -> Any:
-        """Convert parameter value to the correct type."""
-        if value.lower() == "null":
+        """Convert parameter value to the correct type (legacy single-type version)."""
+        return self._convert_param_value_with_types(value, [param_type])
+
+    def _extract_types_from_schema(self, schema: Any) -> list[str]:
+        """
+        Extract all possible types from a JSON schema definition.
+        Handles anyOf, oneOf, allOf, type arrays, and enum fields.
+
+        Args:
+            schema: The JSON schema definition for a parameter
+
+        Returns:
+            List of type strings (e.g., ["string", "integer", "null"])
+        """
+        if schema is None:
+            return ["string"]
+
+        if not isinstance(schema, dict):
+            return ["string"]
+
+        types: set[str] = set()
+
+        # Handle direct "type" field
+        if "type" in schema:
+            type_value = schema["type"]
+            if isinstance(type_value, str):
+                types.add(type_value)
+            elif isinstance(type_value, list):
+                for t in type_value:
+                    if isinstance(t, str):
+                        types.add(t)
+
+        # Handle enum - infer types from enum values
+        if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+            for value in schema["enum"]:
+                if value is None:
+                    types.add("null")
+                elif isinstance(value, bool):
+                    types.add("boolean")
+                elif isinstance(value, int):
+                    types.add("integer")
+                elif isinstance(value, float):
+                    types.add("number")
+                elif isinstance(value, str):
+                    types.add("string")
+                elif isinstance(value, list):
+                    types.add("array")
+                elif isinstance(value, dict):
+                    types.add("object")
+
+        # Handle anyOf, oneOf, allOf - recursively extract types
+        for choice_field in ("anyOf", "oneOf", "allOf"):
+            if choice_field in schema and isinstance(schema[choice_field], list):
+                for choice in schema[choice_field]:
+                    extracted = self._extract_types_from_schema(choice)
+                    types.update(extracted)
+
+        # If no types found, default to string
+        if not types:
+            return ["string"]
+
+        return list(types)
+
+    def _convert_param_value_with_types(
+        self, value: str, param_types: list[str]
+    ) -> Any:
+        """
+        Convert parameter value to the correct type based on a list of possible types.
+        Tries each type in order until one succeeds.
+
+        Args:
+            value: The string value to convert
+            param_types: List of possible type strings
+
+        Returns:
+            The converted value
+        """
+        # Check if the VALUE itself indicates null (not just if null is allowed)
+        if value.lower() in ("null", "none", "nil"):
             return None
 
-        param_type = param_type.lower()
-        if param_type in ["string", "str", "text"]:
+        # Normalize types
+        normalized_types = [t.lower() for t in param_types]
+
+        # Try each type in order of preference (most specific first, string as fallback)
+        # Priority: integer > number > boolean > object > array > string
+        type_priority = [
+            "integer",
+            "int",
+            "number",
+            "float",
+            "boolean",
+            "bool",
+            "object",
+            "array",
+            "string",
+            "str",
+            "text",
+        ]
+
+        for param_type in type_priority:
+            if param_type not in normalized_types:
+                continue
+
+            if param_type in ["string", "str", "text"]:
+                return value
+            elif param_type in ["integer", "int"]:
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    continue
+            elif param_type in ["number", "float"]:
+                try:
+                    val = float(value)
+                    return val if val != int(val) else int(val)
+                except (ValueError, TypeError):
+                    continue
+            elif param_type in ["boolean", "bool"]:
+                lower_val = value.lower().strip()
+                if lower_val in ["true", "1", "yes", "on"]:
+                    return True
+                elif lower_val in ["false", "0", "no", "off"]:
+                    return False
+                continue
+            elif param_type in ["object", "array"]:
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    continue
+
+        # Fallback: try JSON parse, then return as string
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
             return value
-        elif param_type in ["integer", "int"]:
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return value
-        elif param_type in ["number", "float"]:
-            try:
-                val = float(value)
-                return val if val != int(val) else int(val)
-            except (ValueError, TypeError):
-                return value
-        elif param_type in ["boolean", "bool"]:
-            return value.lower() in ["true", "1"]
-        elif param_type in ["object", "array"]:
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
-        else:
-            # Try JSON parse first, fallback to string
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+
+    def _get_param_types_from_config(
+        self, param_name: str, param_config: dict
+    ) -> list[str]:
+        """
+        Get parameter types from parameter configuration.
+        Handles anyOf, oneOf, allOf, and direct type definitions.
+
+        Args:
+            param_name: The name of the parameter
+            param_config: The properties dict from the tool schema
+
+        Returns:
+            List of type strings
+        """
+        if param_name not in param_config:
+            return ["string"]
+
+        param_schema = param_config[param_name]
+        if not isinstance(param_schema, dict):
+            return ["string"]
+
+        return self._extract_types_from_schema(param_schema)
 
     def _parse_single_invoke(
         self, invoke_str: str, tools: list | None
@@ -207,17 +336,11 @@ class MinimaxM2ToolParser(ToolParser):
                 if param_value.endswith("\n"):
                     param_value = param_value[:-1]
 
-                # Get parameter type
-                param_type = "string"
-                if (
-                    param_name in param_config
-                    and isinstance(param_config[param_name], dict)
-                    and "type" in param_config[param_name]
-                ):
-                    param_type = param_config[param_name]["type"]
+                # Get parameter types (supports anyOf/oneOf/allOf)
+                param_type = self._get_param_types_from_config(param_name, param_config)
 
                 # Convert value
-                param_dict[param_name] = self._convert_param_value(
+                param_dict[param_name] = self._convert_param_value_with_types(
                     param_value, param_type
                 )
 
@@ -593,7 +716,7 @@ class MinimaxM2ToolParser(ToolParser):
                         # Store raw value for later processing
                         self.accumulated_params[self.current_param_name] = param_value
 
-                        # Get parameter configuration for type conversion
+                        # Get parameter configuration with anyOf support
                         param_config = {}
                         if self.streaming_request and self.streaming_request.tools:
                             for tool in self.streaming_request.tools:
@@ -610,17 +733,12 @@ class MinimaxM2ToolParser(ToolParser):
                                         param_config = params["properties"]
                                     break
 
-                        # Get parameter type
-                        param_type = "string"
-                        if (
-                            self.current_param_name in param_config
-                            and isinstance(param_config[self.current_param_name], dict)
-                            and "type" in param_config[self.current_param_name]
-                        ):
-                            param_type = param_config[self.current_param_name]["type"]
+                        # Get parameter types (supports anyOf/oneOf/allOf)
+                        param_type = self._get_param_types_from_config(
+                            self.current_param_name, param_config
+                        )
 
-                        # Convert param value to appropriate type
-                        converted_value = self._convert_param_value(
+                        converted_value = self._convert_param_value_with_types(
                             param_value, param_type
                         )
 

@@ -22,7 +22,7 @@ steps:
 - label: Quantized MoE Test (B200)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py
