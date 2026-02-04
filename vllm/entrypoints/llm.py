@@ -1391,6 +1391,8 @@ class LLM:
 
         if pooling_params is None:
             pooling_params = PoolingParams(task="score")
+        elif pooling_params.task is None:
+            pooling_params.task = "score"
 
         pooling_params_list = list[PoolingParams]()
 
