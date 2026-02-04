@@ -38,7 +38,7 @@ class MockRequest:
             )
             self.mm_features.append(feature)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
+    def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self._token_counts)
         return self._token_counts[input_id]
 
@@ -123,15 +123,15 @@ class TestECExampleConnectorBasics:
 
 
 class TestCacheExistence:
-    """Test cache existence checking using has_caches() API."""
+    """Test cache existence checking using has_cache_item() API."""
 
-    def test_has_caches_all_exist_3_items(
+    def test_has_cache_item_all_exist_3_items(
         self,
         mock_vllm_config_producer,
         mock_vllm_config_consumer,
         mock_request_with_3_mm,
     ):
-        """Test has_caches returns True when all 3 caches exist."""
+        """Test has_cache_item returns True when all 3 caches exist."""
         # Test for producer first
         producer = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
@@ -146,8 +146,11 @@ class TestCacheExistence:
             encoder_cache[mm_hash] = torch.randn(10, 768)
             producer.save_caches(encoder_cache, mm_hash)
 
-        # Test using has_caches API
-        producer_result = producer.has_caches(mock_request_with_3_mm)
+        # Test using has_cache_item API
+        producer_result = [
+            producer.has_cache_item(mm_feature.identifier)
+            for mm_feature in mock_request_with_3_mm.mm_features
+        ]
 
         # Assert
         assert len(producer_result) == 3
@@ -159,14 +162,17 @@ class TestCacheExistence:
             role=ECConnectorRole.SCHEDULER,
         )
 
-        # Test using has_caches API
-        consumer_result = consumer.has_caches(mock_request_with_3_mm)
+        # Test using has_cache_item API
+        consumer_result = [
+            consumer.has_cache_item(mm_feature.identifier)
+            for mm_feature in mock_request_with_3_mm.mm_features
+        ]
 
         # Assert
         assert len(consumer_result) == 3
         assert all(consumer_result), f"Expected all True, got {consumer_result}"
 
-    def test_has_caches_none_exist(
+    def test_has_cache_item_none_exist(
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test has_caches returns False when no caches exist."""
@@ -176,13 +182,16 @@ class TestCacheExistence:
         )
 
         # Test without creating any files
-        result = connector.has_caches(mock_request_with_3_mm)
+        result = [
+            connector.has_cache_item(mm_feature.identifier)
+            for mm_feature in mock_request_with_3_mm.mm_features
+        ]
 
         # Assert
         assert len(result) == 3
         assert not any(result), f"Expected all False, got {result}"
 
-    def test_has_caches_partial_exist(
+    def test_has_cache_item_partial_exist(
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test has_caches with some caches existing (1 of 3)."""
@@ -197,7 +206,10 @@ class TestCacheExistence:
         connector.save_caches(encoder_cache, mm_hash_second)
 
         # Test
-        result = connector.has_caches(mock_request_with_3_mm)
+        result = [
+            connector.has_cache_item(mm_feature.identifier)
+            for mm_feature in mock_request_with_3_mm.mm_features
+        ]
 
         # Assert
         assert len(result) == 3
@@ -323,8 +335,11 @@ class TestCacheSaving:
             encoder_cache[mm_hash] = torch.randn(10, 768)
             connector.save_caches(encoder_cache, mm_hash)
 
-        # Verify all files exist using has_caches
-        result = connector.has_caches(mock_request_with_3_mm)
+        # Verify all files exist using has_cache_item
+        result = [
+            connector.has_cache_item(mm_feature.identifier)
+            for mm_feature in mock_request_with_3_mm.mm_features
+        ]
         assert all(result), f"Not all caches were saved: {result}"
 
         # Verify each file's content
@@ -347,10 +362,9 @@ class TestCacheSaving:
         # Save should not raise but also not create file
         connector.save_caches(encoder_cache, mm_hash)
 
-        # Verify file doesn't exist using has_caches
-        mock_request = MockRequest("req_consumer", [mm_hash], [10])
-        result = connector.has_caches(mock_request)
-        assert not result[0], "Consumer should not save caches"
+        # Verify file doesn't exist using has_cache_item
+        result = connector.has_cache_item(mm_hash)
+        assert not result, "Consumer should not save caches"
 
 
 class TestCacheLoading:

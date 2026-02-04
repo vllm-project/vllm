@@ -11,9 +11,7 @@ import json
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
-from typing import Literal
-
-from pydantic.dataclasses import dataclass
+from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import config
@@ -26,9 +24,9 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
+from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -69,7 +67,6 @@ class LoRAParserAction(argparse.Action):
 
 
 @config
-@dataclass
 class FrontendArgs:
     """Arguments for the OpenAI-compatible frontend server."""
 
@@ -80,11 +77,17 @@ class FrontendArgs:
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
-        "debug", "info", "warning", "error", "critical", "trace"
+        "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_access_log_for_endpoints: str | None = None
+    """Comma-separated list of endpoint paths to exclude from uvicorn access
+    logs. This is useful to reduce log noise from high-frequency endpoints
+    like health checks. Example: "/health,/metrics,/ping".
+    When set, access logs for requests to these paths will be suppressed
+    while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
@@ -114,6 +117,12 @@ class FrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    default_chat_template_kwargs: dict[str, Any] | None = None
+    """Default keyword arguments to pass to the chat template renderer.
+    These will be merged with request-level chat_template_kwargs,
+    with request values taking precedence. Useful for setting default
+    behavior for reasoning models. Example: '{"enable_thinking": false}'
+    to disable thinking mode by default for Qwen3/DeepSeek models."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     ssl_keyfile: str | None = None
@@ -126,6 +135,9 @@ class FrontendArgs:
     """Refresh SSL Context when SSL certificate files change"""
     ssl_cert_reqs: int = int(ssl.CERT_NONE)
     """Whether client certificate is required (see stdlib ssl module's)."""
+    ssl_ciphers: str | None = None
+    """SSL cipher suites for HTTPS (TLS 1.2 and below only).
+    Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
     root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])
@@ -179,8 +191,12 @@ class FrontendArgs:
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If True, log model outputs (generations).
+    """If set to True, log model outputs (generations).
     Requires --enable-log-requests."""
+    enable_log_deltas: bool = True
+    """If set to False, output deltas will not be logged. Relevant only if 
+    --enable-log-outputs is set.
+    """
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     """Maximum size (bytes) of an incomplete HTTP event (header or body) for
     h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
@@ -193,6 +209,11 @@ class FrontendArgs:
     """
     If set to True, only enable the Tokens In<>Out endpoint. 
     This is intended for use in a Disaggregated Everything setup.
+    """
+    enable_offline_docs: bool = False
+    """
+    Enable offline FastAPI documentation for air-gapped environments.
+    Uses vendored static assets bundled with vLLM.
     """
 
     @staticmethod
@@ -211,6 +232,9 @@ class FrontendArgs:
         del frontend_kwargs["allowed_methods"]["nargs"]
         del frontend_kwargs["allowed_headers"]["nargs"]
 
+        # Special case: default_chat_template_kwargs needs json.loads type
+        frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
+
         # Special case: LoRA modules need custom parser action and
         # optional_type(str)
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
@@ -222,6 +246,11 @@ class FrontendArgs:
         if "nargs" in frontend_kwargs["middleware"]:
             del frontend_kwargs["middleware"]["nargs"]
         frontend_kwargs["middleware"]["default"] = []
+
+        # Special case: disable_access_log_for_endpoints is a single
+        # comma-separated string, not a list
+        if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
+            del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.list_registered())
@@ -265,8 +294,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--api-server-count",
         "-asc",
         type=int,
-        default=1,
-        help="How many API server processes to run.",
+        default=None,
+        help="How many API server processes to run. "
+        "Defaults to data_parallel_size if not specified.",
     )
     parser.add_argument(
         "--config",

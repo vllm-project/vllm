@@ -27,7 +27,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING, Optional
 
 import numpy as np
 import pytest
@@ -45,7 +45,11 @@ from transformers import (
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from tests.models.utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (
+    TokensTextLogprobs,
+    TokensTextLogprobsPromptLogprobs,
+    softmax,
+)
 from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -59,7 +63,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -185,6 +189,17 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -200,6 +215,27 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
         cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def workspace_init():
+    """Initialize the workspace manager for tests that need it.
+
+    This fixture initializes the workspace manager with a CUDA device
+    if available, and resets it after the test completes. Tests that
+    create a full vLLM engine should NOT use this fixture as the engine
+    will initialize the workspace manager itself.
+    """
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        init_workspace_manager(device)
+    yield
+    reset_workspace_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -329,6 +365,7 @@ class HfRunner:
             self.config,
             dtype=dtype,
             is_pooling_model=is_sentence_transformer or is_cross_encoder,
+            config_format="hf",
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -389,7 +426,7 @@ class HfRunner:
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
@@ -492,7 +529,7 @@ class HfRunner:
             elif problem_type == "multi_label_classification":
                 logits = output.logits.sigmoid()[0].tolist()
             else:
-                logits = output.logits.softmax(dim=-1)[0].tolist()
+                logits = softmax(output.logits)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -660,6 +697,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        use_cache: bool = True,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
@@ -673,7 +711,7 @@ class HfRunner:
         for inputs in all_inputs:
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
-                use_cache=True,
+                use_cache=use_cache,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
@@ -681,10 +719,16 @@ class HfRunner:
                 **kwargs,
             )
 
+            # Encoder-decoder models return decoder_hidden_states instead of
+            # hidden_states
+            hidden_states = (
+                getattr(output, "hidden_states", None) or output.decoder_hidden_states
+            )
+
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(output.hidden_states, num_logprobs)
+            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
@@ -980,7 +1024,9 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+    def generate_prompt_perplexity(
+        self, prompts: list[str], mask: Optional[list[str]] = None
+    ) -> list[float]:
         """
         Return the perplexity score associated with generating the prompts
 
@@ -991,13 +1037,20 @@ class VllmRunner:
             prompts, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
         )
 
+        mask_prefix_lens = (
+            [len(self.llm.get_tokenizer()(prefix)["input_ids"]) for prefix in mask]
+            if mask is not None
+            else [0 for _ in range(len(prompts))]
+        )
+
         perplexities = []
-        for output in outputs:
+        for output, mask_prefix_len in zip(outputs, mask_prefix_lens):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
             assert token_datas[0] is None
+
             token_log_probs = []
-            for token_data in token_datas[1:]:
+            for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_log_prob = list(token_data.values())[0].logprob
@@ -1077,6 +1130,9 @@ class VllmRunner:
 
     def get_llm(self) -> LLM:
         return self.llm
+
+    def collective_rpc(self, *args, **kwargs):
+        return self.llm.collective_rpc(*args, **kwargs)
 
     def __enter__(self):
         return self
@@ -1488,3 +1544,9 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture(scope="function")
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

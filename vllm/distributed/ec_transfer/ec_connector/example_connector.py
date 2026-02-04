@@ -73,6 +73,7 @@ class ECExampleConnector(ECConnectorBase):
                 data hashes (`mm_hash`) to encoder cache tensors.
             kwargs (dict): Additional keyword arguments for the connector.
         """
+        from vllm.platforms import current_platform
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
@@ -80,10 +81,7 @@ class ECExampleConnector(ECConnectorBase):
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
-                (
-                    "In connector.start_load_caches, ",
-                    "but the connector metadata is None",
-                )
+                "In connector.start_load_caches, but the connector metadata is None"
             )
             return
         # Load the EC for each mm data
@@ -91,7 +89,9 @@ class ECExampleConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(filename)["ec_cache"].cuda()
+            ec_cache = safetensors.torch.load_file(
+                filename, device=current_platform.device_type
+            )["ec_cache"]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
@@ -117,23 +117,20 @@ class ECExampleConnector(ECConnectorBase):
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def has_caches(
+    def has_cache_item(
         self,
-        request: "Request",
-    ) -> list[bool]:
+        identifier: str,
+    ) -> bool:
         """
-        Check if cache exist externally for each mm_data of request
+        Check if cache exist externally for the media
 
         Args:
-            request (Request): the request object.
+            identifier (str): the identifier of the media.
 
         Returns:
-            List of bool indicate that ith mm_data exist in cache or not
+            Bool indicate that media exists in cache or not
         """
-        result = []
-        for feature in request.mm_features:
-            result.append(self._found_match_for_mm_data(feature.identifier))
-        return result
+        return self._found_match_for_mm_data(identifier)
 
     def update_state_after_alloc(
         self,
@@ -144,7 +141,7 @@ class ECExampleConnector(ECConnectorBase):
         Update ECConnector state after encoder cache allocation.
         """
         mm_hash = request.mm_features[index].identifier
-        num_encoder_token = request.get_num_encoder_tokens(index)
+        num_encoder_token = request.get_num_encoder_embeds(index)
         # Insert mm_hash only if this block has not been recorded yet.
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 

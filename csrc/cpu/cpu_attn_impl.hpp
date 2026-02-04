@@ -8,10 +8,8 @@
   #include <sys/sysctl.h>
 #endif
 
-#include "cpu_types.hpp"
-#include "scratchpad_manager.h"
-#include "cpu_attn_macros.h"
-#include "utils.hpp"
+#include "cpu/cpu_arch_macros.h"
+#include "cpu/utils.hpp"
 
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON };
@@ -378,12 +376,13 @@ class AttentionScheduler {
 
   static constexpr int32_t MaxQTileIterNum = 128;
 
-  AttentionScheduler() : available_cache_size_(get_available_l2_size()) {}
+  AttentionScheduler()
+      : available_cache_size_(cpu_utils::get_available_l2_size()) {}
 
   torch::Tensor schedule(const ScheduleInput& input) const {
     const bool casual = input.casual;
     const int32_t thread_num = omp_get_max_threads();
-    const int64_t cache_size = get_available_l2_size();
+    const int64_t cache_size = cpu_utils::get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
     int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
@@ -659,7 +658,7 @@ class AttentionScheduler {
             metadata_ptr->thread_num +
         metadata_ptr->reduction_scratchpad_size_per_kv_head *
             (use_gqa ? input.num_heads_kv : input.num_heads_q);
-    DNNLScratchPadManager::get_dnnl_scratchpad_manager()->realloc(
+    cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(
         scratchpad_size);
 
     // metadata_ptr->print();
@@ -667,7 +666,7 @@ class AttentionScheduler {
     // test out of boundary access
     // {
     //     float* cache_ptr =
-    //     DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<float>();
+    //     cpu_utils::ScratchPadManager::getl_scratchpad_manager()->get_data<float>();
     //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
     //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
     //     }
@@ -749,27 +748,6 @@ class AttentionScheduler {
     return std::max(rounded_tile_size, round_size);
   }
 
-  static int64_t get_available_l2_size() {
-    static int64_t size = []() {
-#if defined(__APPLE__)
-      // macOS doesn't have _SC_LEVEL2_CACHE_SIZE. Use sysctlbyname.
-      int64_t l2_cache_size = 0;
-      size_t len = sizeof(l2_cache_size);
-      if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &len, NULL, 0) == 0 &&
-          l2_cache_size > 0) {
-        return l2_cache_size >> 1;  // use 50% of L2 cache
-      }
-      // Fallback if sysctlbyname fails
-      return 128LL * 1024 >> 1;  // use 50% of 128KB
-#else
-      long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
-      TORCH_CHECK_NE(l2_cache_size, -1);
-      return l2_cache_size >> 1;  // use 50% of L2 cache
-#endif
-    }();
-    return size;
-  }
-
  private:
   int64_t available_cache_size_;
 };
@@ -838,14 +816,10 @@ struct VecTypeTrait<float> {
   using vec_t = vec_op::FP32Vec16;
 };
 
-// ARM only supports BF16 with ARMv8.6-A extension
-#if (defined(__aarch64__) && !defined(ARM_BF16_SUPPORT))
-#else
 template <>
 struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
-#endif
 
 #if !defined(__powerpc__) && !defined(__s390x__)
 template <>
@@ -1402,7 +1376,7 @@ class AttentionMainLoop {
 
       // init buffers
       void* scratchpad_ptr =
-          DNNLScratchPadManager::get_dnnl_scratchpad_manager()
+          cpu_utils::ScratchPadManager::get_scratchpad_manager()
               ->get_data<void>();
       AttentionScratchPad buffer_manager(thread_id, metadata, scratchpad_ptr);
 
@@ -1422,8 +1396,7 @@ class AttentionMainLoop {
         }
       }
 
-      const int64_t available_cache_size =
-          AttentionScheduler::get_available_l2_size();
+      const int64_t available_cache_size = cpu_utils::get_available_l2_size();
       const int32_t default_tile_size =
           AttentionScheduler::calcu_default_tile_size(
               available_cache_size, head_dim, sizeof(kv_cache_t),
@@ -1608,17 +1581,10 @@ class AttentionMainLoop {
 
               if (use_sink) {
                 alignas(64) float s_aux_fp32[16];
-#if defined(__aarch64__) && !defined(ARM_BF16_SUPPORT)
-                // ARM without native BF16 support: manual conversion
-                for (int i = 0; i < 16; ++i) {
-                  s_aux_fp32[i] = static_cast<float>(curr_s_aux[i]);
-                }
-#else
                 // All other platforms have BF16Vec16 available
                 vec_op::BF16Vec16 vec_bf16(curr_s_aux);
                 vec_op::FP32Vec16 vec_fp32(vec_bf16);
                 vec_fp32.save(s_aux_fp32);
-#endif
 
                 float* __restrict__ curr_sum_buffer = sum_buffer;
                 float* __restrict__ curr_max_buffer = max_buffer;

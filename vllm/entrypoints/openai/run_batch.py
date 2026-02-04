@@ -19,14 +19,17 @@ from tqdm import tqdm
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.score.protocol import (
@@ -82,7 +85,7 @@ class BatchRequestInput(OpenAIBaseModel):
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
         if url.endswith("/score"):
-            return ScoreRequest.model_validate(value)
+            return TypeAdapter(ScoreRequest).validate_python(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
@@ -468,6 +471,9 @@ async def run_batch(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            default_chat_template_kwargs=getattr(
+                args, "default_chat_template_kwargs", None
+            ),
         )
         if "generate" in supported_tasks
         else None
@@ -495,6 +501,7 @@ async def run_batch(
             engine_client,
             openai_serving_models,
             request_logger=request_logger,
+            score_template=None,
         )
         if ("embed" in supported_tasks or enable_serving_reranking)
         else None

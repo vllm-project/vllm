@@ -14,7 +14,7 @@ steps:
 
 - label: LoRA TP (Distributed)
   timeout_in_minutes: 30
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -22,6 +22,8 @@ steps:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Alot of these tests are on the edge of OOMing
+    - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py

@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
@@ -20,6 +21,7 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
@@ -37,12 +39,14 @@ steps:
     - pytest -v -s models/test_transformers.py models/test_registry.py
 
 - label: Basic Models Test (Other CPU) # 5min
+  depends_on: 
+  - image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
-  no_gpu: true
+  device: cpu
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 

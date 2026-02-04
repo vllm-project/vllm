@@ -19,11 +19,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.perf import PerfMetricsLogging
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
+    PromptTokenStats,
     SchedulerStats,
 )
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -118,6 +120,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.engine_is_idle = False
         self.aggregated = False
 
+        if self._enable_perf_stats():
+            self.perf_metrics_logging = PerfMetricsLogging(vllm_config)
+
     def _reset(self, now):
         self.last_log_time = now
 
@@ -127,9 +132,13 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
 
+    def _enable_perf_stats(self) -> bool:
+        return self.vllm_config.observability_config.enable_mfu_metrics
+
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
-        self.num_prompt_tokens += iteration_stats.num_prompt_tokens
+        # Use computed tokens for prompt throughput (excludes cached/transferred)
+        self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
@@ -175,6 +184,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.cudagraph_logging.observe(scheduler_stats.cudagraph_stats)
             if not self.aggregated:
                 self.last_scheduler_stats = scheduler_stats
+            if (perf_stats := scheduler_stats.perf_stats) and self._enable_perf_stats():
+                self.perf_metrics_logging.observe(perf_stats)
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
@@ -211,7 +222,7 @@ class LoggingStatLogger(StatLoggerBase):
             "Running: %d reqs",
             "Waiting: %d reqs",
         ]
-        log_args = [
+        log_args: list[int | float | str] = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
@@ -254,6 +265,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.kv_connector_logging.log(log_fn=log_fn)
         if self.cudagraph_logging is not None:
             self.cudagraph_logging.log(log_fn=log_fn)
+        if self._enable_perf_stats():
+            self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
@@ -281,6 +294,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
     @property
     def log_prefix(self):
         return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+
+    def _enable_perf_stats(self) -> bool:
+        # Adding per_gpu perf stats across engines can lead to misleading numbers.
+        return False
 
     def record(
         self,
@@ -575,6 +592,41 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prompt_tokens, engine_indexes, model_name
         )
 
+        # Labeled prompt token counters by source
+        counter_prompt_tokens_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_by_source",
+            documentation="Number of prompt tokens by source.",
+            labelnames=labelnames + ["source"],
+        )
+        self.counter_prompt_tokens_by_source: dict[str, dict[int, Counter]] = {}
+        for source in PromptTokenStats.ALL_SOURCES:
+            self.counter_prompt_tokens_by_source[source] = {
+                idx: counter_prompt_tokens_by_source.labels(
+                    model_name, str(idx), source
+                )
+                for idx in engine_indexes
+            }
+
+        # Cached prompt tokens counter
+        counter_prompt_tokens_cached = self._counter_cls(
+            name="vllm:prompt_tokens_cached",
+            documentation="Number of cached prompt tokens (local + external).",
+            labelnames=labelnames,
+        )
+        self.counter_prompt_tokens_cached = make_per_engine(
+            counter_prompt_tokens_cached, engine_indexes, model_name
+        )
+
+        # Recomputed tokens (last token recomputed when entire prompt is cached)
+        counter_prompt_tokens_recomputed = self._counter_cls(
+            name="vllm:prompt_tokens_recomputed",
+            documentation="Number of cached tokens recomputed for forward pass.",
+            labelnames=labelnames,
+        )
+        self.counter_prompt_tokens_recomputed = make_per_engine(
+            counter_prompt_tokens_recomputed, engine_indexes, model_name
+        )
+
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
@@ -699,43 +751,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name
         )
-
-        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
-        # TODO: remove in 0.13.0
-        if self.show_hidden_metrics:
-            histogram_time_per_output_token = self._histogram_cls(
-                name="vllm:time_per_output_token_seconds",
-                documentation=(
-                    "Histogram of time per output token in seconds."
-                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-                ),
-                buckets=[
-                    0.01,
-                    0.025,
-                    0.05,
-                    0.075,
-                    0.1,
-                    0.15,
-                    0.2,
-                    0.3,
-                    0.4,
-                    0.5,
-                    0.75,
-                    1.0,
-                    2.5,
-                    5.0,
-                    7.5,
-                    10.0,
-                    20.0,
-                    40.0,
-                    80.0,
-                ],
-                labelnames=labelnames,
-            )
-            self.histogram_time_per_output_token = make_per_engine(
-                histogram_time_per_output_token, engine_indexes, model_name
-            )
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
@@ -1092,6 +1107,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             iteration_stats.num_preempted_reqs
         )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
+        # Labeled prompt token counters by source
+        pts = iteration_stats.prompt_token_stats
+        for source in PromptTokenStats.ALL_SOURCES:
+            self.counter_prompt_tokens_by_source[source][engine_idx].inc(
+                pts.get_by_source(source)
+            )
+        self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+        self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
@@ -1109,8 +1132,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            if self.show_hidden_metrics:
-                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][

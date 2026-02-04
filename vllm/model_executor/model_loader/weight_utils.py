@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -232,7 +233,7 @@ def get_quant_config(
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
-    if model_config.quantization in ("gguf", "inc"):
+    if model_config.quantization == "gguf":
         return quant_cls()
 
     # Read the quantization config from the HF model config, if available.
@@ -244,6 +245,23 @@ def get_quant_config(
     if hf_quant_config is None:
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config", None)
+
+    # Pipe information about heads to enable TP-aware loading of attn_head scales
+    if (
+        hf_quant_config is not None
+        and hf_quant_config.get("quant_method") == "compressed-tensors"
+    ):
+        if hf_text_config is not None:
+            n_heads = getattr(hf_text_config, "num_attention_heads", None)
+            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
+        else:
+            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
+            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+
+        hf_quant_config["total_num_heads"] = n_heads
+        hf_quant_config["total_num_kv_heads"] = (
+            n_kv_heads if n_kv_heads is not None else n_heads
+        )
 
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
@@ -448,12 +466,31 @@ def download_weights_from_hf(
             fs = HfFileSystem()
             file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-            # Use the first pattern found in the HF repo's files.
-            for pattern in allow_patterns:
-                matching = fnmatch.filter(file_list, pattern)
-                if len(matching) > 0:
-                    allow_patterns = [pattern]
-                break
+            # If downloading safetensors and an index file exists, use the
+            # specific file names from the index to avoid downloading
+            # unnecessary files (e.g., from subdirectories like "original/").
+            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
+            if "*.safetensors" in allow_patterns and index_file in file_list:
+                index_path = hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename=SAFE_WEIGHTS_INDEX_NAME,
+                    cache_dir=cache_dir,
+                    revision=revision,
+                )
+                with open(index_path) as f:
+                    weight_map = json.load(f)["weight_map"]
+                if weight_map:
+                    # Extra [] so that weight_map files are treated as a
+                    # single allow_pattern in the loop below
+                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item]
+                else:
+                    allow_patterns = ["*.safetensors"]
+            else:
+                # Use the first pattern found in the HF repo's files.
+                for pattern in allow_patterns:
+                    if fnmatch.filter(file_list, pattern):
+                        allow_patterns = [pattern]
+                        break
         except Exception as e:
             logger.warning(
                 "Failed to get file list for '%s'. Trying each pattern in "
@@ -480,6 +517,9 @@ def download_weights_from_hf(
             )
             # If we have downloaded weights for this allow_pattern,
             # we don't need to check the rest.
+            # allow_pattern can be a list (from weight_map) or str (glob)
+            if isinstance(allow_pattern, list):
+                break
             if any(Path(hf_folder).glob(allow_pattern)):
                 break
         time_taken = time.perf_counter() - start_time
@@ -658,8 +698,8 @@ def safetensors_weights_iterator(
             # instead we reconstruct the subclasses here before returning
             if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
-                    "Please use torchao version >= 0.15.0 \
-                        to load torchao safetensors checkpoint"
+                    "Please use torchao version >= 0.15.0 "
+                    "to load torchao safetensors checkpoint"
                 )
             from torchao.prototype.safetensors.safetensors_support import (
                 unflatten_tensor_state_dict,
@@ -1019,6 +1059,7 @@ def composed_weight_loader(
 
 def initialize_dummy_weights(
     model: torch.nn.Module,
+    model_config: ModelConfig,
     low: float = -1e-3,
     high: float = 1e-3,
     seed: int = 1234,
@@ -1035,41 +1076,61 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-    for param in model.state_dict().values():
-        if torch.is_floating_point(param):
-            if current_platform.is_tpu():
-                generator = torch.Generator(device="cpu")
-                generator.manual_seed(seed)
-                # Note: The param.uniform_ function cannot be used in this
-                # context because it demands more TPU HBM than directly copying
-                # from a CPU tensor.
-                # Note: We avoid using torch.rank_like as it doesn't currently
-                # support the generator argument.
-                param.copy_(
-                    (high - low)
-                    * torch.rand(
-                        param.shape,
-                        generator=generator,
-                        dtype=param.dtype,
-                        layout=param.layout,
-                        requires_grad=param.requires_grad,
-                        device="cpu",
-                    )
-                    + low
-                )
-                torch._sync(param)
-                continue
+    # TODO(future PR): make the check below more generic as more online
+    # quant backends are added
+    is_fp8_py_quant = model_config.quantization == "fp8"
 
-            generator = torch.Generator(device=param.data.device)
+    for param in model.state_dict().values():
+        if is_fp8_py_quant and param.device == torch.device("meta"):
+            # for fp8.py's online quantization, dummy weight init will happen
+            # in `process_weights_after_loading`.
+            # TODO(future PR): consider refactoring dummy model init to compose
+            # better with online quantization
+            continue
+
+        initialize_single_dummy_weight(param, low, high, seed)
+
+
+def initialize_single_dummy_weight(
+    param: torch.Tensor,
+    low: float = -1e-3,
+    high: float = 1e-3,
+    seed: int = 1234,
+) -> None:
+    if torch.is_floating_point(param):
+        if current_platform.is_tpu():
+            generator = torch.Generator(device="cpu")
             generator.manual_seed(seed)
-            if torch.finfo(param.data.dtype).bits < 16:
-                # uniform_ doesn't support < 16-bit datatypes (FP8)
-                dtype = param.data.dtype
-                tmp_param = param.data.to(torch.float16)
-                tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-                param.data.copy_(tmp_param)
-            else:
-                param.uniform_(low, high, generator=generator)
+            # Note: The param.uniform_ function cannot be used in this
+            # context because it demands more TPU HBM than directly copying
+            # from a CPU tensor.
+            # Note: We avoid using torch.rank_like as it doesn't currently
+            # support the generator argument.
+            param.copy_(
+                (high - low)
+                * torch.rand(
+                    param.shape,
+                    generator=generator,
+                    dtype=param.dtype,
+                    layout=param.layout,
+                    requires_grad=param.requires_grad,
+                    device="cpu",
+                )
+                + low
+            )
+            torch._sync(param)
+            return
+
+        generator = torch.Generator(device=param.data.device)
+        generator.manual_seed(seed)
+        if torch.finfo(param.data.dtype).bits < 16:
+            # uniform_ doesn't support < 16-bit datatypes (FP8)
+            dtype = param.data.dtype
+            tmp_param = param.data.to(torch.float16)
+            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+            param.data.copy_(tmp_param)
+        else:
+            param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
@@ -1130,12 +1191,25 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
+        # .mixer.attn.{k,v}_scale
+        (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
     ]
 
     # Check if name ends with k_scale or v_scale
-    if name.endswith((".k_scale", ".v_scale")):
+    if name.endswith(
+        (
+            ".k_scale",
+            ".v_scale",
+            ".q_scale",
+            ".k_zero_point",
+            ".v_zero_point",
+            ".q_zero_point",
+        )
+    ):
         import regex as re
 
         for pattern, replacement in scale_mapping_patterns:

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
@@ -34,8 +35,12 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
-from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -51,6 +56,8 @@ DYNAMIC_ARG_DIMS = {
     "intermediate_tensors": 0,
     "inputs_embeds": 0,
 }
+
+logger = init_logger(__name__)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -167,7 +174,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -181,7 +188,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
-        mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if not isinstance(prompt, str):
             # the prompt is the tokenized ids which is not supported
@@ -345,25 +351,85 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+
         if pixel_values is not None:
-            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
+            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
+            # with flash_sdp and mem_efficient_sdp
+            if current_platform.is_rocm():
+                # TODO: [ROCm] Fix accuracy issues with flash backend
+                logger.debug(
+                    "ROCm platform detected. Forcing math SDP backend "
+                    "for vision encoder. Currently ROCm platform has "
+                    "accuracy issues with `flash_sdp` and"
+                    "`mem_efficient_sdp` backends. See issue: "
+                    "https://github.com/vllm-project/vllm/issues/30167"
+                )
+                with torch.nn.attention.sdpa_kernel(
+                    backends=[torch.nn.attention.SDPBackend.MATH]
+                ):
+                    vision_embeddings = self.model.get_image_features(
+                        pixel_values, **kwargs
+                    )
+            else:
+                vision_embeddings = self.model.get_image_features(
+                    pixel_values, **kwargs
+                )
+
+            # Transformers `v5`, `self.get_image_features` returns a tuple
+            # containing the features and optionally attentions/hidden_states
+            # After v5 is settled, we can enable qwen3-vl with several outputs
+            # from `self.get_image_features`
+            if isinstance(vision_embeddings, tuple):
+                vision_embeddings = vision_embeddings[0]
+            elif isinstance(vision_embeddings, dict):
+                vision_embeddings = vision_embeddings.pooler_output
 
             if isinstance(vision_embeddings, torch.Tensor):
-                if vision_embeddings.ndim == 2:
-                    vision_embeddings = vision_embeddings.unsqueeze(0)
+                split_sizes = num_image_patches.flatten().tolist()
+                total_patches = sum(split_sizes)
 
-                # Embeddings have to be 2D tensors of length `num_images`
-                # but transformers returns concat tensors if each patch
-                # is of different size. We split it back to make vLLM happy
-                vision_embeddings = torch.split(
-                    vision_embeddings, num_image_patches.flatten().tolist()
-                )
-                vision_embeddings = [
-                    embed.flatten(start_dim=0, end_dim=-2)
-                    for embed in vision_embeddings
-                ]
+                # Flatten to 2D: [total_tokens, hidden_dim]
+                if vision_embeddings.ndim == 3:
+                    vision_embeddings = vision_embeddings.view(
+                        -1, vision_embeddings.shape[-1]
+                    )
+
+                total_tokens = vision_embeddings.shape[0]
+                if total_tokens == total_patches:
+                    # Direct match: num_image_patches are actual token counts
+                    # (e.g., Qwen2.5-VL style)
+                    token_split_sizes = split_sizes
+                elif total_patches > 0 and total_tokens % total_patches == 0:
+                    # Uniform expansion: each patch expands to N tokens
+                    # (e.g., Idefics3 style)
+                    tokens_per_patch = total_tokens // total_patches
+                    token_split_sizes = [s * tokens_per_patch for s in split_sizes]
+                elif total_patches > 0:
+                    # Mismatch (profiling with dummy data) - pad/truncate
+                    if total_tokens == 0:
+                        raise ValueError(
+                            "Vision encoder returned empty embeddings. "
+                            f"Expected {total_patches} patches from "
+                            f"num_image_patches={split_sizes}"
+                        )
+                    if total_tokens < total_patches:
+                        repeat_factor = (
+                            total_patches + total_tokens - 1
+                        ) // total_tokens
+                        vision_embeddings = vision_embeddings.repeat(repeat_factor, 1)
+                    vision_embeddings = vision_embeddings[:total_patches]
+                    token_split_sizes = split_sizes
+                else:
+                    return []
+
+                return list(torch.split(vision_embeddings, token_split_sizes, dim=0))
 
             return vision_embeddings
+        else:
+            logger.debug(
+                "No pixel values or image embeddings provided for multimodal embedding."
+            )
+            return None
 
     def get_mrope_input_positions(
         self,

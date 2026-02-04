@@ -33,14 +33,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import MultiHeadAttention
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -67,12 +66,12 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLConfig,
@@ -84,6 +83,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -96,6 +96,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 logger = init_logger(__name__)
 
@@ -160,9 +161,9 @@ class HunYuanVisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.gelu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.dense_h_to_4h = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -194,12 +195,11 @@ class HunYuanVisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
+        use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
             if use_data_parallel
@@ -232,12 +232,11 @@ class HunYuanVisionAttention(nn.Module):
         )
 
         self.scale = self.hidden_size_per_attention_head**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head,
             self.scale,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
     def forward(
@@ -260,9 +259,7 @@ class HunYuanVisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.gelu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -274,9 +271,7 @@ class HunYuanVisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel,
         )
         self.mlp = HunYuanVisionMLP(
             dim,
@@ -285,7 +280,6 @@ class HunYuanVisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -439,9 +433,6 @@ class HunYuanVisionTransformer(nn.Module):
         vision_config: HunYuanVLVisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        multimodal_config: MultiModalConfig | None = None,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -467,9 +458,7 @@ class HunYuanVisionTransformer(nn.Module):
                         act_fn=get_act_fn(vision_config.hidden_act),
                         norm_layer=norm_layer,
                         quant_config=quant_config,
-                        multimodal_config=multimodal_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
-                        use_data_parallel=use_data_parallel,
                     )
                     for layer_idx in range(num_hidden_layers)
                 ]
@@ -610,6 +599,11 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     ) -> HunYuanVLProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return HunYuanVLMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -721,9 +715,6 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
 
 
 class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return HunYuanVLMultiModalDataParser()
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -792,6 +783,7 @@ class HunYuanVLForConditionalGeneration(
     SupportsPP,
     SupportsQuant,
     SupportsXDRoPE,
+    SupportsEagle3,
 ):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -872,35 +864,25 @@ class HunYuanVLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: HunYuanVLConfig = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
-        self.multimodal_config = multimodal_config
 
-        if multimodal_config.get_limit_per_prompt("image"):
-            attn_backend_override = (
-                multimodal_config.mm_encoder_attn_backend
-                if multimodal_config is not None
-                else None
-            )
+        with self._mark_tower_model(vllm_config, {"image"}):
             self.visual = HunYuanVisionTransformer(
                 config.vision_config,
-                quant_config=self.quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                multimodal_config=multimodal_config,
-                attn_backend_override=attn_backend_override,
             )
-        else:
-            self.visual = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model.model"),
-            architectures=[
-                "HunYuanDenseV1ForCausalLM",
-                "HunYuanMoEV1ForCausalLM",
-            ],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model.model"),
+                architectures=[
+                    "HunYuanDenseV1ForCausalLM",
+                    "HunYuanMoEV1ForCausalLM",
+                ],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -970,9 +952,6 @@ class HunYuanVLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -991,9 +970,16 @@ class HunYuanVLForConditionalGeneration(
                 multimodal_embeddings += tuple(image_embeddings)
         return multimodal_embeddings
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None,

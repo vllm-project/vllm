@@ -13,13 +13,12 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import set_env_var
 
 CPU_BLOCK_SIZES = [48]
-ATTN_BACKENDS = ["FLASH_ATTN"]
+ATTN_BACKENDS = []
 
 if current_platform.is_cuda():
-    ATTN_BACKENDS.append("FLASHINFER")
+    ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
 
@@ -162,7 +161,7 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "num_cpu_blocks": 1000,
+            "cpu_bytes_to_use": 500 << 20,
             "block_size": cpu_block_size,
         },
     )
@@ -180,13 +179,13 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         topic="test",
     )
 
-    with set_env_var("VLLM_ATTENTION_BACKEND", attn_backend):
-        llm = LLM(
-            model="meta-llama/Llama-3.2-1B-Instruct",
-            gpu_memory_utilization=0.5,
-            kv_events_config=kv_events_config,
-            kv_transfer_config=kv_transfer_config,
-        )
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        gpu_memory_utilization=0.5,
+        kv_events_config=kv_events_config,
+        kv_transfer_config=kv_transfer_config,
+        attention_config={"backend": attn_backend},
+    )
 
     events_endpoint = events_endpoint.replace("*", "127.0.0.1")
     subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
