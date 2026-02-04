@@ -12,6 +12,9 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.routing_utils import (
+    resolve_fused_topk_routing_method,
+)
 
 
 def vllm_topk_softmax(
@@ -129,16 +132,6 @@ def fused_topk_bias(
     )
 
 
-def _resolve_sigmoid_routing_method(top_k: int) -> RoutingMethodType:
-    return RoutingMethodType.Llama4 if top_k == 1 else RoutingMethodType.DeepSeekV3
-
-
-def _resolve_softmax_routing_method(renormalize: bool) -> RoutingMethodType:
-    return (
-        RoutingMethodType.RenormalizeNaive if renormalize else RoutingMethodType.Default
-    )
-
-
 class FusedTopKBiasRouter(BaseRouter):
     """Router using fused top-k with e_score_correction_bias."""
 
@@ -168,9 +161,9 @@ class FusedTopKBiasRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        if self.scoring_func == "sigmoid":
-            return _resolve_sigmoid_routing_method(self.top_k)
-        return _resolve_softmax_routing_method(self.renormalize)
+        return resolve_fused_topk_routing_method(
+            self.scoring_func, self.top_k, self.renormalize
+        )
 
     def _compute_routing(
         self,
