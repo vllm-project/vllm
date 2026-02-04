@@ -49,8 +49,8 @@ def main():
     # Refer to the HuggingFace repo for the correct format to use
     chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
     token_ids = tokenizer.apply_chat_template(
-        chat, add_generation_prompt=True, return_tensors="pt"
-    )
+        chat, add_generation_prompt=True, return_tensors="pt", return_dict=True
+    ).input_ids
 
     embedding_layer = transformers_model.get_input_embeddings()
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
@@ -60,9 +60,7 @@ def main():
 
     completion = client.completions.create(
         model=model_name,
-        # NOTE: The OpenAI client does not allow `None` as an input to
-        # `prompt`. Use an empty string if you have no text prompts.
-        prompt="",
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         # NOTE: The OpenAI client allows passing in extra JSON body via the
