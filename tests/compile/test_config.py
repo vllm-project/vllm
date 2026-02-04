@@ -88,8 +88,8 @@ def test_custom_op():
 # NB: We don't test vllm_enable_compile_cache=True because that depends
 # on the state of the cache directory on the current machine, which
 # may be influenced by other tests.
-@pytest.mark.parametrize("val", ["1"])
-def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
+@pytest.mark.parametrize("val", [False])
+def test_vllm_enable_compile_cache_disabled(vllm_runner, monkeypatch, val):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
