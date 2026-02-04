@@ -308,6 +308,7 @@ _MULTIMODAL_MODELS = {
     ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
+    "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Eagle2_5_VLForConditionalGeneration": (
         "eagle2_5_vl",
@@ -355,6 +356,10 @@ _MULTIMODAL_MODELS = {
     "InternVLForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
+    ),
+    "InternS1ProForConditionalGeneration": (
+        "interns1_pro",
+        "InternS1ProForConditionalGeneration",
     ),
     "Idefics3ForConditionalGeneration": (
         "idefics3",

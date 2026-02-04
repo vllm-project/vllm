@@ -687,6 +687,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekOCRForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR",
     ),
+    "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-OCR-2",
+    ),
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
@@ -751,6 +754,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1", trust_remote_code=True
+    ),
+    "InternS1ProForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S1-Pro",
+        trust_remote_code=True,
+        min_transformers_version="5.0.0",
+        is_available_online=False,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",

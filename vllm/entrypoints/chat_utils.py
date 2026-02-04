@@ -1164,7 +1164,10 @@ def _get_full_multimodal_text_prompt(
 
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
-    return "\n".join(missing_placeholders + [text_prompt])
+    if text_prompt:
+        return "\n".join(missing_placeholders + [text_prompt])
+    else:
+        return "\n".join(missing_placeholders)
 
 
 # No need to validate using Pydantic again
@@ -1463,6 +1466,9 @@ def _parse_chat_message_content(
             # Include reasoning if present for interleaved thinking.
             if reasoning is not None:
                 result_msg["reasoning"] = cast(str, reasoning)
+                result_msg["reasoning_content"] = cast(
+                    str, reasoning
+                )  # keep compatibility
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
