@@ -459,10 +459,7 @@ class Fp8LinearMethod(LinearMethodBase):
                         weight_bf16 = weight_fp8 * weight_scale
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
-        if self.use_marlin:
-            return self.kernel.apply_weights(layer, x, bias)
-
-        if self.block_quant:
+        if self.block_quant and not self.use_marlin:
             assert self.weight_block_size is not None
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
@@ -544,11 +541,11 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
-        weight = qweight.t()
 
         # Update layer with new values.
-        replace_parameter(layer, "weight", weight.data)
+        replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
+        self.kernel.process_weights_after_loading(layer)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
