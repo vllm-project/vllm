@@ -32,7 +32,6 @@ import torch
 from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -41,8 +40,8 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -188,7 +187,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            routing_method_type=RoutingMethodType.Renormalize,
             custom_routing_function=self._custom_routing_function,
         )
 
@@ -479,7 +477,7 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
 
 class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super(Qwen3MoeForCausalLM, self).__init__()
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
         self.model = InternS1ProMoeLLMModel(
@@ -567,15 +565,10 @@ class InternS1ProForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
         },
-        orig_to_new_suffix={
-            # Handle FOPE rotary embeddings
-            ".rotary_emb.sin_coef": ".layers.0.self_attn.rotary_emb.sin_coef",
-            ".rotary_emb.cos_coef": ".layers.0.self_attn.rotary_emb.cos_coef",
-        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super(Qwen3VLForConditionalGeneration, self).__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -595,7 +588,6 @@ class InternS1ProForConditionalGeneration(
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -624,10 +616,32 @@ class InternS1ProForConditionalGeneration(
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
+    def get_frope_params_map(self) -> str:
+        mapper = {}
+        for name, params in self.language_model.model.named_parameters():
+            if "rotary_emb.sin_coef" in name:
+                mapper["language_model.model.rotary_emb.sin_coef"] = (
+                    f"language_model.model.{name}"
+                )
+            if "rotary_emb.cos_coef" in name:
+                mapper["language_model.model.rotary_emb.cos_coef"] = (
+                    f"language_model.model.{name}"
+                )
+        return mapper
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """load weights"""
         skip_prefixes = ["model.time_series."]
         if self.visual is None:
             skip_prefixes.append("visual.")
+        # FIXME(Isotr0py): See if we can avoid tighing FoPE to PP layers
+        weights_mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.visual.": "visual.",
+                "lm_head.": "language_model.lm_head.",
+                "model.language_model.": "language_model.model.",
+            },
+            orig_to_new_suffix=self.get_frope_params_map(),
+        )
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=weights_mapper)
