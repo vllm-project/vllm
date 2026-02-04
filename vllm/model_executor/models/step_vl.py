@@ -224,7 +224,7 @@ class PerceptionEncoderVisionAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
         self.rope = PerceptionEncoderRope2D(
             dim=self.head_dim,

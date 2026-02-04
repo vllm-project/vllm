@@ -763,7 +763,7 @@ class Step3VisionAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
