@@ -5,10 +5,7 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import CompileFactors, config
-from vllm.utils.hashing import safe_hash
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]

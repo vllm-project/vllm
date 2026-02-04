@@ -3,8 +3,6 @@
 
 from typing import Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 

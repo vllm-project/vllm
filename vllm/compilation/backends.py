@@ -4,6 +4,7 @@
 import ast
 import contextvars
 import dataclasses
+import hashlib
 import json
 import operator
 import os

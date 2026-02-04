@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import is_dataclass, replace
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -39,7 +39,12 @@ from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import CompileFactors, SupportsCompileFactors, SupportsHash, config, hash_factors
+from .utils import (
+    CompileFactors,
+    SupportsCompileFactors,
+    config,
+    hash_factors,
+)
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig

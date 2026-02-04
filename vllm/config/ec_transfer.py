@@ -4,8 +4,6 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import CompileFactors, config
 
 ECProducer = Literal["ec_producer"]
