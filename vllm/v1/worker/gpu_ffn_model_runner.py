@@ -166,7 +166,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                         )
 
                 recv_metadata.recv_handle_list = None
-                self.connector.send_ffn_output(rank_ffn_output, recv_metadata, ubatch_idx=ubatch_idx)
+                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
         return rank_ffn_output
     
     @torch.inference_mode()

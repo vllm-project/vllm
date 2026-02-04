@@ -107,7 +107,7 @@ class AFDConnectorMetadata:
             device=device,
             request_id=request_id,
             ffn_need_forward_data=ffn_need_forward_data,
-            timestamp=time.time(),
+            timestamp=1234,
             num_of_stages=num_of_stages,
             afd_tokens_lens=afd_tokens_lens,
         )
