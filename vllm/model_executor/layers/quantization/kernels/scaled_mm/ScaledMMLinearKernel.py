@@ -35,6 +35,24 @@ class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     out_dtype: torch.dtype | None
 
 
+@dataclass
+class FP4ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+    """Configuration for FP4 (NVFP4) scaled matrix multiplication layer."""
+
+    group_size: int | None  # Group size for activation quantization
+    is_checkpoint_fp4_serialized: (
+        bool  # Whether the weights are serialized in checkpoint
+    )
+    out_dtype: torch.dtype | None  # Output data type
+
+
+_FP4ParamsT = tuple[
+    torch.Tensor,  # weight (packed uint8, 2 fp4 values per byte)
+    torch.Tensor,  # weight_scale (fp8 block scales)
+    torch.Tensor,  # weight_scale_2 (global weight scale, fp32)
+    torch.Tensor,  # input_scale_inv (1/input_scale, fp32)
+    torch.Tensor,  # alpha (input_scale * weight_scale_2, fp32)
+]
 _FP8ParamsT = tuple[
     torch.Tensor,  # weight
     torch.Tensor,  # weight_scale
@@ -49,7 +67,7 @@ _Int8ParamsT = tuple[
     torch.Tensor | None,  # azp_adj
 ]
 
-_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
+_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT, _FP4ParamsT)
 _ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
 
 
@@ -88,6 +106,82 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     # return a covariant type in the subclass
     @abstractmethod
     def _get_layer_params(self, layer) -> _ParamsT:
+        raise NotImplementedError
+
+
+class FP4ScaledMMLinearKernel(
+    ScaledMMLinearKernel[FP4ScaledMMLinearLayerConfig, _FP4ParamsT], ABC
+):
+    """Base class for FP4 scaled matrix multiplication kernels.
+
+    FP4 kernels implement W4A8/W4A16 quantization where weights are
+    quantized to 4-bit and activations are either 8-bit or 16-bit.
+    """
+
+    def __init__(
+        self, c: FP4ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def _get_layer_params(self, layer) -> _FP4ParamsT:
+        """Extract FP4 quantization parameters from layer."""
+        w, w_s, w_s2, i_s_inv, alpha = self.layer_param_names
+        return (
+            getattr(layer, w),
+            getattr(layer, w_s),
+            getattr(layer, w_s2),
+            getattr(layer, i_s_inv),
+            getattr(layer, alpha),
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply FP4 quantized weights to input tensor."""
+        weight, weight_scale, weight_global_scale, input_scale_inv, alpha = (
+            self._get_layer_params(layer)
+        )
+
+        # Derive output shape from weight tensor dimensions
+        output_size = [*x.shape[:-1], weight.shape[1]]
+
+        # Delegate to the scaled matrix multiplication implementation
+        return self.apply_fp4_mm(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_global_scale=weight_global_scale,
+            input_scale_inv=input_scale_inv,
+            alpha=alpha,
+            bias=bias,
+            output_shape=output_size,
+            layer=layer,
+        )
+
+    @abstractmethod
+    def apply_fp4_mm(
+        self,
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        input_scale_inv: torch.Tensor,
+        alpha: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list[int],
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Backend-specific FP4 matrix multiplication.
+
+        Subclasses must implement this to perform the actual computation.
+        """
         raise NotImplementedError
 
 

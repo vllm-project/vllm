@@ -5,9 +5,15 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
+from vllm.utils.flashinfer import (
+    flashinfer_scaled_fp4_mm,
+    flashinfer_scaled_fp8_mm,
+    has_flashinfer,
+)
 
 from .ScaledMMLinearKernel import (
+    FP4ScaledMMLinearKernel,
+    FP4ScaledMMLinearLayerConfig,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
@@ -55,3 +61,66 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return flashinfer_scaled_fp8_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
+
+
+class FlashInferFP4ScaledMMLinearKernel(FP4ScaledMMLinearKernel):
+    """FlashInfer FP4 GEMM kernel implementation"""
+
+    def __init__(self, c, layer_param_names, backend: str = "cutlass"):
+        """
+        Args:
+            c: Configuration for the FP4 layer
+            layer_param_names: Names of layer parameters
+            backend: FlashInfer backend variant ("cutlass", "trtllm", or "cudnn")
+        """
+        super().__init__(c, layer_param_names)
+        self.backend = backend
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "Requires CUDA."
+
+        if compute_capability is not None and compute_capability < 100:
+            return False, "NVFP4 requires compute capability of 10.0 (Blackwell)"
+
+        if not has_flashinfer():
+            return False, "FlashInfer not available"
+
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP4ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_fp4_mm(
+        self,
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        input_scale_inv: torch.Tensor,
+        alpha: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list[int],
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Apply FlashInfer FP4 matmul."""
+        output = flashinfer_scaled_fp4_mm(
+            x,
+            weight,
+            weight_scale,
+            weight_global_scale,
+            input_scale_inv,
+            alpha,
+            layer.output_size_per_partition,
+            backend=self.backend,
+        )
+
+        if bias is not None:
+            output = output + bias
+
+        return output.view(*output_shape)

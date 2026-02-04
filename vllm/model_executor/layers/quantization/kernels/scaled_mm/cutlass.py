@@ -5,6 +5,10 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._custom_ops import (
+    cutlass_scaled_fp4_mm,
+    cutlass_scaled_mm_supports_fp4,
+)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
@@ -12,6 +16,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
+    FP4ScaledMMLinearKernel,
+    FP4ScaledMMLinearLayerConfig,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
@@ -170,4 +176,56 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output = ops.cutlass_scaled_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
+        return output.view(*output_shape)
+
+
+class CutlassFP4ScaledMMLinearKernel(FP4ScaledMMLinearKernel):
+    """CUTLASS FP4 GEMM kernel implementation"""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "Requires CUDA."
+
+        if compute_capability is not None and compute_capability < 100:
+            return False, "NVFP4 requires compute capability of 10.0 (Blackwell)"
+
+        if not cutlass_scaled_mm_supports_fp4():
+            return False, "CUTLASS FP4 support not available"
+
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP4ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_fp4_mm(
+        self,
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        input_scale_inv: torch.Tensor,
+        alpha: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list[int],
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Apply CUTLASS FP4 matmul."""
+        output = cutlass_scaled_fp4_mm(
+            x,
+            weight,
+            weight_scale,
+            weight_global_scale,
+            input_scale_inv,
+            alpha,
+            layer.output_size_per_partition,
+        )
+
+        if bias is not None:
+            output = output + bias
+
         return output.view(*output_shape)
