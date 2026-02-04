@@ -92,6 +92,8 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
+    check_interleaved_audio_video,
+    merge_interleaved_embeddings,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -1789,14 +1791,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
-        is_interleaved = False
-        if num_video > 0 and num_audio > 0:
-            video_pos = is_video.nonzero(as_tuple=True)[0]
-            audio_pos = is_audio.nonzero(as_tuple=True)[0]
-            is_interleaved = (
-                video_pos[0].item() < audio_pos[-1].item()
-                and audio_pos[0].item() < video_pos[-1].item()
-            )
+        is_interleaved = check_interleaved_audio_video(
+            is_video, is_audio, num_video, num_audio
+        )
 
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
@@ -1866,39 +1863,15 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         if is_interleaved:
-            # Per-modality scatter for interleaved audio-in-video.
-            video_embeds: list[torch.Tensor] = []
-            audio_embeds: list[torch.Tensor] = []
-            other_embeds: list[torch.Tensor] = []
-            video_remaining = num_video
-            audio_remaining = num_audio
-
-            for emb in multimodal_embeddings:
-                n = emb.shape[0]
-                if video_remaining > 0 and n <= video_remaining:
-                    video_embeds.append(emb)
-                    video_remaining -= n
-                elif audio_remaining > 0 and n <= audio_remaining:
-                    audio_embeds.append(emb)
-                    audio_remaining -= n
-                else:
-                    other_embeds.append(emb)
-
-            if video_embeds:
-                inputs_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds, video_embeds, is_video
-                )
-            if audio_embeds:
-                inputs_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds, audio_embeds, is_audio
-                )
-            if other_embeds:
-                other_mask = is_multimodal & ~is_video & ~is_audio
-                inputs_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds, other_embeds, other_mask
-                )
-
-            return inputs_embeds
+            return merge_interleaved_embeddings(
+                inputs_embeds,
+                multimodal_embeddings,
+                is_video,
+                is_audio,
+                is_multimodal,
+                num_video,
+                num_audio,
+            )
 
         # Default: standard merge (no interleaving)
         inputs_embeds = _merge_multimodal_embeddings(

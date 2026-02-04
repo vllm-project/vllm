@@ -113,6 +113,95 @@ except (ImportError, ModuleNotFoundError):
 logger = init_logger(__name__)
 
 
+def check_interleaved_audio_video(
+    is_video: torch.Tensor,
+    is_audio: torch.Tensor,
+    num_video: int,
+    num_audio: int,
+) -> bool:
+    """
+    Check if video and audio positions are interleaved in the multimodal region.
+
+    Returns:
+        True if video and audio tokens are interleaved, False otherwise.
+    """
+    if num_video == 0 or num_audio == 0:
+        return False
+
+    video_pos = is_video.nonzero(as_tuple=True)[0]
+    audio_pos = is_audio.nonzero(as_tuple=True)[0]
+
+    return (
+        video_pos[0].item() < audio_pos[-1].item()
+        and audio_pos[0].item() < video_pos[-1].item()
+    )
+
+
+def merge_interleaved_embeddings(
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: "MultiModalEmbeddings",
+    is_video: torch.Tensor,
+    is_audio: torch.Tensor,
+    is_multimodal: torch.Tensor,
+    num_video: int,
+    num_audio: int,
+) -> torch.Tensor:
+    """
+    Merge embeddings for interleaved audio-in-video sequences.
+
+    When use_audio_in_video=True, video and audio tokens are interleaved in
+    the token sequence, but embeddings are provided as separate contiguous
+    tensors (video first, then audio). This function reorders video and audio
+    embeddings to match sequence position order and scatters them efficiently.
+
+    Args:
+        inputs_embeds: The input embeddings tensor to merge into.
+        multimodal_embeddings: List of embedding tensors (video, audio, other).
+        is_video: Boolean mask for video token positions.
+        is_audio: Boolean mask for audio token positions.
+        is_multimodal: Boolean mask for all multimodal token positions.
+        num_video: Total count of video tokens.
+        num_audio: Total count of audio tokens.
+
+    Returns:
+        The merged inputs_embeds tensor with multimodal embeddings scattered
+        to their correct positions.
+    """
+    # Categorize embeddings by modality based on token counts.
+    # Embeddings come grouped by modality but order varies (e.g., image, video, audio
+    # or video, audio depending on input kwargs order).
+    video_embeds: list[torch.Tensor] = []
+    audio_embeds: list[torch.Tensor] = []
+    other_embeds: list[torch.Tensor] = []
+    video_remaining = num_video
+    audio_remaining = num_audio
+
+    for emb in multimodal_embeddings:
+        n = emb.shape[0]
+        if video_remaining > 0 and n <= video_remaining:
+            video_embeds.append(emb)
+            video_remaining -= n
+        elif audio_remaining > 0 and n <= audio_remaining:
+            audio_embeds.append(emb)
+            audio_remaining -= n
+        else:
+            other_embeds.append(emb)
+
+    # Scatter each modality to its positions
+    if video_embeds:
+        video_positions = is_video.nonzero(as_tuple=True)[0]
+        inputs_embeds[video_positions] = torch.cat(video_embeds, dim=0)
+    if audio_embeds:
+        audio_positions = is_audio.nonzero(as_tuple=True)[0]
+        inputs_embeds[audio_positions] = torch.cat(audio_embeds, dim=0)
+    if other_embeds:
+        other_mask = is_multimodal & ~is_video & ~is_audio
+        other_positions = other_mask.nonzero(as_tuple=True)[0]
+        inputs_embeds[other_positions] = torch.cat(other_embeds, dim=0)
+
+    return inputs_embeds
+
+
 class Qwen2_5OmniAudioFeatureInputs(TensorSchema):
     """
     Dimensions:
@@ -1302,11 +1391,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             return inputs_embeds
 
         # Check for audio-in-video: interleaved video and audio tokens
-        # in the multimodal region. When use_audio_in_video=True, video
-        # and audio tokens are interleaved in the token sequence, but
-        # the embeddings are provided as separate contiguous tensors.
-        # A single masked_scatter_ would place them in the wrong order,
-        # so we scatter each modality separately using per-modality masks.
+        # in the multimodal region.
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
@@ -1316,50 +1401,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
-        if num_video > 0 and num_audio > 0:
-            # Check if video and audio positions are actually interleaved
-            video_pos = is_video.nonzero(as_tuple=True)[0]
-            audio_pos = is_audio.nonzero(as_tuple=True)[0]
-
-            is_interleaved = (
-                video_pos[0].item() < audio_pos[-1].item()
-                and audio_pos[0].item() < video_pos[-1].item()
+        if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
+            return merge_interleaved_embeddings(
+                inputs_embeds,
+                multimodal_embeddings,
+                is_video,
+                is_audio,
+                is_multimodal,
+                num_video,
+                num_audio,
             )
-
-            if is_interleaved:
-                # Match embeddings to modalities by exact token count
-                video_embeds: list[torch.Tensor] = []
-                audio_embeds: list[torch.Tensor] = []
-                other_embeds: list[torch.Tensor] = []
-                video_remaining = num_video
-                audio_remaining = num_audio
-
-                for emb in multimodal_embeddings:
-                    n = emb.shape[0]
-                    if video_remaining > 0 and n <= video_remaining:
-                        video_embeds.append(emb)
-                        video_remaining -= n
-                    elif audio_remaining > 0 and n <= audio_remaining:
-                        audio_embeds.append(emb)
-                        audio_remaining -= n
-                    else:
-                        other_embeds.append(emb)
-
-                if video_embeds:
-                    inputs_embeds = _merge_multimodal_embeddings(
-                        inputs_embeds, video_embeds, is_video
-                    )
-                if audio_embeds:
-                    inputs_embeds = _merge_multimodal_embeddings(
-                        inputs_embeds, audio_embeds, is_audio
-                    )
-                if other_embeds:
-                    other_mask = is_multimodal & ~is_video & ~is_audio
-                    inputs_embeds = _merge_multimodal_embeddings(
-                        inputs_embeds, other_embeds, other_mask
-                    )
-
-                return inputs_embeds
 
         # Default: standard merge (no interleaving)
         return _merge_multimodal_embeddings(
