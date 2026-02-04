@@ -1060,7 +1060,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
             start_idx += group_size
 
-        assert start_idx == group_size
+        assert start_idx == len(items)
 
 
 MultiModalKwargsOptionalItems: TypeAlias = (
