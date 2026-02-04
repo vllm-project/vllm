@@ -201,8 +201,8 @@ class InputProcessor:
         Validate supported SamplingParam.
         Should raise ValueError if unsupported for API Server.
         """
-
         if isinstance(params, PoolingParams):
+            params.verify(self.model_config)
             return
 
         self._validate_logprobs(params)

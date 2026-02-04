@@ -35,7 +35,7 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import PoolingTask, SupportedTask
+from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -152,31 +152,15 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()
 
-            pooling_task: PoolingTask
-            if request.task is None:
+            if pooling_params.task is None:
                 if "token_embed" in self.supported_tasks:
-                    pooling_task = "token_embed"
+                    pooling_params.task = "token_embed"
                 elif "token_classify" in self.supported_tasks:
-                    pooling_task = "token_classify"
+                    pooling_params.task = "token_classify"
                 elif "plugin" in self.supported_tasks:
-                    pooling_task = "plugin"
+                    pooling_params.task = "plugin"
                 else:
-                    return self.create_error_response(
-                        f"pooling_task must be one of {self.supported_tasks}."
-                    )
-            else:
-                pooling_task = request.task
-
-            if pooling_task not in self.supported_tasks:
-                return self.create_error_response(
-                    f"Task {pooling_task} is not supported, it"
-                    f" must be one of {self.supported_tasks}."
-                )
-
-            try:
-                pooling_params.verify(pooling_task, self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
+                    pooling_params.task = self.supported_tasks[0]
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"

@@ -42,6 +42,7 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
     def to_pooling_params(self):
         return PoolingParams(
+            task="score",
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )

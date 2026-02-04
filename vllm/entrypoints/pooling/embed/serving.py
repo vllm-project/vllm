@@ -424,12 +424,6 @@ class OpenAIServingEmbedding(OpenAIServing):
             if isinstance(pooling_params, ErrorResponse):
                 return pooling_params
 
-            # Verify and set the task for pooling params
-            try:
-                pooling_params.verify("embed", self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
-
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
 
@@ -661,18 +655,3 @@ class OpenAIServingEmbedding(OpenAIServing):
         )
 
         return await self.handle(ctx)  # type: ignore[return-value]
-
-    def _create_pooling_params(
-        self,
-        ctx: EmbeddingServeContext,
-    ) -> PoolingParams | ErrorResponse:
-        pooling_params = super()._create_pooling_params(ctx)
-        if isinstance(pooling_params, ErrorResponse):
-            return pooling_params
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-        return pooling_params

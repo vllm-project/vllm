@@ -72,15 +72,7 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return deepcopy(self)
 
-    def verify(
-        self, task: PoolingTask, model_config: "ModelConfig | None" = None
-    ) -> None:
-        if self.task is None:
-            self.task = task
-        elif self.task != task:
-            msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
-            raise ValueError(msg)
-
+    def verify(self, model_config: "ModelConfig") -> None:
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":

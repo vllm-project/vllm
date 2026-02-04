@@ -116,11 +116,6 @@ class ServingScores(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         pooling_params = request.to_pooling_params()
 
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
@@ -219,11 +214,6 @@ class ServingScores(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         default_pooling_params = request.to_pooling_params()
-
-        try:
-            default_pooling_params.verify("score", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
