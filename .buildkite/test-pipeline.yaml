@@ -1410,7 +1410,7 @@ steps:
   commands:
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
     # Run sequence parallel tests
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
     - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
 
 - label: Distributed Tests (H100) # optional

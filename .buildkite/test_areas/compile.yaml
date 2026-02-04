@@ -2,7 +2,7 @@ group: Compile
 depends_on: 
   - image-build
 steps:
-- label: Sequence Parallel Tests (2 GPUs)
+- label: Sequence Parallel Correctness Tests (2 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   num_devices: 2
@@ -11,12 +11,12 @@ steps:
   - vllm/compilation/
   - vllm/v1/worker/
   - vllm/v1/cudagraph_dispatcher.py
-  - tests/distributed/test_sequence_parallel.py
+  - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/distributed/test_sequence_parallel.py
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
-- label: Sequence Parallel Tests (2xH100)
+- label: Sequence Parallel Correctness Tests (2xH100)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
@@ -24,10 +24,20 @@ steps:
   num_devices: 2
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/distributed/test_sequence_parallel.py
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+
+- label: AsyncTP Tests (2xH100)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  num_devices: 2
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: Distributed Compile Unit Tests (2xH100)
-  timeout_in_minutes: 40
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
