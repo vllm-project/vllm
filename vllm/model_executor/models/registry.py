@@ -878,7 +878,7 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str | None:
-        cls_name = model_config._get_model_impl_backend_cls(model_impl="ATOM")
+        cls_name = model_config._get_model_impl_backend_cls(cls_prefix="ATOM")
         return cls_name
 
     def _try_resolve_transformers(
