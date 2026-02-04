@@ -416,16 +416,28 @@ async def run_benchmark(
         if profiling_started and prefix:
             await call_debug_endpoint(session, rotator, "/debug/profile/stop")
             logger.info("Stopped profiling")
-            # Wait for traces to be written to disk (async in torch profiler)
-            await asyncio.sleep(2.0)
-            downloaded = await fetch_traces(session, rotator, prefix, "traces")
-            if downloaded:
-                logger.info("Downloaded %d trace files to ./traces/", len(downloaded))
-            else:
+
+            # Retry fetching traces (async write by torch profiler)
+            max_retries = 3
+            downloaded: list[str] = []
+            for attempt in range(max_retries):
+                await asyncio.sleep(2.0)
+                downloaded = await fetch_traces(session, rotator, prefix, "traces")
+                if downloaded:
+                    logger.info(
+                        "Downloaded %d trace files to ./traces/", len(downloaded)
+                    )
+                    break
+                logger.info(
+                    "No traces yet, retrying (%d/%d)...", attempt + 1, max_retries
+                )
+
+            if not downloaded:
                 logger.warning(
-                    "No trace files found matching prefix '%s'. "
+                    "No trace files found matching prefix '%s' after %d attempts. "
                     "Check server profiler directory.",
                     prefix,
+                    max_retries,
                 )
 
     return results, server_config
