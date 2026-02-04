@@ -1225,7 +1225,13 @@ def backend_supports_prefill_query_quantization() -> bool:
     Not supported:
     - cuDNN Prefill
     - FlashAttention
+    - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
+    # FP8 prefill query quantization requires GB200 (device capability 100)
+    # for the necessary FP8 kernels at the moment.
+    if not current_platform.is_device_capability_family(100):
+        return False
+
     return use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
 
 
@@ -2236,7 +2242,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.workspace_buffer is not None
 
-        out = torch.empty(
+        out = torch.zeros(
             q.shape[0],
             q.shape[1],
             v.shape[2],
@@ -2345,10 +2351,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
 
-            # kv_b_proj may not be quantized, for example NVFP4 models.
-            kv_c_normed = workspace[:toks][..., : self.kv_lora_rank].to(
-                self.kv_b_proj.weight.dtype
-            )
+            # Extract kv_c_normed from workspace
+            kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
+            # When FP8 weights are used without FP8 prefill, kv_b_proj expects
+            # model dtype input and will quantize internally.
+            if (
+                use_fp8_prefill
+                or self.kv_b_proj.weight.dtype != current_platform.fp8_dtype()
+            ):
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
