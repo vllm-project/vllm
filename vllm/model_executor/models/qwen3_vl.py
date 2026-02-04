@@ -130,6 +130,8 @@ from .vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
+    should_torch_compile_mm_vit,
+
 )
 
 logger = init_logger(__name__)
@@ -309,6 +311,9 @@ class Qwen3_VisionPatchMerger(nn.Module):
         return out
 
 
+@support_torch_compile(
+    enable_if=should_torch_compile_mm_vit,
+)
 class Qwen3_VisionTransformer(nn.Module):
     def __init__(
         self,
@@ -445,12 +450,20 @@ class Qwen3_VisionTransformer(nn.Module):
 
     def rot_pos_emb(self, grid_thw: list[list[int]]):
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
-        pos_ids = [
-            self.rot_pos_ids(h, w, self.spatial_merge_size)
-            if t == 1
-            else self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1)
-            for t, h, w in grid_thw
-        ]
+        # pos_ids = [
+        #     self.rot_pos_ids(h, w, self.spatial_merge_size)
+        #     if t == 1
+        #     else self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1)
+        #     for t, h, w in grid_thw
+        # ]
+        pos_ids = [                                                                                                           
+            torch.cond(                                                                                                       
+                torch.tensor(t == 1),                                                                                         
+                lambda: self.rot_pos_ids(h, w, self.spatial_merge_size),                                                      
+                lambda: self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1),                                         
+            )                                                                                                                 
+            for t, h, w in grid_thw                                                                                           
+        ]  
         pos_ids = torch.cat(pos_ids, dim=0).to(self.device, non_blocking=True)
 
         # Use pre-computed cos_sin_cache from RotaryEmbedding
@@ -468,12 +481,18 @@ class Qwen3_VisionTransformer(nn.Module):
 
         outputs = []
         for t, h, w in grid_thw:
-            h_idxs = torch.linspace(
-                0, num_grid_per_side - 1, h, dtype=torch.float32, device=self.device
-            )
-            w_idxs = torch.linspace(
-                0, num_grid_per_side - 1, w, dtype=torch.float32, device=self.device
-            )
+            # torch._check_is_size(h)
+            # h_idxs = torch.linspace(
+            #     0, num_grid_per_side - 1, h, dtype=torch.float32, device=self.device
+            # )
+            #   if h == 1:                                                                                                            
+            #     h_idxs = torch.zeros(1, dtype=torch.float32, device=self.device)                                                  
+            # else:                                                                                                                 
+            h_idxs = torch.arange(h, dtype=torch.float32, device=self.device) * ((num_grid_per_side - 1) / (h - 1))  
+            # w_idxs = torch.linspace(
+            #     0, num_grid_per_side - 1, w, dtype=torch.float32, device=self.device
+            # )
+            w_idxs = torch.arange(w, dtype=torch.float32, device=self.device) * ((num_grid_per_side - 1) / (w - 1))               
 
             h_floor = h_idxs.to(torch.long)
             w_floor = w_idxs.to(torch.long)
@@ -530,7 +549,8 @@ class Qwen3_VisionTransformer(nn.Module):
             self.attn_backend == AttentionBackendEnum.FLASH_ATTN
             or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            # max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            max_seqlen = torch.diff(cu_seqlens).max()     
         return max_seqlen
 
     def forward(
@@ -543,20 +563,24 @@ class Qwen3_VisionTransformer(nn.Module):
 
         if isinstance(grid_thw, list):
             grid_thw_list = grid_thw
-            grid_thw = np.array(grid_thw, dtype=np.int32)
+            # grid_thw = np.array(grid_thw, dtype=np.int32)
+            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
         else:
             grid_thw_list = grid_thw.tolist()
-            grid_thw = grid_thw.numpy()
+            # grid_thw = grid_thw.numpy()
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
 
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
-        )
-        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens)
+        # cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+        #     axis=0, dtype=np.int32
+        # )
+        # cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        # cu_seqlens = torch.from_numpy(cu_seqlens)
+        spatial_sizes = grid_thw[:, 1] * grid_thw[:, 2]  # h * w for each entry                                           
+        cu_seqlens = torch.repeat_interleave(spatial_sizes, grid_thw[:, 0]).cumsum(dim=0, dtype=torch.int32)                
+        cu_seqlens = torch.cat([torch.zeros(1, dtype=torch.int32), cu_seqlens])
 
         hidden_states = hidden_states.unsqueeze(1)
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
@@ -1279,11 +1303,12 @@ class Qwen3VLForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
+                vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            # self.visual.compile(fullgraph=True)
 
             # register buffer for deepstack
             if self.use_deepstack:
