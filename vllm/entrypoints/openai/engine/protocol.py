@@ -3,9 +3,18 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import sys
 import time
-from enum import StrEnum
+from enum import Enum
 from typing import Any, ClassVar, Literal, TypeAlias
+
+# StrEnum was added in Python 3.11
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    class StrEnum(str, Enum):
+        """Backport of StrEnum for Python < 3.11."""
+        pass
 
 import regex as re
 from pydantic import (
