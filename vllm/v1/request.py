@@ -147,6 +147,9 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # True if this request is scheduled as a non-final prefill chunk.
+        self.is_prefill_chunk = False
+
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0

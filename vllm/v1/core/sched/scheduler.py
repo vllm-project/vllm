@@ -912,6 +912,12 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+            request.is_prefill_chunk = request.num_computed_tokens < (
+                request.num_tokens + request.num_output_placeholders
+            )
+            scheduler_output.has_structured_output_requests |= (
+                request.use_structured_output
+            )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -1560,6 +1566,12 @@ class Scheduler(SchedulerInterface):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
+                continue
+
+            if request.is_prefill_chunk:
+                # Ignore draft tokens for prefill chunks.
+                if request.spec_token_ids:
+                    request.spec_token_ids = []
                 continue
 
             # Add newly generated spec token ids to the request.
