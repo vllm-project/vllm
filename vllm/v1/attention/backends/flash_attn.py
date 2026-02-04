@@ -572,7 +572,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
-            requires_alibi=alibi_slopes is not None
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
         )
         logger.info("Using FlashAttention version %s", self.vllm_flash_attn_version)
         # Cache the batch invariant result for use in forward passes

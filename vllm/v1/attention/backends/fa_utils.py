@@ -35,7 +35,9 @@ elif current_platform.is_rocm():
             )
 
 
-def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
+def get_flash_attn_version(
+    requires_alibi: bool = False, head_size: int | None = None
+) -> int | None:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform
 
@@ -92,6 +94,22 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         if requires_alibi and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with ALiBi, defaulting to FA version 2."
+            )
+            fa_version = 2
+
+        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
+        # supported head dimensions.
+        # See: https://github.com/Dao-AILab/flash-attention/issues/1959
+        if (
+            fa_version == 4
+            and device_capability.major >= 10
+            and head_size is not None
+            and head_size > 128
+        ):
+            logger.warning_once(
+                "FA4 on Blackwell does not support head_size=%d due to TMEM "
+                "capacity limits, defaulting to FA version 2.",
+                head_size,
             )
             fa_version = 2
 
