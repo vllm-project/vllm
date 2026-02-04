@@ -489,7 +489,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
     ),
     "Step3p5ForCausalLM": _HfExamplesInfo(
-        "stepfun-ai/step-3.5-flash", trust_remote_code=True
+        "stepfun-ai/Step-3.5-Flash", trust_remote_code=True
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
