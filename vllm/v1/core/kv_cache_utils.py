@@ -1396,13 +1396,12 @@ def _auto_fit_max_model_len(
     """
     When max_model_len is set to -1, this function estimates the largest
     context length that can be supported with the available GPU memory.
-    It finds the maximum max_model_len that fits across all workers by
-    checking each worker's projected KV cache groups against its available
-    memory.
+    It uses binary search to find the maximum length that fits across all
+    workers.
 
     Args:
         vllm_config: The global VllmConfig (will be modified in-place)
-        projected_groups_per_worker: KV cache groups projected to each worker
+        projected_groups_per_worker: KV cache groups projected to each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
     """
