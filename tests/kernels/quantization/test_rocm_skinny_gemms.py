@@ -78,6 +78,10 @@ NKM_FACTORS_WVSPLITK_FP8 = [
     (1, 64, 64 + 16),
     (1, 64 + 16, 64),
     (1, 64 + 16, 64 + 16),
+    (4, 64, 64),
+    (4, 64, 64 + 16),
+    (4, 64 + 16, 64),
+    (4, 64 + 16, 64 + 16),
     (2, 512, 512),
     (3, 512, 512),
     (3, 512, 512 + 16),
@@ -210,22 +214,25 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     assert torch.allclose(out, ref_out, rtol=0.01)
 
 
+@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [True, False])
-@pytest.mark.parametrize("padded_b", [True, False])
+@pytest.mark.parametrize("padded_a", [False, True])
+@pytest.mark.parametrize("padded_b", [False, True])
 @pytest.mark.parametrize("biased", [False, True])
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
     reason="only test for rocm fp8",
 )
-def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded_a, padded_b, biased):
+def test_rocm_wvsplitk_fp8_kernel(
+    xnorm, n, k, m, dtype, seed, padded_a, padded_b, biased
+):
     torch.manual_seed(seed)
 
-    xavier = math.sqrt(2 / k)  # normalize to avoid large deltas
-    A = (torch.rand(n, k, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, device="cuda") - 0.5) * xavier
+    xavier = math.sqrt(2 / k) if xnorm else 1  # normalize to avoid large deltas
+    A = (torch.rand(n, k, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, device="cuda") * 2 - 1) * xavier
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
@@ -234,11 +241,14 @@ def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded_a, padded_b, bias
     if padded_a:
         A = pad_fp8(A)
 
-    BIAS = None if (not biased) else (torch.rand(m, dtype=dtype, device="cuda") - 0.5)
+    BIAS = None if (not biased) else (torch.rand(m, dtype=dtype, device="cuda") * 2 - 1)
 
     ref_out = torch._scaled_mm(
         A, B.t(), out_dtype=dtype, scale_a=scale_a, scale_b=scale_b, bias=BIAS
     )
     out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b, get_cu_count(), BIAS)
 
-    assert torch.allclose(out, ref_out, rtol=0.01)
+    if xnorm:
+        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-8)
+    else:
+        assert torch.allclose(out, ref_out, 0.01)
