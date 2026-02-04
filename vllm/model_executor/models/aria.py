@@ -12,6 +12,7 @@ from transformers.models.aria.processing_aria import AriaProcessor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -539,6 +540,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.vllm_config = vllm_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = AriaVisionTransformer(
@@ -609,10 +611,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
-        image_outputs = self.vision_tower(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
-        )
+        with set_forward_context(None, self.vllm_config):
+            image_outputs = self.vision_tower(
+                pixel_values=pixel_values,
+                patch_attention_mask=patch_attention_mask,
+            )
         image_attn_mask = None
         if patch_attention_mask is not None:
             flattened_mask = patch_attention_mask.flatten(1)

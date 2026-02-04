@@ -37,9 +37,14 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
+from .vision import (
+    is_vit_use_data_parallel,
+    run_dp_sharded_vision_model,
+    should_torch_compile_mm_vit,
+)
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -220,6 +225,12 @@ class Idefics2VisionMLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 0,
+    },
+    enable_if=should_torch_compile_mm_vit,
+)
 class Idefics2EncoderLayer(nn.Module):
     def __init__(
         self,
@@ -290,16 +301,19 @@ class Idefics2Encoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
 
-        self.layers = nn.ModuleList(
-            [
-                Idefics2EncoderLayer(
-                    config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                )
-                for layer_idx in range(num_hidden_layers)
-            ]
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("Idefics2EncoderLayer", is_encoder=True):
+            self.layers = nn.ModuleList(
+                [
+                    Idefics2EncoderLayer(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.layers.{layer_idx}",
+                    )
+                    for layer_idx in range(num_hidden_layers)
+                ]
+            )
 
     def forward(
         self,
