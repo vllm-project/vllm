@@ -10,6 +10,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -22,7 +24,7 @@ class CPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
-        assert self.speculative_config is None, "spec decode is not supported."
+        # Note: speculative decoding is now supported on CPU with PyTorch fallbacks
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
@@ -60,6 +62,10 @@ class CPUModelRunner(GPUModelRunner):
         if self.lora_config:
             self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
 
+        if hasattr(self, "drafter"):
+            logger.info_once("Loading drafter model...")
+            self.drafter.load_model(self.model)
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -75,7 +81,32 @@ class CPUModelRunner(GPUModelRunner):
                 )
             )
 
+        # Warm up drafter for speculative decoding
+        if self.speculative_config and (self.speculative_config.uses_draft_model()):
+            from vllm.v1.spec_decode.draft_model import DraftModelProposer
+
+            if isinstance(self.drafter, (DraftModelProposer)):
+                logger.info("Warming up drafter model...")
+                self.drafter.dummy_run(max(16, self.max_num_reqs))
+
         logger.info("Warming up done.")
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache for CPU backend, including drafter cache if needed.
+
+        Args:
+            kv_cache_config: Configuration for the KV cache
+        """
+        # Call parent implementation
+        super().initialize_kv_cache(kv_cache_config)
+
+        # Log CPU-specific confirmation for speculative decoding
+        if self.speculative_config:
+            if self.speculative_config.use_eagle():
+                logger.info("EAGLE drafter KV cache initialized for CPU backend")
+            elif self.speculative_config.uses_draft_model():
+                logger.info("Draft model KV cache initialized for CPU backend")
 
     def _init_device_properties(self) -> None:
         pass
@@ -86,6 +117,71 @@ class CPUModelRunner(GPUModelRunner):
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
+
+    # =========================================================================
+    # CPU-safe overrides for speculative decoding methods
+    # These methods override GPU-specific implementations that use CUDA streams
+    # =========================================================================
+
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        """CPU-safe version: no async copy needed, tensors already on CPU."""
+        if self.use_async_scheduling and not (
+            scheduler_output.has_structured_output_requests
+            or self.input_batch.sampling_metadata.output_token_ids
+        ):
+            return
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids
+        if not torch.is_tensor(draft_token_ids):
+            return
+
+        num_reqs = draft_token_ids.shape[0]
+        if self.draft_token_ids_cpu is not None:
+            if not zeros_only:
+                self.draft_token_ids_cpu[:num_reqs].copy_(draft_token_ids)
+            else:
+                self.draft_token_ids_cpu[:num_reqs] = 0
+
+    def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
+        """CPU-safe version: no event synchronization needed."""
+        if isinstance(self._draft_token_ids, list):
+            return self._draft_token_ids, self.input_batch.req_ids
+        req_ids = self._draft_token_req_ids
+        if req_ids is None:
+            return [], []
+        if self.draft_token_ids_cpu is not None:
+            return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
+        return [], []
+
+    def _copy_valid_sampled_token_count(
+        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
+    ) -> None:
+        """CPU-safe version: direct copy without CUDA streams."""
+        if self.valid_sampled_token_count_cpu is None:
+            return
+
+        counts = valid_sampled_tokens_count
+        counts_cpu = self.valid_sampled_token_count_cpu
+        counts_cpu[: counts.shape[0]].copy_(counts)
+        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+    def _get_valid_sampled_token_count(self) -> list[int]:
+        """CPU-safe version: no event synchronization needed."""
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+        if prev_sampled_token_ids is None:
+            return []
+
+        counts_cpu = self.valid_sampled_token_count_cpu
+        if counts_cpu is None:
+            return []
+        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        """CPU-safe version: direct tolist() without CUDA events."""
+        return sampled_token_ids.tolist()
 
 
 @contextmanager
