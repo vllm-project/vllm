@@ -10,6 +10,38 @@ build:
   jobs:
     post_checkout:
       - git fetch --unshallow || true
+    post_install:
+      - |
+        set -ex
+        if [ "$READTHEDOCS_VERSION_TYPE" != "external" ] || ! git diff --quiet origin/main -- \
+            docs/ \
+            examples/ \
+            .readthedocs.yaml \
+            '*.md' \
+            requirements/docs.txt;
+        then
+          # changes detected, proceed with doc generation
+          exit 0;
+        fi
+        # no changes detected, verify generated docs are up to date
+        COMMIT=$(git rev-parse HEAD)
+        # generate docs on current branch
+        python docs/mkdocs/hooks/generate_argparse.py
+        python docs/mkdocs/hooks/generate_metrics.py
+        rm -rf /tmp/generated
+        mkdir -p /tmp/generated
+        mv docs/generated /tmp/generated/current
+        # go back to last commit
+        git checkout HEAD~
+        python docs/mkdocs/hooks/generate_argparse.py
+        python docs/mkdocs/hooks/generate_metrics.py
+        mv docs/generated /tmp/generated/last
+        if diff -r /tmp/generated/last /tmp/generated/current; then
+          echo "Generated docs are up to date, skipping update."
+          exit 183
+        fi
+        rm -rf /tmp/generated/
+        git checkout $COMMIT --force
 
 mkdocs:
   configuration: mkdocs.yaml
