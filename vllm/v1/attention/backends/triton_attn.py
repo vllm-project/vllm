@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
-
+MAX_SPECULATIVE_TOKENS_3D_ATTN = 16 # Number of speculative tokens to choose 3D attention 
 
 @dataclass
 class TritonAttentionMetadata:
@@ -167,9 +167,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
+        # Buffer size needs to accommodate total tokens, not just sequences.
+        # For speculative decoding with max_seqlen_q=16 and seq_threshold_3D sequences,
+        # we need buffer capacity for seq_threshold_3D * 16 tokens.
+        # We use a conservative multiplier of 16 to handle speculative decode batches for 3D attn
+        max_tokens_for_3d = self.seq_threshold_3D * MAX_SPECULATIVE_TOKENS_3D_ATTN 
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                max_tokens_for_3d,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -178,12 +183,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_tokens_for_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_tokens_for_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )

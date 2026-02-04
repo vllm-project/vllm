@@ -971,17 +971,34 @@ def unified_attention(
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold
-    if (
+    # 2. The batch includes prefill-like workloads (long query sequences), or
+    # 3. The grid size is too large for efficient 3D parallelization, or
+    # 4. The KV sequences are too short to benefit from segmentation, or
+    # 5. The total number of query tokens exceeds the 3D buffer capacity
+    #
+    # The 3D kernel is optimized for decode-like workloads with:
+    # - Small query lengths (pure decode or speculative decode with <=16 tokens)
+    # - Long KV sequences (>256 tokens to benefit from parallel softmax segments)
+    # - Reasonable grid size (total_num_q_blocks * num_kv_heads <= 128)
+    # - Total tokens fit in pre-allocated buffers (scaled by max_seqlen_q multiplier)
+    #
+    # Note: Buffer capacity is seq_threshold_3D * 16 to accommodate speculative decode
+    # with a maximum of 16 query tokens (15 speculative + 1 confirmed).
+    buffer_capacity = seq_threshold_3D * 16 if seq_threshold_3D is not None else 0
+
+    use_2d = (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
-    ):
+        or max_seqlen_q > 16  # Prefill-like: reject large query batches
+        or max_seqlen_k <= 256  # 3D needs long KV to benefit from segmentation
+        or total_num_q_blocks * num_kv_heads > 512  # Grid too large for 3D
+        or q.shape[0] > buffer_capacity  # Total tokens exceed buffer capacity
+    )
+
+    if use_2d:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
