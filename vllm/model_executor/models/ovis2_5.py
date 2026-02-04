@@ -12,6 +12,7 @@ from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
@@ -461,6 +462,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
+        self.vllm_config = vllm_config
         self.config: PretrainedConfig = config
 
         with self._mark_language_model(vllm_config):
@@ -566,9 +568,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
         target_dtype = self.visual_tokenizer.dtype
-        visual_tokens = self.visual_tokenizer(
-            image_patches_flat.to(target_dtype), grid_thws
-        )
+        with set_forward_context(None, self.vllm_config):
+            visual_tokens = self.visual_tokenizer(
+                image_patches_flat.to(target_dtype), grid_thws
+            )
 
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
         indicator_embeds = self.vte(indicator_tokens)
