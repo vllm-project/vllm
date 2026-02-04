@@ -5,7 +5,6 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
 import torch
@@ -473,11 +472,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)  # type: ignore[type-var]
-                )
+                if self.structured_outputs is None:
+                    self.structured_outputs = StructuredOutputsParams(
+                        **structured_outputs_kwargs
+                    )
+                else:
+                    merged = dict(self.structured_outputs.__dict__)
+                    merged.update(structured_outputs_kwargs)
+                    self.structured_outputs = StructuredOutputsParams(**merged)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
