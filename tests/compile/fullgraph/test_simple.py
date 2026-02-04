@@ -98,6 +98,7 @@ def _run_simple_model(
             use_inductor_graph_partition=use_inductor_graph_partition,
             cudagraph_copy_inputs=True,
             cudagraph_capture_sizes=[1, 2],
+            vllm_enable_compile_cache=False,
         )
     )
     with set_current_vllm_config(vllm_config):
@@ -182,10 +183,6 @@ def test_simple_piecewise_compile(backend, intermediate_unbacked):
 def test_simple_inductor_graph_partition(monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
-    # disable compile cache so that we run separately for different splitting_ops
-    # and get the expected number of cudagraphs captured.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     _run_simple_model(
         splitting_ops=["silly::attention"],
