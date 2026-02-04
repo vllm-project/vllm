@@ -542,7 +542,7 @@ steps:
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - vllm/lora
@@ -638,7 +638,7 @@ steps:
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
@@ -653,7 +653,7 @@ steps:
 - label: Kernels Quantization Test %N # 64min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/
@@ -666,7 +666,7 @@ steps:
 - label: Kernels MoE Test %N # 40min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -744,7 +744,7 @@ steps:
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
@@ -755,7 +755,7 @@ steps:
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -829,7 +829,7 @@ steps:
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -890,7 +890,7 @@ steps:
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -911,7 +911,7 @@ steps:
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
