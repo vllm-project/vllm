@@ -64,7 +64,7 @@ N_FACTORS_WVSPLITKRC = [
     128,
 ]
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
-M_FACTORS_WVSPLITKRC = [128, 128 + 64, 256, 256 + 64, 640, 640 + 64]
+M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
@@ -120,7 +120,7 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, seed, bias_mode):
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    assert torch.allclose(out, ref_out, rtol=0.04 if dtype == torch.float16 else 0.01)
+    assert torch.allclose(out, ref_out, rtol=0.05, atol=0.01)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)

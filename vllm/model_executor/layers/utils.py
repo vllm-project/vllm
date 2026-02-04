@@ -155,20 +155,29 @@ def rocm_unquantized_gemm_impl(
 
         return gemm_a16w16(x, weight, bias)
 
+    # Next ^2 of n
+    N_p2 = 1 << (n - 1).bit_length()
+    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
+    # and each working on a 512-shard of K, how many CUs would we need?
+    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
+    # How many of 4 waves in a group can work on same 16 Ms at same time?
+    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
+    GrpsShrB = min(N_p2 // 16, 4)
+    # Given the above, how many CUs would we need?
+    CuNeeded = rndup_cus * GrpsShrB
+    # candidate for atomic reduce count splitk?
+    fits_wvsplitkrc = CuNeeded <= cu_count
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
         and (
-            n >= 10
+            10 <= n <= 128
             and k % 8 == 0
-            and m % 64 == 0
-            and n <= 128
             and k > 512
-            and ((k + 511) // 512)
-            * ((m + 15) // 16)
-            * (1 if (n <= 16) else (2 if (n <= 32) else 4))
-            < cu_count * 4
+            and m % 16 == 0
+            and fits_wvsplitkrc
             and x.is_contiguous()
         )
     )

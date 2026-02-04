@@ -1680,125 +1680,59 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
   }
 
-  if (!doRdc) {
-    if (m + (threadIdx.x % 16) < M) {
-      scalar_t biases[N / NTILE / GrpsShrB][4] = {0};
+  if (m + (threadIdx.x % 16) < M) {
+    int my_cntr;
+    int mindx = m + (threadIdx.x % 16);
+    int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
+    scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+    // Atomic add the output, read biases
+    for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
+      for (uint32_t j = 0; j < 4; j++) {
+        // int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+        //             (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+        // int adr = mindx + M * nindx;
+        int g_nindx =
+            j + (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+        int g_adr = g_mindx + M * g_nindx * 4;
+        atomicAdd(&glbl[g_adr], sum4[nt][0][j]);
+      }
+    int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                 (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+    int adr_ = mindx + M * nindx_ / 4;
+    // Update the complete counter
+    my_cntr = atomicAdd(&cntr[adr_], 1);
+    float vals[N / NTILE / GrpsShrB][4] = {};
+    // If we're the last k-shard, read back the value and convert...
+    if (my_cntr + 1 == k_rnd) {
       if (BIAS)
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           for (uint32_t j = 0; j < 4; j++) {
-            int mindx = m + (threadIdx.x % 16);
             int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
           }
         }
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
         for (uint32_t j = 0; j < 4; j++) {
-          int mindx = m + (threadIdx.x % 16);
-          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-          int adr = mindx + M * nindx;
-          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
-            C[adr] = __float2bfloat16(sum4[nt][0][j]);
-          } else {
-            if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
-            C[adr] = __float2half(sum4[nt][0][j]);
-          }
+          int g_nindx =
+              j + (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          int g_adr = g_mindx + M * g_nindx * 4;
+          vals[nt][j] = glbl[g_adr];
         }
       }
-    }
-  } else {
-    if (m + (threadIdx.x % 16) < M) {
-      int my_cntr;
-      if (!BIAS) {
-        int mindx = m + (threadIdx.x % 16);
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
-          for (uint32_t j = 0; j < 4; j++) {
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+      __builtin_amdgcn_sched_barrier(0);
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          if (nindx < actlN) {
             int adr = mindx + M * nindx;
-            atomicAdd(&glbl[adr], sum4[nt][0][j]);
-          }
-        int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                     (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_ / 4;
-        my_cntr = atomicAdd(&cntr[adr_], 1);
-        float vals[N / NTILE / GrpsShrB][4] = {};
-        if (my_cntr + 1 == k_rnd) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              int adr = mindx + M * nindx;
-              vals[nt][j] = glbl[adr];
-            }
-          }
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              if (nindx >= actlN) break;
-              int adr = mindx + M * nindx;
-              if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                C[adr] = __float2bfloat16(vals[nt][j]);
-              } else {
-                C[adr] = __float2half(vals[nt][j]);
-              }
-            }
-          }
-        }
-      } else {
-        int mindx = m + (threadIdx.x % 16);
-        int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
-        scalar_t biases[N / NTILE / GrpsShrB][4] = {};
-        // Atomic add the output, read biases
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
-          for (uint32_t j = 0; j < 4; j++) {
-            // int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-            //             (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            // int adr = mindx + M * nindx;
-            int g_nindx =
-                j +
-                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
-            int g_adr = g_mindx + M * g_nindx * 4;
-            atomicAdd(&glbl[g_adr], sum4[nt][0][j]);
-          }
-        int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                     (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_ / 4;
-        // Update the complete counter
-        my_cntr = atomicAdd(&cntr[adr_], 1);
-        float vals[N / NTILE / GrpsShrB][4] = {};
-        // If we're the last k-shard, read back the value and convert...
-        if (my_cntr + 1 == k_rnd) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int g_nindx =
-                  j +
-                  (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
-              int g_adr = g_mindx + M * g_nindx * 4;
-              vals[nt][j] = glbl[g_adr];
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-            }
-          }
-          __builtin_amdgcn_sched_barrier(0);
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              if (nindx < actlN) {
-                int adr = mindx + M * nindx;
-                if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                  vals[nt][j] += __bfloat162float(biases[nt][j]);
-                  C[adr] = __float2bfloat16(vals[nt][j]);
-                } else {
-                  vals[nt][j] += __half2float(biases[nt][j]);
-                  C[adr] = __float2half(vals[nt][j]);
-                }
-              }
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              vals[nt][j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(vals[nt][j]);
+            } else {
+              vals[nt][j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(vals[nt][j]);
             }
           }
         }
@@ -1880,19 +1814,37 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     auto glbl = axl_glbl.data_ptr<float>();
-    int rndup_cus = ((M_in + 16 - 1) / 16) * ((K_in + 512 - 1) / 512);
+
+    // With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
+    // and each working on a 512-shard of K, how many CUs would we need?
+    int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
+
+    // How many of 4 waves in a group can work on same 16 Ms at same time? First
+    // try to maximize this. This reduces the Ms each group works on, i.e.
+    // increasing the number of CUs needed.
+    int GrpsShrB = min(N_p2 / 16, 4);
+
+    // Given the above, how many CUs would we need?
+    int CuNeeded = rndup_cus * GrpsShrB;
+
+    if (CuNeeded > CuCount) std::runtime_error("Invalid wvSplitKrc size");
+
+    // Can we increase SplitK by shrinking the K-shared to 256?
+    int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+
     switch (N_p2) {
       case 16:
         WVSPLITKrc(16, 1, 1) break;
       case 32:
-        if (rndup_cus * 2 * 2 < CuCount * 4)
-          WVSPLITKrc(32, 2, 2) else WVSPLITKrc(32, 2, 1) break;
+        if (chunkk == 2)
+          WVSPLITKrc(32, 2, 2) else if (chunkk == 1) WVSPLITKrc(32, 2, 1) break;
       case 64:
-        if (rndup_cus * 2 * 4 < CuCount * 4)
-          WVSPLITKrc(64, 4, 2) else WVSPLITKrc(64, 4, 1) break;
+        if (chunkk == 2)
+          WVSPLITKrc(64, 4, 2) else if (chunkk == 1) WVSPLITKrc(64, 4, 1) break;
       case 128:
-        if (rndup_cus * 2 * 4 < CuCount * 4)
-          WVSPLITKrc(128, 4, 2) else WVSPLITKrc(128, 4, 1) break;
+        if (chunkk == 2)
+          WVSPLITKrc(128, 4, 2) else if (chunkk == 1)
+              WVSPLITKrc(128, 4, 1) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
