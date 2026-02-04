@@ -1007,7 +1007,7 @@ class MLACommonBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [192, 576]
+        return [576]
 
     @classmethod
     def is_mla(cls) -> bool:
