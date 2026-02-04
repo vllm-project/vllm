@@ -206,7 +206,9 @@ class InputProcessor:
         Should raise ValueError if unsupported for API Server.
         """
         if isinstance(params, PoolingParams):
-            assert supported_tasks is not None
+            if supported_tasks is None:
+                raise RuntimeError("`supported_tasks` must be passed for pooling")
+
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
             ]
