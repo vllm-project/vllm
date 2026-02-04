@@ -194,6 +194,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(

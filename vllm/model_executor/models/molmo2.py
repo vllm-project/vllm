@@ -611,6 +611,7 @@ class ImagePoolingAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
             )
 
     def forward_sdpa(

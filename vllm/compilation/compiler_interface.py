@@ -101,7 +101,6 @@ class CompilerInterface:
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
-        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         """
@@ -273,7 +272,26 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
 
+        def is_saveable_2_10(compiled_artifact):
+            # can just use compiled_artifact.is_saveable in 2.11
+            if compiled_artifact._artifacts is None:
+                return False
+            _, cache_info = compiled_artifact._artifacts
+            return len(cache_info.aot_autograd_artifacts) == 1
+
         if is_compile_cache_enabled(compiler_config):
+            if not is_saveable_2_10(compiled_graph):
+                raise RuntimeError(
+                    "The compiled artifact is not serializable. This usually means "
+                    "that the model code has something that is not serializable "
+                    "by torch.compile in it. You can fix this by either "
+                    "figuring out what is not serializable and rewriting it, "
+                    "filing a bug report, "
+                    "or suppressing this error by "
+                    "disabling vLLM's compilation cache via "
+                    "VLLM_DISABLE_COMPILE_CACHE=1 "
+                    "(this will greatly increase vLLM server warm start times)."
+                )
             compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
@@ -283,7 +301,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
-        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
@@ -508,7 +525,6 @@ class InductorAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
-        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
