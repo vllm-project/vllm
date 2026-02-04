@@ -679,7 +679,7 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
-            prompt_is_reasoning_end_arr = [None] * num_choices
+            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
 
