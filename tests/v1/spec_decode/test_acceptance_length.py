@@ -179,13 +179,13 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
     acceptance_counts = [0] * num_spec_tokens
 
     for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
+        if metric.name == "vllm_spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+        elif metric.name == "vllm_spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
             num_accepted_tokens += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+        elif metric.name == "vllm_spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
             for pos in range(min(len(metric.values), num_spec_tokens)):
                 acceptance_counts[pos] += metric.values[pos]

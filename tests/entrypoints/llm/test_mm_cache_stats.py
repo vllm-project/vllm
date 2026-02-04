@@ -35,8 +35,8 @@ def _get_counter_value(metrics: list[Metric], name: str):
 
 
 def _get_mm_cache_stats(metrics: list[Metric]):
-    mm_cache_queries = _get_counter_value(metrics, "vllm:mm_cache_queries")
-    mm_cache_hits = _get_counter_value(metrics, "vllm:mm_cache_hits")
+    mm_cache_queries = _get_counter_value(metrics, "vllm_mm_cache_queries")
+    mm_cache_hits = _get_counter_value(metrics, "vllm_mm_cache_hits")
 
     return mm_cache_queries, mm_cache_hits
 

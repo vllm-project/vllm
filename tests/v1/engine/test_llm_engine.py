@@ -186,17 +186,17 @@ def test_engine_metrics(vllm_runner, example_prompts):
                     found.append(metric)
             return found
 
-        num_requests_running = find_metric("vllm:num_requests_running")
+        num_requests_running = find_metric("vllm_num_requests_running")
         assert len(num_requests_running) == 1
         assert isinstance(num_requests_running[0], Gauge)
         assert num_requests_running[0].value == 0.0
 
-        generation_tokens = find_metric("vllm:generation_tokens")
+        generation_tokens = find_metric("vllm_generation_tokens")
         assert len(generation_tokens) == 1
         assert isinstance(generation_tokens[0], Counter)
         assert generation_tokens[0].value == total_tokens
 
-        request_generation_tokens = find_metric("vllm:request_generation_tokens")
+        request_generation_tokens = find_metric("vllm_request_generation_tokens")
         assert len(request_generation_tokens) == 1
         assert isinstance(request_generation_tokens[0], Histogram)
         assert "+Inf" in request_generation_tokens[0].buckets
@@ -205,7 +205,7 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert request_generation_tokens[0].sum == total_tokens
 
         num_accepted_tokens_per_pos = find_metric(
-            "vllm:spec_decode_num_accepted_tokens_per_pos"
+            "vllm_spec_decode_num_accepted_tokens_per_pos"
         )
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)

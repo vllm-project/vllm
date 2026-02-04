@@ -30,7 +30,7 @@ spec:
             labelName: model_name
             matchers:
               # Any one vllm metric that always carries model_name
-              - vllm:generation_tokens_total{}
+              - vllm_generation_tokens_total{}
 
   panels:
     "1":
@@ -55,9 +55,9 @@ spec:
                     name: accelerators-thanos-querier-datasource
                   # avg latency by model = sum(rate(sum)) / sum(rate(count))
                   query: >
-                    sum by (model_name) (rate(vllm:e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
                     /
-                    sum by (model_name) (rate(vllm:e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
                   seriesNameFormat: '{{model_name}}'
 
     "2":
@@ -79,9 +79,9 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    (sum by (model_name) (increase(vllm:e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
                     /
-                    (sum by (model_name) (increase(vllm:e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__range])))
 
     "3":
       kind: Panel
@@ -105,7 +105,7 @@ spec:
                     histogram_quantile(
                       0.50,
                       sum by (le, model_name) (
-                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -131,7 +131,7 @@ spec:
                     histogram_quantile(
                       0.90,
                       sum by (le, model_name) (
-                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -157,7 +157,7 @@ spec:
                     histogram_quantile(
                       0.99,
                       sum by (le, model_name) (
-                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -182,9 +182,9 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (model_name) (rate(vllm:time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
                     /
-                    sum by (model_name) (rate(vllm:time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
                   seriesNameFormat: '{{model_name}}'
 
     "7":
@@ -206,9 +206,9 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    (sum by (model_name) (increase(vllm:time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
                     /
-                    (sum by (model_name) (increase(vllm:time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__range])))
 
     "8":
       kind: Panel
@@ -232,7 +232,7 @@ spec:
                     histogram_quantile(
                       0.50,
                       sum by (le, model_name) (
-                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -258,7 +258,7 @@ spec:
                     histogram_quantile(
                       0.90,
                       sum by (le, model_name) (
-                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -284,7 +284,7 @@ spec:
                     histogram_quantile(
                       0.99,
                       sum by (le, model_name) (
-                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -309,9 +309,9 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (model_name) (rate(vllm:inter_token_latency_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_inter_token_latency_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
                     /
-                    sum by (model_name) (rate(vllm:inter_token_latency_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_inter_token_latency_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
                   seriesNameFormat: '{{model_name}}'
           - kind: TimeSeriesQuery
             spec:
@@ -325,7 +325,7 @@ spec:
                     histogram_quantile(
                       0.50,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
                   seriesNameFormat: '{{model_name}} p50'
@@ -341,7 +341,7 @@ spec:
                     histogram_quantile(
                       0.90,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
                   seriesNameFormat: '{{model_name}} p90'
@@ -357,7 +357,7 @@ spec:
                     histogram_quantile(
                       0.99,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
                   seriesNameFormat: '{{model_name}} p99'
@@ -381,9 +381,9 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    (sum by (model_name) (increase(vllm:inter_token_latency_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_inter_token_latency_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
                     /
-                    (sum by (model_name) (increase(vllm:inter_token_latency_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+                    (sum by (model_name) (increase(vllm_inter_token_latency_seconds_count{model_name=~"$Deployment_id"}[$__range])))
 
     "13":
       kind: Panel
@@ -407,7 +407,7 @@ spec:
                     histogram_quantile(
                       0.50,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -433,7 +433,7 @@ spec:
                     histogram_quantile(
                       0.90,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -459,7 +459,7 @@ spec:
                     histogram_quantile(
                       0.99,
                       sum by (le, model_name) (
-                        rate(vllm:inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                        rate(vllm_inter_token_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
                       )
                     )
 
@@ -484,7 +484,7 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_generation_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
                   seriesNameFormat: '{{model_name}} generation'
           - kind: TimeSeriesQuery
             spec:
@@ -495,7 +495,7 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
+                    sum by (model_name) (rate(vllm_prompt_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
                   seriesNameFormat: '{{model_name}} prompt'
           - kind: TimeSeriesQuery
             spec:
@@ -507,7 +507,7 @@ spec:
                     name: accelerators-thanos-querier-datasource
                   # overall iteration tokens/sec if exposed
                   query: >
-                    rate(vllm:iteration_tokens_total_count[$__interval])
+                    rate(vllm_iteration_tokens_total_count[$__interval])
                   seriesNameFormat: 'iteration overall'
 
     "17":
@@ -530,7 +530,7 @@ spec:
                     name: accelerators-thanos-querier-datasource
                   # Multiply by 100 so we can read it as a percentage without setting a unit (avoids CUE unit conflicts)
                   query: >
-                    100 * avg(vllm:kv_cache_usage_perc)
+                    100 * avg(vllm_kv_cache_usage_perc)
 
     "18":
       kind: Panel
@@ -553,7 +553,7 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (pod) (vllm:num_requests_running)
+                    sum by (pod) (vllm_num_requests_running)
                   seriesNameFormat: '{{pod}}'
 
     "19":
@@ -577,7 +577,7 @@ spec:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
                   query: >
-                    sum by (pod) (vllm:num_requests_waiting)
+                    sum by (pod) (vllm_num_requests_waiting)
                   seriesNameFormat: '{{pod}}'
 
     "20":
@@ -598,7 +598,7 @@ spec:
                   datasource:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
-                  query: sum(vllm:num_requests_running)
+                  query: sum(vllm_num_requests_running)
 
     "21":
       kind: Panel
@@ -618,7 +618,7 @@ spec:
                   datasource:
                     kind: PrometheusDatasource
                     name: accelerators-thanos-querier-datasource
-                  query: sum(vllm:num_requests_waiting)
+                  query: sum(vllm_num_requests_waiting)
 
   layouts:
     - kind: Grid

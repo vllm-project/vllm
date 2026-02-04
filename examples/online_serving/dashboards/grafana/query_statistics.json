@@ -77,7 +77,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "editorMode": "code",
-          "expr": "sum by (model_name) (\n  rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval])\n)",
+          "expr": "sum by (model_name) (\n  rate(vllm_request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval])\n)",
           "interval": "1",
           "legendFormat": "{{model_name}}",
           "range": true,
@@ -118,7 +118,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum(rate(vllm_request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -160,7 +160,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -202,7 +202,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -244,7 +244,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -292,7 +292,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum by (le, model_name) (rate(vllm_request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}} le={{le}}",
           "range": true,
           "refId": "A"
@@ -334,7 +334,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm_request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -376,7 +376,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm_request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -418,7 +418,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))\n/\nsum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum(rate(vllm_prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))\n/\nsum(rate(vllm_request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -460,7 +460,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm_request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -523,7 +523,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum by (model_name) (rate(vllm_prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "range": true,
           "refId": "A"
@@ -565,7 +565,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum(rate(vllm_prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -628,7 +628,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum by (model_name) (rate(vllm_generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "range": true,
           "refId": "A"
@@ -670,7 +670,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
+          "expr": "sum(rate(vllm_generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -696,7 +696,7 @@
       },
       {
         "current": { "text": ["All"], "value": ["$__all"] },
-        "definition": "label_values(vllm:request_success_total,model_name)",
+        "definition": "label_values(vllm_request_success_total,model_name)",
         "includeAll": true,
         "label": "Deployment_ID",
         "multi": true,
@@ -704,7 +704,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(vllm:request_success_total,model_name)",
+          "query": "label_values(vllm_request_success_total,model_name)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
