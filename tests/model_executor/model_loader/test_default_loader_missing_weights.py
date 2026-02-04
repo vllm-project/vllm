@@ -18,7 +18,7 @@ We reproduce it in both:
 
 Run:
   /root/learning/vllm/.venv/bin/python -m pytest -q \
-    tests/repro/test_v1_missing_weights_repro.py
+    tests/model_executor/model_loader/test_default_loader_missing_weights.py
 """
 
 from __future__ import annotations

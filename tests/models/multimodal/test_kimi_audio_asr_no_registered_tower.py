@@ -16,13 +16,12 @@ from pathlib import Path
 
 
 def test_kimi_audio_does_not_register_audio_tower_submodule() -> None:
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "vllm"
-        / "model_executor"
-        / "models"
-        / "kimi_audio_asr.py"
-    )
+    # Resolve repo root robustly regardless of test file location.
+    # Find the first parent that contains a top-level `vllm/` package directory.
+    this_file = Path(__file__).resolve()
+    repo_root = next(p for p in this_file.parents if (p / "vllm").is_dir())
+
+    path = repo_root / "vllm" / "model_executor" / "models" / "kimi_audio_asr.py"
     src = path.read_text(encoding="utf-8")
 
     assert "self.audio_tower" not in src, (
