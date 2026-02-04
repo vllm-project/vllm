@@ -9,9 +9,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.model_executor.layers.fused_moe.router.routing_utils import (
-    resolve_fused_topk_routing_method,
-)
 
 
 def vllm_topk_softmax(
@@ -138,7 +135,7 @@ class FusedTopKRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return resolve_fused_topk_routing_method(
+        return RoutingMethodType.from_topk(
             self.scoring_func, self.top_k, self.renormalize
         )
 

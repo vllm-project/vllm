@@ -123,6 +123,24 @@ class RoutingMethodType(IntEnum):
     # Unspecified
     Unspecified = 8.0
 
+    @staticmethod
+    def from_topk(
+        scoring_func: str,
+        top_k: int,
+        renormalize: bool,
+    ) -> "RoutingMethodType":
+        if scoring_func == "sigmoid":
+            return (
+                RoutingMethodType.Llama4 if top_k == 1 else RoutingMethodType.DeepSeekV3
+            )
+        if scoring_func == "softmax":
+            return (
+                RoutingMethodType.RenormalizeNaive
+                if renormalize
+                else RoutingMethodType.Default
+            )
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
 
 @dataclass
 class FusedMoEQuantDesc:
