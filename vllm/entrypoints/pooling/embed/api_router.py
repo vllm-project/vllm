@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+from functools import lru_cache
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
@@ -20,11 +21,21 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-if importlib.util.find_spec("orjson") is not None:
-    from fastapi.responses import ORJSONResponse as _RESPONSE_CLASS
-else:
-    logger.warning_once("To make v1/embeddings API fast, please install orjson")
-    from fastapi.responses import JSONResponse as _RESPONSE_CLASS
+_RESPONSE_CLASS_FOR_EMBEDDINGS = JSONResponse
+
+
+@lru_cache(maxsize=1)
+def try_load_orjson_response_class_for_embeddings():
+    global _RESPONSE_CLASS_FOR_EMBEDDINGS
+    if importlib.util.find_spec("orjson") is not None:
+        from fastapi.responses import ORJSONResponse
+
+        _RESPONSE_CLASS_FOR_EMBEDDINGS = ORJSONResponse
+        return
+    logger.warning_once(
+        "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
+    )
+
 
 router = APIRouter()
 
@@ -40,7 +51,6 @@ def embedding(request: Request) -> OpenAIServingEmbedding | None:
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
-    response_class=_RESPONSE_CLASS,
 )
 @with_cancellation
 @load_aware_call
@@ -65,7 +75,8 @@ async def create_embedding(
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, EmbeddingResponse):
-        return _RESPONSE_CLASS(content=generator.model_dump())
+        try_load_orjson_response_class_for_embeddings()
+        return _RESPONSE_CLASS_FOR_EMBEDDINGS(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
         return StreamingResponse(
             content=generator.content,
