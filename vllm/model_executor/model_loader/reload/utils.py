@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from .types import LayerTensors
 
@@ -39,3 +40,28 @@ def get_layer_size(layer: torch.nn.Module) -> int:
         for name, tensor in get_layer_tensors(layer).items()
         if name not in SKIP_TENSORS
     )
+
+
+class CopyCounter(TorchDispatchMode):
+    """
+    Tracks total number of elements modified with `copy_`.
+
+    Useful for keeping track of weight loading where underlying weights can be
+    arbitrarily transformed (such as with `narrow`) before calling copy.
+
+    Note: Assumes that copy kwargs are not used.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.copied_numel = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if func is torch.ops.aten.copy_.default:
+            assert args[0].numel() == args[1].numel()
+            self.copied_numel += args[0].numel()
+
+        return func(*args, **kwargs)
