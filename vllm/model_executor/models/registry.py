@@ -235,6 +235,10 @@ _EMBEDDING_MODELS = {
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "VoyageQwen3BidirectionalEmbedModel": (
+        "voyage_qwen3_bidirectional_embed",
+        "VoyageQwen3BidirectionalEmbedModel",
+    ),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
@@ -250,10 +254,6 @@ _EMBEDDING_MODELS = {
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
-    "VoyageQwen3BidirectionalEmbedModel": (
-        "voyage_qwen3_bidirectional_embed",
-        "VoyageQwen3BidirectionalEmbedModel",
-    ),
 }
 
 _CROSS_ENCODER_MODELS = {
