@@ -679,12 +679,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
-            if constexpr (std::is_same_v<scalar_t, half>) {
-              sum[n][y] += __half2float(biases[n][y]);
-            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              sum[n][y] += __bfloat162float(biases[n][y]);
+            if (commitColumn[y]) {
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                sum[n][y] += __half2float(biases[n][y]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                sum[n][y] += __bfloat162float(biases[n][y]);
+              }
+              C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
             }
-            C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
           }
         }
       }
@@ -726,8 +728,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
-            sum4[n][y][0] += __bfloat162float(biases[n][y]);
-            C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            if (commitColumn[y]) {
+              sum4[n][y][0] += __bfloat162float(biases[n][y]);
+              C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            }
           }
         }
       }
@@ -1024,12 +1028,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
-            if constexpr (std::is_same_v<scalar_t, half>) {
-              sum[n][y] += __half2float(biases[n][y]);
-            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              sum[n][y] += __bfloat162float(biases[n][y]);
+            if (commitColumn[y]) {
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                sum[n][y] += __half2float(biases[n][y]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                sum[n][y] += __bfloat162float(biases[n][y]);
+              }
+              C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
             }
-            C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
           }
         }
       }
@@ -1068,8 +1074,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
-            sum4[n][y][0] += __bfloat162float(biases[n][y]);
-            C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            if (commitColumn[y]) {
+              sum4[n][y][0] += __bfloat162float(biases[n][y]);
+              C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            }
           }
         }
       }
