@@ -11,55 +11,9 @@ from vllm import LLM
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.forward_context import set_forward_context
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-
-
-def _worker_embed_multimodal(
-    worker, vllm_config, cudagraph_runtime_mode, batch_descriptor, multi_modal_data
-):
-    """Helper function to run multimodal embedding on a worker.
-    This function sets up the necessary forward context for tensor-parallel (TP)
-    execution and then calls the model's `embed_multimodal` method.
-    Note: For data-parallel (DP) mode, the forward context is typically
-          created and managed within the
-          vision.py:run_dp_sharded_mrope_vision_model(), which would override the
-          context set here.
-    Args:
-        worker: The worker instance containing the model runner.
-        vllm_config: The vLLM engine configuration.
-        cudagraph_runtime_mode: The runtime mode for CUDA graph execution.
-        batch_descriptor: An object describing the current batch.
-        multi_modal_data: A dictionary of keyword arguments to be passed to
-            the model's `embed_multimodal` method.
-    Returns:
-        The output from the model's `embed_multimodal` method.
-    """
-
-    # Access model via worker.model_runner.model
-    # Note: Accessing internal attributes. Assuming V1 worker structure.
-    model = worker.model_runner.model
-
-    # Move multi_modal_data to the model's device
-    target_device = next(model.parameters()).device
-    multi_modal_data = {
-        k: v.to(target_device) if isinstance(v, torch.Tensor) else v
-        for k, v in multi_modal_data.items()
-    }
-
-    with (
-        set_forward_context(
-            None,
-            vllm_config=vllm_config,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=batch_descriptor,
-        ),
-        torch.inference_mode(),
-    ):
-        ans = model.embed_multimodal(**multi_modal_data)
-        torch.cuda.synchronize()
-        return ans
-
+from vllm.v1.worker.mm_cudagraph import MMEncoderCudagraphManager
 
 # Format: (model_name, tp_size, mm_encoder_tp_mode)
 TEST_CONFIGS = [
@@ -123,62 +77,103 @@ def llm(request):
         cleanup_dist_env_and_memory()
 
 
-class TestQwenVLCUDAGraph:
-    def _run_embed_multimodal(
-        self, llm, multi_modal_data, num_patches, force_eager=False
+def _worker_embed_multimodal(
+    worker, vllm_config, multi_modal_data, enforce_eager=False
+):
+    """Helper function to run multimodal embedding on a worker.
+    This function sets up the necessary forward context for tensor-parallel (TP)
+    execution and then calls the model's `embed_multimodal` method.
+    Note: For data-parallel (DP) mode, the forward context is typically
+          created and managed within the
+          vision.py:run_dp_sharded_mrope_vision_model(), which would override the
+          context set here.
+    This method manually constructs a MMEncoderCudagraphManager because accessing the
+        one within the GPU model runner is difficult.
+    Args:
+        worker: The worker instance containing the model runner.
+        vllm_config: The vLLM engine configuration.
+        multi_modal_data: A dictionary of keyword arguments to be passed to
+            the model's `embed_multimodal` method.
+        enforce_eager: If True, forces the execution to run in eager mode
+    Returns:
+        The output from the model's `embed_multimodal` method.
+    """
+
+    # Access model via worker.model_runner.model
+    # Note: Accessing internal attributes. Assuming V1 worker structure.
+    model = worker.model_runner.model
+
+    # Move multi_modal_data to the model's device
+    target_device = next(model.parameters()).device
+    multi_modal_data = {
+        k: v.to(target_device) if isinstance(v, torch.Tensor) else v
+        for k, v in multi_modal_data.items()
+    }
+
+    processor = MULTIMODAL_REGISTRY.create_processor(vllm_config.model_config)
+    dummy_inputs_builder = processor.dummy_inputs
+    mm_cudagraph_manager = MMEncoderCudagraphManager(
+        vllm_config,
+        dummy_inputs_builder,
+    )
+    mm_cudagraph_manager.dispatcher.initialize_cudagraph_keys(
+        CUDAGraphMode.PIECEWISE,
+    )
+
+    # Dispatch to get runtime mode and batch descriptor
+    (
+        cudagraph_runtime_mode,
+        batch_descriptor,
+        _,
+        multi_modal_data,
+    ) = mm_cudagraph_manager.dispatch_and_pad_mm_input(multi_modal_data)
+    if enforce_eager:
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
+    else:
+        multi_modal_data["mm_cudagraph_manager"] = mm_cudagraph_manager
+
+    with (
+        set_forward_context(
+            None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+        ),
+        torch.inference_mode(),
     ):
+        ans = model.embed_multimodal(**multi_modal_data)
+        torch.cuda.synchronize()
+        return ans
+
+
+class TestQwenVLCUDAGraph:
+    def _run_embed_multimodal(self, llm, multi_modal_data, enforce_eager=False):
         """Runs the multimodal embedding process, potentially with CUDA graphs.
-        This method manually constructs a CudagraphDispatcher because accessing the
-        one within the GPU model runner is difficult. It then dispatches based on
-        the number of image patches to determine the appropriate CUDA graph or
-        eager mode for execution. The actual embedding is performed on the
-        worker(s) via an RPC call.
+        The actual embedding is performed on the worker(s) via an RPC call.
         Args:
             llm: The LLM object containing the model engine and configuration.
             multi_modal_data: A dictionary containing the multimodal data to be
                 processed.
-            num_patches: The number of image patches, used to determine the
-                number of tokens for the dispatcher.
-            force_eager: If True, forces the execution to run in eager mode,
+            enforce_eager: If True, forces the execution to run in eager mode,
                 bypassing CUDA graphs.
         Returns:
             The outputs from the multimodal embedding process executed on the
             worker.
         """
         vllm_config = llm.llm_engine.vllm_config
-
-        dispatcher = CudagraphDispatcher(vllm_config)
-        dispatcher.initialize_cudagraph_keys(
-            cudagraph_mode=vllm_config.compilation_config.cudagraph_mode,
-            uniform_decode_query_len=1,
-        )
-
-        # Dispatch to get runtime mode and batch descriptor
-        cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
-            num_tokens=num_patches,
-            uniform_decode=False,
-            has_lora=False,
-            is_mm_encoder=True,
-        )
-
         model_executor = llm.llm_engine.model_executor
 
         rpc_kwargs = {}
         # Use collective_rpc to execute on driver worker (rank 0)
         if isinstance(model_executor, MultiprocExecutor):
             rpc_kwargs["unique_reply_rank"] = 0
-        # If force_eager is True, override the runtime mode to NONE
-        if force_eager:
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
-        else:
-            multi_modal_data["cudagraph_dispatcher"] = dispatcher
+
         outputs = model_executor.collective_rpc(
             partial(
                 _worker_embed_multimodal,
                 vllm_config=vllm_config,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor,
                 multi_modal_data=multi_modal_data,
+                enforce_eager=enforce_eager,
             ),
             **rpc_kwargs,
         )
@@ -216,12 +211,12 @@ class TestQwenVLCUDAGraph:
 
             # Run with Piecewise CUDA Graph
             piecewise_outputs = self._run_embed_multimodal(
-                llm, multi_modal_data, num_patches * num_imgs, force_eager=False
+                llm, multi_modal_data, enforce_eager=False
             )
 
             # Run with Eager Mode (simulated by setting runtime mode to NONE)
             eager_outputs = self._run_embed_multimodal(
-                llm, multi_modal_data, num_patches * num_imgs, force_eager=True
+                llm, multi_modal_data, enforce_eager=True
             )
 
             if isinstance(piecewise_outputs, torch.Tensor):

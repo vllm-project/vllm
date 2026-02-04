@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import itertools
 import math
 from abc import ABC, abstractmethod
@@ -11,7 +12,6 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.config import (
-    CUDAGraphMode,
     MultiModalConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -483,9 +483,7 @@ def run_dp_sharded_mrope_vision_model(
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
     # Context setup
-    vllm_config = get_current_vllm_config()
-    cudagraph_runtime_mode = CUDAGraphMode.NONE
-    batch_descriptor = None
+    ctx = contextlib.nullcontext()
 
     if mm_cudagraph_manager is not None:
         mm_groups: dict[str, torch.Tensor | list] = {
@@ -501,12 +499,14 @@ def run_dp_sharded_mrope_vision_model(
         pixel_values_local = mm_groups["pixel_values"]
         local_grid_thw_list = mm_groups["image_grid_thw"]
 
-    with set_forward_context(
-        None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=cudagraph_runtime_mode,
-        batch_descriptor=batch_descriptor,
-    ):
+        ctx = set_forward_context(
+            None,
+            vllm_config=mm_cudagraph_manager.vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+        )
+
+    with ctx:
         # Run the vision model on the local pixel_values_local
         if rope_type == "rope_2d":
             if pixel_values_local.shape[0] > 0:

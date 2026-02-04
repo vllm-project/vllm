@@ -24,13 +24,10 @@ class MMEncoderCudagraphManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        cudagraph_dispatcher: CudagraphDispatcher,
-        device: torch.device,
         dummy_input_builder: BaseDummyInputsBuilder[Any],
     ):
         self.vllm_config = vllm_config
-        self.dispatcher = cudagraph_dispatcher
-        self.device = device
+        self.dispatcher = CudagraphDispatcher(self.vllm_config, is_mm_encoder=True)
         self.dummy_input_builder = dummy_input_builder
 
         compilation_config = vllm_config.compilation_config
@@ -76,7 +73,7 @@ class MMEncoderCudagraphManager:
         if not self.enabled:
             return (
                 CUDAGraphMode.NONE,
-                BatchDescriptor(num_tokens, is_mm_encoder=True),
+                BatchDescriptor(num_tokens),
                 original_num_imgs,
                 mm_kwargs_group,
             )
@@ -84,7 +81,6 @@ class MMEncoderCudagraphManager:
         # Dispatch to get the target padded size
         cudagraph_runtime_mode, batch_descriptor = self.dispatcher.dispatch(
             num_tokens=num_tokens,
-            is_mm_encoder=True,
         )
         target_num_tokens = batch_descriptor.num_tokens
 
@@ -127,10 +123,7 @@ class MMEncoderCudagraphManager:
             num_tokens
         )
 
-        batch_descriptor = BatchDescriptor(
-            num_tokens=num_tokens,
-            is_mm_encoder=True,
-        )
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
 
         with set_forward_context(
             None,

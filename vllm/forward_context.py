@@ -55,10 +55,6 @@ class BatchDescriptor(NamedTuple):
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
-    is_mm_encoder: bool = False
-    """
-    mm_encoder Piecewise CUDA Graph Flag
-    """
 
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
         """
@@ -71,7 +67,6 @@ class BatchDescriptor(NamedTuple):
             uniform=False,
             has_lora=self.has_lora,
             num_active_loras=self.num_active_loras,
-            is_mm_encoder=self.is_mm_encoder,
         )
 
 

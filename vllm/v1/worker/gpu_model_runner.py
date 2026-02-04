@@ -658,8 +658,6 @@ class GPUModelRunner(
             dummy_inputs_builder = processor.dummy_inputs
             self.mm_cudagraph_manager = MMEncoderCudagraphManager(
                 self.vllm_config,
-                self.cudagraph_dispatcher,
-                self.device,
                 dummy_inputs_builder,
             )
 
@@ -2442,11 +2440,7 @@ class GPUModelRunner(
                     # Default values for non-mm_encoder cudagraph case
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
                     batch_descriptor = None
-                    if (
-                        mm_mgr is not None
-                        and mm_mgr.enabled
-                        and "pixel_values" in mm_kwargs_group
-                    ):
+                    if mm_mgr is not None and "pixel_values" in mm_kwargs_group:
                         (
                             cudagraph_runtime_mode,
                             batch_descriptor,
@@ -5259,9 +5253,10 @@ class GPUModelRunner(
                 )
             # Capture MM encoder CUDA graphs if enabled
             if self.mm_cudagraph_manager is not None:
-                for runtime_mode, _ in self.cudagraph_dispatcher.get_capture_descs(
-                    is_mm_encoder=True
-                ):
+                for (
+                    runtime_mode,
+                    _,
+                ) in self.mm_cudagraph_manager.dispatcher.get_capture_descs():
                     self.mm_cudagraph_manager.capture(
                         model=self.model, cudagraph_mode=runtime_mode
                     )
@@ -5628,6 +5623,14 @@ class GPUModelRunner(
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
+
+        if (
+            self.mm_cudagraph_manager is not None
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
+        ):
+            self.mm_cudagraph_manager.dispatcher.initialize_cudagraph_keys(
+                CUDAGraphMode.PIECEWISE,
+            )
 
         # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
         if self.speculative_config and self.speculative_config.use_eagle():

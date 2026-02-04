@@ -29,9 +29,20 @@ class CudagraphDispatcher:
     runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, is_mm_encoder: bool = False):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
+        self.is_mm_encoder = is_mm_encoder
+        self.max_capture_size = (
+            self.compilation_config.max_cudagraph_capture_size
+            if not is_mm_encoder
+            else self.compilation_config.max_mm_encoder_cudagraph_capture_size
+        )
+        self.capture_sizes = (
+            self.compilation_config.cudagraph_capture_sizes
+            if not is_mm_encoder
+            else self.compilation_config.mm_encoder_cudagraph_capture_sizes
+        )
         self.uniform_decode_query_len = (
             1
             if not self.vllm_config.speculative_config
@@ -68,11 +79,16 @@ class CudagraphDispatcher:
 
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
-        max_capture_size = self.compilation_config.max_cudagraph_capture_size
-        capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        self._bs_to_padded_graph_size: list[int] = self._get_padded_size_map(
-            capture_sizes, max_capture_size
-        )
+        self._bs_to_padded_graph_size: list[int] = [0] * (self.max_capture_size + 1)
+        for end, start in zip(
+            self.capture_sizes + [self.max_capture_size + 1],
+            [0] + self.capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self._bs_to_padded_graph_size[bs] = start
+                else:
+                    self._bs_to_padded_graph_size[bs] = end
 
         # Validate that compile_sizes won't be changed by padding.
         # Only validate when cudagraphs are actually being used.
@@ -81,7 +97,7 @@ class CudagraphDispatcher:
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
             for size in self.compilation_config.compile_sizes:
-                if size <= max_capture_size:
+                if size <= self.max_capture_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
                         raise ValueError(
@@ -112,48 +128,16 @@ class CudagraphDispatcher:
             # No specialization: only capture graphs with LoRA active
             return [lora_config.max_loras + 1]
 
-    def _compute_bs_to_padded_mm_encoder_graph_size(self) -> None:
-        """pre-compute the mapping from batch size to mm_encoder padded graph size."""
-        max_capture_size = self.compilation_config.max_mm_encoder_cudagraph_capture_size
-        capture_sizes = self.compilation_config.mm_encoder_cudagraph_capture_sizes
-
-        self._bs_to_padded_mm_encoder_graph_size: list[int] = self._get_padded_size_map(
-            capture_sizes, max_capture_size
-        )
-
-    def _get_padded_size_map(
-        self, capture_sizes: list[int] | None, max_size: int | None
-    ) -> list[int]:
-        if capture_sizes is None:
-            capture_sizes = []
-        if max_size is None:
-            max_size = 0
-        padded_size_map: list[int] = [0] * (max_size + 1)
-        for end, start in zip(
-            capture_sizes + [max_size + 1],
-            [0] + capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    padded_size_map[bs] = start
-                else:
-                    padded_size_map[bs] = end
-        return padded_size_map
-
     def _create_padded_batch_descriptor(
         self,
         num_tokens: int,
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
-        is_mm_encoder: bool = False,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
-        if is_mm_encoder:
-            num_tokens_padded = self._bs_to_padded_mm_encoder_graph_size[num_tokens]
-        else:
-            num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
+        num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
             num_reqs = num_tokens_padded // uniform_decode_query_len
@@ -168,7 +152,6 @@ class CudagraphDispatcher:
             uniform=uniform_decode,
             has_lora=has_lora,
             num_active_loras=num_active_loras,
-            is_mm_encoder=is_mm_encoder,
         )
 
     def add_cudagraph_key(
@@ -192,10 +175,9 @@ class CudagraphDispatcher:
             return
 
         self._compute_bs_to_padded_graph_size()
-        self._compute_bs_to_padded_mm_encoder_graph_size()
 
         # Get LoRA cases to capture
-        lora_cases = self._get_lora_cases()
+        lora_cases = self._get_lora_cases() if not self.is_mm_encoder else [0]
         self.captured_lora_counts = [
             lora_count for lora_count in lora_cases if lora_count
         ]
@@ -204,21 +186,11 @@ class CudagraphDispatcher:
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs, num_active_loras in product(
-                self.compilation_config.cudagraph_capture_sizes, lora_cases
-            ):
+            for bs, num_active_loras in product(self.capture_sizes, lora_cases):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
                     self._create_padded_batch_descriptor(
                         bs, False, num_active_loras > 0, num_active_loras
-                    ).relax_for_mixed_batch_cudagraphs(),
-                )
-            # mm_encoder CUDAGraph Entry
-            for patch_len in self.compilation_config.mm_encoder_cudagraph_capture_sizes:
-                self.add_cudagraph_key(
-                    CUDAGraphMode.PIECEWISE,
-                    self._create_padded_batch_descriptor(
-                        patch_len, False, False, is_mm_encoder=True
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
 
@@ -234,7 +206,7 @@ class CudagraphDispatcher:
             )
             cudagraph_capture_sizes_for_decode = [
                 x
-                for x in self.compilation_config.cudagraph_capture_sizes
+                for x in self.capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             for bs, num_active_loras in product(
@@ -256,7 +228,6 @@ class CudagraphDispatcher:
         has_lora: bool = False,
         disable_full: bool = False,
         num_active_loras: int = 0,
-        is_mm_encoder: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -277,19 +248,9 @@ class CudagraphDispatcher:
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
-            or (
-                not is_mm_encoder
-                and num_tokens > self.compilation_config.max_cudagraph_capture_size
-            )
-            or (
-                is_mm_encoder
-                and num_tokens
-                > self.compilation_config.max_mm_encoder_cudagraph_capture_size
-            )
+            or num_tokens > self.max_capture_size
         ):
-            return CUDAGraphMode.NONE, BatchDescriptor(
-                num_tokens, is_mm_encoder=is_mm_encoder
-            )
+            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
         effective_num_active_loras = num_active_loras
         if has_lora and num_active_loras > 0:
@@ -307,13 +268,9 @@ class CudagraphDispatcher:
                 # so we must use max_loras + 1 for dispatch to find a matching graph.
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
-                batch_desc = self._create_padded_batch_descriptor(
-                    num_tokens,
-                    uniform_decode,
-                    has_lora,
-                    effective_num_active_loras,
-                    is_mm_encoder,
-                )
+        batch_desc = self._create_padded_batch_descriptor(
+            num_tokens, uniform_decode, has_lora, effective_num_active_loras
+        )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
         if not disable_full:
@@ -331,13 +288,9 @@ class CudagraphDispatcher:
             return CUDAGraphMode.PIECEWISE, relaxed_batch_desc
 
         # finally, just return no cudagraphs and a trivial batch descriptor
-        return CUDAGraphMode.NONE, BatchDescriptor(
-            num_tokens, is_mm_encoder=is_mm_encoder
-        )
+        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
-    def get_capture_descs(
-        self, is_mm_encoder: bool = False
-    ) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
+    def get_capture_descs(self) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
         """
         Returns capture descriptors for cudagraph capturing.
 
@@ -355,9 +308,7 @@ class CudagraphDispatcher:
             descs = list(self.cudagraph_keys[mode])
             if descs:
                 # Sort by num_tokens descending (largest first)
-                filter_descs = [d for d in descs if d.is_mm_encoder == is_mm_encoder]
-                if filter_descs:
-                    filter_descs.sort(key=lambda d: d.num_tokens, reverse=True)
-                    result.append((mode, filter_descs))
+                descs.sort(key=lambda d: d.num_tokens, reverse=True)
+                result.append((mode, descs))
 
         return result
