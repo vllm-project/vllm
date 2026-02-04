@@ -530,6 +530,7 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-venv \
         libibverbs-dev \
     && rm -rf /var/lib/apt/lists/* \
+    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
