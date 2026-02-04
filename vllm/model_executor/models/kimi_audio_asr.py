@@ -306,12 +306,8 @@ class KimiAudioASRMultiModalProcessor(
 
     """
 
-    def build_data_parser(self) -> MultiModalDataParser:
-        # SpeechToTextConfig is provided at request-time; for parser we only need
-
-        # a nominal target sample rate.
-
-        return KimiAudioASRMultiModalDataParser(target_sr=16_000)
+    # NOTE: Do not override `_get_data_parser` / `build_data_parser`.
+    # vLLM routes data parsing through `ProcessingInfo.get_data_parser()`.
 
     def _hf_processor_applies_updates(
         self,
