@@ -32,7 +32,6 @@ import torch
 from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -41,6 +40,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -575,7 +575,7 @@ class InternS1ProForConditionalGeneration(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         config: PretrainedConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -595,7 +595,6 @@ class InternS1ProForConditionalGeneration(
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
