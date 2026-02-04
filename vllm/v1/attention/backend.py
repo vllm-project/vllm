@@ -617,7 +617,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl(or ops) supports MTP
-    # when cp_kv_cache_interleave_size > 1
+    # when dcp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False
 
     # some attention backends might not always want to return lse

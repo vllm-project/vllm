@@ -23,7 +23,7 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
         kernel_block_size: int,
-        cp_kv_cache_interleave_size: int,
+        dcp_kv_cache_interleave_size: int,
     ):
         """
         Args:
@@ -95,7 +95,7 @@ class BlockTable:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+        self.dcp_kv_cache_interleave_size = dcp_kv_cache_interleave_size
 
     def append_row(
         self,
@@ -163,16 +163,16 @@ class BlockTable:
             virtual_block_offsets = positions % virtual_block_size
             mask = (
                 virtual_block_offsets
-                // self.cp_kv_cache_interleave_size
+                // self.dcp_kv_cache_interleave_size
                 % cp_world_size
                 == cp_rank
             )
             # Calculate local block_offsets
             block_offsets = (
                 virtual_block_offsets
-                // (cp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
-                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+                // (cp_world_size * self.dcp_kv_cache_interleave_size)
+                * self.dcp_kv_cache_interleave_size
+                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
             )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
@@ -266,7 +266,7 @@ class MultiGroupBlockTable:
         block_sizes: list[int],
         kernel_block_sizes: list[int],
         max_num_blocks: list[int] | None = None,
-        cp_kv_cache_interleave_size: int = 1,
+        dcp_kv_cache_interleave_size: int = 1,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
@@ -299,7 +299,7 @@ class MultiGroupBlockTable:
                 pin_memory,
                 device,
                 kernel_block_size,
-                cp_kv_cache_interleave_size,
+                dcp_kv_cache_interleave_size,
             )
             for block_size, kernel_block_size, max_num_blocks_per_req in zip(
                 block_sizes, kernel_block_sizes, max_num_blocks

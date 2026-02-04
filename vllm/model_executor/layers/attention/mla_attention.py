@@ -1143,7 +1143,7 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    cp_tot_seq_lens: torch.Tensor | None
+    dcp_tot_seq_lens: torch.Tensor | None
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -1371,9 +1371,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.pcp_world_size = 1
             self.pcp_rank = 0
         # DCP groups span PCP, so dcp_world_size is the effective CP world size.
-        self.cp_local_block_size = parallel_config.cp_kv_cache_interleave_size
-        self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_world_size
-        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+        self.dcp_kv_cache_interleave_size = parallel_config.dcp_kv_cache_interleave_size
         # TODO(yyj) Remove this once the PCP bug for decode_length > 1 is fixed.
         supports_cp_with_varlen = supports_cp_with_varlen and self.pcp_world_size == 1
 
@@ -1551,12 +1551,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        cp_tot_seq_lens_device: torch.Tensor | None,
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
-            cp_tot_seq_lens=cp_tot_seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -1699,16 +1699,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         context_lens_cpu,
                         self.dcp_world_size,
                         None,
-                        self.cp_local_block_size,
+                        self.dcp_local_block_size,
                     )
                     # Note(qcs): The max local context lengths
-                    # padded to `cp_local_block_size`.
+                    # padded to `dcp_local_block_size`.
                     padded_local_context_lens_cpu: torch.Tensor = (
                         cdiv(
                             context_lens_cpu,
-                            self.cp_virtual_block_size,
+                            self.dcp_virtual_block_size,
                         )
-                        * self.cp_local_block_size
+                        * self.dcp_local_block_size
                     )
                     # Note(hc): The above max_context_chunk already enforces
                     # block_size alignment, DCP and PCP just need the block_size can
@@ -1719,9 +1719,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     padded_local_max_context_chunk_across_ranks = (
                         cdiv(
                             max_context_chunk,
-                            self.cp_virtual_block_size,
+                            self.dcp_virtual_block_size,
                         )
-                        * self.cp_local_block_size
+                        * self.dcp_local_block_size
                     )
                     local_chunk_starts = (
                         torch.arange(num_chunks, dtype=torch.int32)
@@ -1847,20 +1847,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
-            cp_tot_seq_lens_device = None
+            dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
-                cp_tot_seq_lens_device = seq_lens[:num_decodes]
+                dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 
                 # After CP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
-                # and I is cp_kv_cache_interleave_size.
+                # and I is dcp_kv_cache_interleave_size.
                 # This eliminates GPU->CPU sync while minimizing workspace
                 # over-allocation.
-                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                num_partitions = self.dcp_world_size * self.dcp_kv_cache_interleave_size
                 max_seq_len = (
                     (max_seq_len + num_partitions - 1) // num_partitions
-                ) * self.cp_kv_cache_interleave_size
+                ) * self.dcp_kv_cache_interleave_size
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
@@ -1869,7 +1869,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
-                cp_tot_seq_lens_device=cp_tot_seq_lens_device,
+                dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 
         attn_metadata = self.metadata_cls(
@@ -2068,8 +2068,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.dcp_rank: int = -1
         self.pcp_rank: int = -1
 
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+        self.dcp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(

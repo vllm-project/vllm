@@ -791,7 +791,7 @@ def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
     dcp_rank: int | None = None,
-    cp_kv_cache_interleave_size: int = 1,
+    dcp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
     use this function to calculate split decode seq_lens of each dcp rank.
@@ -813,15 +813,15 @@ def get_dcp_local_seq_lens(
     )
     base = (
         seq_lens_tiled
-        // cp_kv_cache_interleave_size
+        // dcp_kv_cache_interleave_size
         // dcp_size
-        * cp_kv_cache_interleave_size
+        * dcp_kv_cache_interleave_size
     )
     remainder = seq_lens_tiled - base * dcp_size
     remainder = torch.clip(
-        remainder - rank_offsets * cp_kv_cache_interleave_size,
+        remainder - rank_offsets * dcp_kv_cache_interleave_size,
         0,
-        cp_kv_cache_interleave_size,
+        dcp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)

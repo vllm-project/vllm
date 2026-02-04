@@ -251,26 +251,19 @@ class ParallelConfig:
     needs to be divisible by dcp_size."""
 
     dcp_kv_cache_interleave_size: int = 1
-    """
-    Interleave size of kv_cache storage while using DCP.
-    dcp_kv_cache_interleave_size has been replaced by cp_kv_cache_interleave_size,
-    and will be deprecated when PCP is fully supported.
-
-    """
-    cp_kv_cache_interleave_size: int = 1
-    """Interleave size of kv_cache storage while using DCP or PCP.
-    For `cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `cp_world_size = pcp_world_size * dcp_world_size`.
-    store interleave_size tokens on cp_rank i,
-    then store next interleave_size tokens on cp_rank i+1.
+    """Interleave size of KV cache storage while using DCP.
+    Store interleave_size tokens on dcp_rank i, then store next
+    interleave_size tokens on dcp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
-        cp_rank `i % cp_world_size`.
+        dcp_rank `i % dcp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
         first populated to the preceding ranks. Tokens are then stored
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
-    Block_size should be greater than or equal to cp_kv_cache_interleave_size.
-    Block_size should be divisible by cp_kv_cache_interleave_size.
+    Block_size should be >= dcp_kv_cache_interleave_size and divisible by it.
     """
+
+    cp_kv_cache_interleave_size: int = 1
+    """DEPRECATED: Use dcp_kv_cache_interleave_size instead."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
