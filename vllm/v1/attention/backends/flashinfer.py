@@ -644,6 +644,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        """Get the cudagraph support level for FlashInfer attention.
+
+        This depends on whether we can use TRTLLM attention for decodes, since we can
+        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
+        To check this, we must call can_use_trtllm_attention with the number of KV
+        heads from the kv_cache_spec. We check all available KV cache specs and
+        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        """
+        # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -655,8 +664,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         has_trtllm_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
-                has_trtllm_support = False
-                break
+                # FlashInfer only applies to attention, so we don't consider other types
+                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
+                continue
             if not can_use_trtllm_attention(
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
