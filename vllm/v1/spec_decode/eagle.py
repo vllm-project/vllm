@@ -46,7 +46,6 @@ from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
-    create_vllm_config_for_draft_model,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     extend_all_queries_by_N,
@@ -87,7 +86,6 @@ class SpecDecodeBaseProposer:
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Unifying eagle, draft model, and parallel drafting support
-        self.is_draft_model = not self.pass_hidden_states_to_model
         self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
@@ -1273,8 +1271,21 @@ class SpecDecodeBaseProposer:
             model = model.module
         return model.__class__.__name__
 
+    def _get_model(self) -> nn.Module:
+        """
+        Default method to call get_model(). Can be overridden by subclasses which
+        need to customize model loading.
+        """
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("eagle_head"):
+            model = get_model(
+                vllm_config=self.vllm_config,
+                model_config=self.speculative_config.draft_model_config,
+            )
+        return model
+
     def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = self.speculative_config.draft_model_config
         target_attn_layer_names = set(
             get_layers_from_vllm_config(
                 self.vllm_config,
@@ -1288,24 +1299,7 @@ class SpecDecodeBaseProposer:
             ).keys()
         )
 
-        from vllm.compilation.backends import set_model_tag
-
-        if self.is_draft_model:
-            # Draft models may be quantized or on different parallelism,
-            # so we load them with a modified vllm config
-            temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
-            with set_model_tag("draft_model"):
-                self.model = get_model(
-                    vllm_config=temp_vllm_config,
-                    prefix="draft_model",
-                )
-        else:
-            # EAGLE models read the base model's vllm config to determine
-            # total number of layers, hidden size, etc.
-            with set_model_tag("eagle_head"):
-                self.model = get_model(
-                    vllm_config=self.vllm_config, model_config=draft_model_config
-                )
+        self.model = self._get_model()
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(
@@ -1374,8 +1368,27 @@ class SpecDecodeBaseProposer:
         else:
             target_language_model = target_model
 
-        # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1 and not self.is_draft_model:
+        self._maybe_share_embeddings(target_language_model)
+        self._maybe_share_lm_head(target_language_model)
+
+        if self.parallel_drafting and self.pass_hidden_states_to_model:
+            assert self.parallel_drafting_hidden_state_tensor is not None
+            self.parallel_drafting_hidden_state_tensor.copy_(
+                self.model.combine_hidden_states(
+                    self.model.mask_hidden.view(3 * self.hidden_size)
+                )
+                if self.eagle3_use_aux_hidden_state
+                else self.model.mask_hidden.view(self.hidden_size)
+            )
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        """
+        Some draft models may not have their own embedding layers, and some may
+        have a duplicate copy of the target model's embedding layers. In these cases,
+        we share the target model's embedding layers with the draft model to save
+        memory.
+        """
+        if get_pp_group().world_size == 1:
             inner_model = getattr(target_language_model, "model", None)
             if inner_model is None:
                 raise AttributeError("Target model does not have 'model' attribute")
@@ -1437,9 +1450,14 @@ class SpecDecodeBaseProposer:
                 " from the target model."
             )
 
-        # share lm_head with the target model if needed
+    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
+        """
+        Some draft models may not have their own LM head, and some may have a
+        duplicate copy of the target model's LM head. In these cases, we share
+        the target model's LM head with the draft model to save memory.
+        """
         share_lm_head = False
-        if hasattr(self.model, "has_own_lm_head") and not self.is_draft_model:
+        if hasattr(self.model, "has_own_lm_head"):
             # EAGLE model
             if not self.model.has_own_lm_head:
                 share_lm_head = True
@@ -1468,7 +1486,7 @@ class SpecDecodeBaseProposer:
                     "Detected EAGLE model with distinct lm_head weights. "
                     "Keeping separate lm_head weights from the target model."
                 )
-        elif not self.is_draft_model:
+        else:
             # MTP model
             share_lm_head = True
             logger.info(
@@ -1480,16 +1498,6 @@ class SpecDecodeBaseProposer:
             if hasattr(self.model, "lm_head"):
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
-
-        if self.parallel_drafting and self.pass_hidden_states_to_model:
-            assert self.parallel_drafting_hidden_state_tensor is not None
-            self.parallel_drafting_hidden_state_tensor.copy_(
-                self.model.combine_hidden_states(
-                    self.model.mask_hidden.view(3 * self.hidden_size)
-                )
-                if self.eagle3_use_aux_hidden_state
-                else self.model.mask_hidden.view(self.hidden_size)
-            )
 
     @torch.inference_mode()
     def dummy_run(

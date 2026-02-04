@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import torch.nn as nn
+from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 
 logger = init_logger(__name__)
 
@@ -45,3 +49,27 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 f"must be the same. Got {draft_tp} and {tgt_tp}. "
                 "Please pass 'draft_tensor_parallel_size' in the speculative_config."
             )
+
+    @override
+    def _get_model(self) -> nn.Module:
+        # Draft models may be quantized or on different parallelism,
+        # so we load them with a modified vllm config
+        from vllm.compilation.backends import set_model_tag
+
+        temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+        with set_model_tag("draft_model"):
+            model = get_model(
+                vllm_config=temp_vllm_config,
+                prefix="draft_model",
+            )
+        return model
+
+    @override
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        # Draft models don't share embeddings with the target model
+        pass
+
+    @override
+    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
+        # Draft models don't share lm_head with the target model
+        pass
