@@ -487,9 +487,11 @@ class Scheduler(SchedulerInterface):
                     - request.num_output_placeholders
                 )
                 if num_scheduled_spec_tokens > 0:
-                    # Trim spec_token_ids list to num_scheduled_spec_tokens.
-                    del request.spec_token_ids[num_scheduled_spec_tokens:]
-                    scheduled_spec_decode_tokens[request_id] = request.spec_token_ids
+                    spec_token_ids = request.spec_token_ids
+                    if len(spec_token_ids) > num_scheduled_spec_tokens:
+                        spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                    scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
                 request.spec_token_ids = []
@@ -887,7 +889,8 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
-        request.spec_token_ids.clear()
+        if request.spec_token_ids:
+            request.spec_token_ids = []
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
