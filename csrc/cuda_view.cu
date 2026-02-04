@@ -7,6 +7,12 @@
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
+  // handle empty tensor
+  if (cpu_tensor.numel() == 0) {
+    return torch::empty(cpu_tensor.sizes(),
+                        cpu_tensor.options().device(torch::kCUDA));
+  }
+
   if (cpu_tensor.is_pinned()) {
     // If CPU tensor is pinned, directly get the device pointer.
     void* host_ptr = const_cast<void*>(cpu_tensor.data_ptr());
