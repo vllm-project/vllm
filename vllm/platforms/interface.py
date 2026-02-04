@@ -118,9 +118,9 @@ class Platform:
     # hint: search for "get_visible_accelerator_ids_env_var" in
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
-    
+
     # environment variables that need to be set to 1 to prevent ray from
-    # setting the visible devices e.g. 
+    # setting the visible devices e.g.
     # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
     ray_noset_device_env_vars: list[str] = []
 

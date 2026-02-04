@@ -147,12 +147,17 @@ class RayDistributedExecutor(Executor):
         )
 
         return ray_remote_kwargs
-    
+
     def _update_noset_device_env_vars(self, ray_remote_kwargs):
         runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
-        runtime_env.update({"env_vars": {
-            env_var: "1" for env_var in current_platform.ray_noset_device_env_vars
-        }})
+        runtime_env.update(
+            {
+                "env_vars": {
+                    env_var: "1"
+                    for env_var in current_platform.ray_noset_device_env_vars
+                }
+            }
+        )
         return ray_remote_kwargs
 
     # child class could overwrite this to return actual env vars.
@@ -178,11 +183,11 @@ class RayDistributedExecutor(Executor):
                 ray_remote_kwargs
             )
 
-        # The way ray actors are setup in vllm is that the visible devices are 
-        # not set by actors, they are left unset by ray. Internally we index 
+        # The way ray actors are setup in vllm is that the visible devices are
+        # not set by actors, they are left unset by ray. Internally we index
         # the right gpu with local_rank. This is similar to how mp mode works.
         self._update_noset_device_env_vars(ray_remote_kwargs)
-        
+
         # Create the workers.
         bundle_indices: list[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
@@ -320,10 +325,10 @@ class RayDistributedExecutor(Executor):
         # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
         # This is needed because:
         # 1. Ray's compiled DAG needs to find the allocated GPU in
-        #    CUDA_VISIBLE_DEVICES. 
+        #    CUDA_VISIBLE_DEVICES.
         # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
-        #    all GPUs for P2P checks and communication setup. Though if it was 
-        #    just this reason, we could have also just kept the visible devices 
+        #    all GPUs for P2P checks and communication setup. Though if it was
+        #    just this reason, we could have also just kept the visible devices
         #    unset.
         # Each worker will use local_rank to index into the visible devices.
         all_args_to_update_environment_variables = [
