@@ -178,6 +178,37 @@ def count_tokens(response_data: dict) -> tuple[int, int]:
     return usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
 
 
+@dataclass
+class ServerConfig:
+    """Server parallelism configuration."""
+
+    data_parallel_size: int = 1
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    world_size: int = 1
+
+
+async def fetch_server_config(
+    session: aiohttp.ClientSession,
+    rotator: EndpointRotator,
+) -> ServerConfig:
+    """Fetch server parallelism config from first endpoint."""
+    endpoint = rotator.all()[0]
+    try:
+        resp = await session.get(f"{endpoint}/debug/config")
+        if resp.status == 200:
+            data = await resp.json()
+            return ServerConfig(
+                data_parallel_size=data.get("data_parallel_size", 1),
+                tensor_parallel_size=data.get("tensor_parallel_size", 1),
+                pipeline_parallel_size=data.get("pipeline_parallel_size", 1),
+                world_size=data.get("world_size", 1),
+            )
+    except Exception as e:
+        logger.warning("Failed to fetch server config: %s", e)
+    return ServerConfig()
+
+
 async def run_single_iteration(
     session: aiohttp.ClientSession,
     config: BenchmarkConfig,
@@ -270,7 +301,9 @@ async def fetch_traces(
     return downloaded
 
 
-async def run_benchmark(config: BenchmarkConfig) -> list[IterationResult]:
+async def run_benchmark(
+    config: BenchmarkConfig,
+) -> tuple[list[IterationResult], ServerConfig]:
     """Main benchmark loop with parameter sweeping."""
 
     rotator = EndpointRotator(config.endpoints)
@@ -283,6 +316,15 @@ async def run_benchmark(config: BenchmarkConfig) -> list[IterationResult]:
     )
 
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Fetch server config once
+        server_config = await fetch_server_config(session, rotator)
+        logger.info(
+            "Server config: DP=%d, TP=%d, PP=%d",
+            server_config.data_parallel_size,
+            server_config.tensor_parallel_size,
+            server_config.pipeline_parallel_size,
+        )
+
         # Start profiling if requested
         prefix = None
         profiling_started = False
@@ -376,10 +418,13 @@ async def run_benchmark(config: BenchmarkConfig) -> list[IterationResult]:
             logger.info("Stopped profiling")
             await fetch_traces(session, rotator, prefix, "traces")
 
-    return results
+    return results, server_config
 
 
-def print_results_summary(results: list[IterationResult]) -> None:
+def print_results_summary(
+    results: list[IterationResult],
+    server_config: ServerConfig | None = None,
+) -> None:
     """Print a summary of benchmark results."""
     if not results:
         logger.warning("No results to summarize")
@@ -388,6 +433,16 @@ def print_results_summary(results: list[IterationResult]) -> None:
     print("\n" + "=" * 110)
     print("BENCHMARK RESULTS SUMMARY")
     print("=" * 110)
+
+    if server_config:
+        print(
+            f"Server: DP={server_config.data_parallel_size}, "
+            f"TP={server_config.tensor_parallel_size}, "
+            f"PP={server_config.pipeline_parallel_size}, "
+            f"World={server_config.world_size}"
+        )
+        print("-" * 110)
+
     print(
         f"{'Mode':>8} {'Context':>8} {'Input':>8} {'Batch':>6} {'Iters':>6} "
         f"{'Total (ms)':>12} {'Per-Iter (ms)':>14} {'Tokens/s':>12}"
@@ -516,8 +571,8 @@ def main(args: argparse.Namespace | None = None):
         )
 
     logger.info("Starting benchmark with config: %s", config)
-    results = asyncio.run(run_benchmark(config))
-    print_results_summary(results)
+    results, server_config = asyncio.run(run_benchmark(config))
+    print_results_summary(results, server_config)
 
     if args.output:
         write_results_json(results, args.output)
