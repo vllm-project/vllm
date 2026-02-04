@@ -161,7 +161,6 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     seq_lens: torch.Tensor
 
     # Sparse-specific
-    topk_tokens_tensor: torch.Tensor
     block_size: int = 64
     topk_tokens: int = 2048
 
@@ -191,12 +190,6 @@ class FlashInferMLASparseMetadataBuilder(
 
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
-            dtype=torch.int32,
-            device=device,
-        )
-        self.topk_tokens_tensor = torch.full(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
-            self.topk_tokens,
             dtype=torch.int32,
             device=device,
         )
@@ -236,7 +229,6 @@ class FlashInferMLASparseMetadataBuilder(
             seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            topk_tokens_tensor=self.topk_tokens_tensor,
         )
 
 
@@ -327,12 +319,13 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical = triton_convert_req_index_to_global_index(
+        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
+            return_valid_counts=True,
         )
 
         if self._workspace_buffer is None:
@@ -342,8 +335,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
-
-        seq_lens = attn_metadata.topk_tokens_tensor[:num_actual_toks]
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),

@@ -278,23 +278,33 @@ def test_sparse_backend_decode_correctness(
     # Create sparse indices with UNIQUE per-token offsets to catch bugs where
     # the kernel uses wrong indices for some tokens (e.g., due to incorrect
     # tensor shapes like [1, num_tokens, ...] instead of [num_tokens, 1, ...]).
-    base_indices = torch.arange(topk_tokens, device=device, dtype=torch.int32)
+    # Also include -1 masked indices to verify the kernel handles them correctly.
     sparse_indices = torch.empty(
         total_query_tokens, topk_tokens, dtype=torch.int32, device=device
     )
     for tok_idx in range(total_query_tokens):
         max_valid_idx = positions[tok_idx]
         offset = tok_idx * 7  # Prime number for varied offsets
-        if max_valid_idx > 0:
-            tok_indices = (base_indices + offset) % (max_valid_idx + 1)
+        # Use only half the topk indices as valid, mask the rest with -1
+        # This tests that the kernel correctly ignores -1 indices
+        num_valid = min(topk_tokens // 2, max_valid_idx + 1)
+        if num_valid > 0:
+            valid_range = torch.arange(num_valid, device=device, dtype=torch.int32)
+            tok_indices = (valid_range + offset) % (max_valid_idx + 1)
+            # Pad with -1 for the remaining positions
+            tok_indices = torch.cat(
+                [
+                    tok_indices,
+                    torch.full(
+                        (topk_tokens - num_valid,), -1, device=device, dtype=torch.int32
+                    ),
+                ]
+            )
         else:
-            tok_indices = torch.zeros_like(base_indices)
-        # Mask out indices beyond topk (though with small topk this won't apply)
-        tok_indices = torch.where(
-            base_indices < topk_tokens,
-            tok_indices,
-            torch.full_like(tok_indices, -1),
-        )
+            tok_indices = torch.full(
+                (topk_tokens,), -1, device=device, dtype=torch.int32
+            )
+            tok_indices[0] = 0  # At least one valid index
         sparse_indices[tok_idx] = tok_indices
 
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -676,3 +686,63 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected
+
+
+def test_triton_convert_returns_valid_counts():
+    """Test that return_valid_counts correctly counts non-negative indices."""
+    device = torch.device("cuda")
+    num_tokens = 8
+    num_requests = 2
+    max_blocks_per_req = 10
+    block_size = 64
+    num_topk_tokens = 128
+
+    req_id = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32, device=device)
+    block_table = torch.arange(
+        num_requests * max_blocks_per_req, dtype=torch.int32, device=device
+    ).view(num_requests, max_blocks_per_req)
+
+    # Create token indices with varying numbers of valid entries
+    # Token 0: 64 valid, 64 invalid (-1)
+    # Token 1: 32 valid, 96 invalid
+    # Token 2: 128 valid (all)
+    # Token 3: 1 valid, 127 invalid
+    # etc.
+    token_indices = torch.full(
+        (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
+    )
+    expected_valid = []
+    for i in range(num_tokens):
+        num_valid = [64, 32, 128, 1, 64, 32, 128, 1][i]
+        token_indices[i, :num_valid] = torch.arange(
+            num_valid, dtype=torch.int32, device=device
+        ) % (block_size * max_blocks_per_req)
+        expected_valid.append(num_valid)
+
+    expected_valid_tensor = torch.tensor(
+        expected_valid, dtype=torch.int32, device=device
+    )
+
+    # Test with return_valid_counts=True
+    result, valid_counts = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        return_valid_counts=True,
+    )
+
+    torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)
+
+    # Test that return_valid_counts=False returns only the indices
+    result_only = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        return_valid_counts=False,
+    )
+    assert isinstance(result_only, torch.Tensor)
+    torch.testing.assert_close(result_only, result, rtol=0, atol=0)

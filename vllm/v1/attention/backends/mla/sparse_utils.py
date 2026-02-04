@@ -7,13 +7,14 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-# Kernel with prefill workspace support
+# Kernel with prefill workspace support and valid count tracking
 @triton.jit
 def _convert_req_index_to_global_index_kernel(
     req_id_ptr,  # int32 [num_tokens]
     block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
     token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    valid_count_ptr,  # int32 [num_tokens] - output valid count per row
     prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
     workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
     # shapes (compile-time where possible)
@@ -21,6 +22,7 @@ def _convert_req_index_to_global_index_kernel(
     BLOCK_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
+    COUNT_VALID: tl.constexpr,  # whether to count valid indices
     # strides (in elements)
     bt_stride0,
     bt_stride1,
@@ -74,6 +76,11 @@ def _convert_req_index_to_global_index_kernel(
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
     tl.store(out_ptr_ij, out_val)
 
+    # Count valid indices in this tile and atomically add to row total
+    if COUNT_VALID:
+        tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
+        tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+
 
 def triton_convert_req_index_to_global_index(
     req_id: torch.Tensor,  # int32 [num_tokens]
@@ -85,7 +92,8 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
-):
+    return_valid_counts: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
         block_table[req_id[token_id],
@@ -104,6 +112,9 @@ def triton_convert_req_index_to_global_index(
         prefill request index (maps to prefill_workspace_starts)
     prefill_workspace_starts: int32 [num_prefills], 0-indexed workspace
         starts for each prefill request
+
+    When return_valid_counts is True, also returns the count of valid (non -1)
+    indices per row, computed during the same kernel pass (no extra overhead).
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -129,6 +140,13 @@ def triton_convert_req_index_to_global_index(
     token_indices_c = token_indices.contiguous()
     out = torch.empty_like(token_indices_c)
 
+    # Allocate valid count buffer if needed (must be zero-initialized for atomics)
+    valid_counts: torch.Tensor | None = None
+    if return_valid_counts:
+        valid_counts = torch.zeros(
+            num_tokens, dtype=torch.int32, device=token_indices.device
+        )
+
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
     ti_stride0, ti_stride1 = token_indices_c.stride()
@@ -149,6 +167,7 @@ def triton_convert_req_index_to_global_index(
         block_table_c,
         token_indices_c,
         out,
+        valid_counts,
         prefill_workspace_request_ids,
         prefill_workspace_starts,
         # shapes / constexprs
@@ -156,6 +175,7 @@ def triton_convert_req_index_to_global_index(
         BLOCK_SIZE,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
+        return_valid_counts,
         # strides
         bt_stride0,
         bt_stride1,
@@ -164,4 +184,8 @@ def triton_convert_req_index_to_global_index(
         out_stride0,
         out_stride1,
     )
+
+    if return_valid_counts:
+        assert valid_counts is not None
+        return out, valid_counts
     return out
