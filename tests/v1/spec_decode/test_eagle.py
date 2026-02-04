@@ -148,6 +148,11 @@ def test_prepare_next_token_ids():
         block_size=16,
         device=device,
     )
+    kv_cache_group_id = 0
+    common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
+    # Mock connection of layer names to kv_cache_group_ids
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
 
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
@@ -155,7 +160,7 @@ def test_prepare_next_token_ids():
 
     next_token_ids_from_padded, valid_sampled_tokens_count = (
         proposer.prepare_next_token_ids_padded(
-            common_attn_metadata,
+            common_attn_metadata_by_gid,
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,
@@ -248,10 +253,17 @@ def test_prepare_inputs():
     )
     proposer = _create_proposer("eagle", 1)
 
-    updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, sampled_token_ids, num_draft_tokens
+    # Mock connection of layer names to kv_cache_group_ids
+    kv_cache_group_id = 0
+    common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
+
+    updated_cm_by_gid, token_indices = proposer.prepare_inputs(
+        common_attn_metadata_by_gid, sampled_token_ids, num_draft_tokens
     )
 
+    updated_metadata = updated_cm_by_gid[kv_cache_group_id]
     assert torch.equal(updated_metadata.query_start_loc, expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
@@ -306,9 +318,17 @@ def test_prepare_inputs_padded():
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
-    output_metadata, token_indices_to_sample, num_rejected_tokens_gpu = (
+    # Mock connection of layer names to kv_cache_group_ids
+    kv_cache_group_id = 0
+    common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
+
+    output_cm_by_gid, token_indices_to_sample, num_rejected_tokens_gpu = (
         proposer.prepare_inputs_padded(
-            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+            common_attn_metadata_by_gid,
+            spec_decode_metadata,
+            valid_sampled_tokens_count,
         )
     )
 
@@ -316,6 +336,7 @@ def test_prepare_inputs_padded():
     expected_num_rejected = torch.tensor([1, 0, 2], dtype=torch.int32, device=device)
     assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
 
+    output_metadata = output_cm_by_gid[kv_cache_group_id]
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
@@ -566,13 +587,15 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][
-        0
-    ].get_metadata_builder.return_value = attn_metadata_builder
+    attn_group = mock.MagicMock()
+    attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    attn_group.layer_names = proposer.attn_layer_names
+    proposer.runner.attn_groups = [[attn_group]]
     proposer._get_attention_metadata_builder = mock.MagicMock(
         return_value=attn_metadata_builder
     )
+    kv_cache_group_id = 0
+    common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
 
     result = proposer.propose(
         target_token_ids=target_token_ids,
@@ -580,8 +603,8 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
         last_token_indices=None,
-        common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
+        cm_by_gid=common_attn_metadata_by_gid,
     )
 
     assert result.shape == (batch_size, num_speculative_tokens)
@@ -702,11 +725,11 @@ def test_propose_tree(spec_token_tree):
 
     # Mock runner for attention metadata building.
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builders = [attn_metadata_builder]
-    proposer.runner.attn_groups[0][
-        0
-    ].get_metadata_builder.return_value = attn_metadata_builder
+    attn_group = mock.MagicMock()
+    attn_group.layer_names = proposer.attn_layer_names
+    attn_group.metadata_builders = [attn_metadata_builder]
+    attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    proposer.runner.attn_groups = [[attn_group]]
     proposer._get_attention_metadata_builder = mock.MagicMock(
         return_value=attn_metadata_builder
     )
@@ -729,6 +752,8 @@ def test_propose_tree(spec_token_tree):
         block_size=16,
         device=device,
     )
+    kv_cache_group_id = 0
+    common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
     sampling_metadata = mock.MagicMock()
 
     # Propose draft tokens.
@@ -738,8 +763,8 @@ def test_propose_tree(spec_token_tree):
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
         last_token_indices=None,
-        common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
+        cm_by_gid=common_attn_metadata_by_gid,
     )
     assert result.shape == (batch_size, num_speculative_tokens)
 

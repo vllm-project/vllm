@@ -9,10 +9,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import CommonAttnMetadataByGid
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     extend_all_queries_by_1,
 )
+from vllm.v1.core.kv_cache_utils import DRAFT_MODEL_PREFIX
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
@@ -36,10 +38,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_padded_drafter_batch_disabled()
         self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
-
-    def _block_size(self) -> int:
-        builder = self._get_attention_metadata_builder()
-        return builder.kv_cache_spec.block_size
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -88,9 +86,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         next_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         last_token_indices: torch.Tensor | None,
-        cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
-    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        cm_by_gid: CommonAttnMetadataByGid,
+    ) -> tuple[int, torch.Tensor, CommonAttnMetadataByGid]:
+        cad = self.pick_first_layer_common_attn_metadata(cm_by_gid)
         batch_size = cad.batch_size()
         grid = (batch_size,)
         start_locs = cad.query_start_loc[:-1]
@@ -126,26 +125,28 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             rejected_tok_fill=0,
         )
 
-        # recompute slot mapping
-        new_slot_mapping = compute_new_slot_mapping(
-            cad=cad,
-            new_positions=self.positions[:num_tokens],
-            is_rejected_token_mask=is_rejected_tok,
-            block_size=self._block_size(),
-            max_model_len=self.max_model_len,
-        )
-        # update common_attn_metadata
-        new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
-            cad,
-            arange=self.arange,
-            new_slot_mapping=new_slot_mapping,
-        )
+        # Update slot_mappings across all KV cache groups
+        new_cm_by_gid: CommonAttnMetadataByGid = {}
+        for gid, cm in cm_by_gid.items():
+            slot_mapping = compute_new_slot_mapping(
+                cad=cm,
+                new_positions=self.positions[:num_tokens],
+                is_rejected_token_mask=is_rejected_tok,
+                block_size=self._get_metadata_builder(gid).kv_cache_spec.block_size,
+                max_model_len=self.max_model_len,
+                block_table_tensor=cm.block_table_tensor,
+            )
+            new_cm = cm.replace(slot_mapping=slot_mapping)
+            new_cm = extend_all_queries_by_1(new_cm, arange=self.arange)
+            new_cm_by_gid[gid] = new_cm
 
+        # Pick the updated CAM to compute new_last_token_indices
+        new_cad = self.pick_first_layer_common_attn_metadata(new_cm_by_gid)
         new_last_token_indices = new_cad.query_start_loc[1:] - 1
         if num_rejected_tokens_gpu is not None:
             new_last_token_indices -= num_rejected_tokens_gpu
 
-        return num_tokens, new_last_token_indices, new_cad
+        return num_tokens, new_last_token_indices, new_cm_by_gid
 
     def load_model(self, target_model: Any) -> None:
         """Takes target_model to satisfy the type checker."""
@@ -167,8 +168,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             draft_vllm_config.parallel_config.tensor_parallel_size,
             draft_vllm_config.parallel_config.rank,
         )
-        with set_model_tag("draft_model"):
-            self.model = get_model(vllm_config=draft_vllm_config, prefix="draft_model")
+        with set_model_tag(DRAFT_MODEL_PREFIX):
+            self.model = get_model(
+                vllm_config=draft_vllm_config, prefix=DRAFT_MODEL_PREFIX
+            )
 
         # This must be computed after loading the draft model
         # because that mutates the forward_context of the vllm_config
@@ -210,8 +213,9 @@ def compute_new_slot_mapping(
     is_rejected_token_mask: torch.Tensor,
     block_size: int,
     max_model_len: int,
+    block_table_tensor: torch.Tensor,
 ):
-    batch_size, n_blocks_per_req = cad.block_table_tensor.shape
+    batch_size, n_blocks_per_req = block_table_tensor.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
     req_indices = torch.repeat_interleave(
         req_indices, cad.naive_query_lens() + 1, output_size=len(new_positions)
@@ -222,7 +226,7 @@ def compute_new_slot_mapping(
     block_table_indices = (
         req_indices * n_blocks_per_req + clamped_positions // block_size
     )
-    block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
+    block_nums = block_table_tensor.view(-1)[block_table_indices]
     block_offsets = clamped_positions % block_size
     new_slot_mapping = block_nums * block_size + block_offsets
     # Mask out the position ids that exceed the max model length.

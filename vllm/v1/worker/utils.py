@@ -237,3 +237,16 @@ def is_residual_scattered_for_sp(
     if compile_sizes is None:
         return False
     return num_input_tokens in compile_sizes
+
+
+def layer_names_to_kv_cache_group_id(
+    attn_groups: list[list[AttentionGroup]],
+    only_prefix: str = "",  # Note that str.startswith("") is True
+) -> dict[str, int]:
+    layer_to_kv_cache_gid = {}
+    for group_id, listof_attn_groups in enumerate(attn_groups):
+        for attn_group in listof_attn_groups:
+            for layer_name in attn_group.layer_names:
+                if layer_name.startswith(only_prefix):
+                    layer_to_kv_cache_gid[layer_name] = group_id
+    return layer_to_kv_cache_gid
