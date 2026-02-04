@@ -29,6 +29,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -522,7 +523,7 @@ class FusedMoE(CustomOp):
         # TODO(bnell): end attributes
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
-        self.activation = activation
+        self.activation = MoEActivation.from_str(activation)
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -557,7 +558,7 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
-            activation=activation,
+            activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
         )

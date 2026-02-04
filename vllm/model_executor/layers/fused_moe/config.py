@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
@@ -1071,7 +1072,7 @@ class FusedMoEConfig:
     hidden_dim: int
     intermediate_size_per_partition: int
     num_local_experts: int
-    activation: str
+    activation: MoEActivation
     device: torch.device | str
     routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig

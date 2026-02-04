@@ -17,6 +17,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -35,7 +39,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    apply_moe_activation,
     disable_inplace,
     moe_kernel_quantize_input,
 )
@@ -1472,6 +1475,7 @@ def outplace_fused_experts_fake(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
@@ -1525,7 +1529,7 @@ def fused_experts(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     inplace: bool = False,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1540,7 +1544,7 @@ def fused_experts(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        activation=activation,
+        activation=activation.value,
         apply_router_weight_on_input=apply_router_weight_on_input,
         use_fp8_w8a8=quant_config.use_fp8_w8a8,
         use_int8_w8a8=quant_config.use_int8_w8a8,
@@ -1614,6 +1618,9 @@ def fused_experts_impl(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # Convert string activation to enum for internal use
+    activation_enum = MoEActivation.from_str(activation)
+
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -1695,7 +1702,7 @@ def fused_experts_impl(
 
     # This needs separate memory since it's used concurrently with cache1
     activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
-        N, activation
+        N, activation_enum
     )
     intermediate_cache2 = torch.empty(
         (M * top_k_num, activation_out_dim),
@@ -1841,7 +1848,7 @@ def fused_experts_impl(
         )
 
         apply_moe_activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation_enum, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
@@ -1938,8 +1945,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai", "swiglustep"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -1963,7 +1975,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M, topk, max(activation_out_dim, K))
@@ -1979,7 +1991,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -2144,7 +2156,7 @@ class TritonWNA16Experts(TritonExperts):
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
+    def _supports_activation(activation: MoEActivation) -> bool:
         raise NotImplementedError(
             "TritonWNA16Experts is not yet used by an Oracle. "
             "This method should not be called."
@@ -2165,7 +2177,7 @@ class TritonWNA16Experts(TritonExperts):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,

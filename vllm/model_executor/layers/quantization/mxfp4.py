@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1150,8 +1151,9 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer.activation == "swigluoai", (
-            "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
+        assert layer.activation == MoEActivation.SWIGLUOAI, (
+            "Only swiglu_oai activation is supported for "
+            f"IPEX MXFP4 MoE, not {layer.activation}."
         )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))

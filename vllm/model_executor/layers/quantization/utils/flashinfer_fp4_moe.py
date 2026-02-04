@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -63,9 +64,9 @@ def _supports_quant_scheme(
     return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-def _supports_activation(activation: str) -> bool:
+def _supports_activation(activation: MoEActivation) -> bool:
     """Supports silu activation only."""
-    return activation in ["silu"]
+    return activation in [MoEActivation.SILU]
 
 
 def _supports_routing_method(
@@ -262,7 +263,7 @@ def flashinfer_trtllm_fp4_moe(
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
     num_expert_group: int | None,
     topk_group: int | None,
@@ -292,7 +293,7 @@ def flashinfer_trtllm_fp4_moe(
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2404
-    assert activation == "silu", (
+    assert activation == MoEActivation.SILU, (
         "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
         f"{activation} found instead."
     )
@@ -364,7 +365,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
 ) -> torch.Tensor:
     """
@@ -386,7 +387,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     import flashinfer
 
     # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2535
-    assert activation == "silu", (
+    assert activation == MoEActivation.SILU, (
         "Only SiLU activation is supported for FlashInfer TRTLLM FP4 Routed MoE. "
         f"{activation} found instead."
     )

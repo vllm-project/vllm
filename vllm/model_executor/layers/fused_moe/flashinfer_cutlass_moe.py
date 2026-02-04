@@ -5,6 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
@@ -130,8 +131,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "relu2_no_mul"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -164,7 +165,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -201,7 +202,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -214,8 +215,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         from flashinfer.fused_moe.core import ActivationType
 
         activation_str_to_value_map = {
-            "silu": ActivationType.Swiglu,  # This is the default
-            "relu2_no_mul": ActivationType.Relu2,
+            MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"

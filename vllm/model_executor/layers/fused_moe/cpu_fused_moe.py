@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -36,9 +37,9 @@ def _swigluoai_forward_native(
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
-_CPU_MOE_ACT_FN: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
-    "silu": SiluAndMul.forward_native,
-    "swigluoai": _swigluoai_forward_native,
+_CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
+    MoEActivation.SILU: SiluAndMul.forward_native,
+    MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
 }
 
 
@@ -168,9 +169,9 @@ class SGLFusedMOE:
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> torch.Tensor:
-        assert activation == "silu", f"{activation} is not supported."
+        assert activation == MoEActivation.SILU, f"{activation} is not supported."
         assert not apply_router_weight_on_input
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -233,7 +234,7 @@ class CPUFusedMOE:
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> torch.Tensor:
         assert activation in _CPU_MOE_ACT_FN, f"{activation} is not supported."
         assert not apply_router_weight_on_input
@@ -351,7 +352,7 @@ class CPUFusedMOE:
         input: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int = -1,
     ) -> torch.Tensor:
         output = cpu_fused_moe(
@@ -373,7 +374,7 @@ class CPUFusedMOE:
         input: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int = -1,
     ) -> torch.Tensor:
         output = torch.empty_like(input)
@@ -400,6 +401,7 @@ def cpu_fused_moe_torch(
     activation: str,
     global_num_experts: int = -1,
 ) -> None:
+    act = MoEActivation.from_str(activation)
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
@@ -423,7 +425,7 @@ def cpu_fused_moe_torch(
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
-        gate_up = _CPU_MOE_ACT_FN[activation](gate_up)
+        gate_up = _CPU_MOE_ACT_FN[act](gate_up)
         expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -972,7 +973,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert layer.activation == "silu", (
+        assert layer.activation == MoEActivation.SILU, (
             f"Expected 'silu' activation but got {layer.activation}"
         )
 
