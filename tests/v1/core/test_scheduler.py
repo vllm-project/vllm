@@ -3473,3 +3473,52 @@ def test_prepend_skipped_requests_order():
 
     # verify waiting order is preserved
     assert list(scheduler.waiting) == expected_waiting_reqs
+
+
+def test_abort_request_waiting_for_remote_kvs():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # add a single request
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # set request to waiting for remote KVs, and abort it
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert request.status == RequestStatus.FINISHED_ABORTED
+
+    # verify request is not deleted
+    assert request.request_id in scheduler.requests
+
+    # finish recving request
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_recving={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # assert request is deleted
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.finished_recving_kv_req_ids
+
+
+def test_abort_request_finished_recving():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # add a single request
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # set request to waiting for remote KVs, finished but not yet updated
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.finished_recving_kv_req_ids.add(request.request_id)
+
+    # abort request
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert request.status == RequestStatus.FINISHED_ABORTED
+
+    # verify request is deleted
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.finished_recving_kv_req_ids
