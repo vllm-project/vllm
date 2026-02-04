@@ -231,6 +231,14 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
+        # Stats tracking.
+        self._num_scheduled_reqs: int = 0
+        self._num_scheduled_tokens: int = 0
+        self._num_stopped_reqs: int = 0
+        self._num_scheduled_new_reqs: int = 0
+        self._num_scheduled_resumed_reqs: int = 0
+        self._num_scheduled_running_reqs: int = 0
+
         def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
             return any(
                 isinstance(group_spec.kv_cache_spec, MambaSpec)
@@ -785,6 +793,13 @@ class Scheduler(SchedulerInterface):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+
+        # Stats tracking.
+        self._num_scheduled_reqs = len(num_scheduled_tokens)
+        self._num_scheduled_tokens = total_num_scheduled_tokens
+        self._num_scheduled_new_reqs = len(scheduled_new_reqs)
+        self._num_scheduled_resumed_reqs = len(scheduled_resumed_reqs)
+        self._num_scheduled_running_reqs = len(scheduled_running_reqs)
 
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
@@ -1391,6 +1406,7 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
 
         # Remove the stopped requests from the running and waiting queues.
+        self._num_stopped_reqs = len(stopped_running_reqs)
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
         if stopped_preempted_reqs:
@@ -1806,6 +1822,12 @@ class Scheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            num_scheduled_reqs=self._num_scheduled_reqs,
+            num_scheduled_tokens=self._num_scheduled_tokens,
+            num_stopped_reqs=self._num_stopped_reqs,
+            num_scheduled_new_reqs=self._num_scheduled_new_reqs,
+            num_scheduled_resumed_reqs=self._num_scheduled_resumed_reqs,
+            num_scheduled_running_reqs=self._num_scheduled_running_reqs,
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,

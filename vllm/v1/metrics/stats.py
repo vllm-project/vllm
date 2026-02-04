@@ -168,6 +168,15 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
+    # Scheduling visibility: how many requests/tokens were actually scheduled
+    # this step
+    num_scheduled_reqs: int = 0
+    num_scheduled_tokens: int = 0
+    num_stopped_reqs: int = 0
+    num_scheduled_new_reqs: int = 0
+    num_scheduled_resumed_reqs: int = 0
+    num_scheduled_running_reqs: int = 0
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
