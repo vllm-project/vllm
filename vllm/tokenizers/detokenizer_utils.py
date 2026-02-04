@@ -157,7 +157,7 @@ def detokenize_incrementally(
         )
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
-        _replace_none_with_empty(new_tokens)
+        _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     else:
         new_tokens = [""]
     output_tokens = prev_tokens + new_tokens
