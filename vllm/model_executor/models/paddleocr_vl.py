@@ -729,6 +729,7 @@ class SiglipEncoder(nn.Module):
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             raise RuntimeError(
                 f"PaddleOCR-VL does not support {self.attn_backend} backend now."

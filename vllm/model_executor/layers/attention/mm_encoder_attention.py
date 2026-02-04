@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_torch_sdpa_wrapper,
+    vit_triton_attn_wrapper,
 )
 
 logger = init_logger(__name__)
@@ -173,6 +174,41 @@ class MMEncoderAttention(CustomOp):
             output = output.reshape(bsz, q_len, -1)
         return output
 
+    def _forward_triton(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward using vLLM's native triton attention.
+
+        Input shape:
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
+        bsz, q_len = query.size()[:2]
+        kv_len = key.size(1)
+        is_reshaped = query.dim() != 4
+
+        query, key, value = self.maybe_reshape_qkv_to_4d(
+            query, key, value, bsz, q_len, kv_len
+        )
+
+        output = vit_triton_attn_wrapper(
+            q=query,
+            k=key,
+            v=value,
+            batch_size=bsz,
+            scale=self.scale,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        if is_reshaped:
+            output = output.reshape(bsz, q_len, -1)
+        return output
+
     def forward_native(
         self,
         query: torch.Tensor,
@@ -193,6 +229,8 @@ class MMEncoderAttention(CustomOp):
     ) -> torch.Tensor:
         if self.is_flash_attn_backend:
             return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
+        elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
+            return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             return self._forward_sdpa(query, key, value, cu_seqlens)
         else:

@@ -183,3 +183,108 @@ def vit_torch_sdpa_wrapper(
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, scale, cu_seqlens)
+
+
+def triton_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Wrapper for vLLM's native triton attention (context_attention_fwd).
+    This provides an alternative to flash_attn that doesn't require
+    the external flash_attn package.
+
+    Input shape: (batch_size x seq_len x num_heads x head_size)
+    Output shape: (batch_size x seq_len x num_heads x head_size)
+    """
+    from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+    q_len = q.size(1)
+
+    # Build b_start_loc and b_seq_len from cu_seqlens or uniform lengths
+    if cu_seqlens is None:
+        # All sequences have the same length
+        b_start_loc = torch.arange(
+            0, batch_size * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+        b_seq_len = torch.full((batch_size,), q_len, dtype=torch.int32, device=q.device)
+        max_input_len = q_len
+    else:
+        # Variable length sequences
+        b_start_loc = cu_seqlens[:-1].to(torch.int32)
+        b_seq_len = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+        # max_seqlen may be 0 or None, in which case we compute it from b_seq_len
+        max_seqlen_val = (
+            int(max_seqlen.item())
+            if max_seqlen is not None and max_seqlen.item() > 0
+            else int(b_seq_len.max().item())
+        )
+        max_input_len = max_seqlen_val
+
+    # Reshape from 4D to 3D: [b, s, h, d] -> [b*s, h, d]
+    q_3d, k_3d, v_3d = (einops.rearrange(x, "b s h d -> (b s) h d") for x in [q, k, v])
+    output = torch.empty_like(q_3d)
+
+    context_attention_fwd(
+        q=q_3d,
+        k=k_3d,
+        v=v_3d,
+        o=output,
+        b_start_loc=b_start_loc,
+        b_seq_len=b_seq_len,
+        max_input_len=max_input_len,
+        is_causal=False,  # ViT uses bidirectional attention
+        softmax_scale=scale,
+    )
+
+    # Reshape output back to 4D: [b*s, h, d] -> [b, s, h, d]
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+    return context_layer
+
+
+def triton_attn_wrapper_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)
+
+
+direct_register_custom_op(
+    op_name="triton_attn_wrapper",
+    op_func=triton_attn_wrapper,
+    fake_impl=triton_attn_wrapper_fake,
+)
+
+
+def vit_triton_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    ViT-specific wrapper for vLLM's native triton attention.
+    Uses torch.ops for torch.compile compatibility.
+    """
+    return torch.ops.vllm.triton_attn_wrapper(
+        q,
+        k,
+        v,
+        batch_size,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )

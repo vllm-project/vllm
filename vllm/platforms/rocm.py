@@ -379,6 +379,7 @@ class RocmPlatform(Platform):
         return [
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
         ]
 
@@ -413,16 +414,17 @@ class RocmPlatform(Platform):
             logger.info_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
-        if (
-            on_gfx1x()
-            and flash_attn_triton_available()
-            and (dtype == torch.float16 or dtype == torch.bfloat16)
-        ):
-            logger.info_once(
-                "Using Flash Attention (Triton backend) for ViT model on RDNA."
-            )
-            return AttentionBackendEnum.FLASH_ATTN
+        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend if available
+        if on_gfx1x() and (dtype == torch.float16 or dtype == torch.bfloat16):
+            if flash_attn_triton_available():
+                logger.info_once(
+                    "Using Flash Attention (Triton backend) for ViT model on RDNA."
+                )
+                return AttentionBackendEnum.FLASH_ATTN
+            else:
+                # Use vLLM's native triton attention as fallback (no flash_attn dep)
+                logger.info_once("Using vLLM Triton Attention for ViT model on RDNA.")
+                return AttentionBackendEnum.TRITON_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA

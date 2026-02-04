@@ -177,6 +177,18 @@ def _fwd_kernel(
     )
 
 
+def _is_rdna() -> bool:
+    """Check if running on RDNA architecture (gfx11xx, gfx12xx)."""
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import on_gfx1x
+
+        return on_gfx1x()
+    except ImportError:
+        return False
+
+
 def get_block_size(dtype: torch.dtype) -> int:
     if dtype == torch.float32:
         return 32
@@ -184,8 +196,23 @@ def get_block_size(dtype: torch.dtype) -> int:
         80
     ):
         return 128
+    elif _is_rdna():
+        # RDNA (gfx11xx, gfx12xx) performs better with smaller block sizes
+        # This matches the tuning used by flash_attn's triton backend for RDNA
+        return 32
     else:
         return 64
+
+
+def get_num_warps(head_dim: int) -> int:
+    """Get optimal number of warps based on architecture and head dimension."""
+    if _is_rdna():
+        # RDNA tuning: Block=32, Warps=8 is optimal for ViT attention.
+        # Tested on Radeon 8060S (gfx1151) with Qwen2.5-VL-7B.
+        # Tested configs: Block in {16,32,64}, Warps in {2,4,8,16}.
+        return 8
+    else:
+        return 4 if head_dim <= 64 else 8
 
 
 def context_attention_fwd(
@@ -219,7 +246,7 @@ def context_attention_fwd(
     kv_group_num = q.shape[1] // k.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
-    num_warps = 4 if Lk <= 64 else 8
+    num_warps = get_num_warps(Lk)
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
