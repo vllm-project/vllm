@@ -123,6 +123,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -217,8 +218,13 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser = self._get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
+        # Set up the unified parser - either a unified parser or fall back to
+        # separate parsers accessed through the parser interface
+        self.parser = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -263,10 +269,6 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_call_id_type = "random"
 
         self.enable_auto_tools = enable_auto_tools
-        # set up tool use
-        self.tool_parser = self._get_tool_parser(
-            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
-        )
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -469,9 +471,13 @@ class OpenAIServingResponses(OpenAIServing):
                         context = ParsableContext(
                             response_messages=messages,
                             tokenizer=tokenizer,
-                            reasoning_parser_cls=self.reasoning_parser,
+                            reasoning_parser_cls=self.parser.reasoning_parser_cls
+                            if self.parser
+                            else None,
                             request=request,
-                            tool_parser_cls=self.tool_parser,
+                            tool_parser_cls=self.parser.tool_parser_cls
+                            if self.parser
+                            else None,
                             available_tools=available_tools,
                             chat_template=self.chat_template,
                             chat_template_content_format=self.chat_template_content_format,
@@ -479,8 +485,8 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = SimpleContext()
 
-                if self.reasoning_parser is not None:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
                     if (
                         isinstance(
                             struct_out := sampling_params.structured_outputs,
@@ -617,7 +623,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=None,
             tool_dicts=tool_dicts,
-            tool_parser=self.tool_parser,
+            tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
         return messages, engine_prompts
 
@@ -909,9 +915,9 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
-        if self.reasoning_parser:
+        if self.parser and self.parser.reasoning_parser_cls:
             try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
+                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in reasoning parser creation.")
                 raise e
@@ -958,7 +964,7 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer=tokenizer,
             content=content,
             enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.tool_parser,
+            tool_parser_cls=self.parser.tool_parser_cls if self.parser else None,
         )
 
         if content or (self.use_harmony and tool_calls):
@@ -1339,8 +1345,8 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id = ""
         reasoning_parser = None
-        if self.reasoning_parser:
-            reasoning_parser = self.reasoning_parser(tokenizer)
+        if self.parser and self.parser.reasoning_parser_cls:
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         previous_text = ""
         previous_token_ids: list[int] = []
         first_delta_sent = False
