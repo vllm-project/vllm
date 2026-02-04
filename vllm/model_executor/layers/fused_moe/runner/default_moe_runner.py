@@ -38,6 +38,27 @@ logger = init_logger(__name__)
 
 
 class DefaultMoERunner(MoERunner):
+    """
+    Default implementation of the MoE runner for executing Mixture of Experts layers.
+
+    This class provides a comprehensive implementation for running MoE computations
+    with support for:
+    - Expert routing and token dispatching
+    - Shared experts computation with optional parallel execution using CUDA streams
+    - Data parallel (DP) chunking for large batch processing
+    - Tensor model parallel and expert parallel operations
+    - Various quantization methods and custom operators
+    - Both monolithic and decomposed expert execution paths
+
+    The runner handles the complete MoE forward pass including routing tokens to
+    experts, executing expert computations, and combining results. It supports
+    advanced features like overlapped execution of shared experts and optimized
+    kernels for different parallel execution modes.
+
+    Eventually, this class will be split up and specialized for different
+    configurations, e.g. the presense or absence of shared experts, a gate, etc.
+    """
+
     def __init__(
         self,
         layer: torch.nn.Module,
