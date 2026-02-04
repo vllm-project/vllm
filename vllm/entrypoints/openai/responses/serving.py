@@ -114,16 +114,16 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    should_continue_final_message,
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.renderers import RendererLike
+from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -218,8 +218,13 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser = self._get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
+        # Set up the unified parser - either a unified parser or fall back to
+        # separate parsers accessed through the parser interface
+        self.parser = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -264,10 +269,6 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_call_id_type = "random"
 
         self.enable_auto_tools = enable_auto_tools
-        # set up tool use
-        self.tool_parser = self._get_tool_parser(
-            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
-        )
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -291,13 +292,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_server = tool_server
 
     def _validate_generator_input(
-        self, engine_prompt: TokensPrompt
+        self,
+        engine_prompt: TokensPrompt | EmbedsPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
+        prompt_len = get_prompt_len(engine_prompt)
+        if self.max_model_len <= prompt_len:
             error_message = (
-                "The engine prompt length"
-                f" {len(engine_prompt['prompt_token_ids'])} "
+                f"The engine prompt length {prompt_len} "
                 f"exceeds the max_model_len {self.max_model_len}. "
                 "Please reduce prompt."
             )
@@ -307,6 +309,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="input",
             )
+
         return None
 
     def _validate_create_responses_input(
@@ -387,8 +390,6 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
 
             if self.use_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
@@ -396,7 +397,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response, renderer
+                    request, prev_response
                 )
 
         except (
@@ -431,6 +432,9 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
+
             for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
                 if maybe_error is not None:
@@ -446,6 +450,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params
                 )
+                tok_params = request.build_tok_params(self.model_config)
 
                 trace_headers = (
                     None
@@ -465,10 +470,14 @@ class OpenAIServingResponses(OpenAIServing):
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,
-                            renderer=renderer,
-                            reasoning_parser_cls=self.reasoning_parser,
+                            tokenizer=tokenizer,
+                            reasoning_parser_cls=self.parser.reasoning_parser_cls
+                            if self.parser
+                            else None,
                             request=request,
-                            tool_parser_cls=self.tool_parser,
+                            tool_parser_cls=self.parser.tool_parser_cls
+                            if self.parser
+                            else None,
                             available_tools=available_tools,
                             chat_template=self.chat_template,
                             chat_template_content_format=self.chat_template_content_format,
@@ -476,8 +485,8 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = SimpleContext()
 
-                if self.reasoning_parser is not None:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
                     if (
                         isinstance(
                             struct_out := sampling_params.structured_outputs,
@@ -495,6 +504,7 @@ class OpenAIServingResponses(OpenAIServing):
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
+                    tok_params=tok_params,
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,
@@ -596,7 +606,6 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        renderer: RendererLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -606,30 +615,15 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-        # Check if we should continue the final message (partial completion)
-        # This enables Anthropic-style partial message completion where the
-        # user provides an incomplete assistant message to continue from.
-        continue_final = should_continue_final_message(request.input)
-        chat_template_kwargs = dict(
-            reasoning_effort=None
-            if request.reasoning is None
-            else request.reasoning.effort
-        )
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            renderer,
             messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=None,
             tool_dicts=tool_dicts,
-            tool_parser=self.tool_parser,
-            chat_template=self.chat_template,
-            chat_template_content_format=self.chat_template_content_format,
-            # When continuing a partial message, we set continue_final_message=True
-            # and add_generation_prompt=False so the model continues the message
-            # rather than starting a new one.
-            add_generation_prompt=not continue_final,
-            continue_final_message=continue_final,
-            chat_template_kwargs=chat_template_kwargs,
+            tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
         return messages, engine_prompts
 
@@ -921,9 +915,9 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
-        if self.reasoning_parser:
+        if self.parser and self.parser.reasoning_parser_cls:
             try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
+                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in reasoning parser creation.")
                 raise e
@@ -970,7 +964,7 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer=tokenizer,
             content=content,
             enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.tool_parser,
+            tool_parser_cls=self.parser.tool_parser_cls if self.parser else None,
         )
 
         if content or (self.use_harmony and tool_calls):
@@ -1351,8 +1345,8 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id = ""
         reasoning_parser = None
-        if self.reasoning_parser:
-            reasoning_parser = self.reasoning_parser(tokenizer)
+        if self.parser and self.parser.reasoning_parser_cls:
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         previous_text = ""
         previous_token_ids: list[int] = []
         first_delta_sent = False

@@ -19,7 +19,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 
-MODEL_NAME = "mistralai/Voxtral-Mini-3B-Realtime-2602"
+MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 ENGINE_CONFIG = dict(
     model=MODEL_NAME,
     max_model_len=8192,
@@ -37,7 +37,7 @@ EXPECTED_TEXT = [
     (
         " First words I spoke in the original phonograph. "
         "A little piece of practical poetry. Mary had a little lamb,"
-        " it sleeps with quite a snow, and everywhere that Mary went, "
+        " its fleece was quite a slow, and everywhere that Mary went, "
         "the lamb was sure to go."
     ),
     (
@@ -74,7 +74,7 @@ def async_engine() -> AsyncLLM:
 
 
 @pytest.mark.skip(reason="Voxtral streaming is not yet public")
-def test_voxtral_streaming_forward(audio_assets, tokenizer, engine):
+def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
     audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
     def from_file(file_path: str):
@@ -219,7 +219,7 @@ class RealTimeAudioInput:
 
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="Voxtral streaming is not yet public")
-async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine):
+async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
 
     output_tokens_list = []
@@ -246,13 +246,6 @@ async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine
 
     texts = [tokenizer.decode(output_tokens) for output_tokens in output_tokens_list]
 
-    # 'true' streaming and 'offline' streaming differ a bit because log-mels are
-    # differently noramalized
-    texts[0] = (
-        texts[0]
-        .replace("He has f", "F")
-        .replace("its fleece was quite a slow", "it sleeps with quite a snow")
-    )
     texts[1] = texts[1].replace("a base hit", "OBS").replace("oh my", "oh, my")
 
     assert texts == EXPECTED_TEXT

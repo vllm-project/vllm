@@ -12,7 +12,7 @@ affine==2.4.0
     # via rasterio
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.0
+aiohttp==3.13.3
     # via
     #   aiohttp-cors
     #   datasets
@@ -332,7 +332,7 @@ httpx==0.27.2
     #   -r requirements/test.in
     #   perceptron
     #   schemathesis
-huggingface-hub==0.34.3
+huggingface-hub==0.36.1
     # via
     #   accelerate
     #   datasets

@@ -47,6 +47,14 @@ class BatchDescriptor(NamedTuple):
     """
     Whether this batch has active LoRA adapters.
     """
+    num_active_loras: int = 0
+    """
+    Number of distinct active LoRA adapters in this batch.
+    When cudagraph_specialize_lora_count is enabled, separate CUDA graphs
+    are captured for each num_active_loras value. This allows kernels
+    (like fused_moe_lora) whose grid size depends on num_active_loras
+    to be properly captured.
+    """
 
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
         """
@@ -54,7 +62,11 @@ class BatchDescriptor(NamedTuple):
         with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
         """
         return BatchDescriptor(
-            self.num_tokens, num_reqs=None, uniform=False, has_lora=self.has_lora
+            self.num_tokens,
+            num_reqs=None,
+            uniform=False,
+            has_lora=self.has_lora,
+            num_active_loras=self.num_active_loras,
         )
 
 
@@ -191,7 +203,7 @@ class ForwardContext:
     attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]
     """
-    Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
+    Type Dict[str, AttentionMetadata] for v1, map from layer_name of each
     attention layer to its attention metadata
     Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
     for each microbatch.
@@ -274,9 +286,22 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
+    if vllm_config.compilation_config.fast_moe_cold_start:
+        if vllm_config.speculative_config is None:
+            all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
+        else:
+            logger.warning_once(
+                "vllm_config.compilation_config.fast_moe_cold_start is not "
+                "compatible with speculative decoding so we are ignoring "
+                "fast_moe_cold_start."
+            )
+            all_moe_layers = None
+    else:
+        all_moe_layers = None
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
-        all_moe_layers=vllm_config.compilation_config.static_all_moe_layers,
+        all_moe_layers=all_moe_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
@@ -327,8 +352,10 @@ def set_forward_context(
         forward_start_time = time.perf_counter()
 
     dp_metadata: DPMetadata | None = None
-    if vllm_config.parallel_config.data_parallel_size > 1 and (
-        attn_metadata is not None or num_tokens is not None
+    if (
+        vllm_config.parallel_config.data_parallel_size > 1
+        and vllm_config.parallel_config.is_moe_model is not False
+        and (attn_metadata is not None or num_tokens is not None)
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be

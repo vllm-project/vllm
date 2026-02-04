@@ -4,7 +4,7 @@ import importlib
 import json
 import types
 from importlib.util import find_spec
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 import torch
@@ -209,7 +209,7 @@ class TorchAOConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if not isinstance(layer, LinearBase):
             return None
 

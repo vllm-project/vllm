@@ -14,7 +14,7 @@ pytest-shard==0.1.2
 # Async/HTTP dependencies
 anyio==4.6.2.post1
     # via httpx, starlette
-aiohttp==3.13.0
+aiohttp==3.13.3
     # via gpt-oss
 httpx==0.27.2
     # HTTP testing
@@ -94,3 +94,5 @@ timm==1.0.17
 albumentations==1.4.6
 # Pin transformers version
 transformers==4.57.3
+# Pin HF Hub version
+huggingface-hub==0.36.1

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 import torch
@@ -91,7 +91,7 @@ class ExampleConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
