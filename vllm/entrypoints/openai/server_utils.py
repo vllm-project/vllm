@@ -314,9 +314,21 @@ async def log_response(request: Request, call_next):
 
 
 def _http_status_to_error_type(status_code: int) -> ErrorType:
-    """Convert HTTP status code to ErrorType enum."""
+    """Convert HTTP status code to ErrorType enum.
+
+    Tries to match the HTTP status phrase to an ErrorType enum value.
+    Falls back to BAD_REQUEST_ERROR for 4xx errors and
+    INTERNAL_SERVER_ERROR for 5xx errors if no exact match is found.
+    """
     phrase = HTTPStatus(status_code).phrase
-    return ErrorType.from_string(phrase)
+    try:
+        return ErrorType.from_string(phrase)
+    except ValueError:
+        # Fallback for HTTP status codes not explicitly defined in ErrorType
+        if 400 <= status_code < 500:
+            return ErrorType.BAD_REQUEST_ERROR
+        else:
+            return ErrorType.INTERNAL_SERVER_ERROR
 
 
 async def http_exception_handler(_: Request, exc: HTTPException):
