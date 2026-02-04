@@ -98,21 +98,30 @@ class Idefics2VisionEmbeddings(nn.Module):
             if tgt_sizes is not None:
                 nb_patches_h = tgt_sizes[batch_idx][0]
                 nb_patches_w = tgt_sizes[batch_idx][1]
+                fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
+                fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
             else:
                 nb_patches_h = p_attn_mask[:, 0].sum()
                 nb_patches_w = p_attn_mask[0].sum()
-            fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
-            fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
+                fractional_coords_h = torch.cumsum(p_attn_mask[:, 0], dim=0)
+                fractional_coords_h = torch.where(fractional_coords_h < nb_patches_h, fractional_coords_h, nb_patches_h - 1)
+                fractional_coords_h = fractional_coords_h / nb_patches_h
+
+                fractional_coords_w = torch.cumsum(p_attn_mask[0, :], dim=0)
+                fractional_coords_w = torch.where(fractional_coords_w < nb_patches_w, fractional_coords_w, nb_patches_w - 1)
+                fractional_coords_w = fractional_coords_w / nb_patches_w
+
             bucket_coords_h = torch.bucketize(
-                fractional_coords_h, boundaries, right=True
+                fractional_coords_h.cpu(), boundaries, right=True
             )
             bucket_coords_w = torch.bucketize(
-                fractional_coords_w, boundaries, right=True
+                fractional_coords_w.cpu(), boundaries, right=True
             )
             pos_ids = (
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
-            position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
+
+            position_ids[batch_idx] = torch.where(p_attn_mask.cpu().flatten(), pos_ids, position_ids[batch_idx].flatten())
         position_ids = position_ids.to(self.position_embedding.weight.device)
         embeddings += self.position_embedding(position_ids)
         return embeddings
