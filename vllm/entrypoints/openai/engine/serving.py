@@ -12,10 +12,7 @@ from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
-from openai.types.responses import (
-    ToolChoiceFunction,
-)
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -29,7 +26,6 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -40,8 +36,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.context import (
@@ -1219,83 +1213,6 @@ class OpenAIServing:
             return int(rank_str)
         except ValueError:
             return None
-
-    @staticmethod
-    def _parse_tool_calls_from_content(
-        request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike | None,
-        enable_auto_tools: bool,
-        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
-        content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        function_calls = list[FunctionCall]()
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
-        ):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
-            assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                [
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                    for tool_call in tool_calls
-                ]
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            tool_parser_cls
-            and enable_auto_tools
-            and (request.tool_choice == "auto" or request.tool_choice is None)
-        ):
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
-
-            # Automatic Tool Call Parsing
-            try:
-                tool_parser = tool_parser_cls(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-                if content and content.strip() == "":
-                    content = None
-            else:
-                # No tool calls.
-                return None, content
-
-        return function_calls, content
 
     @staticmethod
     def _get_decoded_token(

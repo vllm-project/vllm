@@ -322,7 +322,7 @@ class DelegatingParser(Parser):
         reasoning, content = self.extract_reasoning(model_output, request)
 
         # Then parse tool calls from the content
-        tool_calls, content = self._parse_tool_calls(
+        tool_calls, content = self.parse_tool_calls(
             request=request,
             content=content,
             enable_auto_tools=enable_auto_tools,
@@ -385,16 +385,22 @@ class DelegatingParser(Parser):
 
         return outputs
 
-    def _parse_tool_calls(
+    def parse_tool_calls(
         self,
-        request: ResponsesRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
         content: str | None,
         enable_auto_tools: bool,
-    ) -> tuple[list[FunctionCall], str | None]:
+    ) -> tuple[list[FunctionCall] | None, str | None]:
         """
-        TODO(qandrew): merge _parse_tool_calls_from_content
-        for ChatCompletions into this function
         Parse tool calls from content based on request tool_choice settings.
+
+        This is the unified tool call parsing method used by both
+        ChatCompletions and ResponsesAPI.
+
+        Args:
+            request: The request object (ChatCompletionRequest or ResponsesRequest).
+            content: The model output content to parse for tool calls.
+            enable_auto_tools: Whether automatic tool call parsing is enabled.
 
         Returns:
             A tuple of (function_calls, remaining_content) if tool calls
