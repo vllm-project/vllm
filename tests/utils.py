@@ -1378,8 +1378,6 @@ class TestFP8Layer(torch.nn.Module):
         if is_block_wise:
             block_size = weight_scale_desc.group_shape.col
             weight_scale_shape = weight_shape[0] // block_size
-            print(" --- block wise ----")
-            print(weight_scale_shape)
             self.weight_scale_inv = torch.rand(
                 (weight_scale_shape, weight_scale_shape), dtype=torch.float32
             )
