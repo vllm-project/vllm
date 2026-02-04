@@ -1119,9 +1119,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
                 op_func=_rocm_aiter_gemm_a8w8_bpreshuffle_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8w8_bpreshuffle_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
