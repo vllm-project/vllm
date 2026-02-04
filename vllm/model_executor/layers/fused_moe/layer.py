@@ -328,6 +328,7 @@ class FusedMoE(CustomOp):
         is_sequence_parallel=False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
+        shared_experts: torch.nn.Module | None = None,
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
@@ -655,6 +656,7 @@ class FusedMoE(CustomOp):
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            enable_eplb=self.enable_eplb,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -702,12 +704,13 @@ class FusedMoE(CustomOp):
     def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
 
-    @property
-    def layer_id(self):
-        # Delayed import to avoid circular dependency
-        from vllm.model_executor.models.utils import extract_layer_index
+    # TODO(bnell): is this needed?
+    #@property
+    #def layer_id(self):
+    #    # Delayed import to avoid circular dependency
+    #    from vllm.model_executor.models.utils import extract_layer_index
 
-        return extract_layer_index(self.layer_name)
+    #    return extract_layer_index(self.layer_name)
 
     @property
     def gate(self) -> torch.nn.Module | None:
