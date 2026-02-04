@@ -209,6 +209,7 @@ class Worker(WorkerBase):
                     f"be less than or equal to the number of visible devices "
                     f"({visible_device_count})."
                 )
+
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -538,6 +539,9 @@ class Worker(WorkerBase):
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

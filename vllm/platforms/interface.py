@@ -4,14 +4,11 @@ import contextlib
 import enum
 import os
 import platform
-import random
 import sys
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -118,6 +115,11 @@ class Platform:
     # hint: search for "get_visible_accelerator_ids_env_var" in
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
+
+    # environment variables that need to be set to 1 to prevent ray from
+    # setting the visible devices e.g.
+    # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+    ray_noset_device_env_vars: list[str] = []
 
     # The torch.compile backend for compiling simple and
     # standalone functions. The default value is "inductor" to keep
@@ -364,23 +366,6 @@ class Platform:
         back to `torch.no_grad` by overriding this method.
         """
         return torch.inference_mode(mode=True)
-
-    @classmethod
-    @deprecated(
-        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
-        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
-    )
-    def seed_everything(cls, seed: int | None = None) -> None:
-        """
-        Set the seed of each random module.
-        `torch.manual_seed` will set seed on all devices.
-
-        Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
-        """
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

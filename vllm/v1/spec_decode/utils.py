@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -161,10 +161,11 @@ def create_vllm_config_for_draft_model(
     old = target_model_vllm_config
     assert old.speculative_config is not None, "speculative_config is not set"
     old_spec_config = old.speculative_config
-    new_parallel_config = old_spec_config.draft_parallel_config.replace(
-        rank=old.parallel_config.rank
+    new_parallel_config = replace(
+        old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
     )
-    new: VllmConfig = old.replace(
+    new: VllmConfig = replace(
+        old,
         quant_config=None,
         parallel_config=new_parallel_config,
         model_config=old_spec_config.draft_model_config,

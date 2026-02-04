@@ -92,6 +92,8 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
+    check_interleaved_audio_video,
+    merge_interleaved_embeddings,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -194,6 +196,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -907,13 +910,37 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(
-            dim=0,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        # RDNA3 (gfx11) specific bug workaround: torch.repeat_interleave triggers
+        # kernel crashes. We attempt the operation and catch the RuntimeError
+        # to switch to a vectorized cumsum + searchsorted approach.
+        try:
+            cu_seqlens = torch.repeat_interleave(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        except RuntimeError:
+            logger.warning(
+                "torch.repeat_interleave not executable, "
+                "switching to vectorized searchsorted implementation."
+            )
+            repeat_counts = grid_thw[:, 0]
+            values = grid_thw[:, 1] * grid_thw[:, 2]
+            repeat_cumsum = repeat_counts.cumsum(0)
+            total_items = repeat_cumsum[-1].item()
+
+            indices = torch.searchsorted(
+                repeat_cumsum,
+                torch.arange(total_items, device=grid_thw.device),
+                right=True,
+            )
+            cu_seqlens = values[indices].cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
@@ -1755,6 +1782,19 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
+        # Detect interleaved audio-in-video early, since it affects
+        # both the deepstack path and the final embedding merge.
+        video_token_id = self.config.video_token_id
+        audio_token_id = self.config.audio_token_id
+        is_video = is_multimodal & (input_ids == video_token_id)
+        is_audio = is_multimodal & (input_ids == audio_token_id)
+        num_video = is_video.sum().item()
+        num_audio = is_audio.sum().item()
+
+        is_interleaved = check_interleaved_audio_video(
+            is_video, is_audio, num_video, num_audio
+        )
+
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
         has_vision_embeddings = [
@@ -1766,14 +1806,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         ):
             multiscale_len = len(self.visual.deepstack_visual_indexes)
             multimodal_embeddings_multiscale = []
-            is_vision = torch.zeros_like(is_multimodal)
-            mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
-            mm_position_idx = 0
+
+            if is_interleaved:
+                # Use input_ids-based mask for correct vision positions
+                # when audio and video tokens are interleaved.
+                is_vision = is_video.clone()
+            else:
+                is_vision = torch.zeros_like(is_multimodal)
+                mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
+                mm_position_idx = 0
+
             for index, embeddings in enumerate(multimodal_embeddings):
                 num_tokens = embeddings.shape[0]
-                current_positions = mm_positions[
-                    mm_position_idx : mm_position_idx + num_tokens
-                ]
 
                 # Vision embeddings
                 if embeddings.shape[-1] != self.config.text_config.hidden_size:
@@ -1784,13 +1828,22 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     )
                     multimodal_embeddings[index] = embeddings_main
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
-                    is_vision[current_positions] = True
+                    if not is_interleaved:
+                        current_positions = mm_positions[
+                            mm_position_idx : mm_position_idx + num_tokens
+                        ]
+                        is_vision[current_positions] = True
 
                 # Audio embeddings
                 else:
-                    is_vision[current_positions] = False
+                    if not is_interleaved:
+                        current_positions = mm_positions[
+                            mm_position_idx : mm_position_idx + num_tokens
+                        ]
+                        is_vision[current_positions] = False
 
-                mm_position_idx += num_tokens
+                if not is_interleaved:
+                    mm_position_idx += num_tokens
 
             deepstack_input_embeds = inputs_embeds.new_zeros(
                 inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1)
@@ -1809,6 +1862,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             )
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
+        if is_interleaved:
+            return merge_interleaved_embeddings(
+                inputs_embeds,
+                multimodal_embeddings,
+                is_video,
+                is_audio,
+                is_multimodal,
+                num_video,
+                num_audio,
+            )
+
+        # Default: standard merge (no interleaving)
         inputs_embeds = _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,

@@ -25,7 +25,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
@@ -33,7 +33,8 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
-from .protocol import RendererLike
+from .params import ChatParams
+from .protocol import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -465,7 +466,6 @@ def safe_apply_chat_template(
         chat_template=chat_template,
         chat_template_kwargs=kwargs,
     )
-    resolved_kwargs["return_dict"] = False
 
     try:
         return tokenizer.apply_chat_template(
@@ -584,13 +584,13 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(RendererLike):
+class HfRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -598,9 +598,8 @@ class HfRenderer(RendererLike):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__()
+        super().__init__(config)
 
-        self.config = config
         self.use_unified_vision_chunk = getattr(
             config.hf_config, "use_unified_vision_chunk", False
         )
@@ -632,9 +631,8 @@ class HfRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
@@ -642,9 +640,9 @@ class HfRenderer(RendererLike):
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
@@ -654,7 +652,7 @@ class HfRenderer(RendererLike):
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -666,7 +664,7 @@ class HfRenderer(RendererLike):
         ):
             mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
 
-            # get video placehoder, replace it with runtime video-chunk prompts
+            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
@@ -676,24 +674,19 @@ class HfRenderer(RendererLike):
                 video_placeholder,
             )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
@@ -701,9 +694,9 @@ class HfRenderer(RendererLike):
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
@@ -713,7 +706,7 @@ class HfRenderer(RendererLike):
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -723,9 +716,7 @@ class HfRenderer(RendererLike):
             and mm_uuids is not None
             and mm_data is not None
         ):
-            mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
-
-            # get video placehoder, replace it with runtime video-chunk prompts
+            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
@@ -735,14 +726,10 @@ class HfRenderer(RendererLike):
                 video_placeholder,
             )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt

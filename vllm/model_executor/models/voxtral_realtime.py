@@ -4,7 +4,7 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Mapping
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 
-class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
+class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
         self,
         info: _I,
@@ -58,7 +58,7 @@ class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
-        # streaming can't make use of a cache yet
+        # realtime can't make use of a cache yet
         super().__init__(info, dummy_inputs, cache=None)
 
     def _maybe_apply_prompt_updates(
@@ -72,10 +72,10 @@ class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
         # there are no placeholder audio tokens for streaming
         # so we need to build the place placeholder positions manually
 
-        # in streaming there is always only one audio input
+        # in realtime there is always only one audio input
         audios = mm_kwargs.get("audio", [])
         assert len(audios) == 1, (
-            f"Expected only one audio input for streaming, got {mm_kwargs=}"
+            f"Expected only one audio input for realtime, got {mm_kwargs=}"
         )
         tokenizer = self.info.get_tokenizer()
         audio_config = tokenizer.instruct.audio_encoder.audio_config
@@ -211,23 +211,23 @@ class VoxtralRealtimeBuffer:
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    VoxtralStreamingMultiModalProcessor,
+    VoxtralRealtimeMultiModalProcessor,
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    # transformers' currently has limited support for MistralCommon backend
+    # and cached_get_processor. Let's skip until fixed
+    skip_warmup_audio_preprocessing = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         assert (
             not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ), (
-            "Voxtral streaming doesn't support full cudagraphs yet. "
-            "Please use PIECEWISE."
-        )
+        ), "Voxtral realtime doesn't support full cudagraphs yet. Please use PIECEWISE."
 
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
@@ -302,11 +302,11 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input"""
-        # for streaming we simply flatten the multimodal embeddings
+        # for realtime we simply flatten the multimodal embeddings
         # to be in tensor format, we treat the input ids later
         assert multimodal_embeddings is not None
         assert len(multimodal_embeddings) > 0, (
-            "For streaming you must provide a multimodal_embedding at every step."
+            "For realtime you must provide a multimodal_embedding at every step."
         )
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
         return mm_embeds_flat
@@ -370,7 +370,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
 
         assert audio_inputs is not None, (
-            "For streaming you must provide an audio input at every step."
+            "For realtime you must provide an audio input at every step."
         )
 
         def _truncate_left(
@@ -456,7 +456,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
-        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio}}
-        prompts_dict["prompt_token_ids"] = tokenized.tokens
-        return cast(PromptType, prompts_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=tokenized.tokens,
+            multi_modal_data={
+                "audio": (tokenized.audios[0].audio_array, stt_config.sample_rate)
+            },
+        )
