@@ -43,6 +43,10 @@ mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomO
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
+# mock_if_no_torch("vllm.platforms", MagicMock(current_platform=MagicMock()))
+
+# make sure --request-id-prefix docs are consistent
+sys.modules["uuid"] = MagicMock(uuid4=lambda: MagicMock(hex="mockuuid"))
 
 
 # Mock any version checks by reading from compiled CI requirements
@@ -60,7 +64,7 @@ class PydanticMagicMock(MagicMock):
 
     def __init__(self, *args, **kwargs):
         name = kwargs.pop("name", None)
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, name=name, **kwargs)
         self.__spec__ = ModuleSpec(name, None)
 
     def __get_pydantic_core_schema__(self, source_type, handler):
@@ -85,7 +89,7 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
         except Exception:
-            logger.exception("Failed to import %s.%s: %s", module_name, attr)
+            logger.exception("Failed to import %s.%s", module_name, attr)
 
     raise ImportError(
         f"Failed to import {module_name}.{attr} after mocking {max_mocks} imports"
