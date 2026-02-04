@@ -1347,8 +1347,9 @@ class OpenAIServingResponses(OpenAIServing):
         current_tool_call_id = ""
         current_tool_call_name = ""
         tool_parser = None
-        if self.tool_parser:
-            tool_parser = self.tool_parser(tokenizer)
+        reasoning_end_arr = False
+        if self.parser and self.parser.tool_parser_cls:
+            tool_parser = self.parser.tool_parser_cls(tokenizer)
         reasoning_parser = None
         if self.parser and self.parser.reasoning_parser_cls:
             reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
@@ -1375,6 +1376,10 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=previous_token_ids + output.token_ids,
                         delta_token_ids=output.token_ids,
                     )
+                print(f"Delta message after reasoning parsing: {delta_message}")
+                print(f"Previous text: {previous_text}")
+                print(f"Delta text: {output.text}")
+                print(f"delta_token_ids: {output.token_ids}")
                 if tool_parser:
                     delta_message = tool_parser.extract_tool_calls_streaming(
                         previous_text=previous_text,
@@ -1385,7 +1390,8 @@ class OpenAIServingResponses(OpenAIServing):
                         delta_token_ids=output.token_ids,
                         request=request,  # type: ignore
                     )
-                    if delta_message.tool_calls:
+                    if delta_message and delta_message.tool_calls:
+                        print(f"Delta message after tool parsing: {delta_message}")
                         assert delta_message.tool_calls[0].function is not None
                         assert delta_message.tool_calls[0].function.name is not None
                 previous_text += output.text
@@ -1743,7 +1749,7 @@ class OpenAIServingResponses(OpenAIServing):
                         # skip content part for tool call
                         current_content_index = 1
                         continue
-                elif delta_message.reasoning_content is not None:
+                elif delta_message.reasoning is not None:
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDeltaEvent(
                             type="response.reasoning_text.delta",
