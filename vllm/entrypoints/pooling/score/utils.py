@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
 from typing import Any, TypeAlias, cast
 
 from torch.nn import CosineSimilarity
@@ -10,18 +11,19 @@ from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionContentPartVideoParam,
     ChatTemplateResolutionError,
+    ConversationMessage,
     MultiModalItemTracker,
-    _ContentPart,
-    _parse_chat_message_content_part,
-    apply_hf_chat_template,
+    _parse_chat_message_content_parts,
 )
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
-from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import PoolingRequestOutput
+from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tokenizers import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
@@ -44,6 +46,13 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
     content: Required[list[ScoreContentPartParam]]
     """The multimodal contents"""
+
+
+# Raw input data with content key in ScoreMultiModalParam.
+ScoreInput = str | ScoreMultiModalParam
+ScoreInputs = ScoreInput | list[ScoreInput]
+# Score data without content key.
+ScoreData = str | list[ScoreContentPartParam]
 
 
 def _cosine_similarity(
@@ -77,8 +86,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: list[str] | list[ScoreContentPartParam],
-    data_2: list[str] | list[ScoreContentPartParam],
+    data_1: list[ScoreData],
+    data_2: list[ScoreData],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
@@ -91,42 +100,83 @@ def _validate_score_input_lens(
         raise ValueError("At least one text_pair element must be given")
 
 
+def _validate_mm_score_input(
+    data: list[ScoreInput],
+    is_multimodal_model: bool,
+    architecture: str,
+) -> list[ScoreData]:
+    out: list[ScoreData] = []
+    for d in data:
+        if isinstance(d, str):
+            out.append(d)
+        else:
+            if not is_multimodal_model:
+                raise ValueError(f"MultiModalParam is not supported for {architecture}")
+            content = cast(list[ScoreContentPartParam], d.get("content", []))
+            out.append(content)
+    return out
+
+
+def validate_score_input(
+    data_1: ScoreInputs,
+    data_2: ScoreInputs,
+    is_multimodal_model: bool,
+    architecture: str,
+) -> tuple[list[ScoreData], list[ScoreData]]:
+    if not isinstance(data_1, list):
+        data_1 = [data_1]
+
+    if not isinstance(data_2, list):
+        data_2 = [data_2]
+
+    score_input_1 = _validate_mm_score_input(data_1, is_multimodal_model, architecture)
+    score_input_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
+    _validate_score_input_lens(score_input_1, score_input_2)
+    return score_input_1, score_input_2
+
+
 def parse_score_data(
-    data_1: str | ScoreContentPartParam,
-    data_2: str | ScoreContentPartParam,
+    data_1: ScoreData,
+    data_2: ScoreData,
     model_config: ModelConfig,
-) -> tuple[str, str, MultiModalDataDict | None]:
+) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     mm_tracker = MultiModalItemTracker(model_config)
 
-    content_1 = _parse_score_content(data_1, mm_tracker)
-    content_2 = _parse_score_content(data_2, mm_tracker)
+    content_1 = _parse_score_content("query", data_1, mm_tracker)
+    content_2 = _parse_score_content("document", data_2, mm_tracker)
 
-    def ensure_str(content: _ContentPart | None) -> str:
-        if content is not None and isinstance(content, str):
-            return cast(str, content)
+    def ensure_str(content: list[ConversationMessage]) -> str:
+        assert len(content) == 1
+        prompt = content[0]["content"]
+        if prompt is not None and isinstance(prompt, str):
+            return cast(str, prompt)
         else:
             raise ValueError(f"Only string content is supported, but got {content}.")
 
     prompt_1 = ensure_str(content_1)
     prompt_2 = ensure_str(content_2)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
 
-    return prompt_1, prompt_2, mm_tracker.all_mm_data()
+    return prompt_1, prompt_2, mm_items, mm_uuids
 
 
 def _parse_score_content(
-    data: str | ScoreContentPartParam,
+    role: str,
+    data: ScoreData,
     mm_tracker: BaseMultiModalItemTracker,
-) -> _ContentPart | None:
+) -> list[ConversationMessage]:
+    parts: Iterable[ChatCompletionContentPartParam]
     if isinstance(data, str):
-        part = ChatCompletionContentPartTextParam(type="text", text=data)
+        parts = [ChatCompletionContentPartTextParam(type="text", text=data)]
     else:
-        part = data
+        parts = cast(Iterable[ChatCompletionContentPartParam], data)
 
     mm_parser = mm_tracker.create_parser()
 
-    parse_res = _parse_chat_message_content_part(
-        part,
-        mm_parser,
+    parse_res = _parse_chat_message_content_parts(
+        role=role,
+        parts=parts,
+        mm_tracker=mm_tracker,
         wrap_dicts=False,
         interleave_strings=False,
     )
@@ -183,11 +233,11 @@ def get_score_prompt(
     model_config: ModelConfig,
     tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
-    data_1: str | ScoreContentPartParam,
-    data_2: str | ScoreContentPartParam,
+    data_1: ScoreData,
+    data_2: ScoreData,
     score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
-    prompt_1, prompt_2, mm_data = parse_score_data(
+    prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
         data_1,
         data_2,
         model_config,
@@ -224,15 +274,16 @@ def get_score_prompt(
         # If that fails because there is no such template,
         # fall back to the default implementation.
         try:
-            full_prompt = apply_hf_chat_template(
+            full_prompt = safe_apply_chat_template(
+                model_config,
                 tokenizer,
                 [
                     {"role": "query", "content": prompt_1},
                     {"role": "document", "content": prompt_2},
                 ],
-                score_template,
+                chat_template=score_template,
                 tools=None,
-                model_config=model_config,
+                tokenize=False,
             )
             prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
         except ChatTemplateResolutionError:
@@ -247,6 +298,9 @@ def get_score_prompt(
 
     if mm_data is not None:
         engine_prompt["multi_modal_data"] = mm_data
+    if mm_uuids is not None:
+        engine_prompt["multi_modal_uuids"] = mm_uuids
+
     return full_prompt, engine_prompt
 
 

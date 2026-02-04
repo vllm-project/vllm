@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -18,10 +18,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -41,9 +39,9 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import SpeculativeConfig
+from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import SupportsHash, config, replace
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -102,6 +100,18 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
+def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if using AITER RMSNorm and AITER Triton GEMMs
+    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+
+    return (
+        envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config.get_hidden_size() == 2880
+    )
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -112,6 +122,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -127,6 +138,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -142,6 +154,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -157,6 +170,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -171,8 +185,7 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -263,6 +276,12 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+            if (
+                self.compilation_config
+                and getattr(self.compilation_config, "compile_mm_encoder", False)
+                and self.model_config.multimodal_config
+            ):
+                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -335,13 +354,6 @@ class VllmConfig:
             :10
         ]
         return hash_str
-
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
-        # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -443,6 +455,30 @@ class VllmConfig:
             hf_config.architectures = architectures
 
         model_config = copy.deepcopy(self.model_config)
+
+        if (
+            model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
+            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
+        ):
+            # In Transformers v5, tie_word_embeddings belongs to the config of the class
+            # that can see both layers to be tied. For example:
+            #
+            # SomeVLModel:
+            #   self.language_model = SomeLanguageModel()
+            #   self.vision_model = SomeVisionModel()
+            #
+            # SomeVLModelForMultimodalLM:
+            #   self.model = SomeVLModel()
+            #   self.lm_head = nn.Linear()
+            #
+            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
+            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
+            # belongs to the language_model, so we must ensure that tie_word_embeddings
+            # is set in the language_model's config.
+            tie_word_embeddings = model_config.hf_config.tie_word_embeddings
+            hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
+
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
 
@@ -580,6 +616,11 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "Currently, async scheduling is not compatible with "
+                    "prefix caching for Mamba models."
+                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
@@ -609,6 +650,13 @@ class VllmConfig:
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif self.cache_config.mamba_cache_mode != "none":
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "prefix caching for Mamba models and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
@@ -908,6 +956,18 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        if (
+            self.model_config
+            and vllm_is_batch_invariant()
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                scope="local",
+            )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
@@ -999,6 +1059,17 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if self.cache_config.mamba_cache_mode == "align":
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1320,14 +1391,6 @@ class VllmConfig:
         append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
-
-    def replace(self, **kwargs):
-        """
-        Replace attributes of the config, and 'recompute' the config.
-        dataclass.replace() calls __init__() and __post_init__(), source:
-        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
-        """
-        return replace(self, **kwargs)
 
     def __str__(self):
         return (

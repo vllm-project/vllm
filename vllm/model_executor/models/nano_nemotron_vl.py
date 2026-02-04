@@ -1143,6 +1143,12 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     def supports_video(self):
         return self.get_hf_processor().supports_video
 
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
@@ -1273,9 +1279,6 @@ class NanoNemotronVLMultiModalProcessor(
     NanoNemotronBaseVLMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
     """MultiModalProcessor extended for video support"""
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
 
     def _get_mm_fields_config(
         self,
@@ -1513,7 +1516,7 @@ class NemotronH_Nano_VL_V2(
         self.video_pruning_rate = multimodal_config.video_pruning_rate
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -1542,7 +1545,7 @@ class NemotronH_Nano_VL_V2(
                 ReLUSquaredActivation(),
                 nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
             )
-            self.mlp1 = mlp1.to(language_model.config.dtype)
+            self.mlp1 = mlp1.to(self.language_model.config.dtype)
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -1917,7 +1920,7 @@ class NemotronH_Nano_VL_V2(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2128,3 +2131,7 @@ class NemotronH_Nano_VL_V2(
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        return NemotronHForCausalLM.get_mamba_state_copy_func()

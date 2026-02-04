@@ -557,6 +557,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return MiniCPMVMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
 
@@ -736,9 +741,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMVMultiModalDataParser()
-
     def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
@@ -765,10 +767,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items(
+            "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
@@ -793,10 +794,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (videos := mm_data.get("videos")) is None:
             return {}
 
-        parsed_videos = (
-            self._get_data_parser()
-            .parse_mm_data({"video": videos})
-            .get_items("video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+        mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
+        parsed_videos = mm_items.get_items(
+            "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
 
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
@@ -1035,11 +1035,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.vpm = vpm = self.init_vision_module(
+            self.vpm = self.init_vision_module(
                 config, quant_config, prefix=maybe_prefix(prefix, "vpm")
             )
             self.vision_dim = (
-                vpm.embed_dim if self.version == (2, 0) else vpm.embeddings.embed_dim
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
             )
             self.embed_dim = self.config.hidden_size
 
@@ -1145,7 +1147,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1335,7 +1337,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1428,7 +1429,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1526,7 +1526,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1624,7 +1623,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
