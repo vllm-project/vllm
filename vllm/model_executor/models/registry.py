@@ -163,6 +163,7 @@ _TEXT_GENERATION_MODELS = {
     "MiMoV2FlashForCausalLM": ("mimo_v2_flash", "MiMoV2FlashForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
+    "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
@@ -188,6 +189,7 @@ _TEXT_GENERATION_MODELS = {
     "SeedOssForCausalLM": ("seed_oss", "SeedOssForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
+    "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
@@ -234,6 +236,7 @@ _EMBEDDING_MODELS = {
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "LlavaNextForConditionalGeneration": (
@@ -284,6 +287,10 @@ _MULTIMODAL_MODELS = {
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
     ),
+    "MusicFlamingoForConditionalGeneration": (
+        "musicflamingo",
+        "MusicFlamingoForConditionalGeneration",
+    ),
     "AyaVisionForConditionalGeneration": (
         "aya_vision",
         "AyaVisionForConditionalGeneration",
@@ -301,6 +308,7 @@ _MULTIMODAL_MODELS = {
     ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
+    "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Eagle2_5_VLForConditionalGeneration": (
         "eagle2_5_vl",
@@ -310,6 +318,10 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
+    "FunAudioChatForConditionalGeneration": (
+        "funaudiochat",
+        "FunAudioChatForConditionalGeneration",
+    ),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "Gemma3nForConditionalGeneration": (
@@ -318,8 +330,9 @@ _MULTIMODAL_MODELS = {
     ),
     "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
-    "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
-    "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),  # noqa: E501
+    "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
+    "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),
+    "GlmOcrForConditionalGeneration": ("glm_ocr", "GlmOcrForConditionalGeneration"),  # noqa: E501
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
@@ -344,6 +357,10 @@ _MULTIMODAL_MODELS = {
         "interns1",
         "InternS1ForConditionalGeneration",
     ),
+    "InternS1ProForConditionalGeneration": (
+        "interns1_pro",
+        "InternS1ProForConditionalGeneration",
+    ),
     "Idefics3ForConditionalGeneration": (
         "idefics3",
         "Idefics3ForConditionalGeneration",
@@ -358,6 +375,7 @@ _MULTIMODAL_MODELS = {
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),  # noqa: E501
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
@@ -393,6 +411,10 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
+    "OpenPanguVLForConditionalGeneration": (
+        "openpangu_vl",
+        "OpenPanguVLForConditionalGeneration",
+    ),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
     "PaddleOCRVLForConditionalGeneration": (
@@ -428,6 +450,10 @@ _MULTIMODAL_MODELS = {
         "qwen3_omni_moe_thinker",
         "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
+    "Qwen3ASRForConditionalGeneration": (
+        "qwen3_asr",
+        "Qwen3ASRForConditionalGeneration",
+    ),
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": (
         "qwen3_vl_moe",
@@ -442,7 +468,7 @@ _MULTIMODAL_MODELS = {
     ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
-    "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
+    "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
@@ -471,9 +497,11 @@ _SPECULATIVE_DECODING_MODELS = {
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
+    "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
+    "Step3p5MTP": ("step3p5_mtp", "Step3p5MTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),

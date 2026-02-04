@@ -7,12 +7,11 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
@@ -45,10 +44,10 @@ logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 
-_T = TypeVar("_T", bound=type[nn.Module])
+_T = TypeVar("_T", bound=nn.Module)
 
 
-def ignore_torch_compile(cls: _T) -> _T:
+def ignore_torch_compile(cls: type[_T]) -> type[_T]:
     """
     A decorator to ignore support_torch_compile decorator
     on the class. This is useful when a parent class has
@@ -68,7 +67,7 @@ def ignore_torch_compile(cls: _T) -> _T:
     return cls
 
 
-def _should_ignore_torch_compile(cls: _T) -> bool:
+def _should_ignore_torch_compile(cls: type[_T]) -> bool:
     """
     Check if the class should be ignored for torch.compile.
     """
@@ -79,21 +78,21 @@ def _should_ignore_torch_compile(cls: _T) -> bool:
 def support_torch_compile(
     *,
     enable_if: Callable[[VllmConfig], bool] | None = None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
     *,
     mark_unbacked_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
@@ -101,21 +100,21 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None,
     mark_unbacked_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
-def support_torch_compile(cls: _T) -> _T: ...
+def support_torch_compile(cls: type[_T]) -> type[_T]: ...
 
 
 def support_torch_compile(
-    cls: _T | None = None,
+    cls: type[_T] | None = None,
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
-) -> Callable[[_T], _T] | _T:
+) -> Callable[[type[_T]], type[_T]] | type[_T]:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -182,7 +181,7 @@ def support_torch_compile(
     errors.
     """
 
-    def cls_decorator_helper(cls: _T) -> _T:
+    def cls_decorator_helper(cls: type[_T]) -> type[_T]:
         # helper to pass `dynamic_arg_dims` to `_support_torch_compile`
         # to avoid too much indentation for `_support_torch_compile`
         if not hasattr(cls, "forward"):
@@ -263,12 +262,12 @@ def _verify_source_unchanged(
 
 
 def _support_torch_compile(
-    cls: _T,
+    cls: type[_T],
     dynamic_arg_dims: dict[str, int | list[int]],
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
-) -> _T:
+) -> type[_T]:
     """
     A decorator to add support for compiling the forward method of a class.
     """
@@ -325,12 +324,12 @@ def _support_torch_compile(
         self.compiled = False
 
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
-        TorchCompileWithNoGuardsWrapper.__init__(self)  # type: ignore[arg-type]
+        TorchCompileWithNoGuardsWrapper.__init__(self)
 
     cls.__init__ = __init__
 
     def _mark_dynamic_inputs(
-        mod: _T, ds_type: DynamicShapesType, *args: Any, **kwargs: Any
+        mod: type[_T], ds_type: DynamicShapesType, *args: Any, **kwargs: Any
     ) -> None:
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
@@ -382,7 +381,7 @@ def _support_torch_compile(
                         else:
                             torch._dynamo.decorators.mark_unbacked(arg, dims)
 
-    def __call__(self: _T, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self: type[_T], *args: Any, **kwargs: Any) -> Any:
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
@@ -540,7 +539,6 @@ def _support_torch_compile(
             torch._dynamo.config.patch(**dynamo_config_patches),
             maybe_use_cudagraph_partition_wrapper(self.vllm_config),
             torch.fx.experimental._config.patch(**fx_config_patches),
-            _torch27_patch_tensor_subclasses(),
             torch._inductor.config.patch(**inductor_config_patches),
         ):
             use_aot_compile = envs.VLLM_USE_AOT_COMPILE
@@ -564,7 +562,7 @@ def _support_torch_compile(
         return output
 
     # triggers VllmSerializableFunction.serialize()
-    def save_aot_compiled_function(self):
+    def save_aot_compiled_function(self: type[_T]) -> None:
         if self.was_aot_compile_fn_loaded_from_disk:
             logger.debug("AOT compiled function was loaded from cache, skipping save")
             return
@@ -647,42 +645,3 @@ def maybe_use_cudagraph_partition_wrapper(
         and compilation_config.use_inductor_graph_partition
     ):
         torch._inductor.utils.set_customized_partition_wrappers(None)
-
-
-@contextlib.contextmanager
-def _torch27_patch_tensor_subclasses() -> Generator[None, None, None]:
-    """
-    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
-    using torch 2.7.0. This enables using weight_loader_v2 and the use of
-    `BasevLLMParameters` without having to replace them with regular tensors
-    before `torch.compile`-time.
-    """
-    from vllm.model_executor.parameter import (
-        BasevLLMParameter,
-        ModelWeightParameter,
-        RowvLLMParameter,
-        _ColumnvLLMParameter,
-    )
-
-    def return_false(*args: Any, **kwargs: Any) -> Literal[False]:
-        return False
-
-    if version.parse("2.7") <= version.parse(torch.__version__) < version.parse("2.8"):
-        yield
-        return
-
-    with (
-        torch._dynamo.config.patch(
-            "traceable_tensor_subclasses",
-            [
-                BasevLLMParameter,
-                ModelWeightParameter,
-                _ColumnvLLMParameter,
-                RowvLLMParameter,
-            ],
-        ),
-        patch(
-            "torch._dynamo.variables.torch.can_dispatch_torch_function", return_false
-        ),
-    ):
-        yield

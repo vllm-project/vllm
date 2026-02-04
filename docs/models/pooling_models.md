@@ -305,6 +305,44 @@ Expected output:
 
 An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
 
+## Specific models
+
+### BAAI/bge-m3
+
+The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
+the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
+extra weights. To load the full model weights, override its architecture like this:
+
+```shell
+vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
+```
+
+Then you obtain the sparse embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_classify",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
+
+Due to limitations in the output schema, the output consists of a list of
+token scores for each token for each input. This means that you'll have to call
+`/tokenize` as well to be able to pair tokens with scores.
+Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
+to do that.
+
+You can obtain the colbert embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_embed",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
+
 ## Deprecated Features
 
 ### Encode task
@@ -313,15 +351,6 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 
 - `token_embed` is the same as `embed`, using normalization as the activation.
 - `token_classify` is the same as `classify`, by default using softmax as the activation.
-
-### Remove softmax from PoolingParams
-
-We are going to remove `softmax` and `activation` from `PoolingParams` in v0.15. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
-
-### as_reward_model
-
-!!! warning
-    We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
 
 Pooling models now default support all pooling, you can use it without any settings.
 

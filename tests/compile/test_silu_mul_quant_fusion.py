@@ -222,7 +222,7 @@ def test_fusion_silu_and_mul_quant(
     x = torch.rand(num_tokens, hidden_size * 2)
 
     # Reshape pass is needed for the fusion pass to work
-    custom_ops = []
+    custom_ops = ["none"]
     if enable_silu_mul_custom_op:
         custom_ops.append("+silu_and_mul")
     if enable_quant_fp8_custom_op:
@@ -231,6 +231,7 @@ def test_fusion_silu_and_mul_quant(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
+            backend="eager",  # avoid compilation for SiluAndMul and QuantFP8
             pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
         ),
     )

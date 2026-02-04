@@ -51,7 +51,6 @@ DummyOptions: TypeAlias = (
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
@@ -213,7 +212,8 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

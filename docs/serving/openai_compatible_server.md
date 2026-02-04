@@ -59,6 +59,8 @@ We currently support the following OpenAI APIs:
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+- [Realtime API](#realtime-api) (`/v1/realtime`)
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
@@ -197,7 +199,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -205,7 +207,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
 ### Chat API
@@ -228,7 +230,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -236,7 +238,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-extra-params"
     ```
 
 ### Responses API
@@ -253,7 +255,7 @@ The following extra parameters in the request object are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:responses-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-extra-params"
     ```
 
 The following extra parameters in the response object are supported:
@@ -261,7 +263,7 @@ The following extra parameters in the response object are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:responses-response-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
 
 ### Embeddings API
@@ -378,23 +380,53 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:embedding-pooling-params"
+--8<-- "vllm/pooling_params.py:embed-pooling-params"
 ```
 
-The following extra parameters are supported by default:
+The following Embeddings API parameters are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
     ```
 
-For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
+The following extra parameters are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
+    ```
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+The following parameters are supported by default:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
+    ```
+
+these extra parameters are supported instead:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
     ```
 
 ### Transcriptions API
@@ -491,7 +523,7 @@ For `verbose_json` response format:
       ]
     }
     ```
-Currently “verbose_json” response format doesn’t support avg_logprob, compression_ratio, no_speech_prob.
+Currently “verbose_json” response format doesn’t support no_speech_prob.
 
 #### Extra Parameters
 
@@ -536,6 +568,52 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
+
+### Realtime API
+
+The Realtime API provides WebSocket-based streaming audio transcription, allowing real-time speech-to-text as audio is being recorded.
+
+!!! note
+    To use the Realtime API, please install with extra audio dependencies using `uv pip install vllm[audio]`.
+
+#### Audio Format
+
+Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono channel.
+
+#### Protocol Overview
+
+1. Client connects to `ws://host/v1/realtime`
+2. Server sends `session.created` event
+3. Client optionally sends `session.update` with model/params
+4. Client sends `input_audio_buffer.commit` when ready
+5. Client sends `input_audio_buffer.append` events with base64 PCM16 chunks
+6. Server sends `transcription.delta` events with incremental text
+7. Server sends `transcription.done` with final text + usage
+8. Repeat from step 5 for next utterance
+9. Optionally, client sends input_audio_buffer.commit with final=True
+    to signal audio input is finished. Useful when streaming audio files
+
+#### Client → Server Events
+
+| Event | Description |
+|-------|-------------|
+| `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
+| `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+
+#### Server → Client Events
+
+| Event | Description |
+|-------|-------------|
+| `session.created` | Connection established with session ID and timestamp |
+| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
+| `transcription.done` | Final transcription with usage stats |
+| `error` | Error notification with message and optional code |
+
+#### Example Clients
+
+- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
+- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
 
 ### Tokenizer API
 
@@ -659,14 +737,48 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
+
+The following Classification API parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-params"
+    ```
 
 The following extra parameters are supported:
 
-```python
---8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
-```
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+    ```
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-params"
+    ```
+
+these extra parameters are supported instead:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+    ```
 
 ### Score API
 
@@ -882,12 +994,21 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+The following Score API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
@@ -963,12 +1084,22 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+The following Re-rank API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
@@ -984,4 +1115,4 @@ Key capabilities:
 
 The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/online_serving/ray_serve_deepseek.py](../../examples/online_serving/ray_serve_deepseek.py).
 
-Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/serving-llms.html).
+Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/index.html).

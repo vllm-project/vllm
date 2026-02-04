@@ -7,24 +7,25 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 import torch
 
 import vllm.envs as envs
+from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
+from vllm.inputs.data import StreamingInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
-from vllm.sampling_params import SamplingParams
+from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
@@ -38,6 +39,7 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.engine.utils import get_prompt_text
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -48,6 +50,18 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+
+class InputStreamError(Exception):
+    """Wrapper for errors from the input stream generator.
+
+    This is used to propagate errors from the user's input generator
+    without wrapping them in EngineGenerateError.
+    """
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(str(cause))
 
 
 class AsyncLLM(EngineClient):
@@ -261,7 +275,7 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -289,13 +303,34 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-        _validate_truncation_size(
-            self.model_config.max_model_len,
-            params.truncate_prompt_tokens,
-            tokenization_kwargs,
-        )
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.16. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
+            )
+
+        if isinstance(prompt, AsyncGenerator):
+            # Streaming input case.
+            return await self._add_streaming_input_request(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                tokenization_kwargs,
+                trace_headers,
+                priority,
+                data_parallel_rank,
+            )
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -315,17 +350,14 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
             )
-            if isinstance(prompt, str):
-                prompt_text = prompt
-            elif isinstance(prompt, Mapping):
-                prompt_text = cast(str | None, prompt.get("prompt"))
+            prompt_text = get_prompt_text(prompt)
 
         self.input_processor.assign_request_id(request)
 
@@ -380,6 +412,104 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def _add_streaming_input_request(
+        self,
+        request_id: str,
+        input_stream: AsyncGenerator[StreamingInput, None],
+        sampling_params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+    ) -> RequestOutputCollector:
+        self._validate_streaming_input_sampling_params(sampling_params)
+
+        inputs = dict(
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
+        )
+
+        if not sampling_params.skip_clone:
+            sampling_params = sampling_params.clone()
+            sampling_params.skip_clone = True
+
+        # Create request for validation, also used as the finished signal
+        # once the input stream is closed.
+        final_req = self.input_processor.process_inputs(
+            request_id=request_id,
+            prompt=TokensPrompt(prompt_token_ids=[0]),
+            params=sampling_params,
+            **inputs,  # type: ignore[arg-type]
+        )
+        self.input_processor.assign_request_id(final_req)
+        internal_req_id = final_req.request_id
+
+        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+
+        async def handle_inputs():
+            cancelled = False
+            try:
+                async for input_chunk in input_stream:
+                    sp = input_chunk.sampling_params
+                    if sp:
+                        self._validate_streaming_input_sampling_params(sp)
+                    else:
+                        sp = sampling_params
+                    req = self.input_processor.process_inputs(
+                        request_id=internal_req_id,
+                        prompt=input_chunk.prompt,
+                        params=sp,
+                        resumable=True,
+                        **inputs,  # type: ignore[arg-type]
+                    )
+                    req.external_req_id = request_id
+                    if req.prompt_embeds is not None:
+                        raise ValueError(
+                            "prompt_embeds not supported for streaming inputs"
+                        )
+                    prompt_text = get_prompt_text(input_chunk.prompt)
+                    await self._add_request(req, prompt_text, None, 0, queue)
+            except (asyncio.CancelledError, GeneratorExit):
+                cancelled = True
+            except Exception as error:
+                # Wrap in InputStreamError so generate() can propagate it
+                # without wrapping in EngineGenerateError.
+                queue.put(InputStreamError(error))
+            finally:
+                queue._input_stream_task = None
+                if not cancelled:
+                    # Send empty final request to indicate that inputs have
+                    # finished. Don't send if cancelled (session was aborted).
+                    await self._add_request(final_req, None, None, 0, queue)
+
+        # Ensure output handler is running.
+        self._run_output_handler()
+
+        queue._input_stream_task = asyncio.create_task(handle_inputs())
+        return queue
+
+    @staticmethod
+    def _validate_streaming_input_sampling_params(
+        params: SamplingParams | PoolingParams,
+    ):
+        if (
+            not isinstance(params, SamplingParams)
+            or params.n > 1
+            or params.output_kind == RequestOutputKind.FINAL_ONLY
+            or params.stop
+        ):
+            raise ValueError(
+                "Input streaming not currently supported "
+                "for pooling models, n > 1, request_kind = FINAL_ONLY "
+                "or with stop strings."
+            )
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -387,7 +517,7 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -437,9 +567,10 @@ class AsyncLLM(EngineClient):
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                finished = out.finished
                 assert isinstance(out, RequestOutput)
-                yield out
+                finished = out.finished
+                if out is not STREAM_FINISHED:
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
@@ -463,6 +594,14 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
 
+        # Error from input stream generator - propagate directly.
+        except InputStreamError as e:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed (input error): %s.", request_id, e)
+            raise e.cause from e
+
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
@@ -473,11 +612,14 @@ class AsyncLLM(EngineClient):
                 except Exception as e2:
                     s = (
                         f"{e.__class__.__name__}: "
-                        + "error during printing an exception of class"
+                        "error during printing an exception of class"
                         + e2.__class__.__name__
                     )
                 logger.info("Request %s failed due to %s.", request_id, s)
             raise EngineGenerateError() from e
+        finally:
+            if q is not None:
+                q.close()
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -599,6 +741,7 @@ class AsyncLLM(EngineClient):
         if clear_cache:
             await self.reset_prefix_cache()
             await self.reset_mm_cache()
+            await self.reset_encoder_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
@@ -621,7 +764,6 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -636,22 +778,10 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         q: RequestOutputCollector | None = None
         try:
-            if truncate_prompt_tokens is not None:
-                warnings.warn(
-                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
-                    "is deprecated and will be removed in v0.15. "
-                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -703,6 +833,9 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+        finally:
+            if q is not None:
+                q.close()
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -712,7 +845,7 @@ class AsyncLLM(EngineClient):
         return self.input_processor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_processor.renderer
 
     async def is_tracing_enabled(self) -> bool:
@@ -749,6 +882,9 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
+
+    async def reset_encoder_cache(self) -> None:
+        await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
