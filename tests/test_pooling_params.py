@@ -143,5 +143,5 @@ def test_token_classify(pooling_type: str):
 
     for p in set(invalid_parameters) - set(classify_parameters):
         with pytest.raises(ValueError):
-            pooling_params = PoolingParams(**{p: True})
+            pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
