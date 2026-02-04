@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import logging
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
@@ -35,12 +34,13 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
+from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class Parser:
