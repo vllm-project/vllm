@@ -42,7 +42,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -188,7 +187,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            routing_method_type=RoutingMethodType.Renormalize,
             custom_routing_function=self._custom_routing_function,
         )
 
@@ -479,7 +477,7 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
 
 class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super(Qwen3MoeForCausalLM, self).__init__()
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
         self.model = InternS1ProMoeLLMModel(
@@ -575,7 +573,7 @@ class InternS1ProForConditionalGeneration(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super(Qwen3VLForConditionalGeneration, self).__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
