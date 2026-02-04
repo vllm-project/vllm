@@ -834,14 +834,11 @@ class EplbState:
 
                 # Make sure there's a __len__ method
                 assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
-                num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
 
-                max_num_transfers = max_num_expert_transfers * num_tensors_per_expert
                 cap_num_transfers(
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
-                    num_tensors_per_expert=num_tensors_per_expert,
-                    max_num_transfers=max_num_transfers,
+                    max_num_expert_transfers=max_num_expert_transfers,
                 )
                 new_logical_to_physical_map = torch.argsort(
                     new_physical_to_logical_map, dim=-1
@@ -1316,8 +1313,7 @@ def apply_transfer_cap(
 def cap_num_transfers(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    num_tensors_per_expert: int,
-    max_num_transfers: int,
+    max_num_expert_transfers: int,
 ) -> None:
     """
     Detects if the total number of transfer operations exceeds
@@ -1336,9 +1332,7 @@ def cap_num_transfers(
         old_layer_indices = old_global_expert_indices[layer]
         new_layer_indices = new_global_expert_indices[layer]
         num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
-        total_num_transfers = num_expert_transfers * num_tensors_per_expert
-        if total_num_transfers >= max_num_transfers:
-            max_expert_transfers = max_num_transfers // num_tensors_per_expert
+        if num_expert_transfers >= max_num_expert_transfers:
             apply_transfer_cap(
-                old_layer_indices, new_layer_indices, max_expert_transfers
+                old_layer_indices, new_layer_indices, max_num_expert_transfers
             )
