@@ -19,6 +19,18 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
 
+# Check if Triton is actually available for kernel execution
+try:
+    import importlib.util
+    HAS_TRITON = (importlib.util.find_spec("triton.language") is not None
+                  and hasattr(triton, 'jit') and callable(triton.jit))
+except (ImportError, AttributeError):
+    HAS_TRITON = False
+
+if not HAS_TRITON:
+    logger.info("Triton not available. Using PyTorch CPU fallback for "
+                "speculative decoding rejection sampling.")
+
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
@@ -388,15 +400,25 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
-        rejection_greedy_sample_kernel[(batch_size,)](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            max_spec_len,
-        )
+        if HAS_TRITON and device.type == 'cuda':
+            rejection_greedy_sample_kernel[(batch_size,)](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+            )
+        else:
+            rejection_greedy_sample_pytorch(
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                is_greedy,
+            )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
@@ -423,20 +445,34 @@ def rejection_sample(
     )
 
     # Rejection sampling for random sampling requests.
-    rejection_random_sample_kernel[(batch_size,)](
-        output_token_ids,
-        cu_num_draft_tokens,
-        draft_token_ids,
-        draft_probs,
-        target_probs,
-        bonus_token_ids,
-        recovered_token_ids,
-        uniform_probs,
-        is_greedy,
-        max_spec_len,
-        vocab_size,
-        NO_DRAFT_PROBS=draft_probs is None,
-    )
+    if HAS_TRITON and device.type == 'cuda':
+        rejection_random_sample_kernel[(batch_size,)](
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size,
+            NO_DRAFT_PROBS=draft_probs is None,
+        )
+    else:
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            no_draft_probs=draft_probs is None,
+        )
     return output_token_ids
 
 
@@ -527,14 +563,23 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    expand_kernel[(batch_size,)](
-        expanded_x,
-        x,
-        cu_num_tokens,
-        replace_from,
-        replace_to,
-        MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
-    )
+    if HAS_TRITON and x.device.type == 'cuda':
+        expand_kernel[(batch_size,)](
+            expanded_x,
+            x,
+            cu_num_tokens,
+            replace_from,
+            replace_to,
+            MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
+        )
+    else:
+        expand_pytorch(
+            expanded_x,
+            x,
+            cu_num_tokens,
+            replace_from,
+            replace_to,
+        )
     return expanded_x
 
 
@@ -623,18 +668,191 @@ def sample_recovered_tokens(
             q[i].exponential_(generator=generator)
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
-    sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
-        recovered_token_ids,
-        cu_num_draft_tokens,
-        draft_token_ids,
-        draft_probs,
-        target_probs,
-        q,
-        vocab_size,
-        triton.next_power_of_2(vocab_size),
-        NO_DRAFT_PROBS=draft_probs is None,
-    )
+    if HAS_TRITON and device.type == 'cuda':
+        sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
+            recovered_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            q,
+            vocab_size,
+            triton.next_power_of_2(vocab_size),
+            NO_DRAFT_PROBS=draft_probs is None,
+        )
+    else:
+        sample_recovered_tokens_pytorch(
+            recovered_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            q,
+            no_draft_probs=draft_probs is None,
+        )
     return recovered_token_ids
+
+
+# ============================================================================
+# PyTorch CPU Fallback Implementations
+# ============================================================================
+
+def rejection_greedy_sample_pytorch(
+    output_token_ids: torch.Tensor,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
+    draft_token_ids: torch.Tensor,  # [num_tokens]
+    target_argmax: torch.Tensor,  # [num_tokens]
+    bonus_token_ids: torch.Tensor,  # [batch_size]
+    is_greedy: torch.Tensor | None,  # [batch_size] or None
+):
+    """PyTorch implementation of rejection_greedy_sample_kernel."""
+    batch_size = cu_num_draft_tokens.shape[0]
+    
+    for req_idx in range(batch_size):
+        # Check if this request uses greedy sampling
+        if is_greedy is not None and not is_greedy[req_idx]:
+            continue
+        
+        # Get start and end indices for this request
+        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
+        end_idx = cu_num_draft_tokens[req_idx].item()
+        num_draft_tokens = end_idx - start_idx
+        
+        rejected = False
+        for pos in range(num_draft_tokens):
+            if not rejected:
+                draft_token_id = draft_token_ids[start_idx + pos].item()
+                target_argmax_id = target_argmax[start_idx + pos].item()
+                output_token_ids[req_idx, pos] = target_argmax_id
+                if draft_token_id != target_argmax_id:
+                    rejected = True
+        
+        if not rejected:
+            # If all tokens are accepted, append the bonus token
+            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx, 0]
+
+
+def rejection_random_sample_pytorch(
+    output_token_ids: torch.Tensor,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
+    draft_token_ids: torch.Tensor,  # [num_tokens]
+    draft_probs: torch.Tensor | None,  # [num_tokens, vocab_size] or None
+    target_probs: torch.Tensor,  # [num_tokens, vocab_size]
+    bonus_token_ids: torch.Tensor,  # [batch_size]
+    recovered_token_ids: torch.Tensor,  # [num_tokens]
+    uniform_probs: torch.Tensor,  # [num_tokens]
+    is_greedy: torch.Tensor | None,  # [batch_size] or None
+    no_draft_probs: bool = False,
+):
+    """PyTorch implementation of rejection_random_sample_kernel."""
+    if not no_draft_probs and draft_probs is None:
+        raise ValueError("draft_probs is required when no_draft_probs=False")
+    
+    batch_size = cu_num_draft_tokens.shape[0]
+    
+    for req_idx in range(batch_size):
+        if is_greedy is not None and is_greedy[req_idx]:
+            continue
+        
+        # Get start and end indices for this request
+        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
+        end_idx = cu_num_draft_tokens[req_idx].item()
+        num_draft_tokens = end_idx - start_idx
+        
+        rejected = False
+        for pos in range(num_draft_tokens):
+            if not rejected:
+                draft_token_id = draft_token_ids[start_idx + pos].item()
+                
+                if no_draft_probs:
+                    draft_prob = 1.0
+                else:
+                    draft_prob = draft_probs[start_idx + pos,  # type: ignore[index]
+                                             draft_token_id].item()
+                
+                target_prob = target_probs[start_idx + pos, draft_token_id].item()
+                uniform_prob = uniform_probs[start_idx + pos].item()
+                
+                # Accept if target_prob / draft_prob >= uniform_prob
+                if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+                    # Accept
+                    token_id = draft_token_id
+                else:
+                    # Reject - use recovered token
+                    rejected = True
+                    token_id = recovered_token_ids[start_idx + pos].item()
+                
+                output_token_ids[req_idx, pos] = token_id
+        
+        if not rejected:
+            # If all tokens are accepted, append the bonus token
+            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx, 0]
+
+
+def expand_pytorch(
+    output: torch.Tensor,  # [num_tokens]
+    input_val: torch.Tensor,  # [batch_size]
+    cu_num_tokens: torch.Tensor,  # [batch_size]
+    replace_from: int,
+    replace_to: int,
+):
+    """PyTorch implementation of expand_kernel."""
+    batch_size = cu_num_tokens.shape[0]
+    
+    for req_idx in range(batch_size):
+        start_idx = 0 if req_idx == 0 else cu_num_tokens[req_idx - 1].item()
+        end_idx = cu_num_tokens[req_idx].item()
+        
+        src_val = input_val[req_idx].item()
+        if src_val == replace_from:
+            src_val = replace_to
+        
+        output[start_idx:end_idx] = src_val
+
+
+def sample_recovered_tokens_pytorch(
+    output_token_ids: torch.Tensor,  # [num_tokens]
+    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
+    draft_token_ids: torch.Tensor,  # [num_tokens]
+    draft_probs: torch.Tensor | None,  # [num_tokens, vocab_size] or None
+    target_probs: torch.Tensor,  # [num_tokens, vocab_size]
+    q: torch.Tensor,  # [batch_size, vocab_size]
+    no_draft_probs: bool = False,
+):
+    """PyTorch implementation of sample_recovered_tokens_kernel."""
+    if not no_draft_probs and draft_probs is None:
+        raise ValueError("draft_probs is required when no_draft_probs=False")
+    
+    batch_size = cu_num_draft_tokens.shape[0]
+    
+    eps = torch.tensor(1e-10, device=q.device, dtype=q.dtype)
+    
+    for req_idx in range(batch_size):
+        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
+        end_idx = cu_num_draft_tokens[req_idx].item()
+        num_draft_tokens = end_idx - start_idx
+        
+        q_vals = q[req_idx]
+        # Avoid division by zero: set q_vals == 0 to a small value
+        q_vals_safe = torch.where(q_vals > 0, q_vals, eps)
+        
+        for pos in range(num_draft_tokens):
+            token_idx = start_idx + pos
+            
+            if no_draft_probs:
+                draft_token_id = draft_token_ids[token_idx].item()
+                # Create mask to exclude the draft token
+                prob = target_probs[token_idx].clone()
+                prob[draft_token_id] = 0
+            else:
+                draft_prob = draft_probs[token_idx]  # type: ignore[index]
+                target_prob = target_probs[token_idx]
+                diff = target_prob - draft_prob
+                prob = torch.maximum(diff, torch.zeros_like(target_prob))
+            
+            # Gumbel-max trick: argmax(prob / q)
+            recovered_id = torch.argmax(prob / q_vals_safe).item()
+            output_token_ids[token_idx] = recovered_id
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
