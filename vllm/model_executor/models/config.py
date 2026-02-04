@@ -584,10 +584,6 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
 class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        vllm_config.model_config.hf_config.is_causal = False
-
-    @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         model_config.hf_config.is_causal = False
 
