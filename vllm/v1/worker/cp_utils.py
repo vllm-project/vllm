@@ -221,12 +221,12 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
 
 
 def get_total_cp_world_size():
+    """Get total context parallelism world size for KV cache sharding.
+
+    Only DCP shards the KV cache. With PCP, K/V are gathered after prefill
+    so each rank has the full sequence - no KV sharding.
+    """
     try:
-        pcp_world_size = get_pcp_group().world_size
+        return get_dcp_group().world_size
     except AssertionError:
-        pcp_world_size = 1
-    try:
-        dcp_world_size = get_dcp_group().world_size
-    except AssertionError:
-        dcp_world_size = 1
-    return dcp_world_size * pcp_world_size
+        return 1

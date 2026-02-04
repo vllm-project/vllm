@@ -326,11 +326,6 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    # Aliases for backward compatibility (cp = context parallelism = dcp)
-    cp_local_seq_lens: torch.Tensor | None = None
-    cp_local_seq_lens_cpu: torch.Tensor | None = None
-    """Sequence lengths of the local rank in context parallelism world"""
-
     pcp_allgather_restore_idx: torch.Tensor | None = None
     """Indices to restore the original order of KV in prefill context parallelism"""
 
@@ -646,8 +641,8 @@ class AttentionImplBase(ABC, Generic[T]):
     pcp_world_size: int
     pcp_rank: int
 
-    cp_world_size: int
-    cp_rank: int
+    total_cp_world_size: int
+    total_cp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
@@ -669,11 +664,13 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        # Only DCP shards KV cache. PCP gathers K/V after prefill,
+        # so DCP is the effective total CP for KV sharding purposes.
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
-            self.cp_world_size > 1 and self.can_return_lse_for_decode
+            self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )
         return self
 

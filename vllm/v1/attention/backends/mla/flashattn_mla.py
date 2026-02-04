@@ -347,8 +347,9 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
-            cp_world_size=self.pcp_world_size * self.dcp_world_size,
-            cp_rank=self.pcp_rank * self.dcp_world_size + self.dcp_rank,
+            # DCP groups span PCP, so dcp is the total CP
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.cp_tot_seq_lens,
         )
 

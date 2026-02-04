@@ -787,25 +787,26 @@ def compute_causal_conv1d_metadata(
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
-def get_cp_local_seq_lens(
+def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
-    cp_world_size: int = 1,
-    cp_rank: int | None = None,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
     cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
-    """While using dcp or pcp, kv_cache size stored on each rank may be different,
-    use this function to calculate split decode seq_lens of each cp rank.
+    """While using dcp, kv_cache size stored on each rank may be different,
+    use this function to calculate split decode seq_lens of each dcp rank.
+    Only consider dcp now, we can extend the case of cp based on this.
     """
     num_requests = seq_lens.size(0)
-    if cp_rank is None:
+    if dcp_rank is None:
         rank_offsets = (
-            torch.arange(cp_world_size, dtype=torch.int32, device=seq_lens.device)
+            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
             .unsqueeze(0)
             .repeat(num_requests, 1)
         )
     else:
         rank_offsets = torch.tensor(
-            [[cp_rank]], dtype=torch.int32, device=seq_lens.device
+            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
         )
     seq_lens_tiled = (
         seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
@@ -813,10 +814,10 @@ def get_cp_local_seq_lens(
     base = (
         seq_lens_tiled
         // cp_kv_cache_interleave_size
-        // cp_world_size
+        // dcp_size
         * cp_kv_cache_interleave_size
     )
-    remainder = seq_lens_tiled - base * cp_world_size
+    remainder = seq_lens_tiled - base * dcp_size
     remainder = torch.clip(
         remainder - rank_offsets * cp_kv_cache_interleave_size,
         0,
@@ -824,10 +825,6 @@ def get_cp_local_seq_lens(
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)
-
-
-# Alias for backward compatibility
-get_dcp_local_seq_lens = get_cp_local_seq_lens
 
 
 def pcp_kv_allgather_and_restore(
@@ -864,53 +861,31 @@ def pcp_kv_allgather_and_restore(
     return key, value
 
 
-def get_pcp_part_indices(
-    cu_num_tokens: torch.Tensor,
-    M: int,
-    N: int,
-    return_head=False,
-    return_tail=False,
-):
+def get_pcp_query_restore_idx(cu_num_tokens: torch.Tensor) -> torch.Tensor:
     """
-    When using PCP, we need to split the KV and Query and select a local shard.
-    This function helps get the indices of the selected shards.
+    Get restore index for PCP query splitting.
+
+    When queries are split into head/tail halves for PCP, this returns
+    the argsort index to restore original order after processing.
+
     Args:
-        cu_num_tokens: cumulative number of tokens.
-        M: the number of shards to select.
-        N: the number of shards to split.
-        return_head: whether to return the indices start from head.
-        return_tail: whether to return the indices start from tail.
+        cu_num_tokens: cumulative token counts, shape [num_reqs + 1]
+
+    Returns:
+        restore_idx: tensor to reorder concatenated [head, tail] back to original
     """
-    cu_num_tokens_np = np.asarray(cu_num_tokens)  # e.g. [0,2,4,8]
-    starts = cu_num_tokens_np[:-1]  # [0, 2, 4]
-    ends = cu_num_tokens_np[1:]  # [2, 4, 8]
-    select_len = (ends - starts) * M // N  # [1, 1, 2], M=1, N=2
-    select_num_tokens = cu_num_tokens_np[-1] * M // N
+    cu = cu_num_tokens.cpu().numpy()
+    starts, ends = cu[:-1], cu[1:]
+    half_lens = (ends - starts) // 2
+    total = half_lens.sum()
 
-    seq_ids = np.repeat(np.arange(len(select_len)), select_len)  # [0,1,2,2]
+    seq_ids = np.repeat(np.arange(len(half_lens)), half_lens)
+    cu_half = np.concatenate([[0], np.cumsum(half_lens)[:-1]])
+    offsets = np.arange(total) - cu_half[seq_ids]
 
-    start_loc = np.concatenate([[0], np.cumsum(select_len)[:-1]])  # [0,1,2]
-    local_offsets = np.arange(select_num_tokens) - start_loc[seq_ids]  # [0,0,0,1]
-    head_indices = None
-    tail_indices = None
-    if return_head:
-        head_indices = starts[seq_ids] + local_offsets
-    if return_tail:
-        start_loc = ends - select_len
-        tail_indices = start_loc[seq_ids] + local_offsets
-
-    return head_indices, tail_indices
-
-
-def get_pcp_query_indices(cu_num_tokens: torch.Tensor):
-    head_indices, tail_indices = get_pcp_part_indices(
-        cu_num_tokens,
-        1,
-        2,
-        return_head=True,
-        return_tail=True,
-    )
-    return torch.from_numpy(head_indices), torch.from_numpy(tail_indices)
+    head = starts[seq_ids] + offsets
+    tail = (ends - half_lens)[seq_ids] + offsets
+    return torch.from_numpy(np.concatenate([head, tail]).argsort().astype(np.int32))
 
 
 def extend_all_queries_by_1(

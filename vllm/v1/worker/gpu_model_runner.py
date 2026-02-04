@@ -116,7 +116,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
-    get_cp_local_seq_lens,
+    get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
 from vllm.v1.core.sched.output import NewRequestData
@@ -375,10 +375,8 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
-        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
-        self.cp_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -584,8 +582,8 @@ class GPUModelRunner(
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        if self.cp_world_size > 1:
-            self.cp_local_seq_lens = self._make_buffer(
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
@@ -1804,18 +1802,20 @@ class GPUModelRunner(
             causal=True,
         )
 
-        if self.cp_world_size > 1:
-            self.cp_local_seq_lens.cpu[:num_reqs] = get_cp_local_seq_lens(
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
                 self.seq_lens.cpu[:num_reqs],
-                self.cp_world_size,
-                self.cp_rank,
+                self.dcp_world_size,
+                self.dcp_rank,
                 self.parallel_config.cp_kv_cache_interleave_size,
             )
-            self.cp_local_seq_lens.cpu[num_reqs:].fill_(0)
-            self.cp_local_seq_lens.copy_to_gpu(num_reqs_padded)
+            self.dcp_local_seq_lens.cpu[num_reqs:].fill_(0)
+            self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
-            cm_base.cp_local_seq_lens = self.cp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[:num_reqs_padded]
+            cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
+            cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+                :num_reqs_padded
+            ]
 
         if self.pcp_world_size > 1:
             cm_base.pcp_allgather_restore_idx = (

@@ -344,16 +344,29 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
-            raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
-            )
+        # DCP reuses TP GPUs and splits one TP group into tp_size//dcp_size
+        # DCP groups. When PCP is also enabled, DCP groups span across PCP
+        # halves so a single all-to-all handles decode communication.
+        tp = self.tensor_parallel_size
+        dcp = self.decode_context_parallel_size
+        pcp = self.prefill_context_parallel_size
+        if pcp > 1 and dcp > 1:
+            # With PCP: dcp must divide evenly across PCP halves
+            if dcp % pcp != 0:
+                raise ValueError(
+                    f"dcp_size={dcp} must be divisible by pcp_size={pcp} "
+                    "when both are enabled."
+                )
+            dcp_per_pcp = dcp // pcp
+            if tp % dcp_per_pcp != 0:
+                raise ValueError(
+                    f"tp_size={tp} must be divisible by dcp_per_pcp={dcp_per_pcp} "
+                    f"(dcp_size={dcp} / pcp_size={pcp})."
+                )
+        elif dcp > 1:
+            # Without PCP: tp must be divisible by dcp
+            if tp % dcp != 0:
+                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
 
         return self
 

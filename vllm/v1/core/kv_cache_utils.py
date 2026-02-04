@@ -1292,15 +1292,12 @@ def _report_kv_cache_config(
         // len(kv_cache_config.kv_cache_groups)
         * min_block_size
     )
+    # Only DCP shards KV cache. PCP gathers K/V after prefill.
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
+    if dcp_size > 1:
+        num_tokens *= dcp_size
         logger.info(
-            "Multiplying the GPU KV cache size by the cp_world_size %d "
-            "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
-            pcp_size,
+            "Multiplying the GPU KV cache size by the dcp_world_size %d.",
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"

@@ -139,8 +139,11 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        cp_world_size = self.pcp_world_size * self.dcp_world_size
-        cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        # Only DCP shards the KV cache. With PCP, tokens are split during
+        # prefill but K/V are gathered (pcp_kv_allgather_and_restore) so
+        # each rank inserts the FULL sequence into its cache.
+        cp_world_size = self.dcp_world_size
+        cp_rank = self.dcp_rank
         if cp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is

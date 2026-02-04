@@ -46,8 +46,9 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size * pcp_world_size > 1:
-            self.block_size *= dcp_world_size * pcp_world_size
+        # Only DCP shards KV cache. PCP gathers K/V after prefill.
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -421,8 +422,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            block_size *= dcp_world_size * pcp_world_size
+        # Only DCP shards KV cache. PCP gathers K/V after prefill.
+        if dcp_world_size > 1:
+            block_size *= dcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not

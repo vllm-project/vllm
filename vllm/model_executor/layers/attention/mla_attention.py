@@ -252,14 +252,14 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
     fused_pcp_qkv_select,
-    get_cp_local_seq_lens,
-    get_pcp_query_indices,
+    get_dcp_local_seq_lens,
+    get_pcp_query_restore_idx,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -663,22 +663,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 
-            # correct dcp attn_out with lse.
+            # Only DCP shards KV cache. With PCP-only, each rank has the
+            # full KV cache during decode (gathered after prefill), so no
+            # collective needed.
             if self.impl.dcp_world_size > 1:
-                attn_out, lse = cp_lse_ag_out_rs(
+                attn_out = cp_lse_ag_out_rs(
                     attn_out,
                     lse,
                     get_dcp_group(),
-                    return_lse=True,
-                    is_lse_base_on_e=not getattr(self.impl, "_use_fi_prefill", False),
-                )
-
-            # correct pcp attn_out with lse.
-            if self.impl.pcp_world_size > 1:
-                attn_out = cp_lse_ag_out_ar(
-                    attn_out,
-                    lse,
-                    get_pcp_group(),
+                    return_lse=False,
                     is_lse_base_on_e=not getattr(self.impl, "_use_fi_prefill", False),
                 )
 
@@ -1377,9 +1370,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # PCP might not be initialized in testing
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
+        # DCP groups span PCP, so dcp_world_size is the effective CP world size.
         self.cp_local_block_size = parallel_config.cp_kv_cache_interleave_size
-        self.cp_virtual_block_size = self.cp_local_block_size * self.cp_world_size
+        self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # TODO(yyj) Remove this once the PCP bug for decode_length > 1 is fixed.
         supports_cp_with_varlen = supports_cp_with_varlen and self.pcp_world_size == 1
@@ -1392,16 +1385,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
-        if self.cp_world_size > 1:
+        # Only DCP shards KV cache, affecting workspace sizing.
+        # PCP gathers K/V after prefill so each rank has full sequence.
+        if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP or PCP is triggered,
             # an additional kvcache allgather across the DCP&PCP group is therefore
             # required, so the workspace has to be enlarged by 1/CP relative
             # to the original TP allocation.
-            assert self.chunked_prefill_workspace_size % self.cp_world_size == 0
+            assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
             self.chunked_prefill_workspace = torch.empty(
                 (
                     self.chunked_prefill_workspace_size
-                    + self.chunked_prefill_workspace_size // self.cp_world_size,
+                    + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.model_config.get_head_size(),
                 ),
                 dtype=self.model_config.dtype,
@@ -1603,7 +1598,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        cp_local_seq_lens = common_attn_metadata.cp_local_seq_lens
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -1699,10 +1694,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     chunk_len = chunk_token_to_seq_tensor.shape[0]
                     token_to_seq_tensor_cpu[i, :chunk_len] = chunk_token_to_seq_tensor
 
-                if self.cp_world_size > 1:
-                    local_context_lens_allranks = get_cp_local_seq_lens(
+                if self.dcp_world_size > 1:
+                    local_context_lens_allranks = get_dcp_local_seq_lens(
                         context_lens_cpu,
-                        self.cp_world_size,
+                        self.dcp_world_size,
                         None,
                         self.cp_local_block_size,
                     )
@@ -1720,7 +1715,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     # be divisible by cp_world_size, because DCP and PCP use
                     # cp_gather_cache which not require `cp_chunk_starts`
                     # aligned to page_size.
-                    assert max_context_chunk % self.cp_world_size == 0
+                    assert max_context_chunk % self.dcp_world_size == 0
                     padded_local_max_context_chunk_across_ranks = (
                         cdiv(
                             max_context_chunk,
@@ -1758,7 +1753,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     if self._use_cudnn_prefill
                     else MLACommonPrefillMetadata.ChunkedContextMetadata
                 )
-                if self.cp_world_size > 1:
+                if self.dcp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                         starts=local_chunk_starts.to(device, non_blocking=True),
@@ -1802,12 +1797,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
             pcp_metadata = None
             if self.pcp_world_size > 1:
-                # NOTE(yyj): We need to get the indices here for
-                # restoring the output.
-                q_head_idx, q_tail_idx = get_pcp_query_indices(
-                    prefill_query_start_loc_cpu
-                )
-                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                output_res_idx = get_pcp_query_restore_idx(prefill_query_start_loc_cpu)
                 pcp_query_start_loc = prefill_query_start_loc // 2
                 max_query_len_half = max_query_len // 2
 
@@ -1858,16 +1848,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         decode_metadata = None
         if num_decodes > 0:
             cp_tot_seq_lens_device = None
-            if self.cp_world_size > 1:
+            if self.dcp_world_size > 1:
                 cp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens = cp_local_seq_lens
+                seq_lens = dcp_local_seq_lens
 
                 # After CP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
                 # and I is cp_kv_cache_interleave_size.
                 # This eliminates GPU->CPU sync while minimizing workspace
                 # over-allocation.
-                num_partitions = self.cp_world_size * self.cp_kv_cache_interleave_size
+                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
                 max_seq_len = (
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size
@@ -2643,14 +2633,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         if has_context:
             suffix_output, suffix_lse = output_prefill
-            if self.dcp_world_size * self.pcp_world_size > 1:
+            # DCP groups span PCP, so dcp_world_size is the total CP world size
+            if self.dcp_world_size > 1:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
                         kv_c_and_k_pe_cache,
                         attn_metadata,
                         k_scale=None,
-                        cp_world_size=self.dcp_world_size * self.pcp_world_size,
+                        cp_world_size=self.dcp_world_size,
                     )
                 )
             else:
