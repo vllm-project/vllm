@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from enum import StrEnum
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
@@ -11,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    field_validator,
     model_validator,
 )
 
@@ -55,11 +57,79 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
+class ErrorType(StrEnum):
+    """
+    Enum for standardized error types in API responses.
+
+    Using StrEnum ensures JSON serialization outputs the string value
+    for backwards compatibility.
+    """
+
+    # OpenAI-style error types
+    INVALID_REQUEST_ERROR = "invalid_request_error"
+
+    # vLLM-specific error types
+    BAD_REQUEST_ERROR = "BadRequestError"
+    NOT_FOUND = "NotFoundError"
+    INVALID_USER_INPUT = "InvalidUserInput"
+    NOT_IMPLEMENTED_ERROR = "NotImplementedError"
+    INTERNAL_SERVER_ERROR = "InternalServerError"
+
+    # HTTP status phrase error types (for backwards compatibility)
+    HTTP_BAD_REQUEST = "Bad Request"
+    HTTP_REQUEST_TIMEOUT = "Request Timeout"
+    HTTP_UNPROCESSABLE_ENTITY = "Unprocessable Entity"
+    HTTP_INTERNAL_SERVER_ERROR = "Internal Server Error"
+
+    @classmethod
+    def from_string(cls, value: str) -> "ErrorType":
+        """
+        Convert a string to an ErrorType enum value.
+
+        Args:
+            value: The string value to convert.
+
+        Returns:
+            The corresponding ErrorType enum value.
+
+        Raises:
+            ValueError: If the string does not match any known error type.
+        """
+        # Try direct match first (case-sensitive)
+        for member in cls:
+            if member.value == value:
+                return member
+
+        # If no match found, raise an exception
+        valid_types = [member.value for member in cls]
+        raise ValueError(
+            f"Unknown error type: '{value}'. "
+            f"Valid error types are: {valid_types}"
+        )
+
+
 class ErrorInfo(OpenAIBaseModel):
     message: str
-    type: str
+    type: ErrorType
     param: str | None = None
     code: int
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def validate_type(cls, v: str | ErrorType) -> ErrorType:
+        """
+        Validate and convert the type field to ErrorType enum.
+
+        Supports backwards compatibility by accepting string values
+        and converting them to the corresponding ErrorType enum.
+        """
+        if isinstance(v, ErrorType):
+            return v
+        if isinstance(v, str):
+            return ErrorType.from_string(v)
+        raise TypeError(
+            f"type must be a string or ErrorType, got {type(v).__name__}"
+        )
 
 
 class ErrorResponse(OpenAIBaseModel):

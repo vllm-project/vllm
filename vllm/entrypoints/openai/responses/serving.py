@@ -70,6 +70,7 @@ from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
+    ErrorType,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.engine.serving import (
@@ -304,7 +305,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "Please reduce prompt."
             )
             return self.create_error_response(
-                err_type="invalid_request_error",
+                err_type=ErrorType.INVALID_REQUEST_ERROR,
                 message=error_message,
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="input",
@@ -317,14 +318,14 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> ErrorResponse | None:
         if self.use_harmony and request.is_include_output_logprobs():
             return self.create_error_response(
-                err_type="invalid_request_error",
+                err_type=ErrorType.INVALID_REQUEST_ERROR,
                 message="logprobs are not supported with gpt-oss models",
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="logprobs",
             )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
-                err_type="invalid_request_error",
+                err_type=ErrorType.INVALID_REQUEST_ERROR,
                 message=(
                     "This vLLM engine does not support `store=True` and "
                     "therefore does not support the background mode. To "
@@ -337,7 +338,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
         if request.previous_input_messages and request.previous_response_id:
             return self.create_error_response(
-                err_type="invalid_request_error",
+                err_type=ErrorType.INVALID_REQUEST_ERROR,
                 message="Only one of `previous_input_messages` and "
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
@@ -1289,7 +1290,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_status = response.status
             if prev_status not in ("queued", "in_progress"):
                 return self.create_error_response(
-                    err_type="invalid_request_error",
+                    err_type=ErrorType.INVALID_REQUEST_ERROR,
                     message="Cannot cancel a synchronous response.",
                     param="response_id",
                 )
@@ -1308,7 +1309,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
         return self.create_error_response(
-            err_type="invalid_request_error",
+            err_type=ErrorType.INVALID_REQUEST_ERROR,
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
             param="response_id",
@@ -1316,7 +1317,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _make_store_not_supported_error(self) -> ErrorResponse:
         return self.create_error_response(
-            err_type="invalid_request_error",
+            err_type=ErrorType.INVALID_REQUEST_ERROR,
             message=(
                 "`store=True` (default) is not supported. Please set "
                 "`store=False` in Responses API or set "

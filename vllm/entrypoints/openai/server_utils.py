@@ -20,7 +20,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    ErrorType,
+)
 from vllm.entrypoints.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -309,11 +313,17 @@ async def log_response(request: Request, call_next):
     return response
 
 
+def _http_status_to_error_type(status_code: int) -> ErrorType:
+    """Convert HTTP status code to ErrorType enum."""
+    phrase = HTTPStatus(status_code).phrase
+    return ErrorType.from_string(phrase)
+
+
 async def http_exception_handler(_: Request, exc: HTTPException):
     err = ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(exc.detail),
-            type=HTTPStatus(exc.status_code).phrase,
+            type=_http_status_to_error_type(exc.status_code),
             code=exc.status_code,
         )
     )
@@ -341,7 +351,7 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
     err = ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(message),
-            type=HTTPStatus.BAD_REQUEST.phrase,
+            type=ErrorType.HTTP_BAD_REQUEST,
             code=HTTPStatus.BAD_REQUEST,
             param=param,
         )
