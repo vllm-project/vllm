@@ -989,15 +989,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.cache = cache
 
         if hasattr(self, "_get_data_parser"):
-            logger.warning_once(
-                "BaseMultiModalProcessor._get_data_parser is deprecated "
-                "and will be removed in v0.16."
+            raise ValueError(
+                "BaseMultiModalProcessor._get_data_parser has been "
+                "moved to `info.build_data_parser in v0.16. "
                 "You should override `info.build_data_parser` instead."
             )
 
-            self.data_parser = self._get_data_parser()  # type: ignore
-        else:
-            self.data_parser = self.info.get_data_parser()
+        self.data_parser = self.info.get_data_parser()
 
     @property
     @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
