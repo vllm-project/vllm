@@ -498,17 +498,14 @@ class OpenAIServingResponses(OpenAIServing):
                             merge_structured_outputs_params,
                         )
 
+                        structured_tag = reasoning_parser.prepare_structured_tag(
+                            struct_out.structural_tag,
+                            self.tool_server,
+                        )
                         sampling_params.structured_outputs = (
                             merge_structured_outputs_params(
                                 struct_out,
-                                {
-                                    "structural_tag": (
-                                        reasoning_parser.prepare_structured_tag(
-                                            struct_out.structural_tag,
-                                            self.tool_server,
-                                        )
-                                    ),
-                                },
+                                {"structural_tag": structured_tag},
                             )
                         )
                 generator = self._generate_with_builtin_tools(
