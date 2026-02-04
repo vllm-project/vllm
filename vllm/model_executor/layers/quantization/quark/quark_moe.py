@@ -1252,6 +1252,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             w2_scale=w2_scale,
         )
 
+    @property
     def is_monolithic(self) -> bool:
         return True
 
