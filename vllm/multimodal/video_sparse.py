@@ -5,6 +5,7 @@ import torch
 import torchvision.transforms.v2.functional as tvF
 from torchvision.ops import structural_similarity_index_measure as ssim
 
+
 class SimilarFrameDetector:
     """
     Detects similar frames in video and samples keyframes
