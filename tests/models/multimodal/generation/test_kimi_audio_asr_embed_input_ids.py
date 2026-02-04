@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.models.kimi_audio_asr import KimiAudioForCausalLM
+from vllm.model_executor.models.kimi_audio_asr import KimiAudioForConditionalGeneration
 
 
 class _DummyEmbedTokens:
@@ -51,7 +51,7 @@ def test_embed_input_ids_smoke_no_shape_errors():
     text_input_ids = torch.zeros((s,), dtype=torch.long)
 
     # Case 1: raw whisper feature dim (needs vq_adaptor)
-    out_raw = KimiAudioForCausalLM.embed_input_ids(
+    out_raw = KimiAudioForConditionalGeneration.embed_input_ids(
         dummy_self,
         input_ids,
         whisper_input_features=torch.zeros((s, 5120), dtype=torch.float16),
@@ -64,7 +64,7 @@ def test_embed_input_ids_smoke_no_shape_errors():
 
     # Case 2: already-projected whisper embeddings (hidden_size), should bypass
     # adaptor and still succeed.
-    out_proj = KimiAudioForCausalLM.embed_input_ids(
+    out_proj = KimiAudioForConditionalGeneration.embed_input_ids(
         dummy_self,
         input_ids,
         whisper_input_features=torch.zeros((s, hidden), dtype=torch.float16),

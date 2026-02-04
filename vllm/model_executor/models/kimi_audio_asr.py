@@ -92,7 +92,7 @@ _DEBUG_LOG_COUNT = 0
 _DEBUG_LOG_LIMIT = 5
 
 
-__all__ = ["KimiAudioForCausalLM"]
+__all__ = ["KimiAudioForConditionalGeneration"]
 
 
 # ---- helpers / caching ----
@@ -467,7 +467,9 @@ class VQAdaptor(torch.nn.Module):
     info=KimiAudioASRProcessingInfo,
     dummy_inputs=KimiAudioASRDummyInputsBuilder,
 )
-class KimiAudioForCausalLM(Qwen2ForCausalLM, SupportsTranscription, SupportsMultiModal):
+class KimiAudioForConditionalGeneration(
+    Qwen2ForCausalLM, SupportsTranscription, SupportsMultiModal
+):
     """Kimi-Audio model for conditional generation + transcription."""
 
     # vLLM V1: treat this as a "raw input only" multimodal model so that
