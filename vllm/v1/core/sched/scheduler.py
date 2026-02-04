@@ -825,6 +825,11 @@ class Scheduler(SchedulerInterface):
                 for req in scheduled_new_reqs
             ]
 
+        if self.connector is not None and len(new_reqs_data) > 0:
+            total_num_scheduled_tokens += self._handle_segmented_prefill(
+                new_reqs_data, num_scheduled_tokens
+            )
+
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs,
@@ -910,7 +915,9 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            request = self.requests[req_id]
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
             request.num_computed_tokens += num_scheduled_token
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
@@ -2154,3 +2161,45 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def _handle_segmented_prefill(
+        self,
+        new_reqs_data: list[NewRequestData],
+        num_scheduled_tokens: dict[str, int],
+    ) -> int:
+        """
+        A Segmented prefill enables the reuse of a gapped external KV cache by creating
+        multiple virtual requests (one per gap) that execute together in the same batch
+        while sharing tokens and KV-cache blocks.
+
+        Returns the total number of scheduled tokens across all new requests created.
+        """
+        if self.connector is None:
+            return 0
+
+        total_added_scheduled_tokens = 0
+
+        for nrd in new_reqs_data:
+            request = self.requests.get(nrd.req_id)
+            if request is None:
+                continue
+
+            computed_token_gaps = self.connector.get_computed_token_gaps(request)
+            if not computed_token_gaps:
+                continue
+
+            for start, end in computed_token_gaps:
+                nrd_copy = replace(nrd)
+                nrd_copy.req_id = nrd_copy.req_id + "." + str(start)
+                nrd_copy.num_computed_tokens = start
+                req_copy_num_sched_tokens = end - start
+                num_scheduled_tokens[nrd_copy.req_id] = req_copy_num_sched_tokens
+                total_added_scheduled_tokens += req_copy_num_sched_tokens
+                nrd_copy.prompt_token_ids = (
+                    nrd.prompt_token_ids[:end]
+                    if nrd.prompt_token_ids is not None
+                    else None
+                )
+                new_reqs_data.append(nrd_copy)
+
+        return total_added_scheduled_tokens
