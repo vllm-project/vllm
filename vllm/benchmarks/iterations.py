@@ -355,22 +355,6 @@ async def run_benchmark(
         # Warmup: trigger runtime compilation before benchmarking
         await run_warmup(session, rotator, config.model)
 
-        # Start profiling if requested
-        prefix = None
-        profiling_started = False
-        if config.profile:
-            prefix = f"{config.mode}_{int(time.time())}"
-            profiling_started = await call_debug_endpoint(
-                session, rotator, "/debug/profile/start", {"prefix": prefix}
-            )
-            if profiling_started:
-                logger.info("Started profiling with prefix: %s", prefix)
-            else:
-                logger.warning(
-                    "Profiling failed to start. Ensure server has "
-                    "--profiler-config enabled. Continuing without profiling."
-                )
-
         # Sweep all parameter combinations
         param_combos = list(
             itertools.product(
@@ -388,6 +372,9 @@ async def run_benchmark(
         # For prefill: 1 output token. For decode: config.iterations tokens.
         num_output_tokens = 1 if config.mode == "prefill" else config.iterations
 
+        # Track all trace prefixes for fetching at the end
+        trace_prefixes: list[str] = []
+
         for ctx_len, in_len, batch_size in param_combos:
             logger.info(
                 "Running: mode=%s, ctx=%d, input=%d, batch=%d, output_tokens=%d",
@@ -397,6 +384,18 @@ async def run_benchmark(
                 batch_size,
                 num_output_tokens,
             )
+
+            # Start profiling for this param combo
+            prefix = None
+            if config.profile:
+                prefix = f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size}"
+                started = await call_debug_endpoint(
+                    session, rotator, "/debug/profile/start", {"prefix": prefix}
+                )
+                if started:
+                    trace_prefixes.append(prefix)
+                else:
+                    logger.warning("Failed to start profiling for %s", prefix)
 
             (
                 elapsed_ms,
@@ -410,6 +409,10 @@ async def run_benchmark(
                 in_len,
                 batch_size,
             )
+
+            # Stop profiling for this param combo
+            if config.profile and prefix:
+                await call_debug_endpoint(session, rotator, "/debug/profile/stop")
 
             total_tokens = prompt_tokens + completion_tokens
             tokens_per_second = (
@@ -442,31 +445,31 @@ async def run_benchmark(
                 tokens_per_second,
             )
 
-        # Stop profiling and fetch traces (only if profiling actually started)
-        if profiling_started and prefix:
-            await call_debug_endpoint(session, rotator, "/debug/profile/stop")
-            logger.info("Stopped profiling")
+        # Fetch traces for all param combos
+        if config.profile and trace_prefixes:
+            logger.info("Fetching traces for %d runs...", len(trace_prefixes))
 
             # Retry fetching traces (async write by torch profiler)
             max_retries = 3
-            downloaded: list[str] = []
+            all_downloaded: list[str] = []
             for attempt in range(max_retries):
                 await asyncio.sleep(2.0)
-                downloaded = await fetch_traces(session, rotator, prefix, "traces")
-                if downloaded:
+                for prefix in trace_prefixes:
+                    downloaded = await fetch_traces(session, rotator, prefix, "traces")
+                    all_downloaded.extend(downloaded)
+                if all_downloaded:
                     logger.info(
-                        "Downloaded %d trace files to ./traces/", len(downloaded)
+                        "Downloaded %d trace files to ./traces/", len(all_downloaded)
                     )
                     break
                 logger.info(
                     "No traces yet, retrying (%d/%d)...", attempt + 1, max_retries
                 )
 
-            if not downloaded:
+            if not all_downloaded:
                 logger.warning(
-                    "No trace files found matching prefix '%s' after %d attempts. "
+                    "No trace files found after %d attempts. "
                     "Check server profiler directory.",
-                    prefix,
                     max_retries,
                 )
 
