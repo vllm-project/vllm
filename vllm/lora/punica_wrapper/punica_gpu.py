@@ -375,6 +375,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
                 block_size - 1
             )
+            if topk_ids.numel() < num_virtual_experts:
+                max_num_tokens_padded = min(
+                    topk_ids.numel() * block_size, max_num_tokens_padded
+                )
             if pad_sorted_ids:
                 max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
             sorted_ids = torch.empty(
