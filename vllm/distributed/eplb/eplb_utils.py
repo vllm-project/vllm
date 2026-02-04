@@ -28,22 +28,12 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     # of DeepEP LL kernels.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
     if is_data_parallel and is_eplb_enabled and is_deepep_ll and async_eplb:
-        override_value = 8
         current_value_str = os.getenv("NCCL_MAX_CTAS")
 
         if current_value_str and current_value_str.isdigit():
-            current_value = int(current_value_str)
-            if current_value <= override_value:
-                # The user has already set a value that is smaller or equal.
-                # We honor it and do not override.
-                logger.info_once(
-                    f"EPLB: NCCL_MAX_CTAS is already set to {current_value}. "
-                    f"Not overriding with the default value of {override_value} "
-                    "for deepep_low_latency backend.",
-                    scope="global",
-                )
-                return
+            return
 
+        override_value = 8
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
