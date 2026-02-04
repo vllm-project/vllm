@@ -106,6 +106,7 @@ class PCPManager:
         # Tokens per request for this rank
         pcp_tokens = padded // ws
         chunk = (pcp_tokens // 2).clip(min=1)
+        # Decodes are replicated across PCP ranks, so chunk == pcp_tokens
         chunk[:num_decode_reqs] = pcp_tokens[:num_decode_reqs]
 
         # Aranges for pcp_tokens and chunks
