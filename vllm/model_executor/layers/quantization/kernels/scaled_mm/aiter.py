@@ -11,7 +11,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+)
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
@@ -137,7 +140,7 @@ class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return rocm_aiter_ops.gemm_a8w8(A, B.t(), As, Bs, bias, out_dtype)
 
 
-class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     @classmethod
     def is_supported(cls, compute_capability=None):
         return (
@@ -147,7 +150,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         )
 
     @classmethod
-    def can_implement(cls, config: Fp8BlockMMScaledConfig):
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
         act_quant_desc = config.activation_quant_key.scale
         if (
             act_quant_desc.group_shape != GroupShape(1, 12)

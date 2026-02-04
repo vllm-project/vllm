@@ -16,8 +16,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.BlockScaledMMLinearKernel import (  # noqa: E501
-    Fp8BlockMMScaledConfig,
-    Fp8BlockScaledMMKernel,
+    Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
@@ -26,6 +25,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
     CudaFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
 )
@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     Int8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -87,9 +88,19 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 }
 
 
-_PLATFORM_FP8_BLOCK_PRIORITIES: dict[PlatformEnum, type[Fp8BlockScaledMMKernel]] = {
-    PlatformEnum.CUDA: CudaFp8BlockScaledMMKernel,
-    PlatformEnum.ROCM: AiterFp8BlockScaledMMKernel,
+# in priority/performance order (when available)
+_POSSIBLE_FP8_BLOCK_KERNELS: dict[
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
+] = {
+    PlatformEnum.CUDA: [
+        CudaFp8BlockScaledMMKernel,
+        CutlassFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.ROCM: [
+        AiterFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
 }
 
 _KernelT = TypeVar("_KernelT", bound=MMLinearKernel)
@@ -122,69 +133,6 @@ def is_supported_and_can_implement_kernel(
         )
 
     return True, ""
-
-
-def init_fp8_block_scaled_linear_kernel(
-    activation_quant_key: QuantKey,
-    weight_quant_key: QuantKey,
-    out_dtype: torch.dtype,
-    force_kernel: type[MMLinearKernel] | None = None,
-    module_name: str | None = None,
-) -> Fp8BlockScaledMMKernel:
-    config = Fp8BlockMMScaledConfig(
-        activation_quant_key=activation_quant_key,
-        weight_quant_key=weight_quant_key,
-        out_dtype=out_dtype,
-    )
-
-    if force_kernel is not None:
-        can_implement, reason = is_supported_and_can_implement_kernel(
-            force_kernel,
-            config,
-        )
-        if can_implement:
-            return force_kernel(config)
-
-        logger.info_once(
-            "Tried to force %s, but the kernel couldn't be implemented. %s",
-            force_kernel.__name__,
-            reason,
-            scope="global",
-        )
-
-    platform_enum = current_platform._enum
-
-    # Check if the current platform has a priority kernel implementation
-    if platform_enum in _PLATFORM_FP8_BLOCK_PRIORITIES:
-        prioritized_kernel = _PLATFORM_FP8_BLOCK_PRIORITIES[platform_enum]
-        can_dispatch, reason = is_supported_and_can_implement_kernel(
-            prioritized_kernel,
-            config,
-        )
-        if can_dispatch:
-            module_prefix = f"[{module_name}] " if module_name else ""
-            logger.info_once(
-                f"{module_prefix} Selected kernel: {prioritized_kernel.__name__}"
-            )
-            return prioritized_kernel(config)
-        else:
-            logger.warning_once(f"{reason}")
-
-            fall_back_kernels = prioritized_kernel.ordered_fallback_kernels()
-            for kernel in fall_back_kernels:
-                can_dispatch, _ = is_supported_and_can_implement_kernel(kernel, config)
-                if can_dispatch:
-                    module_prefix = f"[{module_name}] " if module_name else ""
-                    logger.info_once(
-                        f"{module_prefix}Selected kernel: {kernel.__name__} (fallback)"
-                    )
-                    return kernel(config)
-
-            raise ValueError("None of the exsiting quantization kernel can be selected")
-
-    raise ValueError(
-        f"{current_platform} platform is not supported for any scaled mm kernel"
-    )
 
 
 def choose_scaled_mm_linear_kernel(
@@ -250,38 +198,36 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    force_kernel: type[MMLinearKernel] | None = None,
+    force_kernel: type[_KernelT] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMKernel:
-    if activation_quant_key.scale.group_shape.is_per_group():
-        return init_fp8_block_scaled_linear_kernel(
-            activation_quant_key=activation_quant_key,
-            weight_quant_key=weight_quant_key,
-            out_dtype=out_dtype,
-            force_kernel=force_kernel,
-            module_name=module_name,
-        )
-
-    scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
+    config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         out_dtype=out_dtype,
     )
 
-    kernel_type = choose_scaled_mm_linear_kernel(
-        scaled_mm_linear_kernel_config, _POSSIBLE_FP8_KERNELS, force_kernel=force_kernel
-    )
-
-    if module_name:
-        logger.info_once(
-            "Selected %s for %s",
-            kernel_type.__name__,
-            module_name,
-            scope="global",
+    if activation_quant_key.scale.group_shape.is_per_group():
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=config,
+            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            force_kernel=force_kernel,
+        )
+    else:
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=config,
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
+            force_kernel=force_kernel,
         )
 
+    logger.info_once(
+        "Selected %s for %s",
+        kernel_type.__name__,
+        module_name,
+        scope="global",
+    )
     return kernel_type(
-        scaled_mm_linear_kernel_config,
+        config,
     )
 
 
@@ -308,7 +254,6 @@ def init_int8_linear_kernel(
         module_name,
         scope="global",
     )
-
     return kernel_type(
         config,
     )

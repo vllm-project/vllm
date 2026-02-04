@@ -45,7 +45,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_block_scaled_linear_kernel,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -602,7 +601,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         weight_quant_key = create_fp8_quant_key(
             static=True, group_shape=GroupShape(*self.weight_block_size)
         )
-        self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
+        self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
             weight_quant_key=weight_quant_key,
             activation_quant_key=activation_quant_key,
             out_dtype=torch.get_default_dtype(),

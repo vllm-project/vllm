@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMKernel
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -182,7 +182,7 @@ direct_register_custom_op(
 )
 
 
-class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     is_hopper: bool = current_platform.is_device_capability(90)
 
     @classmethod
@@ -195,7 +195,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
             )
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
         return [TritonFp8BlockScaledMMKernel]
 
     def apply_block_scaled_mm(

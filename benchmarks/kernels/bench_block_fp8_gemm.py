@@ -9,7 +9,7 @@ os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 import torch
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_block_scaled_linear_kernel,
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -68,7 +68,7 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     weight_group_shape = GroupShape(block_n, block_k)
     act_quant_group_shape = GroupShape(1, block_k)  # Per-token, per-group quantization
 
-    linear_op = init_fp8_block_scaled_linear_kernel(
+    linear_op = init_fp8_linear_kernel(
         weight_quant_key=create_fp8_quant_key(
             static=True, group_shape=weight_group_shape
         ),

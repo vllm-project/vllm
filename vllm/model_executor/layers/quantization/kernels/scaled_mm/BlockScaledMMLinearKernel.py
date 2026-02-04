@@ -9,24 +9,14 @@ import torch
 from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
 from vllm.model_executor.utils import replace_parameter
 
 from ...utils.fp8_utils import process_fp8_weight_block_strategy
 from ..base import (
     FP8Params,
     MMLinearKernel,
-    MMLinearLayerConfig,
 )
-
-
-@dataclass
-class Fp8BlockMMScaledConfig(MMLinearLayerConfig):
-    weight_quant_key: QuantKey
-    activation_quant_key: QuantKey
-    out_dtype: torch.dtype | None
+from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
 
 @dataclass
@@ -47,8 +37,10 @@ class FP8BlockParams(FP8Params):
         )
 
 
-class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockParams]):
-    def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
+class Fp8BlockScaledMMLinearKernel(
+    MMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8BlockParams]
+):
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.weight_group_shape = config.weight_quant_key.scale.group_shape
@@ -59,7 +51,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
         )
 
     @classmethod
-    def can_implement(cls, config: Fp8BlockMMScaledConfig):
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
         act_quant_key = config.activation_quant_key
         if act_quant_key.scale.static:
             return (
@@ -71,7 +63,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
 
     @classmethod
     @abstractmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
         raise NotImplementedError
 
     def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:

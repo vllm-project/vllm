@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from ...utils.fp8_utils import get_w8a8_block_fp8_configs
 from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMKernel,
+    Fp8BlockScaledMMLinearKernel,
 )
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
@@ -339,7 +339,7 @@ direct_register_custom_op(
 )
 
 
-class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_cuda_alike():
@@ -347,7 +347,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         return True, None
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
         return [cls]
 
     def apply_block_scaled_mm(

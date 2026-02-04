@@ -11,14 +11,17 @@ from vllm.utils.flashinfer import (
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 
-from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+)
 from .cutlass import CutlassFp8BlockScaledMMKernel
 from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from .flashinfer import FlashInferFp8DeepGEMMDynamicBlockScaledKernel
 from .triton import TritonFp8BlockScaledMMKernel
 
 
-class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     """
     Dynamic kernel selector for FP8 block-scaled matrix multiplication on CUDA devices.
 
@@ -44,7 +47,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
     conditions such as output dtype, input shape, and weight properties.
     """
 
-    def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         self.flashinfer_deepgemm_kernel: (
             FlashInferFp8DeepGEMMDynamicBlockScaledKernel | None
         ) = None
@@ -55,7 +58,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         self.deepgemm_kernel: DeepGemmFp8BlockScaledMMKernel | None = None
         if DeepGemmFp8BlockScaledMMKernel.is_supported()[0]:
             self.deepgemm_kernel = DeepGemmFp8BlockScaledMMKernel(config)
-        self.default_fallback_kernel: Fp8BlockScaledMMKernel | None = None
+        self.default_fallback_kernel: Fp8BlockScaledMMLinearKernel | None = None
         for kernel in self.ordered_fallback_kernels():
             if kernel.is_supported()[0]:
                 self.default_fallback_kernel = kernel(config)
@@ -66,7 +69,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
             self.deepgemm_kernel.process_weights_after_loading(layer)
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
         return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
 
     @classmethod

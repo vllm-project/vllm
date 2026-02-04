@@ -18,7 +18,9 @@ from vllm.utils.flashinfer import (
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..base import DynamicMMLinearKernel, FP8Params
-from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from .cutlass import CutlassFp8BlockScaledMMKernel
 from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from .ScaledMMLinearKernel import (
@@ -109,8 +111,8 @@ direct_register_custom_op(
 )
 
 
-class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
-    def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
+class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.input_quant_op = QuantFP8(
@@ -121,7 +123,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         )
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
         return [
             DeepGemmFp8BlockScaledMMKernel,
             CutlassFp8BlockScaledMMKernel,
@@ -196,7 +198,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
 
 class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     DynamicMMLinearKernel[
-        Fp8BlockMMScaledConfig,
+        FP8ScaledMMLinearLayerConfig,
         FP8Params,
         FlashInferFp8BlockScaledMMKernel,
         DeepGemmFp8BlockScaledMMKernel,

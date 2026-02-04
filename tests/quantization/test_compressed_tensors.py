@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    Fp8BlockScaledMMKernel,
+    Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -752,7 +752,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
             assert isinstance(
-                qkv_proj.scheme.w8a8_block_fp8_linear, Fp8BlockScaledMMKernel
+                qkv_proj.scheme.w8a8_block_fp8_linear, Fp8BlockScaledMMLinearKernel
             )
 
             assert qkv_proj.weight.dtype is fp8_dtype
