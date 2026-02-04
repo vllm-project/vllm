@@ -31,6 +31,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -196,13 +197,39 @@ class InputProcessor:
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
+        # TODO: Validate generation tasks as well once `supported_tasks`
+        # is passed to all `process_inputs` calls
+        supported_tasks: tuple[SupportedTask, ...] | None,
     ):
         """
         Validate supported SamplingParam.
         Should raise ValueError if unsupported for API Server.
         """
         if isinstance(params, PoolingParams):
+            assert supported_tasks is not None
+            supported_pooling_tasks = [
+                task for task in supported_tasks if task in POOLING_TASKS
+            ]
+
+            if params.task is None:
+                if not supported_pooling_tasks:
+                    raise ValueError("Pooling tasks are not supported")
+
+                if "token_embed" in supported_pooling_tasks:
+                    params.task = "token_embed"
+                elif "token_classify" in supported_pooling_tasks:
+                    params.task = "token_classify"
+                elif "plugin" in supported_pooling_tasks:
+                    params.task = "plugin"
+
+            if params.task not in supported_pooling_tasks:
+                raise ValueError(
+                    f"Unsupported task: {params.task!r} "
+                    f"Supported tasks: {supported_pooling_tasks}"
+                )
+
             params.verify(self.model_config)
+
             return
 
         self._validate_logprobs(params)
@@ -498,10 +525,11 @@ class InputProcessor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        supported_tasks: tuple[SupportedTask, ...] | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
-        self._validate_params(params)
+        self._validate_params(params, supported_tasks)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size

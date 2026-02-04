@@ -7,7 +7,6 @@ from typing import Annotated, Any
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
@@ -130,7 +129,7 @@ class PoolingParams(
                     invalid_parameters.append(k)
 
             if invalid_parameters:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Task {self.task} only supports {valid_parameters} "
                     f"parameters, does not support "
                     f"{invalid_parameters} parameters"
@@ -150,7 +149,7 @@ class PoolingParams(
 
             if self.dimensions is not None and model_config is not None:
                 if not model_config.is_matryoshka:
-                    raise VLLMValidationError(
+                    raise ValueError(
                         f'Model "{model_config.served_model_name}" does not '
                         f"support matryoshka representation, "
                         f"changing output dimensions will lead to poor results."
@@ -159,20 +158,20 @@ class PoolingParams(
                 mds = model_config.matryoshka_dimensions
                 if mds is not None:
                     if self.dimensions not in mds:
-                        raise VLLMValidationError(
+                        raise ValueError(
                             f"Model {model_config.served_model_name!r} "
                             f"only supports {str(mds)} matryoshka dimensions, "
                             f"use other output dimensions will "
                             f"lead to poor results."
                         )
                 elif self.dimensions < 1:
-                    raise VLLMValidationError("Dimensions must be greater than 0")
+                    raise ValueError("Dimensions must be greater than 0")
 
         elif self.task in ["classify", "score", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:
-            raise VLLMValidationError(f"Unknown pooling task: {self.task!r}")
+            raise ValueError(f"Unknown pooling task: {self.task!r}")
 
     def _verify_valid_parameters(self):
         assert self.task is not None, "task must be set"
@@ -186,7 +185,7 @@ class PoolingParams(
                 invalid_parameters.append(k)
 
         if invalid_parameters:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"Task {self.task!r} only supports {valid_parameters} "
                 f"parameters, does not support "
                 f"{invalid_parameters} parameters"

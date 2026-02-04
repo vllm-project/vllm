@@ -1130,9 +1130,6 @@ class LLM:
                     pooling_params
                 )
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
@@ -1744,6 +1741,7 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            supported_tasks=self.supported_tasks,
         )
 
         self.llm_engine.add_request(

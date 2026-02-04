@@ -152,16 +152,6 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()
 
-            if pooling_params.task is None:
-                if "token_embed" in self.supported_tasks:
-                    pooling_params.task = "token_embed"
-                elif "token_classify" in self.supported_tasks:
-                    pooling_params.task = "token_classify"
-                elif "plugin" in self.supported_tasks:
-                    pooling_params.task = "plugin"
-                else:
-                    pooling_params.task = self.supported_tasks[0]
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 

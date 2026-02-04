@@ -270,7 +270,11 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = await self.engine_core.get_supported_tasks_async()
+
+        return self._supported_tasks
 
     async def add_request(
         self,
@@ -356,6 +360,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text = get_prompt_text(prompt)
 
