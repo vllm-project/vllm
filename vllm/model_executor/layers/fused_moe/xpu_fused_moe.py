@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -15,6 +14,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+
+if current_platform.is_xpu():
+    from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 
 class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
