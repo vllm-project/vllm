@@ -30,6 +30,7 @@ from transformers import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -581,6 +582,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.config = config
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
+        self.vllm_config = vllm_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.embed_tokens = VocabParallelEmbedding(
@@ -647,9 +649,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        image_embeds = self.vision_embed_tokens(
-            image_input["pixel_values"], image_input["image_sizes"]
-        )
+        with set_forward_context(None, self.vllm_config):
+            image_embeds = self.vision_embed_tokens(
+                image_input["pixel_values"], image_input["image_sizes"]
+            )
 
         return image_embeds
 
