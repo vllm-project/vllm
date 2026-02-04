@@ -105,7 +105,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if not remote_host or remote_port == 0:
                     await context.abort(
                         grpc.StatusCode.INVALID_ARGUMENT,
-                        "Invalid kv_transfer_params: remote_host and remote_port must be set."
+                        "Invalid kv_transfer_params: "
+                        "remote_host and remote_port must be set.",
                     )
                 kv_transfer_params = {
                     "remote_host": remote_host,
@@ -113,7 +114,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 }
                 logger.debug(
                     "Request %s has kv_transfer_params: %s",
-                    request_id, kv_transfer_params
+                    request_id,
+                    kv_transfer_params,
                 )
 
             # Build sampling params with detokenize=False
