@@ -34,8 +34,16 @@ def server(request, audio_assets: AudioTestAssets):
         json.dumps({"audio": len(audio_assets)}),
     ] + MISTRAL_FORMAT_ARGS
 
+    # Disable reduced precision reduction for bf16/fp16 matmul operations
+    # to ensure numerical consistency across PyTorch versions.
+    # See: https://github.com/pytorch/pytorch/pull/173002
+    env_dict = {
+        "VLLM_AUDIO_FETCH_TIMEOUT": "30",
+        "VLLM_DISABLE_REDUCED_PRECISION_REDUCTION": "1",
+    }
+
     with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"}
+        MODEL_NAME, args, env_dict=env_dict
     ) as remote_server:
         yield remote_server
 
