@@ -142,16 +142,16 @@ class BlockTable:
         # Only DCP shards the KV cache. With PCP, tokens are split during
         # prefill but K/V are gathered (pcp_kv_allgather_and_restore) so
         # each rank inserts the FULL sequence into its cache.
-        cp_world_size = self.dcp_world_size
-        cp_rank = self.dcp_rank
-        if cp_world_size > 1:
+        dcp_world_size = self.dcp_world_size
+        dcp_rank = self.dcp_rank
+        if dcp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * cp_world_size
+            virtual_block_size = self.block_size * dcp_world_size
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
                 + positions // virtual_block_size
@@ -164,13 +164,13 @@ class BlockTable:
             mask = (
                 virtual_block_offsets
                 // self.dcp_kv_cache_interleave_size
-                % cp_world_size
-                == cp_rank
+                % dcp_world_size
+                == dcp_rank
             )
             # Calculate local block_offsets
             block_offsets = (
                 virtual_block_offsets
-                // (cp_world_size * self.dcp_kv_cache_interleave_size)
+                // (dcp_world_size * self.dcp_kv_cache_interleave_size)
                 * self.dcp_kv_cache_interleave_size
                 + virtual_block_offsets % self.dcp_kv_cache_interleave_size
             )
