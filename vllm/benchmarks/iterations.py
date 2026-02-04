@@ -39,13 +39,21 @@ On the client side, run:
 This benchmark uses sleep(level=0) to pause scheduling, queues requests,
 then resumes scheduling to measure precise batch execution times.
 
-Modes:
-    prefill: Measures prefill latency for (context_len + input_len) total tokens.
-             context_len=0 is valid (clean prefill of new input only).
-             Generates 1 output token to complete the prefill phase.
+Prefix Cache Warmup:
+    Before each benchmark run, the client sends warmup requests with context_len
+    tokens to populate the prefix cache. The benchmark requests share this prefix,
+    so the server can skip prefilling the context portion (prefix cache hit).
 
-    decode:  Warms up KV cache with context_len tokens, then measures decode
-             throughput for --iterations output tokens.
+Modes:
+    prefill: First warms up prefix cache with context_len tokens.
+             Then measures prefill of input_len NEW tokens against existing context.
+             Total prompt = context_len + input_len tokens.
+             context_len=0 is valid (clean prefill of new input only).
+
+    decode:  First warms up prefix cache with context_len tokens.
+             Then measures decode throughput for --iterations output tokens.
+             The benchmark prompt matches the warmup (full prefix cache hit),
+             so we measure ONLY decode latency, not prefill.
              context_len > 0 is REQUIRED (cannot decode without context).
 
 NOTE: For accurate prefill benchmarks, do NOT use --enable-chunked-prefill on the
@@ -152,24 +160,39 @@ async def call_debug_endpoint(
     return all_success
 
 
-def build_prompt(context_len: int, input_len: int, mode: str) -> str:
-    """Build prompt with specified context and input lengths.
+def build_context_prompt(context_len: int) -> str:
+    """Build context prompt for prefix cache warmup.
 
-    For prefill mode: total prompt = context_len + input_len tokens.
-        Measures prefill of new input_len tokens against existing context.
-    For decode mode: prompt = context_len tokens (KV cache warmup).
-        Then generates iterations tokens to measure decode throughput.
+    This prompt will be used to populate the prefix cache before benchmarking.
     """
-    # Use a simple repeating pattern to approximate token count
     # "hello " is roughly 1-2 tokens depending on tokenizer
-    if mode == "prefill":
-        # Total prompt = context (existing history) + input (new tokens to prefill)
-        num_words = (context_len + input_len) // 2
-    else:
-        # Decode: only context for KV cache warmup
-        num_words = context_len // 2
-
+    num_words = context_len // 2
     return "hello " * max(1, num_words)
+
+
+def build_benchmark_prompt(context_len: int, input_len: int, mode: str) -> str:
+    """Build benchmark prompt that shares prefix with context prompt.
+
+    For prefill mode: total = context_len + input_len tokens.
+        The first context_len tokens match the warmup prompt (prefix cache hit).
+        We measure prefill of the remaining input_len new tokens.
+
+    For decode mode: total = context_len tokens (same as warmup).
+        Entire prompt hits prefix cache.
+        We measure only decode iterations (no prefill work).
+    """
+    # Build context portion (same as warmup prompt for prefix cache hit)
+    context_words = context_len // 2
+    context_part = "hello " * max(1, context_words)
+
+    if mode == "prefill":
+        # Add new input tokens after context (these will be prefilled)
+        input_words = input_len // 2
+        input_part = "world " * max(1, input_words)  # Different pattern for clarity
+        return context_part + input_part
+    else:
+        # Decode: same as context (full prefix cache hit, no prefill)
+        return context_part
 
 
 def count_tokens(response_data: dict) -> tuple[int, int]:
@@ -209,7 +232,7 @@ async def fetch_server_config(
     return ServerConfig()
 
 
-async def run_warmup(
+async def run_compilation_warmup(
     session: aiohttp.ClientSession,
     rotator: EndpointRotator,
     model: str,
@@ -229,11 +252,60 @@ async def run_warmup(
         )
         if resp.status == 200:
             await resp.json()
-            logger.info("Warmup complete")
+            logger.info("Compilation warmup complete")
         else:
             logger.warning("Warmup request failed: HTTP %d", resp.status)
     except Exception as e:
         logger.warning("Warmup request failed: %s", e)
+
+
+async def run_prefix_cache_warmup(
+    session: aiohttp.ClientSession,
+    rotator: EndpointRotator,
+    model: str,
+    context_len: int,
+    batch_size: int,
+) -> None:
+    """Populate prefix cache with context tokens before benchmarking.
+
+    Sends batch_size requests with context_len tokens to populate the
+    prefix cache. The benchmark requests will share this prefix.
+    """
+    if context_len <= 0:
+        return
+
+    context_prompt = build_context_prompt(context_len)
+    logger.info("Populating prefix cache with %d context tokens...", context_len)
+
+    # Send warmup requests to all endpoints (round-robin)
+    tasks = []
+    for _ in range(batch_size):
+        endpoint = rotator.next()
+        task = asyncio.ensure_future(
+            session.post(
+                f"{endpoint}/v1/completions",
+                json={
+                    "model": model,
+                    "prompt": context_prompt,
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+            )
+        )
+        tasks.append(task)
+
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    success_count = sum(
+        1 for r in responses if not isinstance(r, Exception) and r.status == 200
+    )
+    # Consume response bodies
+    for resp in responses:
+        if not isinstance(resp, Exception):
+            await resp.read()
+
+    logger.info(
+        "Prefix cache warmup: %d/%d requests succeeded", success_count, batch_size
+    )
 
 
 async def run_single_iteration(
@@ -256,7 +328,7 @@ async def run_single_iteration(
     tasks = []
     for _ in range(batch_size):
         endpoint = rotator.next()
-        prompt = build_prompt(context_len, input_len, config.mode)
+        prompt = build_benchmark_prompt(context_len, input_len, config.mode)
         max_tokens = 1 if config.mode == "prefill" else config.iterations
 
         # ensure_future schedules the coroutine immediately
@@ -353,7 +425,7 @@ async def run_benchmark(
         )
 
         # Warmup: trigger runtime compilation before benchmarking
-        await run_warmup(session, rotator, config.model)
+        await run_compilation_warmup(session, rotator, config.model)
 
         # Sweep all parameter combinations
         param_combos = list(
@@ -385,7 +457,13 @@ async def run_benchmark(
                 num_output_tokens,
             )
 
-            # Start profiling for this param combo
+            # Prefix cache warmup: populate KV cache before profiling
+            # This is NOT profiled - we only profile the actual benchmark
+            await run_prefix_cache_warmup(
+                session, rotator, config.model, ctx_len, batch_size
+            )
+
+            # Start profiling for this param combo (after prefix cache warmup)
             prefix = None
             if config.profile:
                 prefix = f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size}"
