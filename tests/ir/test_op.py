@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
-from vllm.ir.op import IrOp
+from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
 
 # This should not exist
 assert "_custom_add" not in IrOp.registry
@@ -16,6 +17,10 @@ def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 def test_registration_overloads():
+    assert all(
+        n not in IrOp.registry for n in ["_custom_sub", "_custom_mul", "_custom_div"]
+    )
+
     # Calling with decorator
     @vllm.ir.register_op()
     def _custom_sub(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -72,8 +77,8 @@ class TestIrOpCustomAdd:
         def dummy_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y + 123
 
-        assert "dummy_provider" in _custom_add._impls
-        assert callable(_custom_add._impls["dummy_provider"])
+        assert "dummy_provider" in _custom_add.impls
+        assert isinstance(_custom_add.impls["dummy_provider"], IrOpImpl)
 
         x = torch.ones(2, 2)
         y = torch.ones(2, 2)
@@ -114,3 +119,115 @@ class TestIrOpCustomAdd:
             for n in fx_gm.graph.nodes
             if n.op == "call_function"
         )
+
+
+@_custom_add.register_impl("impl_a")
+def impl_a(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y + 10
+
+
+@_custom_add.register_impl("impl_b")
+def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y + 20
+
+
+@_custom_add.register_impl("impl_even", supports_args=lambda a, b: a.size(1) % 2 == 0)
+def impl_even(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y + 50
+
+
+class TestIrOpImplDispatch:
+    def test_register_impl(self):
+        assert "impl_a" in _custom_add.impls
+        impl = _custom_add.impls["impl_a"]
+
+        assert impl is impl_a
+        assert impl.op is _custom_add
+        assert impl.provider == "impl_a"
+        assert callable(impl.impl_fn)
+
+        # Test duplicate registration rejected
+        with pytest.raises(AssertionError):
+
+            @_custom_add.register_impl("impl_a")
+            def impl_a_dup(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+                return x + y + 30
+
+        # Check the original impl is still intact
+        assert _custom_add.impls["impl_a"] is impl_a
+
+    def test_reserved_provider_rejected(self):
+        for provider in RESERVED_PROVIDERS:
+            with pytest.raises(AssertionError):
+
+                @_custom_add.register_impl(provider)
+                def bad_impl(x, y):
+                    return x + y
+
+    def test_set_priority_scoped(self):
+        assert _custom_add.get_priority() == []
+
+        with _custom_add.set_priority(["impl_even", "impl_b"]):
+            assert _custom_add.get_priority() == ["impl_even", "impl_b"]
+
+            # Check nesting
+            with _custom_add.set_priority(["impl_b"]):
+                assert _custom_add.get_priority() == ["impl_b"]
+
+            # Restored
+            assert _custom_add.get_priority() == ["impl_even", "impl_b"]
+
+            # Check that exception restores priority
+            with pytest.raises(ValueError), _custom_add.set_priority(["impl_a"]):
+                assert _custom_add.get_priority() == ["impl_a"]
+                raise ValueError("test exception")
+
+            # Restored again
+            assert _custom_add.get_priority() == ["impl_even", "impl_b"]
+
+        # Restored to empty
+        assert _custom_add.get_priority() == []
+
+    def test_dispatch_priority_order(self):
+        x = torch.tensor(1, dtype=torch.int32)
+        y = torch.tensor(2, dtype=torch.int32)
+
+        with _custom_add.set_priority(["impl_b", "impl_a"]):
+            out1 = _custom_add(x, y)
+            out2 = torch.ops.vllm_ir._custom_add(x, y)
+
+        assert out1.item() == 1 + 2 + 20
+        assert out2.item() == 1 + 2 + 20
+
+    def test_unsupported_impl_filtered(self):
+        @_custom_add.register_impl("unsupported", supported=False)
+        def impl_bad(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return x + y + 999
+
+        x = torch.tensor(1, dtype=torch.int32)
+        y = torch.tensor(2, dtype=torch.int32)
+
+        with _custom_add.set_priority(["unsupported", "impl_a"]):
+            assert _custom_add.get_priority() == ["impl_a"]
+            out = _custom_add(x, y)
+
+        # impl_bad skipped → impl_a
+        assert out.item() == 1 + 2 + 10
+
+    def test_supports_args_runtime_dispatch(self):
+        x1 = torch.ones((2, 2), dtype=torch.int32)
+        y1 = torch.full((2, 2), 2, dtype=torch.int32)
+
+        x2 = torch.ones((2, 3), dtype=torch.int32)
+        y2 = torch.full((2, 3), 2, dtype=torch.int32)
+
+        with _custom_add.set_priority(["impl_even"]):
+            assert _custom_add.get_priority() == ["impl_even", "native"]
+
+            out1 = _custom_add(x1, y1)  # size(1) == 2 → impl_even
+            out2 = _custom_add(x2, y2)  # size(1) == 3 → native fallback
+
+        assert torch.all(out1 == 1 + 2 + 50)
+        assert torch.all(out2 == 1 + 2)
+
+    # TODO(luka) test various warnings
