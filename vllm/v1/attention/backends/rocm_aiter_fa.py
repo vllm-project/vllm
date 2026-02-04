@@ -794,7 +794,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             token_to_batch=swa_token_to_batch,
             seq_starts=swa_seq_starts,
             dequant=self.kv_cache_dtype.startswith("fp8"),
-            kv_cache_layout="NHD",
+            kv_cache_layout="SHUFFLE"
+                if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+                else "NHD",
             total_tokens=swa_total_tokens,
         )
 
