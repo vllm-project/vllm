@@ -16,8 +16,11 @@ class LayerReloadingInfo:
     # model format (meta), populated by `record_metadata_for_reloading`
     restore_metadata: LayerTensors = field(default_factory=lambda: ({}, {}))
 
-    # kernel format (device)
+    # kernel format (device), used for layerwise reloading
     kernel_tensors: LayerTensors = field(default_factory=lambda: ({}, {}))
+
+    # model format (device), used for initial layerwise loading
+    model_format_tensors: LayerTensors = field(default_factory=lambda: ({}, {}))
 
     # track how many restored elements are ready for loading
     load_numel: int = 0
@@ -31,3 +34,13 @@ class LayerReloadingInfo:
 
     def can_process(self) -> bool:
         return self.load_numel_total is not None
+
+    @property
+    def has_model_format_tensors(self) -> bool:
+        parameters, buffers = self.model_format_tensors
+        return len(parameters) > 0 or len(buffers) > 0
+
+    @property
+    def has_kernel_tensors(self) -> bool:
+        parameters, buffers = self.kernel_tensors
+        return len(parameters) > 0 or len(buffers) > 0
