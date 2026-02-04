@@ -148,12 +148,12 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
-
-        if not (c.N % 16 == 0 and c.K % 16 == 0):
+        N, K = c.weight_shape
+        if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
                 f"requires N and K dimensions to be divisible by 16, recieved "
-                f"N={c.N} and K={c.K}.",
+                f"N={N} and K={K}.",
             )
         if c.out_dtype is not torch.bfloat16:
             return False, "requires bfloat16 ouput dtype."

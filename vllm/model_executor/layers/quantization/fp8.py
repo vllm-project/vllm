@@ -398,12 +398,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=kFp8StaticTensorSym,
                 out_dtype=torch.get_default_dtype(),
-                N=output_size_per_partition,
-                K=input_size_per_partition,
+                weight_shape=(output_size_per_partition, input_size_per_partition),
                 module_name=self.__class__.__name__,
             )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         size_k_first = True
         input_scale = None
         # TODO(rob): refactor block quant into separate class.

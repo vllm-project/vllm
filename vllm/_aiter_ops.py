@@ -431,12 +431,13 @@ def _rocm_aiter_gemm_a8w8_fake(
 def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
     A: torch.Tensor,
     B: torch.Tensor,
-    As: torch.Tensor | None = None,
-    Bs: torch.Tensor | None = None,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_bpreshuffle
+
     output = gemm_a8w8_bpreshuffle(A, B, As, Bs, None, output_dtype)
     if bias is not None:
         output.add_(bias)
@@ -446,8 +447,8 @@ def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
 def _rocm_aiter_gemm_a8w8_bpreshuffle_fake(
     A: torch.Tensor,
     B: torch.Tensor,
-    As: torch.Tensor | None = None,
-    Bs: torch.Tensor | None = None,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:

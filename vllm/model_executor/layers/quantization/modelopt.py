@@ -483,12 +483,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             activation_quant_key=kFp8StaticTensorSym,
             weight_quant_key=kFp8StaticTensorSym,
             out_dtype=torch.get_default_dtype(),
-            N=output_size_per_partition,
-            K=input_size_per_partition,
+            weight_shape=(output_size_per_partition, input_size_per_partition),
             module_name=self.__class__.__name__,
         )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
         if not (layer.weight_scale == layer.weight_scale[0]).all():
@@ -569,12 +568,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8StaticTokenSym,
             out_dtype=torch.get_default_dtype(),
-            N=output_size_per_partition,
-            K=input_size_per_partition,
+            weight_shape=(output_size_per_partition, input_size_per_partition),
             module_name=self.__class__.__name__,
         )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
@@ -1180,13 +1178,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        del layer.input_scale
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
-        del layer.weight_scale_2
+        # global scales:
+        input_scale_2 = layer.input_scale.max().to(torch.float32)
+        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
+
+        weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
 
         # Pre-compute alpha and inverse for runtime quantization
         layer.alpha = Parameter(

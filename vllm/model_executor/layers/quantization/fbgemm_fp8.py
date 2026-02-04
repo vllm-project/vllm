@@ -148,8 +148,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8StaticTokenSym,
             out_dtype=torch.get_default_dtype(),
-            N=output_size_per_partition,
-            K=input_size_per_partition,
+            weight_shape=(output_size_per_partition, input_size_per_partition),
             module_name=self.__class__.__name__,
         )
 

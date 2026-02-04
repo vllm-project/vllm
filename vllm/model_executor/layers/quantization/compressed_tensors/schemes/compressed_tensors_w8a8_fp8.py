@@ -145,8 +145,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=weight_quant_key,
                 out_dtype=self.out_dtype,
-                N=output_size_per_partition,
-                K=input_size_per_partition,
+                weight_shape=(output_size_per_partition, input_size_per_partition),
                 module_name=self.__class__.__name__,
             )
 
