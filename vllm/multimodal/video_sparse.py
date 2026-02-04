@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 import torch
-from torchvision.ops import structural_similarity_index_measure as ssim
 import torchvision.transforms.v2.functional as tvF
-
+from torchvision.ops import structural_similarity_index_measure as ssim
 
 class SimilarFrameDetector:
     """
@@ -77,9 +76,7 @@ class SimilarFrameDetector:
         k = max(2, min(total_frames, 2 * (k // 2)))
         return k
 
-    def _downsample_frames(
-        self, frames: torch.Tensor
-    ) -> torch.Tensor:
+    def _downsample_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """
         Downsample frames to reduce computation cost.
         """
@@ -97,9 +94,7 @@ class SimilarFrameDetector:
         )
         return downsampled
 
-    def _calculate_ssim(
-        self, img1: torch.Tensor, img2: torch.Tensor
-    ) -> float:
+    def _calculate_ssim(self, img1: torch.Tensor, img2: torch.Tensor) -> float:
         """
         Calculate Structural Similarity Index (SSIM) between two frames.
         Higher SSIM means more similar frames (range: 0-1).
@@ -117,13 +112,7 @@ class SimilarFrameDetector:
         gray1 = gray1.unsqueeze(0).unsqueeze(0)
         gray2 = gray2.unsqueeze(0).unsqueeze(0)
 
-        ssim_value = ssim(
-            gray1,
-            gray2,
-            win_size=11,
-            sigma=1.5,
-            data_range=255.0,
-            size_average=True
+        ssim_value = ssim(gray1, gray2, win_size=11, sigma=1.5, data_range=255.0, size_average=True
         )
 
         return float(ssim_value)
