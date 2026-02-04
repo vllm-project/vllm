@@ -205,6 +205,7 @@ class AsyncLLM(EngineClient):
             )
         else:
             self.profiler = None
+        self._profiler_running = False
 
     @classmethod
     def from_vllm_config(
@@ -916,12 +917,14 @@ class AsyncLLM(EngineClient):
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
+            self._profiler_running = True
         await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
         coros = [self.engine_core.profile_async(False)]
-        if self.profiler is not None:
+        if self.profiler is not None and self._profiler_running:
             coros.append(asyncio.to_thread(self.profiler.stop))
+            self._profiler_running = False
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
