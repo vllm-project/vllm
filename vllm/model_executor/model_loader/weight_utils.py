@@ -1117,11 +1117,11 @@ def initialize_dummy_weights(
     # Check if any module uses online quantization with meta device weights.
     # If so, we'll skip initializing params on meta device since they'll be
     # handled in `process_weights_after_loading`.
-    def uses_meta_device(module: torch.nn.Module) -> bool:
-        quant_method = getattr(module, "quant_method", None)
-        return getattr(quant_method, "uses_meta_device", False)
+    from vllm.model_executor.model_loader.utils import (
+        model_has_any_online_quant_with_device_meta,
+    )
 
-    has_online_quant = any(uses_meta_device(m) for m in model.modules())
+    has_online_quant = model_has_any_online_quant_with_device_meta(model)
 
     for param in model.state_dict().values():
         if has_online_quant and param.device == torch.device("meta"):
