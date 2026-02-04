@@ -147,7 +147,7 @@ class EPLBConfig:
 
         # If batch_size is set, num_groups must equal world size
         if batch_size is not None and num_groups != ep_size:
-            logger.warning(
+            logger.warning_once(
                 "EPLB: communication_batch_size is set (%d), "
                 "overriding num_communication_groups from %d to %d "
                 "(must equal world size when batch size is specified).",
@@ -159,7 +159,7 @@ class EPLBConfig:
 
         # Cap num_groups at world size
         if num_groups > ep_size:
-            logger.warning(
+            logger.warning_once(
                 "EPLB: num_communication_groups (%d) is larger than "
                 "world size (%d). Using %d instead.",
                 num_groups,
