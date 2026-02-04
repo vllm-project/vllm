@@ -10,6 +10,11 @@ logger = init_logger(__name__)
 
 
 class AsyncScheduler(Scheduler):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # reusable read-only placeholder list for speculative decoding.
+        self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
+
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         has_structured_output_requests = False
@@ -31,9 +36,9 @@ class AsyncScheduler(Scheduler):
                 # The request will generate a new token plus num_spec_tokens
                 # in this scheduling step.
                 request.num_output_placeholders += 1 + cur_num_spec_tokens
-                # Add placeholders for the new tokens in spec_token_ids.
+                # Add placeholders for the new draft/spec tokens.
                 # We will update the actual spec token ids in the worker process.
-                request.spec_token_ids = [-1] * self.num_spec_tokens
+                request.spec_token_ids = self._spec_token_placeholders
 
         scheduler_output.has_structured_output_requests = has_structured_output_requests
         scheduler_output.pending_structured_output_tokens = (
