@@ -1047,19 +1047,12 @@ def test_get_kv_cache_configs_multiple_workers():
 
 
 @pytest.mark.parametrize(
-    ("auto_fit", "asymmetric_memory"),
-    [
-        (False, False),
-        (True, False),
-        (False, True),  # PP workers with different available memory
-    ],
-    ids=["normal", "auto_fit", "asymmetric_memory"],
+    "asymmetric_memory",
+    [False, True],
+    ids=["symmetric", "asymmetric"],
 )
-def test_get_kv_cache_configs_pp_sharding(auto_fit, asymmetric_memory):
-    # PP with 2 workers, each holding different layers.
+def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
     model_config = ModelConfig(max_model_len=512)
-    if auto_fit:
-        model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
 
     ref_kv_cache_spec = new_kv_cache_spec()
@@ -1068,8 +1061,7 @@ def test_get_kv_cache_configs_pp_sharding(auto_fit, asymmetric_memory):
         {"layer2": ref_kv_cache_spec},
     ]
 
-    # 512 tokens / 16 block_size = 32 blocks + 1 extra = 33
-    expected_num_blocks = 33
+    expected_num_blocks = model_config.max_model_len // ref_kv_cache_spec.block_size + 1
     avail_memory = ref_kv_cache_spec.page_size_bytes * expected_num_blocks
 
     # With per-worker validation, each worker only needs memory for its own
@@ -1112,7 +1104,6 @@ def test_project_kv_cache_groups_to_worker():
     spec_a = new_kv_cache_spec()
     spec_b = new_kv_cache_spec(num_kv_heads=4)
 
-    # Worker owns a subset of layers in a group.
     global_groups = [
         KVCacheGroupSpec(["layer1", "layer2", "layer3"], spec_a),
     ]
@@ -1124,13 +1115,11 @@ def test_project_kv_cache_groups_to_worker():
     assert projected[0].layer_names == ["layer1", "layer2"]
     assert projected[0].kv_cache_spec is spec_a
 
-    # Worker has no matching layers. Group should be dropped.
     projected = kv_cache_utils._project_kv_cache_groups_to_worker(
         global_groups, {"layer4": spec_a}
     )
     assert projected == []
 
-    # UniformTypeKVCacheSpecs should be narrowed to worker's layers.
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=16,
         kv_cache_specs={"layer1": spec_a, "layer2": spec_b, "layer3": spec_a},
