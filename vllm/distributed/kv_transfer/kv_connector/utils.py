@@ -282,6 +282,81 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
     cache.index_copy_(0, indices, permuted_blocks)
 
 
+def kv_postprocess_blksize_on_save(cache, indices, target_block_size):
+    """
+    Convert current KV Cache blocks to smaller block size
+
+    example:
+        src blocksize = 16 tokens, target blocksize = 4 tokens
+        src block[0] = target block[0, 1, 2, 3]
+        src is    |h0-b0..................|h1-b0..................|...
+        target is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
+    """
+    blocks_to_update = cache.index_select(0, indices)
+    n_blocks, block_size, n_kv_heads, head_size = blocks_to_update.shape
+    ratio = block_size // target_block_size
+    blocks_processed = (
+        blocks_to_update
+        # 1. Split the block dimension: (N, 4, 4, H, D)
+        .view(n_blocks, ratio, target_block_size, n_kv_heads, head_size)
+        # 2. Flatten N and Ratio to get new total blocks: (4N, 4, H, D)
+        .flatten(0, 1)
+        # 3. Swap Head and Block_Size (NHD -> HND): (4N, H, 4, D)
+        .permute(0, 2, 1, 3)
+    )
+    expanded_indices = (
+        indices.unsqueeze(1) * ratio + torch.arange(ratio, device=indices.device)
+    ).flatten()
+    cache_physical = cache.permute(0, 2, 1, 3)
+    cache_resized_view = cache_physical.view(
+        -1, n_kv_heads, target_block_size, head_size
+    )
+    cache_resized_view.index_copy_(0, expanded_indices, blocks_processed)
+
+
+def kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size):
+    """
+    Convert current KV Cache blocks to smaller block size and permute KV layout
+
+    example:
+        src blocksize = 16 tokens, target blocksize = 4 tokens
+        src block[0] = target block[0, 1, 2, 3]
+        src is    |b0-h0..................|b0-h1..................|...
+        target is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
+    """
+    blocks_to_update = cache.index_select(0, indices)
+    n_blocks, block_size, n_kv_heads, head_size = blocks_to_update.shape
+    ratio = block_size // target_block_size
+    blocks_processed = (
+        blocks_to_update
+        # 1. Split the block dimension: (N, 4, 4, H, D)
+        .view(n_blocks, ratio, target_block_size, n_kv_heads, head_size)
+        # 2. Swap Head and Block_Size (NHD -> HND): (4N, H, 4, D)
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
+        # 3. reshape to fit
+        .view(-1, target_block_size, n_kv_heads, head_size)
+    )
+    expanded_indices = (
+        indices.unsqueeze(1) * ratio + torch.arange(ratio, device=indices.device)
+    ).flatten()
+    cache_physical = cache
+    cache_resized_view = cache_physical.view(
+        -1, target_block_size, n_kv_heads, head_size
+    )
+    cache_resized_view.index_copy_(0, expanded_indices, blocks_processed)
+
+
+def kv_postprocess_layout_on_save(cache, indices):
+    blocks_to_update = cache.index_select(0, indices)
+    target_shape = blocks_to_update.shape
+    # NHD => HND
+    blocks_processed = (
+        blocks_to_update.permute(0, 2, 1, 3).contiguous().view(target_shape)
+    )
+    cache.index_copy_(0, indices, blocks_processed)
+
+
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
