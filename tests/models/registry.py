@@ -489,7 +489,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
     ),
     "Step3p5ForCausalLM": _HfExamplesInfo(
-        "stepfun-ai/Step-3.5-Flash", trust_remote_code=True
+        "stepfun-ai/Step-3.5-Flash",
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={
+            "num_hidden_layers": 4,
+        },
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
@@ -1127,9 +1132,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
-        trust_remote_code=True,
         speculative_model="stepfun-ai/Step-3.5-Flash",
-        is_available_online=False,
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={
+            "num_hidden_layers": 4,
+        },
     ),
 }
 
