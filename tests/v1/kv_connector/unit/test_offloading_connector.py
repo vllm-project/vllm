@@ -42,7 +42,7 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
     EOS_TOKEN_ID,
@@ -355,7 +355,7 @@ class RequestRunner:
             self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
             if (
-                prev_token_id is EOS_TOKEN_ID
+                prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
                 and self.scheduler.requests
             ):
@@ -728,6 +728,57 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
 
     # second request will use the GPU prefix cache
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+
+def test_abort_loading_requests(request_runner):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
+
+    # store 1 blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # start a request to load the first block, but don't complete
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+
+    # abort request
+    req_id = str(runner.req_id)
+    runner.scheduler.finish_requests((req_id,), RequestStatus.FINISHED_ABORTED)
+
+    # verify request is not deleted
+    assert req_id in runner.scheduler.requests
+
+    # complete loading request
+    runner.run(
+        decoded_tokens=[],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # assert request is deleted
+    assert req_id not in runner.scheduler.requests
 
 
 class TestOffloadingConnectorStats:
