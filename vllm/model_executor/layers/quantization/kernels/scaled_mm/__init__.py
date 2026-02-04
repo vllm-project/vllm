@@ -128,6 +128,7 @@ def init_fp8_block_scaled_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
+    force_kernel: type[MMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> Fp8BlockScaledMMKernel:
     config = Fp8BlockMMScaledConfig(
@@ -135,6 +136,21 @@ def init_fp8_block_scaled_linear_kernel(
         weight_quant_key=weight_quant_key,
         out_dtype=out_dtype,
     )
+
+    if force_kernel is not None:
+        can_implement, reason = is_supported_and_can_implement_kernel(
+            force_kernel,
+            config,
+        )
+        if can_implement:
+            return force_kernel(config)
+
+        logger.info_once(
+            "Tried to force %s, but the kernel couldn't be implemented. %s",
+            force_kernel.__name__,
+            reason,
+            scope="global",
+        )
 
     platform_enum = current_platform._enum
 
@@ -234,7 +250,7 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[MMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMKernel:
     if activation_quant_key.scale.group_shape.is_per_group():
@@ -242,6 +258,7 @@ def init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
             out_dtype=out_dtype,
+            force_kernel=force_kernel,
             module_name=module_name,
         )
 

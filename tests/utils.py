@@ -42,11 +42,11 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.layers.quantization.kernels.base import (  # noqa: E501
+    MMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -1369,25 +1369,30 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+        force_kernel: type[MMLinearKernel] | None = None,
     ):
         super().__init__()
-        weight_group_shape = weight_quant_key.scale.group_shape
-        is_block_wise = weight_group_shape.is_per_group()
+        act_scale_desc = activation_quant_key.scale
+        weight_scale_desc = weight_quant_key.scale
+        is_block_wise = act_scale_desc.group_shape.is_per_group()
         if is_block_wise:
-            weight_scale_shape = weight_shape[0] // weight_group_shape[1]
-            self.weight_scale = torch.rand(
+            block_size = weight_scale_desc.group_shape.col
+            weight_scale_shape = weight_shape[0] // block_size
+            print(" --- block wise ----")
+            print(weight_scale_shape)
+            self.weight_scale_inv = torch.rand(
                 (weight_scale_shape, weight_scale_shape), dtype=torch.float32
             )
             self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
+            self.weight_scale = None
             if transpose_weights:
                 self.weight = self.weight.t()
         else:
-            per_tensor_weights = weight_group_shape.is_per_tensor()
-            is_static_activation_scale = activation_quant_key.scale.static
+            per_tensor_weights = weight_scale_desc.group_shape.is_per_tensor()
+            is_static_activation_scale = act_scale_desc.static
             weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
-
+            self.weight_scale_inv = None
             self.weight_scale = torch.rand(
                 weight_scale_shape, dtype=torch.float32, device=device
             )

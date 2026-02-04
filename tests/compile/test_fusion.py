@@ -21,7 +21,17 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.kernels.base import (  # noqa: E501
+    MMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
+    CudaFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
@@ -35,13 +45,11 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
-    QuantKey,
-    ScaleDesc,
     create_fp8_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -72,9 +80,12 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (PerTensorTorchFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
     # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    # Blockwise group shapes (no kernel abstraction)
-    (None, GroupShape(1, 128)),
-    (None, GroupShape(1, 64)),
+    # Blockwise group shapes
+    (CudaFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (CudaFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (CutlassFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (CutlassFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
 ]
 
 # ROCm kernels
@@ -85,9 +96,8 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    # Blockwise group shapes (no kernel abstraction)
-    (None, GroupShape(1, 128)),
-    (None, GroupShape(1, 64)),
+    # Blockwise group shapes
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
 ]
 
 KERNEL_GROUPSHAPE_COMBINATIONS = (
@@ -106,8 +116,8 @@ AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # Per-token with ChannelWiseTorchFP8ScaledMMLinearKernel
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
-    # Blockwise (no kernel abstraction)
-    (None, GroupShape(1, 128), True),
+    # Blockwise
+    (AiterFp8BlockScaledMMKernel, GroupShape(1, 128), True),
 ]
 
 
@@ -116,7 +126,7 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
-        force_kernel: type[FP8ScaledMMLinearKernel] | None,
+        force_kernel: type[MMLinearKernel] | None,
         group_shape: GroupShape,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
@@ -135,23 +145,21 @@ class TestModel(torch.nn.Module):
         is_blockwise = group_shape.is_per_group()
 
         if is_blockwise:
-            act_quant_scale_desc = ScaleDesc(torch.float32, False, group_shape)
+            block_size = group_shape.col
             self.activation_quant_key = create_fp8_quant_key(
                 static=False, group_shape=group_shape
             )
             self.weight_quant_key = create_fp8_quant_key(
-                static=True, group_shape=GroupShape(hidden_size, hidden_size)
+                static=True, group_shape=GroupShape(block_size, block_size)
             )
 
         else:
             is_static = group_shape == GroupShape.PER_TENSOR
-            act_quant_scale_desc = ScaleDesc(torch.float32, is_static, group_shape)
-            w_quant_scale_desc = ScaleDesc(torch.float32, True, group_shape)
-            self.activation_quant_key = QuantKey(
-                dtype=FP8_DTYPE, scale=act_quant_scale_desc, symmetric=True
+            self.activation_quant_key = create_fp8_quant_key(
+                is_static, group_shape=group_shape
             )
-            self.weight_quant_key = QuantKey(
-                dtype=FP8_DTYPE, scale=w_quant_scale_desc, symmetric=True
+            self.weight_quant_key = create_fp8_quant_key(
+                static=True, group_shape=group_shape
             )
 
         self.fp8_linear_layers = [
@@ -160,6 +168,7 @@ class TestModel(torch.nn.Module):
                 activation_quant_key=self.activation_quant_key,
                 weight_quant_key=self.weight_quant_key,
                 force_kernel=force_kernel,
+                transpose_weights=use_aiter_fusion,
             )
             for _ in range(3)
         ]
