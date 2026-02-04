@@ -199,14 +199,14 @@ class BatchDCPPrefillWrapper:
     ):
         """Plan the prefill operation with given parameters."""
         self._context.plan(
-            qo_indptr_cpu,
-            paged_kv_indptr_cpu,
-            paged_kv_indices,
-            paged_kv_last_page_len_cpu,
-            num_qo_heads * dcp_world_size,
-            num_kv_heads,
-            head_dim,
-            page_size,
+            qo_indptr=qo_indptr_cpu,
+            paged_kv_indptr=paged_kv_indptr_cpu,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
             causal=False,  # This is context run
             sm_scale=sm_scale,
             window_left=window_left,
@@ -958,14 +958,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
-                [shared_qo_indptr_cpu, qo_indptr_cpu],
-                [shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
-                [shared_kv_page_indices_cpu, paged_kv_indices],
-                [shared_kv_last_page_len_cpu, paged_kv_last_page_len_cpu],
-                self.num_qo_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.page_size,
+                qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
+                paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
+                paged_kv_indices_arr=[shared_kv_page_indices_cpu, paged_kv_indices],
+                paged_kv_last_page_len=[shared_kv_last_page_len_cpu, paged_kv_last_page_len_cpu],
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                page_size=self.page_size,
                 causal=True,
                 sm_scale=self.sm_scale,
                 window_left=self.window_left,
@@ -1043,14 +1043,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         BatchPrefillWithPagedKVCacheWrapper,
                     )
                     prefill_wrapper.plan(
-                        qo_indptr_prefill_cpu,
-                        paged_kv_indptr_prefill_cpu,
-                        paged_kv_indices,
-                        paged_kv_last_page_len_prefill_cpu,
-                        self.num_qo_heads,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        self.page_size,
+                        qo_indptr=qo_indptr_cpu,
+                        paged_kv_indptr=paged_kv_indptr_cpu,
+                        paged_kv_indices=paged_kv_indices,
+                        paged_kv_last_page_len=paged_kv_last_page_len_cpu[prefill_start:],
+                        num_qo_heads=self.num_qo_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim_qk=self.head_dim,
+                        page_size=self.page_size,
                         causal=True,
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
@@ -1091,14 +1091,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # in atten_metadata when using cudagraph.
                 fast_plan_decode(
                     decode_wrapper,
-                    self.paged_kv_indptr.cpu[: num_input_tokens + 1],
-                    paged_kv_indices,
-                    self.paged_kv_last_page_len.cpu[:num_input_tokens],
-                    seq_lens_cpu[:num_input_tokens],
-                    self.num_qo_heads * self.dcp_world_size,
-                    self.num_kv_heads,
-                    self.head_dim,
-                    self.page_size,
+                    indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
+                    indices=paged_kv_indices,
+                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[:num_input_tokens],
+                    seq_lens_cpu=seq_lens_cpu[:num_input_tokens],
+                    num_qo_heads=self.num_qo_heads * self.dcp_world_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    page_size=self.page_size,
                     # Disable flashinfer's pos encoding and use vllm's rope.
                     pos_encoding_mode="NONE",
                     sm_scale=self.sm_scale,
@@ -1603,28 +1603,28 @@ def fast_plan_decode(
     # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
-            indptr_cpu,
-            indices,
-            last_page_len_cpu,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            page_size,
-            pos_encoding_mode,
-            window_left,
-            logits_soft_cap,
-            q_data_type,
-            kv_data_type,
-            o_data_type,
-            data_type,
-            sm_scale,
-            rope_scale,
-            rope_theta,
-            non_blocking,
-            None,  # block_tables
-            None,  # seq_lens
-            fixed_split_size,
-            disable_split_kv,
+            indptr=indptr_cpu,
+            indices=indices,
+            last_page_len=last_page_len_cpu,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            pos_encoding_mode=pos_encoding_mode,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_data_type,
+            o_data_type=o_data_type,
+            data_type=data_type,
+            sm_scale=sm_scale,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            non_blocking=non_blocking,
+            block_tables=None,  # block_tables
+            seq_lens=None,  # seq_lens
+            fixed_split_size=fixed_split_size,
+            disable_split_kv=disable_split_kv,
         )
         self.vllm_first_call = False
         return
@@ -1672,7 +1672,7 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 19 arguments for tensor core version
+        # Make sure we pass exactly 16 arguments for tensor core version
         args = [
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1698,6 +1698,7 @@ def fast_plan_decode(
         self._plan_info = self._cached_module.plan(
             *args,
         )
+
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
 
