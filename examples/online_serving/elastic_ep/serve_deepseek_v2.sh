@@ -65,7 +65,7 @@ vllm serve $MODEL_NAME \
     --enable-expert-parallel \
     --enable-eplb \
     --all2all-backend pplx \
-    --num-redundant-experts $REDUNDANT_EXPERTS \
+    --eplb-config.num_redundant_experts $REDUNDANT_EXPERTS \
     --trust-remote-code \
     --host $HOST \
     --port $PORT
