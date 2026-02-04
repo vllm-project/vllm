@@ -7,6 +7,7 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -826,83 +827,93 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
 
 
 def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    pos: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    flash_layout: bool,
-    apply_scale: bool = True,
-    offs: torch.Tensor | None = None,
-    q_out: torch.Tensor | None = None,
-    k_out: torch.Tensor | None = None,
-    output_zeros: bool = True,
-    zeros_out: torch.Tensor | None = None,
-) -> list[torch.Tensor]:
-    from aiter.ops.triton import qk_rope_reshape_and_cache
+    layer_name: str = "",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    This impl wraps the AITER call as well as fetching the KV cache and
+    other attention metadata from the forward context. It also returns
+    a dummy tensor, similar to `Attention.unified_kv_cache_update`,
+    that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
-    return qk_rope_reshape_and_cache(
-        q,
-        k,
-        v,
-        key_cache,
-        value_cache,
-        slot_mapping,
-        pos,
-        cos,
-        sin,
-        k_scale,
-        v_scale,
-        is_neox,
-        flash_layout,
-        apply_scale=apply_scale,
-        offs=offs,
-        q_out=q_out,
-        k_out=k_out,
-        output_zeros=output_zeros,
-        zeros_out=zeros_out,
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    self = attn_layer.impl
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
+            cos, sin = cos_sin_cache.chunk(2, dim=-1)
+            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+            key_cache, value_cache = kv_cache.unbind(0)
+            if is_fp8_kv_cache:
+                key_cache_og_dtype = key_cache.dtype
+                value_cache_og_dtype = value_cache.dtype
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
+                query,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                layer_slot_mapping,
+                positions,
+                cos,
+                sin,
+                attn_layer._k_scale,
+                attn_layer._v_scale,
+                is_neox,
+                flash_layout=True,
+                apply_scale=is_fp8_kv_cache,
+                q_out=query,
+                k_out=key,
+                output_zeros=False,
+            )
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(key_cache_og_dtype)
+                value_cache = value_cache.view(value_cache_og_dtype)
+        else:
+            query, key = self.rotary_emb(positions, query, key)
+
+    dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+    return query, key, value, dummy
 
 
 def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    pos: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    flash_layout: bool,
-    apply_scale: bool = True,
-    offs: torch.Tensor = None,
-    q_out: torch.Tensor = None,
-    k_out: torch.Tensor = None,
-    output_zeros: bool = True,
-    zeros_out: torch.Tensor = None,
-) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-):
-    q_out = torch.empty_like(q)
-    k_out = torch.empty_like(k)
-    key_cache = torch.empty_like(key_cache)
-    value_cache = torch.empty_like(value_cache)
-    if zeros_out is not None:
-        zeros_out = torch.empty_like(zeros_out)
-        return q_out, k_out, key_cache, value_cache, zeros_out
-    return q_out, k_out, key_cache, value_cache
+    layer_name: str = "",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    q_out = torch.empty_like(query)
+    k_out = torch.empty_like(key)
+    v_out = torch.empty_like(value)
+    dummy = torch.empty(0, device=query.device, dtype=query.dtype)
+    return q_out, k_out, v_out, dummy
 
 
 # Global flag to ensure ops are registered only once

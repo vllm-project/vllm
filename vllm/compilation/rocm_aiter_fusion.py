@@ -575,6 +575,8 @@ class RopeReshapeKVCachePattern:
             k = k.view(-1, self.num_kv_heads, self.head_dim)
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            # Note: dummy needs to be the first output due to an Inductor bug,
+            # see https://github.com/vllm-project/vllm/issues/33666
             return dummy, q, k, v
 
         def replacement(
@@ -584,11 +586,18 @@ class RopeReshapeKVCachePattern:
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
             q = q.view(-1, self.num_heads, self.head_dim)
             k = k.view(-1, self.num_kv_heads, self.head_dim)
             v = v.view(-1, self.num_kv_heads, self.head_dim)
-            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            q, k, v, dummy = self.FUSED_OP(
+                q,
+                k,
+                v,
+                positions,
+                cos_sin_cache,
+                self.is_neox,
+                self.layer_name,
+            )
             return dummy, q, k, v
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
@@ -649,11 +658,16 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         # TODO (Rohan138): Remove before merging!
-        graph.print_tabular()
-        from torch.fx.passes.graph_drawer import FxGraphDrawer
-        gm = graph.owning_module
-        drawer = FxGraphDrawer(gm, "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass")
-        drawer.get_dot_graph().write_svg("/home/ropotdar/Desktop/rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass.svg")
+        # graph.print_tabular()
+        # from torch.fx.passes.graph_drawer import FxGraphDrawer
+
+        # gm = graph.owning_module
+        # drawer = FxGraphDrawer(
+        #     gm, "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
+        # )
+        # drawer.get_dot_graph().write_svg(
+        #     "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass.svg"
+        # )
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)

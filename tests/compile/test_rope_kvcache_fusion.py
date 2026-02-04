@@ -17,7 +17,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.v1.attention.backend import (
@@ -193,6 +193,9 @@ def test_rope_kvcache_fusion(
             q_unfused, k_unfused, v_unfused, dummy = model(
                 q_unfused, k_unfused, v_unfused, pos_unfused
             )
+            forward_context = get_forward_context()
+            attn_layer = forward_context.no_compile_layers[model.layer_name]
+            kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
 
         torch._dynamo.mark_dynamic(q, 0)
@@ -202,6 +205,9 @@ def test_rope_kvcache_fusion(
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
             q_fused, k_fused, v_fused, dummy = model_fused(q, k, v, pos)
+            forward_context = get_forward_context()
+            attn_layer = forward_context.no_compile_layers[model.layer_name]
+            kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
 
         if dtype == torch.float16:
@@ -212,6 +218,9 @@ def test_rope_kvcache_fusion(
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(
+            kv_cache_unfused, kv_cache_fused, atol=ATOL, rtol=RTOL
+        )
 
         assert fusion_pass.matched_count == 1
 
