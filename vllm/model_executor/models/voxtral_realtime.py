@@ -225,10 +225,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        assert (
-            not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ), "Voxtral realtime doesn't support full cudagraphs yet. Please use PIECEWISE."
-
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
         )

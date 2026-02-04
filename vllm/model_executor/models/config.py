@@ -582,6 +582,29 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class VoxtralRealtimeModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Disable torch.compile and cudagraphs for VoxtralRealtime models.
+
+        VoxtralRealtime does not support torch.compile or cudagraphs yet,
+        so we force eager mode execution.
+        """
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if (
+            compilation_config.mode is None
+            or compilation_config.mode != CompilationMode.NONE
+        ):
+            logger.info(
+                "VoxtralRealtime does not support torch.compile or cudagraphs. "
+                "Setting compilation mode to NONE."
+            )
+            compilation_config.mode = CompilationMode.NONE
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -604,4 +627,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "VoxtralRealtimeGeneration": VoxtralRealtimeModelConfig,
 }
