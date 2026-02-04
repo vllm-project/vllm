@@ -112,7 +112,8 @@ class SimilarFrameDetector:
         gray1 = gray1.unsqueeze(0).unsqueeze(0)
         gray2 = gray2.unsqueeze(0).unsqueeze(0)
 
-        ssim_value = ssim(gray1, gray2, win_size=11, sigma=1.5, data_range=255.0, size_average=True
+        ssim_value = ssim(
+            gray1, gray2, win_size=11, sigma=1.5, data_range=255.0, size_average=True
         )
 
         return float(ssim_value)
