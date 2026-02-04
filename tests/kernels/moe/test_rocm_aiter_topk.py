@@ -18,7 +18,7 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("This test can only run on ROCm", allow_module_level=True)
+    pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
 # This environment variable must be set so ops will be registered.
 os.environ["VLLM_ROCM_USE_AITER"] = "1"
@@ -31,7 +31,7 @@ import vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe  # noqa: F401
 aiter_available = importlib.util.find_spec("aiter") is not None
 
 if not aiter_available:
-    pytest.skip("These tests require AITER to run", allow_module_level=True)
+    pytest.skip("These tests require AITER to run.", allow_module_level=True)
 
 
 def test_rocm_aiter_biased_grouped_topk_custom_op_registration():
