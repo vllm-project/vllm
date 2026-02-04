@@ -4,8 +4,8 @@
 Shared utilities for online MoE weight loading and quantization.
 """
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Protocol
 
 import torch
 from torch.nn import Module
@@ -47,7 +47,11 @@ def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
     set_weight_attrs(new, attrs_to_set)
 
 
-class MoeQuantizationCallbacks(Protocol):
+class MoeQuantizationCallbacks(ABC):
+    """Abstract base class defining callbacks that MoE quantization methods
+    must implement for online weight loading and quantization."""
+
+    @abstractmethod
     def create_scale_tensors(
         self,
         layer: Module,
@@ -55,11 +59,19 @@ class MoeQuantizationCallbacks(Protocol):
         intermediate_size_per_partition: int,
         hidden_size: int,
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
-        pass
+        """Create scale tensors for quantization.
 
+        Returns:
+            Tuple of (w13_weight_scale, w2_weight_scale) parameters
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_quantized_dtype(self) -> torch.dtype:
-        pass
+        """Return the target dtype for quantized weights (e.g., int8, fp8)."""
+        raise NotImplementedError
 
+    @abstractmethod
     def quantize_expert(
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -72,8 +84,9 @@ class MoeQuantizationCallbacks(Protocol):
             Tuple of (quantized_weight, scale) where scale shape depends on
             the quantization method (per-tensor or per-channel).
         """
-        pass
+        raise NotImplementedError
 
+    @abstractmethod
     def setup_kernel(
         self,
         layer: Module,
@@ -81,7 +94,9 @@ class MoeQuantizationCallbacks(Protocol):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-    ) -> None: ...
+    ) -> None:
+        """Setup the kernel after quantization is complete."""
+        raise NotImplementedError
 
 
 class MoeOnlineWeightLoader:

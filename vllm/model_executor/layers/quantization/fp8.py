@@ -73,6 +73,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     CopyNumelCounter,
     MoeOnlineWeightLoader,
+    MoeQuantizationCallbacks,
     _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1008,7 +1009,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-class Fp8OnlineMoEMethod(Fp8MoEMethod):
+class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeQuantizationCallbacks):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
@@ -1084,7 +1085,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer,
             w13,

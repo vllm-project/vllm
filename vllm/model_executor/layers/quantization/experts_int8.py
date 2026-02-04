@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     MoeOnlineWeightLoader,
+    MoeQuantizationCallbacks,
 )
 
 logger = init_logger(__name__)
@@ -70,7 +71,7 @@ class ExpertsInt8Config(QuantizationConfig):
         return None
 
 
-class ExpertsInt8MoEMethod(FusedMoEMethodBase):
+class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeQuantizationCallbacks):
     def __init__(
         self,
         quant_config: ExpertsInt8Config,
@@ -142,8 +143,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
     def quantize_expert(
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize a single expert's weight to int8 with per-channel scales."""
-        # weight shape: [out_features, in_features]
         vmax = torch.iinfo(torch.int8).max
         channel_max = torch.max(torch.abs(weight), dim=1)[0]
         scales = channel_max / vmax
@@ -168,12 +167,8 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
-        if self.moe_quant_config and (
-            (not self.moe.moe_parallel_config.use_all2all_kernels)
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
+        if self.moe_quant_config:
             prepare_finalize = MoEPrepareAndFinalizeNoEP()
-
             experts = TritonExperts(
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
