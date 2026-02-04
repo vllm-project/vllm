@@ -415,6 +415,7 @@ class GPUModelRunner(
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
             dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            enable_starscream=self.parallel_config.enable_starscream,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling

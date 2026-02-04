@@ -85,6 +85,7 @@ class InputBatch:
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
         dcp_kv_cache_interleave_size: int = 1,
+        enable_starscream: bool = False,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -139,6 +140,7 @@ class InputBatch:
             kernel_block_sizes=kernel_block_sizes,
             num_speculative_tokens=num_speculative_tokens,
             dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
+            enable_starscream=enable_starscream,
         )
 
         # Sampling-related.

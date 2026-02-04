@@ -614,6 +614,8 @@ class VllmConfig:
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.enable_starscream:
+                assert (self.parallel_config.dcp_kv_cache_interleave_size == 1), (f"dcp_kv_cache_interleave_size: ({self.parallel_config.dcp_kv_cache_interleave_size}) should be equal to (1) when enable_starscream is set")
             assert (
                 self.parallel_config.dcp_kv_cache_interleave_size
                 <= self.cache_config.block_size

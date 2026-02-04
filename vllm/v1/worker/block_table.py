@@ -23,6 +23,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         dcp_kv_cache_interleave_size: int,
+        enable_starscream: bool,
     ):
         """
         Args:
@@ -88,6 +89,7 @@ class BlockTable:
             self.dcp_world_size = 1
             self.dcp_rank = 0
         self.dcp_kv_cache_interleave_size = dcp_kv_cache_interleave_size
+        self.enable_starscream = enable_starscream
 
     def append_row(
         self,
@@ -145,89 +147,80 @@ class BlockTable:
             )
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             virtual_block_offsets = positions % virtual_block_size
-            
-            # Count tokens per request
-            unique_reqs, req_counts = np.unique(req_indices, return_counts=True)
-            tokens_per_req = np.zeros(req_indices.shape[0], dtype=np.int32)
-            for req_id, count in zip(unique_reqs, req_counts):
-                tokens_per_req[req_indices == req_id] = count
-            
-            is_single_token = tokens_per_req == 1
-            
-            # Original round-robin logic for single-token requests
-            mask_single = (
-                virtual_block_offsets
-                // self.dcp_kv_cache_interleave_size
-                % self.dcp_world_size
-                == self.dcp_rank
-            )
-            block_offsets_single = (
-                virtual_block_offsets
-                // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
-                * self.dcp_kv_cache_interleave_size
-                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
-            )
-            
-            # New contiguous chunking logic for multi-token requests
-            base_chunk = tokens_per_req // self.dcp_world_size
-            num_extra = tokens_per_req % self.dcp_world_size
-            boundary = num_extra * (base_chunk + 1)
-            
-            # Calculate GPU assignment
-            gpu_assignment = np.where(
-                positions < boundary,
-                positions // (base_chunk + 1),
-                num_extra + (positions - boundary) // base_chunk
-            )
-            
-            mask_multi = gpu_assignment == self.dcp_rank
-            
-            # Calculate local offset within assigned GPU's chunk
-            chunk_start = np.where(
-                gpu_assignment < num_extra,
-                gpu_assignment * (base_chunk + 1),
-                num_extra * (base_chunk + 1) + (gpu_assignment - num_extra) * base_chunk
-            )
-            block_offsets_multi = positions - chunk_start
-            
-            # Combine results
-            mask = np.where(is_single_token, mask_single, mask_multi)
-            block_offsets = np.where(is_single_token, block_offsets_single, block_offsets_multi)
-            
-            slot_mapping = block_numbers * self.block_size + block_offsets
-            self.slot_mapping.np[: req_indices.shape[0]] = np.where(
-                mask, slot_mapping, -1
-            )
-            #***************************
-#            virtual_block_size = self.block_size * self.dcp_world_size
-#            block_table_indices = (
-#                req_indices * self.max_num_blocks_per_req
-#                + positions // virtual_block_size
-#            )
-#
-#            block_numbers = self.block_table.np.ravel()[block_table_indices]
-#            # Use virtual_block_size for mask calculation, which marks local
-#            # tokens.
-#            virtual_block_offsets = positions % virtual_block_size
-#            mask = (
-#                virtual_block_offsets
-#                // self.dcp_kv_cache_interleave_size
-#                % self.dcp_world_size
-#                == self.dcp_rank
-#            )
-#            # Calculate local block_offsets
-#            block_offsets = (
-#                virtual_block_offsets
-#                // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
-#                * self.dcp_kv_cache_interleave_size
-#                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
-#            )
-#            # Calculate slot_mapping
-#            slot_mapping = block_numbers * self.block_size + block_offsets
-#            # Write final slots, use -1 for not-local
-#            self.slot_mapping.np[: req_indices.shape[0]] = np.where(
-#                mask, slot_mapping, -1
-#            )
+
+            if self.enable_starscream:
+                # Count tokens per request
+                unique_reqs, req_counts = np.unique(req_indices, return_counts=True)
+                tokens_per_req = np.zeros(req_indices.shape[0], dtype=np.int32)
+                for req_id, count in zip(unique_reqs, req_counts):
+                    tokens_per_req[req_indices == req_id] = count
+                
+                is_single_token = tokens_per_req == 1
+                
+                # Original round-robin logic for single-token requests
+                mask_single = (
+                    virtual_block_offsets
+                    // self.dcp_kv_cache_interleave_size
+                    % self.dcp_world_size
+                    == self.dcp_rank
+                )
+                block_offsets_single = (
+                    virtual_block_offsets
+                    // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
+                    * self.dcp_kv_cache_interleave_size
+                    + virtual_block_offsets % self.dcp_kv_cache_interleave_size
+                )
+                
+                # New contiguous chunking logic for multi-token requests
+                base_chunk = tokens_per_req // self.dcp_world_size
+                num_extra = tokens_per_req % self.dcp_world_size
+                boundary = num_extra * (base_chunk + 1)
+                
+                # Calculate GPU assignment
+                gpu_assignment = np.where(
+                    positions < boundary,
+                    positions // (base_chunk + 1),
+                    num_extra + (positions - boundary) // base_chunk
+                )
+                
+                mask_multi = gpu_assignment == self.dcp_rank
+                
+                # Calculate local offset within assigned GPU's chunk
+                chunk_start = np.where(
+                    gpu_assignment < num_extra,
+                    gpu_assignment * (base_chunk + 1),
+                    num_extra * (base_chunk + 1) + (gpu_assignment - num_extra) * base_chunk
+                )
+                block_offsets_multi = positions - chunk_start
+                
+                # Combine results
+                mask = np.where(is_single_token, mask_single, mask_multi)
+                block_offsets = np.where(is_single_token, block_offsets_single, block_offsets_multi)
+                
+                slot_mapping = block_numbers * self.block_size + block_offsets
+                self.slot_mapping.np[: req_indices.shape[0]] = np.where(
+                    mask, slot_mapping, -1
+                )
+            else:
+                mask = (
+                    virtual_block_offsets
+                    // self.dcp_kv_cache_interleave_size
+                    % self.dcp_world_size
+                    == self.dcp_rank
+                )
+                # Calculate local block_offsets
+                block_offsets = (
+                    virtual_block_offsets
+                    // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
+                    * self.dcp_kv_cache_interleave_size
+                    + virtual_block_offsets % self.dcp_kv_cache_interleave_size
+                )
+                # Calculate slot_mapping
+                slot_mapping = block_numbers * self.block_size + block_offsets
+                # Write final slots, use -1 for not-local
+                self.slot_mapping.np[: req_indices.shape[0]] = np.where(
+                    mask, slot_mapping, -1
+                )
         else:
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req + positions // self.block_size
@@ -315,6 +308,7 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         num_speculative_tokens: int = 0,
         dcp_kv_cache_interleave_size: int = 1,
+        enable_starscream: bool = False,
     ) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -345,6 +339,7 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 dcp_kv_cache_interleave_size,
+                enable_starscream,
             )
             for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]
