@@ -19,25 +19,21 @@ from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 
-logger = init_logger(__name__)
+router = APIRouter()
 
-_RESPONSE_CLASS_FOR_EMBEDDINGS = JSONResponse
+logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=1)
-def try_load_orjson_response_class_for_embeddings():
-    global _RESPONSE_CLASS_FOR_EMBEDDINGS
+def _get_json_response_cls():
     if importlib.util.find_spec("orjson") is not None:
         from fastapi.responses import ORJSONResponse
 
-        _RESPONSE_CLASS_FOR_EMBEDDINGS = ORJSONResponse
-        return
+        return ORJSONResponse
     logger.warning_once(
         "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
     )
-
-
-router = APIRouter()
+    return JSONResponse
 
 
 def embedding(request: Request) -> OpenAIServingEmbedding | None:
@@ -75,8 +71,7 @@ async def create_embedding(
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, EmbeddingResponse):
-        try_load_orjson_response_class_for_embeddings()
-        return _RESPONSE_CLASS_FOR_EMBEDDINGS(content=generator.model_dump())
+        return _get_json_response_cls()(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
         return StreamingResponse(
             content=generator.content,
