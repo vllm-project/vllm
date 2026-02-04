@@ -612,6 +612,9 @@ class FusedMoE(CustomOp):
             return
 
         self.ensure_moe_quant_config_init()
+        # Storing the runner in the FusedMoE is an intermediate state, eventually
+        # the runner will own the FusedMoE layer and provide the execution interface
+        # for MoE ops.
         self._runner = DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
@@ -660,7 +663,9 @@ class FusedMoE(CustomOp):
                 self.shared_experts,
                 inplace=not self.moe_config.disable_inplace,
             )
-            # force reconstruction of runner
+            # We need to force reconstruction of runner because we're swapping out
+            # the quant_method with a FusedMoEModularMethod. This logic can go
+            # away once the FusedMoEModularMethod is eliminated.
             self.init_runner(reconstruct=True)
         else:
             self.init_runner()

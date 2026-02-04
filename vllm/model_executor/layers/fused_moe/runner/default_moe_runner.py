@@ -21,9 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -238,8 +235,8 @@ class DefaultMoERunner(MoERunner):
         """
         assert self.quant_method is not None
         return (
-            isinstance(self.quant_method, FusedMoEModularMethod)
-            and self.quant_method.fused_experts.output_is_reduced()
+            self.quant_method.moe_mk is not None
+            and self.quant_method.moe_mk.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -254,10 +251,10 @@ class DefaultMoERunner(MoERunner):
     def _reduce_output(
         self,
         states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        trunc_dim: int,
+        trunc_size: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         def trunc(x: torch.Tensor) -> torch.Tensor:
-            return x[..., :trunc_dim]
+            return x[..., :trunc_size]
 
         def reduce_and_trunc(x: torch.Tensor) -> torch.Tensor:
             return trunc(self.maybe_all_reduce_tensor_model_parallel(x))
@@ -282,17 +279,17 @@ class DefaultMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        og_hidden_states = hidden_states.shape[-1]
-        if self.moe_config.hidden_dim != og_hidden_states:
+        og_hidden_size = hidden_states.shape[-1]
+        if self.moe_config.hidden_dim != og_hidden_size:
             hidden_states = F.pad(
                 hidden_states,
-                (0, self.moe_config.hidden_dim - og_hidden_states),
+                (0, self.moe_config.hidden_dim - og_hidden_size),
                 mode="constant",
                 value=0.0,
             )
 
         fused_output = self.moe_forward(hidden_states, router_logits)
-        return self._reduce_output(fused_output, og_hidden_states)
+        return self._reduce_output(fused_output, og_hidden_size)
 
     def forward_impl_chunked(
         self,
