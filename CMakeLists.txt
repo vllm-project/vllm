@@ -155,6 +155,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
+
+  if(DEFINED ENV{TORCH_CUDA_ARCH_LIST} AND
+     "$ENV{TORCH_CUDA_ARCH_LIST}" MATCHES "\\+PTX($|[ ,;])")
+    message(WARNING
+      "'+PTX' suffix detected in TORCH_CUDA_ARCH_LIST will be ignored. "
+      "vLLM uses per-file CUDA architecture settings, so the global +PTX "
+      "suffix has no effect. Remove '+PTX' to silence this warning.")
+  endif()
+
   # Filter the target architectures by the supported supported archs
   # since for some files we will build for all CUDA_ARCHS.
   cuda_archs_loose_intersection(CUDA_ARCHS
