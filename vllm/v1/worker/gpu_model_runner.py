@@ -5255,10 +5255,12 @@ class GPUModelRunner(
             if self.mm_cudagraph_manager is not None:
                 for (
                     runtime_mode,
-                    _,
+                    batch_descs,
                 ) in self.mm_cudagraph_manager.dispatcher.get_capture_descs():
                     self.mm_cudagraph_manager.capture(
-                        model=self.model, cudagraph_mode=runtime_mode
+                        model=self.model,
+                        batch_descs=batch_descs,
+                        cudagraph_mode=runtime_mode,
                     )
 
             torch.cuda.synchronize()
@@ -5624,13 +5626,8 @@ class GPUModelRunner(
             cudagraph_mode, self.uniform_decode_query_len
         )
 
-        if (
-            self.mm_cudagraph_manager is not None
-            and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
-        ):
-            self.mm_cudagraph_manager.dispatcher.initialize_cudagraph_keys(
-                CUDAGraphMode.PIECEWISE,
-            )
+        if self.mm_cudagraph_manager is not None:
+            self.mm_cudagraph_manager.initialize_cudagraph_keys(cudagraph_mode)
 
         # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
         if self.speculative_config and self.speculative_config.use_eagle():

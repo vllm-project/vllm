@@ -30,19 +30,6 @@ class MMEncoderCudagraphManager:
         self.dispatcher = CudagraphDispatcher(self.vllm_config, is_mm_encoder=True)
         self.dummy_input_builder = dummy_input_builder
 
-        compilation_config = vllm_config.compilation_config
-        self.capture_sizes: list[int] = []
-        if compilation_config and compilation_config.mm_encoder_cudagraph_capture_sizes:
-            self.capture_sizes = sorted(
-                compilation_config.mm_encoder_cudagraph_capture_sizes
-            )
-
-        self.enabled = bool(
-            self.capture_sizes
-            and compilation_config
-            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        )
-
         # Check if using data parallel mode for ViT
         self.is_vit_dp_mode = self._check_vit_dp_mode(vllm_config)
 
@@ -57,6 +44,18 @@ class MMEncoderCudagraphManager:
 
         return mm_encoder_tp_mode == "data" and tp_size > 1
 
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Initialize cudagraph dispatcher keys for MM Encoder.
+
+        MM Encoder only supports PIECEWISE cudagraphs.
+        """
+        if cudagraph_mode.mixed_mode() in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+            mm_cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            mm_cudagraph_mode = CUDAGraphMode.NONE
+
+        self.dispatcher.initialize_cudagraph_keys(mm_cudagraph_mode)
+
     def dispatch_and_pad_mm_input(
         self,
         mm_kwargs_group: BatchedTensorInputs,
@@ -69,14 +68,6 @@ class MMEncoderCudagraphManager:
             original_num_imgs = image_grid_thw.shape[0]
         else:
             original_num_imgs = len(image_grid_thw)
-
-        if not self.enabled:
-            return (
-                CUDAGraphMode.NONE,
-                BatchDescriptor(num_tokens),
-                original_num_imgs,
-                mm_kwargs_group,
-            )
 
         # Dispatch to get the target padded size
         cudagraph_runtime_mode, batch_descriptor = self.dispatcher.dispatch(
@@ -138,25 +129,22 @@ class MMEncoderCudagraphManager:
     def capture(
         self,
         model: nn.Module,
+        batch_descs: "list[BatchDescriptor]",
         cudagraph_mode: CUDAGraphMode,
     ) -> None:
-        if not self.enabled or not self.capture_sizes:
-            return
-
         self.vllm_config.in_mm_encoder_tracing = True
 
-        capture_sizes_desc = list(reversed(self.capture_sizes))
-
         if is_global_first_rank():
-            capture_sizes_iter: Any = tqdm(
-                capture_sizes_desc,
+            batch_descriptors: Any = tqdm(
+                batch_descs,
                 disable=not self.vllm_config.load_config.use_tqdm_on_load,
                 desc="Capturing MM_Encoder CUDA graphs (PIECEWISE)",
             )
         else:
-            capture_sizes_iter = capture_sizes_desc
+            batch_descriptors = batch_descs
 
-        for capture_size in capture_sizes_iter:
+        for batch_desc in batch_descriptors:
+            capture_size = batch_desc.num_tokens
             self.capture_graph(
                 capture_size,
                 model=model,

@@ -51,11 +51,14 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
-    set_current_vllm_config,
 )
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -1287,20 +1290,16 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            with set_current_vllm_config(self.vllm_config):
-                if (
-                    self.use_data_parallel
-                    and not self.vllm_config.in_mm_encoder_tracing
-                ):
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual,
-                        pixel_values,
-                        grid_thw_list,
-                        rope_type="rope_3d",
-                        mm_cudagraph_manager=mm_cudagraph_manager,
-                    )
-                else:
-                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            if self.use_data_parallel and not self.vllm_config.in_mm_encoder_tracing:
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual,
+                    pixel_values,
+                    grid_thw_list,
+                    rope_type="rope_3d",
+                    mm_cudagraph_manager=mm_cudagraph_manager,
+                )
+            else:
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -1351,7 +1350,7 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            with set_current_vllm_config(self.vllm_config):
+            with set_forward_context(None, self.vllm_config):
                 if (
                     self.use_data_parallel
                     and not self.vllm_config.in_mm_encoder_tracing

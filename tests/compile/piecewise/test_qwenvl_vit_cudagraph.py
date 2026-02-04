@@ -116,7 +116,7 @@ def _worker_embed_multimodal(
         vllm_config,
         dummy_inputs_builder,
     )
-    mm_cudagraph_manager.dispatcher.initialize_cudagraph_keys(
+    mm_cudagraph_manager.initialize_cudagraph_keys(
         CUDAGraphMode.PIECEWISE,
     )
 
