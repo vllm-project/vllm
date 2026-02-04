@@ -17,12 +17,16 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -763,18 +767,51 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
-            out = fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-            )
+            # Handle MXFP4 weight emulation: dequantize weights and apply
+            # activation QDQ via quant_config for both input and intermediate
+            if self.weight_dtype == "mxfp4":
+                # Dequantize MXFP4 weights to float
+                w13 = dequant_mxfp4(layer.w13_weight, layer.w13_weight_scale, x.dtype)
+                w2 = dequant_mxfp4(layer.w2_weight, layer.w2_weight_scale, x.dtype)
+
+                # Create emulation quant_config for activation QDQ only.
+                # This ensures both input and intermediate activations are
+                # quantize-dequantized to simulate precision loss.
+                # Weights are already dequantized, so no weight quantization.
+                emulation_quant_config = FusedMoEQuantConfig(
+                    _a1=FusedMoEQuantDesc(dtype=self.input_dtype),
+                    _a2=FusedMoEQuantDesc(dtype=self.input_dtype),
+                    _w1=FusedMoEQuantDesc(),  # No weight quantization
+                    _w2=FusedMoEQuantDesc(),  # No weight quantization
+                )
+
+                out = fused_experts(
+                    x,
+                    w13,
+                    w2,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=layer.activation,
+                    global_num_experts=layer.global_num_experts,
+                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                    expert_map=layer.expert_map,
+                    quant_config=emulation_quant_config,
+                )
+            else:
+                # MXFP6-only path: pass to fused_experts with quant_config
+                out = fused_experts(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=layer.activation,
+                    global_num_experts=layer.global_num_experts,
+                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                    expert_map=layer.expert_map,
+                    quant_config=self.moe_quant_config,
+                )
 
         return out
