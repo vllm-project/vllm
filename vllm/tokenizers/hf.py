@@ -58,7 +58,11 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         def __reduce__(self):
             return get_cached_tokenizer, (tokenizer,)
 
-    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+    # Keep the original class name to maintain compatibility with
+    # HuggingFace transformers processor type checking.
+    # The processor checks tokenizer class name against expected types.
+    CachedTokenizer.__name__ = tokenizer.__class__.__name__
+    CachedTokenizer.__qualname__ = tokenizer.__class__.__qualname__
 
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
