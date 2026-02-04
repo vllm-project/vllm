@@ -12,6 +12,7 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -48,8 +49,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
 
+        # Compute captured LoRA counts for cudagraph specialization.
+        captured_lora_counts = get_captured_lora_counts(
+            self.max_loras, self.lora_config.specialize_active_lora
+        )
+
         self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
         # When speculative decoding is enabled, max_num_samples is
@@ -57,7 +66,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # This line can be optimized by replacing max_num_batched_tokens
         # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
     def update_metadata(
@@ -102,7 +114,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
         )
 
@@ -143,7 +157,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(num_tokens),
+            *self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            ),
             offset_start=offset_start,
             add_inputs=True,
         )
@@ -175,7 +191,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             offset_start=0,
             add_inputs=add_inputs,
         )
@@ -287,7 +305,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             [lora_a_stacked],
             buffer.unsqueeze(dim=0),
-            *self.prompt_mapping_meta.meta_args(x.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
         )
 
@@ -295,7 +315,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer.unsqueeze(dim=0),
             [lora_b_stacked],
             y,
-            *self.prompt_mapping_meta.meta_args(buffer.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                buffer.size(0), self.lora_config.specialize_active_lora
+            ),
             add_inputs=True,
         )
         y = y.view_as(y_org)
@@ -310,52 +332,59 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        naive_block_assignment: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
-        num_virtual_experts = num_experts * max_loras
-        max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
-            block_size - 1
+        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            )
         )
-        if pad_sorted_ids:
-            max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-        sorted_ids = torch.empty(
-            (max_num_tokens_padded,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-        # Expert ids must be set default to -1 to prevent a blank block
-        expert_ids = torch.empty(
-            (max_num_m_blocks,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        num_tokens_post_pad = torch.empty(
-            (1,), dtype=torch.int32, device=topk_ids.device
-        )
+        if naive_block_assignment:
+            expert_ids = topk_ids.reshape(-1)
+            sorted_ids = None
+            num_tokens_post_pad = None
+        else:
+            num_virtual_experts = num_experts * max_loras
+            max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
+                block_size - 1
+            )
+            if pad_sorted_ids:
+                max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+            sorted_ids = torch.empty(
+                (max_num_tokens_padded,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+            # Expert ids must be set default to -1 to prevent a blank block
+            expert_ids = torch.empty(
+                (max_num_m_blocks,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            num_tokens_post_pad = torch.empty(
+                (1,), dtype=torch.int32, device=topk_ids.device
+            )
 
-        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
-            num_tokens
-        )
+            ops.moe_lora_align_block_size(
+                topk_ids,
+                lora_ids,
+                adapter_enabled,
+                token_lora_mapping,
+                num_virtual_experts,
+                max_loras,
+                block_size,
+                sorted_ids,
+                expert_ids,
+                num_tokens_post_pad,
+                expert_map,
+            )
 
-        ops.moe_lora_align_block_size(
-            topk_ids,
-            lora_ids,
-            adapter_enabled,
-            token_lora_mapping,
-            num_virtual_experts,
-            max_loras,
-            block_size,
-            sorted_ids,
-            expert_ids,
-            num_tokens_post_pad,
-            expert_map,
-        )
-
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        return token_lora_mapping, sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -364,9 +393,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
+        sorted_token_ids: torch.Tensor | None,
         expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor | None,
         max_lora_rank: int,
         top_k_num: int,
         shrink_config,
@@ -375,6 +404,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
         fully_sharded: bool = False,
         offset: int = 0,
+        token_lora_mapping: torch.Tensor | None = None,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
@@ -382,6 +412,19 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Uses combined virtual expert indexing where expert_ids contains:
             virtual_expert_id = lora_id * num_experts + expert_id
         """
+        (
+            token_lora_mapping_meta,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ) = self.token_mapping_meta.meta_args(
+            x.size(0), self.lora_config.specialize_active_lora
+        )
+        if token_lora_mapping is None:
+            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,
@@ -391,6 +434,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
+            token_lora_mapping,
             max_lora_rank,
             top_k_num,
             adapter_enabled,
