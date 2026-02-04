@@ -1371,13 +1371,13 @@ class LLM:
 
     def _late_interaction_score(
         self,
-        tokenizer: TokenizerLike,
-        text_1: list[str | TextPrompt | TokensPrompt],
-        text_2: list[str | TextPrompt | TokensPrompt],
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        pooling_params: PoolingParams | None = None,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
+        *,
+        use_tqdm: bool | Callable[..., tqdm],
+        pooling_params: PoolingParams | None,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        tokenization_kwargs: dict[str, Any],
     ) -> list[ScoringRequestOutput]:
         """
         Late interaction scoring (ColBERT MaxSim).
@@ -1386,6 +1386,25 @@ class LLM:
         MaxSim: sum over query tokens of max similarity to any document token.
         """
         from vllm.outputs import PoolingOutput
+
+        tokenizer = self.get_tokenizer()
+
+        # Extract text from ScoreData
+        text_1: list[str] = []
+        for text in data_1:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_1.append(text)
+
+        text_2: list[str] = []
+        for text in data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_2.append(text)
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
@@ -1607,9 +1626,8 @@ class LLM:
             )
         elif is_late_interaction:
             return self._late_interaction_score(
-                tokenizer,
-                data_1,  # type: ignore[arg-type]
-                data_2,  # type: ignore[arg-type]
+                score_data_1,
+                score_data_2,
                 use_tqdm=use_tqdm,
                 pooling_params=pooling_params,
                 lora_request=lora_request,

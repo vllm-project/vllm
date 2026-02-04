@@ -311,11 +311,20 @@ An OpenAI client example can be found here: [examples/pooling/embed/openai_embed
 
 [ColBERT](https://arxiv.org/abs/2004.12832) (Contextualized Late Interaction over BERT) is a retrieval model that uses per-token embeddings and MaxSim scoring for document ranking. Unlike single-vector embedding models, ColBERT retains token-level representations and computes relevance scores through late interaction, providing better accuracy while being more efficient than cross-encoders.
 
-vLLM supports ColBERT models for reranking tasks. To use a ColBERT model, you need to override the architecture:
+vLLM supports ColBERT models for reranking tasks, automatically applying MaxSim scoring for query-document relevance:
 
 ```shell
-vllm serve answerdotai/answerai-colbert-small-v1 \
-    --hf-overrides '{"architectures": ["ColBERTModel"], "dim": 96}'
+vllm serve answerdotai/answerai-colbert-small-v1
+```
+
+Currently supports ColBERT models with standard BERT encoders (e.g., `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0`).
+
+ColBERT models with modified encoder architectures are not yet supported, including BERT variants with rotary embeddings (e.g., `jinaai/jina-colbert-v2`) or other custom encoders (e.g., `LiquidAI/LFM2-ColBERT-350M`).
+
+If your standard BERT ColBERT model's config doesn't specify the architecture as `ColBERT`, `ColBERTModel`, or `HF_ColBERT`, override it with:
+
+```shell
+vllm serve your-colbert-model --hf-overrides '{"architectures": ["ColBERTModel"]}'
 ```
 
 Then you can use the rerank endpoint:

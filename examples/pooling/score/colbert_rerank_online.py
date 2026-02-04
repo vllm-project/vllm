@@ -8,8 +8,7 @@ and MaxSim scoring for document reranking, providing better accuracy than
 single-vector models while being more efficient than cross-encoders.
 
 Start the server with:
-    vllm serve answerdotai/answerai-colbert-small-v1 \
-        --hf-overrides '{"architectures": ["ColBERTModel"], "dim": 96}'
+    vllm serve answerdotai/answerai-colbert-small-v1
 
 Then run this script:
     python colbert_rerank_online.py

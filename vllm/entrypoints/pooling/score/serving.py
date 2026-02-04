@@ -305,8 +305,7 @@ class ServingScores(OpenAIServing):
                     request_id=f"{emb_1.request_id}_{emb_2.request_id}",
                     outputs=PoolingOutput(data=maxsim_score),
                     prompt_token_ids=tokens,
-                    num_cached_tokens=emb_1.num_cached_tokens
-                    + emb_2.num_cached_tokens,
+                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
                     finished=True,
                 )
             )

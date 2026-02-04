@@ -55,18 +55,13 @@ class ColBERTModel(BertEmbeddingModel):
         self.head_dtype = vllm_config.model_config.head_dtype
 
         # ColBERT dimension - check various config field names used by different
-        # ColBERT implementations
+        # ColBERT implementations. If not found in config, will be inferred
+        # from loaded weights in load_weights()
         self.colbert_dim: int | None = (
             getattr(config, "colbert_dim", None)
             or getattr(config, "dim", None)
             or getattr(config, "projection_dim", None)
         )
-        if self.colbert_dim is None:
-            raise ValueError(
-                "ColBERT dimension not found in model config. "
-                "Expected one of: 'colbert_dim', 'dim', or 'projection_dim'. "
-                "You can specify it via --hf-overrides '{\"dim\": 128}'"
-            )
 
         # Initialize parent (this will call _build_pooler)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -74,15 +69,27 @@ class ColBERTModel(BertEmbeddingModel):
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(vllm_config=vllm_config, prefix=prefix)
 
-    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
-        # ColBERT linear projection: hidden_size -> colbert_dim
-        # Original ColBERT uses bias=False
-        self.colbert_linear = nn.Linear(
+    def _build_colbert_linear(self) -> nn.Linear:
+        """Build the ColBERT linear projection layer."""
+        if self.colbert_dim is None:
+            raise ValueError("colbert_dim must be set before building the linear layer")
+        return nn.Linear(
             self.hidden_size,
             self.colbert_dim,
             bias=False,
             dtype=self.head_dtype,
         )
+
+    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
+        # ColBERT linear projection: hidden_size -> colbert_dim
+        # Original ColBERT uses bias=False
+        # If colbert_dim is not set from config, it will be inferred during
+        # load_weights and the linear layer will be created there
+        if self.colbert_dim is not None:
+            self.colbert_linear = self._build_colbert_linear()
+        else:
+            # Placeholder - will be created when weights are loaded
+            self.colbert_linear = None
 
         # ColBERT only supports token_embed - it's fundamentally a per-token
         # embedding model.
@@ -122,11 +129,24 @@ class ColBERTModel(BertEmbeddingModel):
 
         # Load ColBERT linear weights
         if colbert_side:
-            params_dict = dict(self.named_parameters())
             for name, weight in colbert_side:
-                if name in params_dict:
-                    param = params_dict[name]
-                    param.data.copy_(weight)
-                    loaded.add(name)
+                if name == "colbert_linear.weight":
+                    # Infer colbert_dim from weights if not set in config
+                    if self.colbert_dim is None:
+                        # Weight shape is [colbert_dim, hidden_size]
+                        self.colbert_dim = weight.shape[0]
+                        # Create the linear layer now that we know the dimension
+                        self.colbert_linear = self._build_colbert_linear()
+                        # Move to the same device as the model's existing parameters
+                        device = next(self.model.parameters()).device
+                        self.colbert_linear.to(device)
+                        # Update the pooler's projector to use the new linear layer
+                        self.pooler.head.projector = self.colbert_linear
+
+                    # Load weights directly into the pooler's projector
+                    weight = weight.to(self.pooler.head.projector.weight.device)
+                    self.pooler.head.projector.weight.data.copy_(weight)
+                    loaded.add("pooler.head.projector.weight")
+                    break
 
         return loaded

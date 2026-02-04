@@ -20,8 +20,6 @@ def server():
     args = [
         "--max-model-len",
         str(MAX_MODEL_LEN),
-        "--hf-overrides",
-        f'{{"architectures": ["ColBERTModel"], "dim": {COLBERT_DIM}}}',
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
