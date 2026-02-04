@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import itertools
 import math
 from abc import ABC, abstractmethod
@@ -10,15 +11,21 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    MultiModalConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.mm_cudagraph import MMEncoderCudagraphManager
 
 logger = init_logger(__name__)
 
@@ -387,6 +394,7 @@ def run_dp_sharded_mrope_vision_model(
     grid_thw_list: list[list[int]],
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
+    mm_cudagraph_manager: MMEncoderCudagraphManager | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -474,31 +482,58 @@ def run_dp_sharded_mrope_vision_model(
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
-    # Run the vision model on the local pixel_values_local
-    if rope_type == "rope_2d":
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list)
-            )
-            if isinstance(image_embeds_local, list):
-                image_embeds_local = torch.cat(image_embeds_local, dim=0)
+    # Context setup
+    ctx = contextlib.nullcontext()
+
+    if mm_cudagraph_manager is not None:
+        mm_groups: dict[str, torch.Tensor | list] = {
+            "pixel_values": pixel_values_local,
+            "image_grid_thw": local_grid_thw_list,
+        }
+        (
+            cudagraph_runtime_mode,
+            batch_descriptor,
+            _,
+            mm_groups,
+        ) = mm_cudagraph_manager.dispatch_and_pad_mm_input(mm_groups)
+        pixel_values_local = mm_groups["pixel_values"]
+        local_grid_thw_list = mm_groups["image_grid_thw"]
+
+        ctx = set_forward_context(
+            None,
+            vllm_config=mm_cudagraph_manager.vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+        )
+
+    with ctx:
+        # Run the vision model on the local pixel_values_local
+        if rope_type == "rope_2d":
+            if pixel_values_local.shape[0] > 0:
+                image_embeds_local = vision_model(
+                    pixel_values_local, torch.tensor(local_grid_thw_list)
+                )
+                if isinstance(image_embeds_local, list):
+                    image_embeds_local = torch.cat(image_embeds_local, dim=0)
+            else:
+                out_dim = getattr(vision_model.config, "hidden_size", None)
+                image_embeds_local = torch.empty(
+                    (0, embed_dim_reduction_factor, out_dim),
+                    device=pixel_values.device,
+                    dtype=pixel_values.dtype,
+                )
         else:
-            out_dim = getattr(vision_model.config, "hidden_size", None)
-            image_embeds_local = torch.empty(
-                (0, embed_dim_reduction_factor, out_dim),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
-    else:
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
-        else:
-            # Handle empty case
-            image_embeds_local = torch.empty(
-                (0, vision_model.out_hidden_size),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
+            if pixel_values_local.shape[0] > 0:
+                image_embeds_local = vision_model(
+                    pixel_values_local, local_grid_thw_list
+                )
+            else:
+                # Handle empty case
+                image_embeds_local = torch.empty(
+                    (0, vision_model.out_hidden_size),
+                    device=pixel_values.device,
+                    dtype=pixel_values.dtype,
+                )
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
@@ -522,6 +557,9 @@ def run_dp_sharded_mrope_vision_model(
                 device=image_embeds_local.device,
             )
         image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
+    # truncate the padded output from CUDA graph execution
+    elif current_len > max_len_per_rank:
+        image_embeds_local_padded = image_embeds_local[:max_len_per_rank]
     else:
         image_embeds_local_padded = image_embeds_local
 

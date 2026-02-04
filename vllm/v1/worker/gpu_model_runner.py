@@ -170,6 +170,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.mm_cudagraph import MMEncoderCudagraphManager
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -649,6 +650,16 @@ class GPUModelRunner(
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+
+        # MM encoder CUDA graph manager for ViT piecewise CUDA graph.
+        self.mm_cudagraph_manager: MMEncoderCudagraphManager | None = None
+        if self.supports_mm_inputs:
+            processor = self.mm_registry.create_processor(self.model_config)
+            dummy_inputs_builder = processor.dummy_inputs
+            self.mm_cudagraph_manager = MMEncoderCudagraphManager(
+                self.vllm_config,
+                dummy_inputs_builder,
+            )
 
         self.mm_budget = (
             MultiModalBudget(self.vllm_config, self.mm_registry)
@@ -2420,12 +2431,44 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
+                mm_mgr = self.mm_cudagraph_manager
+                is_vit_dp_mode = mm_mgr.is_vit_dp_mode if mm_mgr else False
 
-                with self.timed_encoder_operation(
-                    should_time, mm_lora_refs, current_item_idx, num_items
-                ):
-                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                if not is_vit_dp_mode:
+                    original_num_imgs = -1
 
+                    # Default values for non-mm_encoder cudagraph case
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                    batch_descriptor = None
+                    if mm_mgr is not None and "pixel_values" in mm_kwargs_group:
+                        (
+                            cudagraph_runtime_mode,
+                            batch_descriptor,
+                            original_num_imgs,
+                            mm_kwargs_group,
+                        ) = mm_mgr.dispatch_and_pad_mm_input(mm_kwargs_group)
+
+                    with (
+                        set_forward_context(
+                            None,
+                            vllm_config=self.vllm_config,
+                            cudagraph_runtime_mode=cudagraph_runtime_mode,
+                            batch_descriptor=batch_descriptor,
+                        ),
+                        self.timed_encoder_operation(
+                            should_time, mm_lora_refs, current_item_idx, num_items
+                        ),
+                    ):
+                        curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                    # Remove the padded items before sanity check
+                    if original_num_imgs != -1:
+                        curr_group_outputs = curr_group_outputs[:original_num_imgs]
+                else:
+                    with self.timed_encoder_operation(
+                        should_time, mm_lora_refs, current_item_idx, num_items
+                    ):
+                        mm_kwargs_group["mm_cudagraph_manager"] = mm_mgr
+                        curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
@@ -5101,6 +5144,7 @@ class GPUModelRunner(
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
+        self.vllm_config.in_mm_encoder_tracing = True
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -5138,9 +5182,10 @@ class GPUModelRunner(
                     )
 
                     # Run multimodal encoder.
-                    dummy_encoder_outputs = self.model.embed_multimodal(
-                        **batched_dummy_mm_inputs
-                    )
+                    with set_forward_context(None, self.vllm_config):
+                        dummy_encoder_outputs = self.model.embed_multimodal(
+                            **batched_dummy_mm_inputs
+                        )
 
                     sanity_check_mm_encoder_outputs(
                         dummy_encoder_outputs,
@@ -5164,6 +5209,7 @@ class GPUModelRunner(
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+        self.vllm_config.in_mm_encoder_tracing = False
 
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
@@ -5208,6 +5254,17 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
+            # Capture MM encoder CUDA graphs if enabled
+            if self.mm_cudagraph_manager is not None:
+                for (
+                    runtime_mode,
+                    batch_descs,
+                ) in self.mm_cudagraph_manager.dispatcher.get_capture_descs():
+                    self.mm_cudagraph_manager.capture(
+                        model=self.model,
+                        batch_descs=batch_descs,
+                        cudagraph_mode=runtime_mode,
+                    )
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -5571,6 +5628,9 @@ class GPUModelRunner(
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
+
+        if self.mm_cudagraph_manager is not None:
+            self.mm_cudagraph_manager.initialize_cudagraph_keys(cudagraph_mode)
 
         # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
         if self.speculative_config and self.speculative_config.use_eagle():

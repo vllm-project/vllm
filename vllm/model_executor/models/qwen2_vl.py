@@ -1044,6 +1044,25 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
             ),
         }
 
+    def _calculate_patch_size(self, patches: int) -> tuple[int, int]:
+        vision_config = self.info.get_hf_config().vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        assert patches % (merge_size * merge_size) == 0, (
+            f"Qwen2-VL: Number of patches ({patches}) must be multiple of "
+            f"merge_size squared ({merge_size}^2)"
+        )
+        h_patches = merge_size
+        w_patches = patches // merge_size
+        return h_patches, w_patches
+
+    def _get_img_feature_dim(self) -> int:
+        vision_config = self.info.get_hf_config().vision_config
+        in_channels = vision_config.in_channels
+        temporal_patch_size = vision_config.temporal_patch_size
+        patch_size = vision_config.patch_size
+        return in_channels * temporal_patch_size * patch_size * patch_size
+
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
     def _get_prompt_updates(

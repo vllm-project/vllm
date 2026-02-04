@@ -526,6 +526,13 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    mm_encoder_cudagraph_capture_sizes: list[int] | None = None
+    """Sizes to capture mm_encoder cudagraph.
+    - None (default): capture sizes are inferred from vllm config.
+    - list[int]: capture sizes are specified as given."""
+    max_mm_encoder_cudagraph_capture_size: int = field(default=None)
+    """The maximum mm_encoder cudagraph capture size.
+    """
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
@@ -644,6 +651,8 @@ class CompilationConfig:
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::flash_attn_maxseqlen_wrapper",
+        "vllm::torch_sdpa_wrapper",
     ]
 
     def compute_hash(self) -> str:

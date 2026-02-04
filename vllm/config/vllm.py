@@ -254,6 +254,13 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+    in_mm_encoder_tracing: bool = False
+    """Flag for mm_encoder compilation or mm_encoder CUDA graph capture.
+    
+    If true, mm_encoder in DP mode will execute the mm_encoder model directly instead of
+    `run_dp_sharded_mrope_vision_model` to ensure correct memory profiling
+    and compilation for each rank.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -810,6 +817,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
+            self._set_mm_encoder_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1328,6 +1336,140 @@ class VllmConfig:
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
         )
+
+    def _set_mm_encoder_cudagraph_sizes(self):
+        """Sets the CUDA graph capture sizes for the multimodal encoder (MM Encoder).
+
+        This method determines the batch sizes (in terms of number of patches)
+        for which MM Encoder CUDA graphs will be captured. CUDA graphs improve
+        performance by reducing kernel launch overhead for the multimodal encoder.
+
+        The logic is as follows:
+        1.  The feature is only enabled if all of the following conditions are met:
+            - A model is configured (`model_config` is not None).
+            - Eager mode is not enforced (`enforce_eager` is False).
+            - CUDA graph mode is enabled (`cudagraph_mode` is not NONE).
+            - Multimodal encoder compilation is enabled (`compile_mm_encoder` is True).
+            If these conditions are not met, the list of capture sizes will be empty,
+            effectively disabling mm_encoder CUDA graphs.
+
+        2.  If the user has explicitly provided `mm_encoder_cudagraph_capture_sizes`
+            in the compilation config, those sizes are used. The list is
+            de-duplicated and sorted in ascending order.
+
+        3.  If no sizes are provided by the user, a default list of sizes is
+            generated. The maximum size for this list is determined automatically
+            by `compute_encoder_budget` (capped at 8192), or by the user-provided
+            `max_mm_encoder_cudagraph_capture_size`. The default sizes are:
+            [512, 1024, 1536] + list(range(2048, 4096, 128)) + list(
+            range(4096, max_size + 1, 256))
+
+        4.  The final list of sizes is stored in
+            `self.compilation_config.mm_encoder_cudagraph_capture_sizes`. The
+            `max_mm_encoder_cudagraph_capture_size` is also updated to be consistent
+            with the largest value in this final list.
+
+        At runtime:
+        - If a batch's size matches or is smaller than a captured size, the
+          closest captured graph is used.
+        - If a batch's size is larger than the largest captured size, a CUDA
+          graph will not be used for that batch (fallback to eager execution).
+        """
+        if (
+            self.model_config is not None
+            and not self.model_config.enforce_eager
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.compile_mm_encoder
+        ):
+            # determine the initial max_mm_encoder_cudagraph_capture_size
+            max_mm_encoder_cudagraph_capture_size = (
+                self.compilation_config.max_mm_encoder_cudagraph_capture_size
+            )
+            if max_mm_encoder_cudagraph_capture_size is None:
+                from vllm.multimodal import MULTIMODAL_REGISTRY
+                from vllm.multimodal.budget import MultiModalBudget
+
+                mm_budget = MultiModalBudget(self, MULTIMODAL_REGISTRY)
+                encoder_compute_budget = (
+                    mm_budget.encoder_compute_budget if mm_budget else 0
+                )
+                max_mm_encoder_cudagraph_capture_size = min(
+                    encoder_compute_budget, 8192
+                )
+
+            # determine the mm_encoder_cudagraph_capture_sizes
+            if self.compilation_config.mm_encoder_cudagraph_capture_sizes is not None:
+                # de-duplicate the sizes provided by the config
+                dedup_sizes = list(
+                    set(self.compilation_config.mm_encoder_cudagraph_capture_sizes)
+                )
+                mm_encoder_cudagraph_capture_sizes = dedup_sizes
+                # sort to make sure the sizes are in ascending order
+                mm_encoder_cudagraph_capture_sizes.sort()
+            else:
+                mm_encoder_cudagraph_capture_sizes = [
+                    i
+                    for i in [512, 1024, 1536]
+                    if i <= max_mm_encoder_cudagraph_capture_size
+                ]
+                if max_mm_encoder_cudagraph_capture_size >= 2048:
+                    # Step size 128 for larger batch sizes
+                    mm_encoder_cudagraph_capture_sizes += list(
+                        range(
+                            2048,
+                            min(max_mm_encoder_cudagraph_capture_size + 1, 4096),
+                            128,
+                        )
+                    )
+                if max_mm_encoder_cudagraph_capture_size >= 4096:
+                    # Step size 256 for largest batch sizes
+                    mm_encoder_cudagraph_capture_sizes += list(
+                        range(4096, max_mm_encoder_cudagraph_capture_size + 1, 256)
+                    )
+
+            # user-specific compilation_config.max_mm_encoder_cudagraph_capture_size get
+            # truncated to valid_max_size when they are inconsistent.
+            valid_max_size = (
+                mm_encoder_cudagraph_capture_sizes[-1]
+                if mm_encoder_cudagraph_capture_sizes
+                else 0
+            )
+            if (
+                self.compilation_config.max_mm_encoder_cudagraph_capture_size
+                is not None
+                and self.compilation_config.max_mm_encoder_cudagraph_capture_size
+                != valid_max_size
+            ):
+                # raise error only when both two flags are user-specified
+                # and they are inconsistent with each other
+                if (
+                    self.compilation_config.mm_encoder_cudagraph_capture_sizes
+                    is not None
+                ):
+                    raise ValueError(
+                        "customized max_mm_encoder_cudagraph_capture_size(="
+                        f"{
+                            self.compilation_config.max_mm_encoder_cudagraph_capture_size
+                        }"
+                        ") should be consistent with the max value of "
+                        f"mm_encoder_cudagraph_capture_sizes(={valid_max_size})"
+                    )
+
+                logger.warning(
+                    "Truncating max_mm_encoder_cudagraph_capture_size to %d",
+                    valid_max_size,
+                )
+            # always set the final max_mm_encoder_cudagraph_capture_size
+            self.compilation_config.max_mm_encoder_cudagraph_capture_size = (
+                valid_max_size
+            )
+            self.compilation_config.mm_encoder_cudagraph_capture_sizes = (
+                mm_encoder_cudagraph_capture_sizes
+            )
+        else:
+            # no cudagraph in use
+            self.compilation_config.max_mm_encoder_cudagraph_capture_size = 0
+            self.compilation_config.mm_encoder_cudagraph_capture_sizes = []
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

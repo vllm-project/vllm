@@ -48,10 +48,23 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.compilation.backends import (
+    set_is_first_graph_in_mm_encoder_sequence,
+    set_is_last_graph_in_mm_encoder_sequence,
+)
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -65,6 +78,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -139,6 +153,7 @@ logger = init_logger(__name__)
 DUMMY_VIDEO_NUM_FRAMES = 2048
 
 
+@support_torch_compile(dynamic_arg_dims={"x": 0}, enable_if=should_torch_compile_mm_vit)
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -205,6 +220,15 @@ class Qwen3_VisionMLP(nn.Module):
         return mlp_output
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+    },
+    enable_if=should_torch_compile_mm_vit,
+)
 class Qwen3_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -257,6 +281,7 @@ class Qwen3_VisionBlock(nn.Module):
         return x
 
 
+@support_torch_compile(dynamic_arg_dims={"x": 0}, enable_if=should_torch_compile_mm_vit)
 class Qwen3_VisionPatchMerger(nn.Module):
     def __init__(
         self,
@@ -286,6 +311,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc1",
             disable_tp=use_data_parallel,
+            return_bias=False,
         )
         self.act_fn = nn.GELU()
         self.linear_fc2 = RowParallelLinear(
@@ -295,6 +321,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc2",
             disable_tp=use_data_parallel,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -303,9 +330,9 @@ class Qwen3_VisionPatchMerger(nn.Module):
         else:
             x = self.norm(x).view(-1, self.hidden_size)
 
-        x_parallel, _ = self.linear_fc1(x)
+        x_parallel = self.linear_fc1(x)
         x_parallel = self.act_fn(x_parallel)
-        out, _ = self.linear_fc2(x_parallel)
+        out = self.linear_fc2(x_parallel)
         return out
 
 
@@ -337,13 +364,18 @@ class Qwen3_VisionTransformer(nn.Module):
         self.out_hidden_size = vision_config.out_hidden_size * (
             1 + len(self.deepstack_visual_indexes)
         )
+        # TODO[@lucaskabela]: Investigate fixing this usage
+        # see https://github.com/vllm-project/vllm/issues/27044
+        # DO NOT MOVE THIS IMPORT
+        from vllm.compilation.backends import set_model_tag
 
-        self.patch_embed = Qwen3_VisionPatchEmbed(
-            patch_size=self.patch_size,
-            temporal_patch_size=self.temporal_patch_size,
-            in_channels=vision_config.in_channels,
-            hidden_size=self.hidden_size,
-        )
+        with set_model_tag("Qwen3_VisionPatchEmbed", is_encoder=True):
+            self.patch_embed = Qwen3_VisionPatchEmbed(
+                patch_size=self.patch_size,
+                temporal_patch_size=self.temporal_patch_size,
+                in_channels=vision_config.in_channels,
+                hidden_size=self.hidden_size,
+            )
 
         self.pos_embed = nn.Embedding(self.num_position_embeddings, self.hidden_size)
 
@@ -356,29 +388,31 @@ class Qwen3_VisionTransformer(nn.Module):
             rope_parameters={"partial_rotary_factor": 0.5},
         )
 
-        self.merger = Qwen3_VisionPatchMerger(
-            d_model=vision_config.out_hidden_size,
-            context_dim=self.hidden_size,
-            norm_layer=norm_layer,
-            spatial_merge_size=self.spatial_merge_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.merger",
-        )
+        with set_model_tag("Qwen3_VisionPatchMerger", is_encoder=True):
+            self.merger = Qwen3_VisionPatchMerger(
+                d_model=vision_config.out_hidden_size,
+                context_dim=self.hidden_size,
+                norm_layer=norm_layer,
+                spatial_merge_size=self.spatial_merge_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.merger",
+            )
 
-        self.deepstack_merger_list = nn.ModuleList(
-            [
-                Qwen3_VisionPatchMerger(
-                    d_model=vision_config.out_hidden_size,
-                    context_dim=self.hidden_size,
-                    spatial_merge_size=self.spatial_merge_size,
-                    use_postshuffle_norm=True,
-                    norm_layer=norm_layer,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
-                )
-                for layer_idx in range(len(self.deepstack_visual_indexes))
-            ]
-        )
+        with set_model_tag("Qwen3_VisionPatchMerger_postshuffle_norm", is_encoder=True):
+            self.deepstack_merger_list = nn.ModuleList(
+                [
+                    Qwen3_VisionPatchMerger(
+                        d_model=vision_config.out_hidden_size,
+                        context_dim=self.hidden_size,
+                        spatial_merge_size=self.spatial_merge_size,
+                        use_postshuffle_norm=True,
+                        norm_layer=norm_layer,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
+                    )
+                    for layer_idx in range(len(self.deepstack_visual_indexes))
+                ]
+            )
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
@@ -393,20 +427,45 @@ class Qwen3_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now."
             )
-        self.blocks = nn.ModuleList(
-            [
-                Qwen3_VisionBlock(
-                    dim=self.hidden_size,
-                    num_heads=self.num_heads,
-                    mlp_hidden_dim=vision_config.intermediate_size,
-                    act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
-                    norm_layer=norm_layer,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.blocks.{layer_idx}",
+        with set_model_tag("Qwen3_VisionBlock", is_encoder=True):
+            self.blocks = nn.ModuleList(
+                [
+                    Qwen3_VisionBlock(
+                        dim=self.hidden_size,
+                        num_heads=self.num_heads,
+                        mlp_hidden_dim=vision_config.intermediate_size,
+                        act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
+                        norm_layer=norm_layer,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.blocks.{layer_idx}",
+                    )
+                    for layer_idx in range(vision_config.depth)
+                ]
+            )
+        vllm_config: VllmConfig = get_current_vllm_config()
+        self._persistent_hidden_states_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_cos_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_sin_buffer: torch.Tensor | None = None
+        if vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes:
+            max_compile_size = (
+                vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes[-1]
+            )
+            self._persistent_hidden_states_buffer = torch.empty(
+                (max_compile_size, self.patch_embed.proj.input_size),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            (
+                self._persistent_rotary_pos_emb_cos_buffer,
+                self._persistent_rotary_pos_emb_sin_buffer,
+            ) = [
+                torch.empty(
+                    (max_compile_size, head_dim // 2),
+                    device=self.device,
+                    dtype=torch.bfloat16,
                 )
-                for layer_idx in range(vision_config.depth)
+                for _ in range(2)
             ]
-        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -533,13 +592,38 @@ class Qwen3_VisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
+    def _use_piecewise_cudagraph(self) -> bool:
+        if self._persistent_hidden_states_buffer is None:
+            return False
+        if not is_forward_context_available():
+            return False
+        fwd_ctx = get_forward_context()
+        return (
+            fwd_ctx is not None
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
-        hidden_states = self.patch_embed(hidden_states)
+        seq_len, _ = x.size()
+        is_cudagraph_mode = self._use_piecewise_cudagraph()
+
+        if is_cudagraph_mode:
+            hidden_states = self._persistent_hidden_states_buffer[:seq_len]
+            hidden_states.copy_(x, non_blocking=True)
+        else:
+            hidden_states = x.to(
+                device=self.device, dtype=self.dtype, non_blocking=True
+            )
+
+        with (
+            set_is_first_graph_in_mm_encoder_sequence(True),
+            set_is_last_graph_in_mm_encoder_sequence(False),
+        ):
+            hidden_states = self.patch_embed(hidden_states)
 
         if isinstance(grid_thw, list):
             grid_thw_list = grid_thw
@@ -549,8 +633,17 @@ class Qwen3_VisionTransformer(nn.Module):
             grid_thw = grid_thw.numpy()
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+        original_hidden_states = hidden_states
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
+
+        if is_cudagraph_mode:
+            rotary_pos_emb_sin = self._persistent_rotary_pos_emb_sin_buffer[
+                :seq_len
+            ].copy_(rotary_pos_emb_sin)
+            rotary_pos_emb_cos = self._persistent_rotary_pos_emb_cos_buffer[
+                :seq_len
+            ].copy_(rotary_pos_emb_cos)
 
         cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             axis=0, dtype=np.int32
@@ -562,22 +655,40 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
+        if is_cudagraph_mode:
+            # The above operations will produce temporary new tensors.
+            # That is not friendly to cudagraphs,
+            # so we need to copy them back to the persistent buffer
+            original_hidden_states = original_hidden_states.view(hidden_states.shape)
+            original_hidden_states.copy_(hidden_states)
+            hidden_states = original_hidden_states
+
         deepstack_feature_lists = []
-        for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
-            )
-            if layer_num in self.deepstack_visual_indexes:
-                deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
-                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
+        with (
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(False),
+        ):
+            for layer_num, blk in enumerate(self.blocks):
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens,
+                    rotary_pos_emb_cos=rotary_pos_emb_cos,
+                    rotary_pos_emb_sin=rotary_pos_emb_sin,
+                    max_seqlen=max_seqlen,
                 )
-                deepstack_feature_lists.append(deepstack_feature)
-        hidden_states = self.merger(hidden_states)
+                if layer_num in self.deepstack_visual_indexes:
+                    deepstack_merger_idx = self.deepstack_visual_indexes.index(
+                        layer_num
+                    )
+                    deepstack_feature = self.deepstack_merger_list[
+                        deepstack_merger_idx
+                    ](hidden_states)
+                    deepstack_feature_lists.append(deepstack_feature)
+        with (
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(True),
+        ):
+            hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
@@ -909,6 +1020,25 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)
         return video_items
+
+    def _calculate_patch_size(self, patches: int) -> tuple[int, int]:
+        vision_config = self.info.get_hf_config().vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        assert patches % (merge_size * merge_size) == 0, (
+            f"Qwen3-VL: Number of patches ({patches}) must be multiple of "
+            f"merge_size squared ({merge_size}^2)"
+        )
+        h_patches = merge_size
+        w_patches = patches // merge_size
+        return h_patches, w_patches
+
+    def _get_img_feature_dim(self) -> int:
+        vision_config = self.info.get_hf_config().vision_config
+        in_channels = vision_config.in_channels
+        temporal_patch_size = vision_config.temporal_patch_size
+        patch_size = vision_config.patch_size
+        return in_channels * temporal_patch_size * patch_size * patch_size
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
@@ -1262,6 +1392,7 @@ class Qwen3VLForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.video_pruning_rate = multimodal_config.video_pruning_rate
@@ -1410,21 +1541,29 @@ class Qwen3VLForConditionalGeneration(
             )
 
     def _process_image_input(
-        self, image_input: Qwen2_5_VLImageInputs
+        self,
+        image_input: Qwen2_5_VLImageInputs,
+        mm_cudagraph_manager: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            if self.use_data_parallel:
+
+            if self.use_data_parallel and not self.vllm_config.in_mm_encoder_tracing:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                    self.visual,
+                    pixel_values,
+                    grid_thw_list,
+                    rope_type="rope_3d",
+                    mm_cudagraph_manager=mm_cudagraph_manager,
                 )
             else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -1432,10 +1571,13 @@ class Qwen3VLForConditionalGeneration(
         return image_embeds.split(sizes)
 
     def _process_video_input(
-        self, video_input: Qwen2_5_VLVideoInputs
+        self,
+        video_input: Qwen2_5_VLVideoInputs,
+        mm_cudagraph_manager: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
@@ -1443,13 +1585,22 @@ class Qwen3VLForConditionalGeneration(
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype
             )
-            if self.use_data_parallel:
-                grid_thw_list = grid_thw.tolist()
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+            with set_forward_context(None, self.vllm_config):
+                if (
+                    self.use_data_parallel
+                    and not self.vllm_config.in_mm_encoder_tracing
+                ):
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values_videos,
+                        grid_thw_list,
+                        rope_type="rope_3d",
+                        mm_cudagraph_manager=mm_cudagraph_manager,
+                    )
+                else:
+                    video_embeds = self.visual(
+                        pixel_values_videos, grid_thw=grid_thw_list
+                    )
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
@@ -1893,6 +2044,7 @@ class Qwen3VLForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
+        mm_cudagraph_manager = kwargs.pop("mm_cudagraph_manager", None)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -1906,14 +2058,18 @@ class Qwen3VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input)
+                image_embeddings = self._process_image_input(
+                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
+                )
                 if self.is_multimodal_pruning_enabled:
                     image_embeddings = self._postprocess_image_embeds_evs(
                         image_embeddings, multimodal_input
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
+                video_embeddings = self._process_video_input(
+                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
+                )
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
