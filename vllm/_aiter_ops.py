@@ -1673,5 +1673,87 @@ class rocm_aiter_ops:
 
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
+    @staticmethod
+    def flash_attn_varlen_func(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        min_seqlen_q: int | None = None,
+        dropout_p: float = 0.0,
+        softmax_scale: float | None = None,
+        causal: bool = False,
+        window_size: tuple[int, int] | None = None,
+        alibi_slopes: torch.Tensor | None = None,
+        return_lse: bool = False,
+        out: torch.Tensor | None = None,
+    ):
+        """
+        Flash attention with variable length sequences.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.flash_attn_varlen_func
+        """
+        from aiter import flash_attn_varlen_func
+
+        return flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            min_seqlen_q=min_seqlen_q,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            out=out,
+        )
+
+    @staticmethod
+    def pa_fwd_asm(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        K_QScale: torch.Tensor,
+        V_QScale: torch.Tensor,
+        out_: torch.Tensor,
+    ):
+        """
+        Paged attention forward pass using assembly kernel.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.pa_fwd_asm
+        """
+        from aiter import pa_fwd_asm
+
+        return pa_fwd_asm(
+            Q=Q,
+            K=K,
+            V=V,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            K_QScale=K_QScale,
+            V_QScale=V_QScale,
+            out_=out_,
+        )
+
 
 rocm_aiter_ops.register_ops_once()

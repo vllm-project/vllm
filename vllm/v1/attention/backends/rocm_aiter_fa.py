@@ -32,16 +32,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
-    # IMPORTANT: This import is UNCONDITIONAL on ROCm (no env var check).
-    # This enables explicit backend selection via attention_config to work
-    # even when VLLM_ROCM_USE_AITER=0. Auto-discovery (which checks the env var)
-    # is handled in eagle.py and other discovery code, which avoids importing
-    # this module when the backend is not enabled, preventing JIT warnings.
-    # This file is not going to be imported unless the user explicitly
-    # imports it or selects it via attention_config, so the aiter import
-    # here should not cause any issues.
-    import aiter
-
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
@@ -805,7 +795,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             total_tokens=swa_total_tokens,
         )
 
-        aiter.flash_attn_varlen_func(
+        rocm_aiter_ops.flash_attn_varlen_func(
             q=query,
             k=key_fetched,
             v=value_fetched,
@@ -855,7 +845,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
-        out, lse = aiter.flash_attn_varlen_func(
+        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
@@ -902,7 +892,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            suf_out, suf_lse = aiter.flash_attn_varlen_func(
+            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
                 q=query,
                 k=key_fetched,
                 v=value_fetched,
@@ -1060,7 +1050,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 prefill_key = key[num_decode_tokens + num_extend_tokens :]
                 prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-                aiter.flash_attn_varlen_func(
+                rocm_aiter_ops.flash_attn_varlen_func(
                     q=prefill_query,
                     k=prefill_key,
                     v=prefill_value,
@@ -1166,7 +1156,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     new_key_cache = key_cache.view_as(k_cache_template)
                     new_value_cache = value_cache.view_as(v_cache_template)
-                    aiter.pa_fwd_asm(
+                    rocm_aiter_ops.pa_fwd_asm(
                         Q=query[:num_decode_tokens],
                         K=new_key_cache,
                         V=new_value_cache,
