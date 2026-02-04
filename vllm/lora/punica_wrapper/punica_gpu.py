@@ -366,6 +366,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # When specialize_active_lora is enabled, num_loras is
             # num_active_loras; otherwise it's max_loras + 1.
             # Use max_loras for allocation to ensure sufficient space.
+            num_loras = (
+                num_loras
+                if not self.lora_config.specialize_active_lora
+                else num_loras + 1
+            )
             num_virtual_experts = num_experts * num_loras
             max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
                 block_size - 1
@@ -395,7 +400,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 token_lora_mapping,
                 lora_id_to_slot,
                 num_virtual_experts,
-                num_loras,
+                num_loras,  # exclude no-lora
+                max_loras,
                 block_size,
                 sorted_ids,
                 expert_ids,

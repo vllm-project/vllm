@@ -81,9 +81,7 @@ class LoRAKernelMeta:
 
         # Inverse mapping: lora_id -> lora_slot
         # Initialized to -1 (invalid slot) for all lora_ids
-        lora_id_to_slot = torch.full(
-            (max_loras + 1,), -1, dtype=torch.int32, device=device
-        )
+        lora_id_to_slot = torch.full((max_loras,), -1, dtype=torch.int32, device=device)
 
         return LoRAKernelMeta(
             token_lora_mapping=token_lora_mapping,
@@ -156,7 +154,7 @@ class LoRAKernelMeta:
         # Build inverse mapping: lora_id -> lora_slot
         # For each active lora_id, store its slot index in the inverse map
         for slot_idx in range(lora_ids.size(0)):
-            lora_id = lora_ids[slot_idx].item()
+            lora_id = lora_ids[slot_idx]
             if lora_id >= 0 and lora_id < self.lora_id_to_slot.size(0):
                 self.lora_id_to_slot[lora_id] = slot_idx
 

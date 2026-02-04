@@ -71,6 +71,7 @@ def test_moe_lora_align_block_size(
         token_lora_mapping,
         lora_id_to_slot,
         num_virtual_experts,
+        max_loras,  # num_loras (all adapters enabled, so same as max_loras)
         max_loras,
         block_size,
         sorted_token_ids,

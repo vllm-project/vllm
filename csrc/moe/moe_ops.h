@@ -27,13 +27,16 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
                                   torch::Tensor expert_ids,
                                   torch::Tensor num_tokens_post_pad);
 
-void moe_lora_align_block_size(
-    torch::Tensor topk_ids, torch::Tensor lora_ids,
-    torch::Tensor adapter_enabled, torch::Tensor token_lora_mapping,
-    torch::Tensor lora_id_to_slot, int64_t num_virtual_experts,
-    int64_t num_loras, int64_t block_size, torch::Tensor sorted_token_ids,
-    torch::Tensor expert_ids, torch::Tensor num_tokens_post_pad,
-    std::optional<torch::Tensor> maybe_expert_map);
+void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
+                               torch::Tensor adapter_enabled,
+                               torch::Tensor token_lora_mapping,
+                               torch::Tensor lora_id_to_slot,
+                               int64_t num_virtual_experts, int64_t num_loras,
+                               int64_t max_loras, int64_t block_size,
+                               torch::Tensor sorted_token_ids,
+                               torch::Tensor expert_ids,
+                               torch::Tensor num_tokens_post_pad,
+                               std::optional<torch::Tensor> maybe_expert_map);
 #ifndef USE_ROCM
 torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              torch::Tensor b_qweight, torch::Tensor b_scales,

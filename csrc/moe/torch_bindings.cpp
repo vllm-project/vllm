@@ -52,6 +52,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor lora_id_to_slot,"
       "                     int num_virtual_experts,"
       "                     int num_loras,"
+      "                     int max_loras,"
       "                     int block_size,"
       "                     Tensor !sorted_token_ids,"
       "                     Tensor !expert_ids,"
