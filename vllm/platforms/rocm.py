@@ -77,10 +77,16 @@ if os.environ.get("VLLM_ROCM_TUNABLEOP_ENABLED", "1") != "0":
     # Tuning is enabled by default in PyTorch, so we need to explicitly disable it
     tuning_enabled = os.environ.get("VLLM_ROCM_TUNABLEOP_TUNING", "1") != "0"
     torch.cuda.tunable.tuning_enable(tuning_enabled)
+    tunableop_filename = torch.cuda.tunable.get_filename()
+    if not tunableop_filename:
+        # Filename not explicitly set - PyTorch will use default location
+        result_dir = os.environ.get("PYTORCH_TUNABLEOP_RESULT_DIR", os.getcwd())
+        tunableop_filename = os.path.join(result_dir, "tunableop_results0.csv")
     logger.info(
-        "PyTorch TunableOp enabled for ROCm: enabled=%s, tuning=%s",
+        "PyTorch TunableOp enabled for ROCm: enabled=%s, tuning=%s, file=%s",
         torch.cuda.tunable.is_enabled(),
         torch.cuda.tunable.tuning_is_enabled(),
+        tunableop_filename,
     )
 else:
     logger.info("PyTorch TunableOp disabled for ROCm via VLLM_ROCM_TUNABLEOP_ENABLED=0")
