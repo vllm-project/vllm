@@ -196,8 +196,7 @@ class OpenAIServingPooling(OpenAIServing):
 
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -235,8 +234,7 @@ class OpenAIServingPooling(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         return response
 
