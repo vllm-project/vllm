@@ -166,12 +166,13 @@ def group_mm_kwargs_by_modality(
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
         mm_kwargs_items = MultiModalKwargsItems({modality: items_lst})
-        mm_kwargs_data = mm_kwargs_items.get_data(
+
+        for num_items, mm_kwargs_batch in mm_kwargs_items.iter_batches(
+            modality,
             device=device,
             pin_memory=pin_memory,
-        )
-
-        yield modality, len(items_lst), mm_kwargs_data
+        ):
+            yield modality, num_items, mm_kwargs_batch
 
 
 def fetch_audio(
