@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import cv2
 import numpy as np
 import torch
+from torchvision.ops import structural_similarity_index_measure as ssim
+import torchvision.transforms.v2.functional as tvF
 
 
 class SimilarFrameDetector:
@@ -76,10 +77,11 @@ class SimilarFrameDetector:
         k = max(2, min(total_frames, 2 * (k // 2)))
         return k
 
-    def _downsample_frames(self, frames: torch.Tensor) -> torch.Tensor:
+    def _downsample_frames(
+        self, frames: torch.Tensor
+    ) -> torch.Tensor:
         """
         Downsample frames to reduce computation cost.
-        Use torch interpolate (GPU) or cv2 resize (CPU fallback).
         """
         frame_number, channels, height, width = frames.shape
         new_height, new_width = (
@@ -87,41 +89,24 @@ class SimilarFrameDetector:
             width // self.downscale_factor,
         )
 
-        # Use torch interpolate if available (GPU-optimized)
-        if hasattr(torch.nn.functional, "interpolate"):
-            downsampled = torch.nn.functional.interpolate(
-                frames,
-                size=(new_height, new_width),
-                mode="bilinear",
-                align_corners=False,
-            )
-        else:
-            # Fallback to cv2 resize (CPU)
-            frames_np = frames.cpu().numpy()
-            downsampled = torch.zeros(
-                (frame_number, channels, new_height, new_width),
-                dtype=torch.float32,
-                device=frames.device,
-            )
-            for f in range(frame_number):
-                frame = frames_np[f].transpose(1, 2, 0)
-                if frame.dtype != np.uint8:
-                    frame = np.clip(frame, 0, 255).astype(np.uint8)
-                downsampled_frame = cv2.resize(
-                    frame,
-                    (new_width, new_height),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-                downsampled[f] = torch.from_numpy(downsampled_frame.transpose(2, 0, 1))
-
+        downsampled = tvF.resize(
+            img=frames,
+            size=(new_height, new_width),
+            interpolation=tvF.InterpolationMode.BILINEAR,
+            antialias=True,
+        )
         return downsampled
 
-    def _calculate_ssim(self, img1: torch.Tensor, img2: torch.Tensor) -> float:
+    def _calculate_ssim(
+        self, img1: torch.Tensor, img2: torch.Tensor
+    ) -> float:
         """
         Calculate Structural Similarity Index (SSIM) between two frames.
         Higher SSIM means more similar frames (range: 0-1).
         """
-        # Convert RGB to grayscale
+        assert img1.shape == img2.shape
+        assert img1.device == img2.device
+
         if img1.shape[0] == 3:
             gray1 = 0.299 * img1[0] + 0.587 * img1[1] + 0.114 * img1[2]
             gray2 = 0.299 * img2[0] + 0.587 * img2[1] + 0.114 * img2[2]
@@ -129,31 +114,19 @@ class SimilarFrameDetector:
             gray1 = img1[0]
             gray2 = img2[0]
 
-        # Move to CPU for cv2 operations
-        gray1_np = gray1.cpu().numpy() if gray1.device.type != "cpu" else gray1.numpy()
-        gray2_np = gray2.cpu().numpy() if gray2.device.type != "cpu" else gray2.numpy()
+        gray1 = gray1.unsqueeze(0).unsqueeze(0)
+        gray2 = gray2.unsqueeze(0).unsqueeze(0)
 
-        # SSIM constants
-        C1 = (0.01 * 255) ** 2
-        C2 = (0.03 * 255) ** 2
-
-        # Gaussian blur for mean/variance calculation
-        mu1 = cv2.GaussianBlur(gray1_np, (11, 11), 1.5)
-        mu2 = cv2.GaussianBlur(gray2_np, (11, 11), 1.5)
-
-        mu1_sq = mu1**2
-        mu2_sq = mu2**2
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = cv2.GaussianBlur(gray1_np**2, (11, 11), 1.5) - mu1_sq
-        sigma2_sq = cv2.GaussianBlur(gray2_np**2, (11, 11), 1.5) - mu2_sq
-        sigma12 = cv2.GaussianBlur(gray1_np * gray2_np, (11, 11), 1.5) - mu1_mu2
-
-        # Compute SSIM map and return mean value
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
-            (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        ssim_value = ssim(
+            gray1,
+            gray2,
+            win_size=11,
+            sigma=1.5,
+            data_range=255.0,
+            size_average=True
         )
-        return float(np.mean(ssim_map))
+
+        return float(ssim_value)
 
     def _calculate_photometric_loss(
         self, frame1: torch.Tensor, frame2: torch.Tensor
