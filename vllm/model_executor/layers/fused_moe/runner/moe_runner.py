@@ -6,6 +6,14 @@ import torch
 
 
 class MoERunner(ABC):
+    """
+    Abstract base class for Mixture of Experts (MoE) runners.
+
+    This class defines the interface that all MoE runner implementations must follow.
+    MoE runners are responsible for executing the forward pass of MoE layers, handling
+    expert routing, and managing tensor parallel operations.
+    """
+
     @abstractmethod
     def forward(
         self,
