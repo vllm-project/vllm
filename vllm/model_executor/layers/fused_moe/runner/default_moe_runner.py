@@ -127,10 +127,6 @@ class DefaultMoERunner(MoERunner):
                     )
                 self.moe_forward = getattr(torch.ops.vllm, op_name)
 
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
-
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
@@ -152,20 +148,12 @@ class DefaultMoERunner(MoERunner):
         return shared_out, fused_out
 
     @property
-    def use_flashinfer_cutlass_kernels(self):
-        return (
-            self.moe_quant_config is not None
-            and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config_use_flashinfer_cutlass_kernels
-        )
-
-    @property
     def use_dp_chunking(self) -> bool:
         return (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_parallel_config.use_mori_kernels
-            or self.moe_parallel_config.use_fi_all2allv_kernels
+            self.moe_config.moe_parallel_config.use_pplx_kernels
+            or self.moe_config.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_config.moe_parallel_config.use_mori_kernels
+            or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     def _maybe_setup_shared_experts_stream(
