@@ -29,7 +29,9 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
-from .vision import is_vit_use_data_parallel
+from .vision import is_vit_use_data_parallel, should_torch_compile_mm_vit
+
+from vllm.compilation.decorators import support_torch_compile
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -234,8 +236,9 @@ class Siglip2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
         seq_length, embed_dim = hidden_states.shape
@@ -248,12 +251,11 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads_per_partition, self.head_dim)
 
         if self.use_rope:
-            cos, sin = position_embeddings
             queries, keys = apply_rotary_pos_emb(
                 queries.unsqueeze(0),
                 keys.unsqueeze(0),
-                cos,
-                sin,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
                 self.attn.is_flash_attn_backend,
                 self.apply_rotary_emb,
             )
@@ -309,6 +311,15 @@ class Siglip2MLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+    },
+    enable_if=should_torch_compile_mm_vit,
+)
 class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
@@ -335,13 +346,15 @@ class Siglip2EncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
     ) -> tuple[torch.FloatTensor]:
         """
         Args:
             hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
             cu_seqlens: Cumulative sequence lengths tensor.
-            position_embeddings: Position embeddings tensor.
+            rotary_pos_emb_cos: Cosine of rotary position embeddings.
+            rotary_pos_emb_sin: Sine of rotary position embeddings.
         """
         residual = hidden_states
 
@@ -349,7 +362,8 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
-            position_embeddings=position_embeddings,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
         )
         hidden_states = residual + hidden_states
 
@@ -377,16 +391,20 @@ class Siglip2Encoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [
-                Siglip2EncoderLayer(
-                    config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{idx}",
-                )
-                for idx in range(config.num_hidden_layers)
-            ]
-        )
+
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("Siglip2EncoderLayer", is_encoder=True):
+            self.layers = nn.ModuleList(
+                [
+                    Siglip2EncoderLayer(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.layers.{idx}",
+                    )
+                    for idx in range(config.num_hidden_layers)
+                ]
+            )
 
         self.rotary_pos_emb = VisionRotaryEmbedding(
             config.hidden_size // config.num_attention_heads // 2
@@ -534,13 +552,21 @@ class Siglip2Encoder(nn.Module):
 
         reverse_indices = torch.argsort(window_index)
 
+        # Unpack position embeddings for torch.compile compatibility
+        rotary_pos_emb_cos, rotary_pos_emb_sin = position_embeddings
+
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
             if not self.fullatt_block_indexes or index in self.fullatt_block_indexes:
                 cu_seqlens_tmp = cu_seqlens
             else:
                 cu_seqlens_tmp = cu_window_seqlens
-            hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
+            hidden_states = block(
+                hidden_states,
+                cu_seqlens_tmp,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
+            )
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
