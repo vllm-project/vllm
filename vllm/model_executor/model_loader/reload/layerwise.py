@@ -17,10 +17,16 @@ from .meta import (
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
+    materialize_layer_tensors_with_device_meta,
     restore_layer_on_meta,
 )
 from .types import LayerReloadingInfo
-from .utils import get_layer_params_buffers, get_layer_size, get_layer_tensors
+from .utils import (
+    CopyCounter,
+    get_layer_params_buffers,
+    get_layer_size,
+    get_layer_tensors,
+)
 
 logger = init_logger(__name__)
 
@@ -66,20 +72,31 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module,
+    is_reload: bool = True,
+    target_device: torch.device | None = None,
+):
     """
-    Set up layerwise weight loading with deferred processing.
+    Set up layerwise weight reloading|initial loading with deferred processing.
 
-    Must be called after `record_metadata_for_reloading`. This function:
-    1. Saves current kernel tensors for later copying
-    2. Restores layer parameters/buffers from metadata (on meta device)
-    3. Wraps weight loaders to defer processing until all weights are loaded
+    For weight reloading (is_reload = True):
 
-    When all weights for a layer are loaded, the wrapped loaders will:
-    1. Materialize the layer onto the target device
-    2. Load all cached weights
-    3. Run quantization processing if applicable
-    4. Copy processed values back to original tensor storage
+        Must be called after `record_metadata_for_reloading`. This function:
+        1. Saves current kernel tensors for later copying
+        2. Restores layer parameters/buffers from metadata (on meta device)
+        3. Wraps weight loaders to defer processing until all weights are loaded
+
+        When all weights for a layer are loaded, the wrapped loaders will:
+        1. Materialize the layer onto the target device
+        2. Load all cached weights
+        3. Run quantization processing if applicable
+        4. Copy processed values back to original tensor storage
+
+    For weight initial loading (is_reload = False):
+
+        1. saves `target_device` to be used during weight loading
+        2. wraps all weight loaders to enable deffered processing
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
@@ -93,10 +110,16 @@ def initialize_layerwise_reload(model: torch.nn.Module):
             continue
 
         # Save current tensors for later copying
-        info.kernel_tensors = get_layer_params_buffers(layer)
-
-        # Restore layer parameters/buffers onto meta device
-        restore_layer_on_meta(layer, info)
+        if is_reload:
+            # reload path, TODO document more
+            assert target_device is None
+            info.kernel_tensors = get_layer_params_buffers(layer)
+            # Restore layer parameters/buffers onto meta device
+            restore_layer_on_meta(layer, info)
+        else:
+            # initial load path
+            assert target_device is not None
+            info.initial_load_target_device = target_device
 
         # Track loading progress to determine when to process/copy
         info.load_numel = 0
@@ -106,11 +129,21 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         # Note that nested wrapping will occur for shared tensors
         for name, tensor in get_layer_tensors(layer).items():
             if _get_weight_loader(tensor).__name__ != "online_process_loader":
-                tensor.weight_loader = make_online_process_loader(layer, name)
+                tensor.weight_loader = make_online_process_loader(
+                    layer, name, is_reload
+                )
 
 
-def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
-    """Create a wrapped weight loader that defers processing."""
+def make_online_process_loader(
+    layer: torch.nn.Module, param_name: str, is_reload: bool
+) -> Callable:
+    """
+    Create a wrapped weight loader that defers processing.
+
+    * If `is_reload` is True, weights are cached on CPU and only actually
+      loaded when every chunk has been processed.
+    * If `is_reload` is False, weights are loaded directly (no CPU cache)
+    """
     info = get_layerwise_info(layer)
     param = getattr(layer, param_name)
     original_loader = _get_original_loader(param)
@@ -133,16 +166,42 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             # there's no way to reach `load_numel_total` without loading all
             # necessary weights. `weight_shape` is very small, so this is safe.
             # see Limitations(4)
-            logger.debug("%s: Excessive loading", layer.__class__.__name__)
+            logger.debug(
+                "%s: Excessive loading of param '%s'",
+                layer.__class__.__name__,
+                param_name,
+            )
             return
 
         # Bind and normalize arguments
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
-        # Cache loaded weights, track loading progress
-        info.loaded_weights.append((param_name, bound_args))
-        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        if is_reload:
+            # Cache loaded weights, track loading progress. Weights will be
+            # actually loaded later.
+            info.loaded_weights.append((param_name, bound_args))
+            num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+
+        else:
+            if info.load_numel == 0:
+                # If this is the first weight chunk being loaded, materialize any
+                # non-materialized tensors in this layer
+                assert info.initial_load_target_device is not None
+                with info.initial_load_target_device:
+                    materialize_layer_tensors_with_device_meta(layer)
+
+            # Update param reference to point to the current (materialized)
+            # tensor instead of the old meta tensor that was captured when
+            # the loader was wrapped
+            current_param = getattr(layer, param_name)
+            bound_args.arguments["param"] = current_param
+
+            # Load weights directly
+            with CopyCounter() as counter:
+                ret = original_loader(*bound_args.args, **bound_args.kwargs)
+            num_loaded = counter.copied_numel
+
         info.load_numel += num_loaded
 
         logger.debug(
@@ -156,14 +215,16 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
             layer, (Attention, MLAAttention)
         ):
-            _layerwise_process(layer, info)
+            _layerwise_process(layer, info, is_reload)
 
         return ret
 
     return online_process_loader
 
 
-def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
+def finalize_layerwise_reload(
+    model: torch.nn.Module, model_config: ModelConfig, is_reload: bool = True
+):
     """
     Remove the outermost layer of weight loading wrappers.
 
@@ -185,12 +246,14 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
                 )
 
             else:
-                _place_kernel_tensors(layer, info)
+                if is_reload:
+                    _place_kernel_tensors(layer, info)
                 layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded, place kernel tensors back
         elif info.can_process() and info.load_numel <= 0:
-            _place_kernel_tensors(layer, info)
+            if is_reload:
+                _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -198,38 +261,40 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
         # see Limitations(4)
         elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
-            _layerwise_process(layer, info)
+            _layerwise_process(layer, info, is_reload)
 
         info.reset()
 
 
-def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
+def _layerwise_process(
+    layer: torch.nn.Module, info: LayerReloadingInfo, is_reload: bool
+):
     """
     Finalize layer loading after all weights have been cached.
 
-    This function:
-    1. Materializes the layer onto the target device
-    2. Loads all cached weights
-    3. Runs quantization processing if applicable
-    4. Copies processed values back to original tensor storage
-    """
-    # Materialize layer tensors onto device
-    materialize_layer(layer)
+    If `is_reload` is True, this function:
+        1. Materializes the layer onto the target device
+        2. Loads all cached weights
+        3. Runs `process_weights_after_loading` if applicable
+        4. Copies processed values back to original tensor storage
 
-    # Reset FP8 online quantization flag so process_weights_after_loading
-    # will run again during reload
-    if hasattr(layer, "_already_called_process_weights_after_loading"):
-        delattr(layer, "_already_called_process_weights_after_loading")
+    If `is_reload` is False, this function:
+        1. Runs `process_weights_after_loading` if applicable
+    """
+    if is_reload:
+        # Materialize layer tensors onto device
+        materialize_layer(layer)
 
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
 
-    # Load all cached weights into materialized layer (using original loaders)
-    for name, args in info.loaded_weights:
-        param = getattr(layer, name)
-        args.arguments["param"] = param
-        param.weight_loader(*args.args, **args.kwargs)
+    if is_reload:
+        # Load all cached weights into materialized layer (using original loaders)
+        for name, args in info.loaded_weights:
+            param = getattr(layer, name)
+            args.arguments["param"] = param
+            param.weight_loader(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
     # Attention/MLA are processed in `finalize_layerwise_reload`
@@ -237,15 +302,17 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
 
-    # Copy processed values into original tensor storage (preserves cudagraph refs)
-    # this code is a no-op if not reloading (because kernel tensors is empty)
-    parameters, buffers = info.kernel_tensors
-    for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
-    for name, buffer in buffers.items():
-        buffer.data.copy_(getattr(layer, name))
+    if is_reload:
+        # Reloading path
+        # Copy processed values into original tensor storage (preserves cudagraph refs)
+        # this code is a no-op if not reloading (because kernel tensors is empty)
+        parameters, buffers = info.kernel_tensors
+        for name, param in parameters.items():
+            param.data.copy_(getattr(layer, name))
+        for name, buffer in buffers.items():
+            buffer.data.copy_(getattr(layer, name))
 
-    _place_kernel_tensors(layer, info)
+        _place_kernel_tensors(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -265,6 +332,7 @@ def _get_weight_loader(tensor: torch.Tensor):
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Assign each parameter/buffer in `info.kernel_tensors` back onto `layer`"""
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 
