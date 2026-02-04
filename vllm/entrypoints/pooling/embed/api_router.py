@@ -16,10 +16,14 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 if importlib.util.find_spec("orjson") is not None:
     from fastapi.responses import ORJSONResponse as _RESPONSE_CLASS
 else:
+    logger.warning_once("To make v1/embeddings API fast, please install orjson")
     from fastapi.responses import JSONResponse as _RESPONSE_CLASS
 
 router = APIRouter()
