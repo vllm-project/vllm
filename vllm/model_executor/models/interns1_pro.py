@@ -565,11 +565,6 @@ class InternS1ProForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
         },
-        orig_to_new_suffix={
-            # Handle FOPE rotary embeddings
-            ".rotary_emb.sin_coef": ".layers.0.self_attn.rotary_emb.sin_coef",
-            ".rotary_emb.cos_coef": ".layers.0.self_attn.rotary_emb.cos_coef",
-        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -621,10 +616,32 @@ class InternS1ProForConditionalGeneration(
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
+    def get_frope_params_map(self) -> str:
+        mapper = {}
+        for name, params in self.language_model.model.named_parameters():
+            if "rotary_emb.sin_coef" in name:
+                mapper["language_model.model.rotary_emb.sin_coef"] = (
+                    f"language_model.model.{name}"
+                )
+            if "rotary_emb.cos_coef" in name:
+                mapper["language_model.model.rotary_emb.cos_coef"] = (
+                    f"language_model.model.{name}"
+                )
+        return mapper
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """load weights"""
         skip_prefixes = ["model.time_series."]
         if self.visual is None:
             skip_prefixes.append("visual.")
+        # FIXME(Isotr0py): See if we can avoid tighing FoPE to PP layers
+        weights_mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.visual.": "visual.",
+                "lm_head.": "language_model.lm_head.",
+                "model.language_model.": "language_model.model.",
+            },
+            orig_to_new_suffix=self.get_frope_params_map(),
+        )
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=weights_mapper)
