@@ -100,9 +100,16 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             # Extract kv_transfer_params for Mooncake PD disaggregation
             kv_transfer_params = None
             if request.HasField("kv_transfer_params"):
+                remote_host = request.kv_transfer_params.remote_host
+                remote_port = request.kv_transfer_params.remote_port
+                if not remote_host or remote_port == 0:
+                    await context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        "Invalid kv_transfer_params: remote_host and remote_port must be set."
+                    )
                 kv_transfer_params = {
-                    "remote_host": request.kv_transfer_params.remote_host,
-                    "remote_port": request.kv_transfer_params.remote_port,
+                    "remote_host": remote_host,
+                    "remote_port": remote_port,
                 }
                 logger.debug(
                     "Request %s has kv_transfer_params: %s",
