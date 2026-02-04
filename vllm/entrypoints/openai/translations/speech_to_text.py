@@ -70,20 +70,6 @@ ResponseType: TypeAlias = (
 logger = init_logger(__name__)
 
 
-def _is_kimi_audio_asr_model(hf_config: object) -> bool:
-    """Return True if this model is Moonshot Kimi-Audio.
-
-    We scope transcription default overrides to this architecture to avoid
-    changing behavior for other speech-to-text models.
-    """
-
-    architectures = getattr(hf_config, "architectures", None)
-    if not architectures:
-        return False
-
-    return "MoonshotKimiaForCausalLM" in architectures
-
-
 class OpenAISpeechToText(OpenAIServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
@@ -479,22 +465,8 @@ class OpenAISpeechToText(OpenAIServing):
                 default_max_tokens = min(
                     self.model_config.max_model_len, request.max_completion_tokens
                 )
-            default_sampling_params = self.default_sampling_params
-            if default_sampling_params is None:
-                default_sampling_params = {}
-
-            hf_cfg = getattr(self.model_config, "hf_config", None)
-            if _is_kimi_audio_asr_model(hf_cfg):
-                default_sampling_params = dict(default_sampling_params)
-                # Apply Kimi-Audio demo-like defaults only when the user did not
-                # explicitly set them on the request.
-                if "top_k" not in request.model_fields_set:
-                    default_sampling_params.setdefault("top_k", 5)
-                if "repetition_penalty" not in request.model_fields_set:
-                    default_sampling_params.setdefault("repetition_penalty", 1.0)
-
             sampling_params = request.to_sampling_params(
-                default_max_tokens, default_sampling_params
+                default_max_tokens, self.default_sampling_params
             )
             if request.response_format == "verbose_json":
                 sampling_params.logprobs = 1

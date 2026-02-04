@@ -428,8 +428,6 @@ class OpenAIServingChat(OpenAIServing):
                         data_parallel_rank=data_parallel_rank,
                     )
 
-                    from typing import cast
-
                     generator = self.engine_client.generate(
                         engine_request,
                         sampling_params,
@@ -437,7 +435,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_text=cast(str | None, prompt_text),
+                        prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
                     )

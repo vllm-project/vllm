@@ -1101,8 +1101,6 @@ class OpenAIServing:
                 priority=priority,
             )
 
-            from typing import cast
-
             generator = self.engine_client.generate(
                 engine_request,
                 sampling_params,
@@ -1110,7 +1108,7 @@ class OpenAIServing:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
-                prompt_text=cast(str | None, prompt_text),
+                prompt_text=prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
