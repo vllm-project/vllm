@@ -236,7 +236,7 @@ _EMBEDDING_MODELS = {
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "VoyageQwen3BidirectionalEmbedModel": (
-        "voyage_qwen3_bidirectional_embed",
+        "voyage",
         "VoyageQwen3BidirectionalEmbedModel",
     ),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
