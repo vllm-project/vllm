@@ -105,8 +105,8 @@ class ModelConfig:
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object 
-    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    """Original model weights path. Used when the model is pulled from object
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -324,7 +324,6 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
-            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
