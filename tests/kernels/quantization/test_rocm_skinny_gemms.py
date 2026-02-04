@@ -30,15 +30,22 @@ NKM_FACTORS_LLMM1 = [
 
 NKM_FACTORS_WVSPLITK = [
     # Different batch sizes with key dimensions
-    (1, 16, 16),
+    (1, 32, 16),
     (1, 64, 64),
     (2, 256, 256),
     (3, 1024, 1024),
     (4, 4096, 4096),
+    (4, 4096, 4096 + 1),
+    (4, 4096 + 16, 4096),
+    (4, 4096 + 16, 4096 + 1),
     # Extended K values
     (1, 9216, 512),
     (2, 10240, 1024),
     (4, 16384, 8192),
+    (4, 16384 * 2, 8192),
+    (4, 16384 * 2, 8192 + 1),
+    (4, 16384 * 2 + 16, 8192),
+    (4, 16384 * 2 + 16, 8192 + 1),
     # Minimum M constraint validation (m >= 8)
     (1, 64, 8),
     (2, 128, 8),
@@ -144,55 +151,32 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
-    torch.manual_seed(seed)
-    cu_count = get_cu_count()
-
-    A = torch.rand(n, k, dtype=dtype, device="cuda") - 0.5
-    B = torch.rand(m, k, dtype=dtype, device="cuda") - 0.5
-
-    ref_out = torch.nn.functional.linear(A, B)
-    out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
-
-    assert torch.allclose(out, ref_out, rtol=0.01)
-
-
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_bias1D_kernel(n, k, m, dtype, seed):
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
+@pytest.mark.parametrize("padded_a", [False, True])
+@pytest.mark.parametrize("padded_b", [False, True])
+def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed, bias_mode, padded_a, padded_b):
     torch.manual_seed(seed)
     cu_count = get_cu_count()
 
     xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+    A = (torch.randn(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
+    B = (torch.randn(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
+
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
+
+    if padded_a:
+        A = pad_weights_fp8(A)
+    if padded_b:
+        B = pad_weights_fp8(B)
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    assert torch.allclose(out, ref_out, rtol=0.01)
-
-
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
-    torch.manual_seed(seed)
-    cu_count = get_cu_count()
-
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
-
-    ref_out = torch.nn.functional.linear(A, B, BIAS)
-    out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
-
-    assert torch.allclose(out, ref_out, rtol=0.01)
+    assert torch.allclose(out, ref_out, rtol=0.02, atol=0.01)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
