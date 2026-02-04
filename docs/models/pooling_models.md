@@ -321,10 +321,10 @@ Currently supports ColBERT models with standard BERT encoders (e.g., `answerdota
 
 ColBERT models with modified encoder architectures are not yet supported, including BERT variants with rotary embeddings (e.g., `jinaai/jina-colbert-v2`) or other custom encoders (e.g., `LiquidAI/LFM2-ColBERT-350M`).
 
-If your standard BERT ColBERT model's config doesn't specify the architecture as `ColBERT`, `ColBERTModel`, or `HF_ColBERT`, override it with:
+If your standard BERT ColBERT model's config doesn't specify the architecture as `HF_ColBERT`, override it with:
 
 ```shell
-vllm serve your-colbert-model --hf-overrides '{"architectures": ["ColBERTModel"]}'
+vllm serve your-colbert-model --hf-overrides '{"architectures": ["HF_ColBERT"]}'
 ```
 
 Then you can use the rerank endpoint:

@@ -171,7 +171,7 @@ def test_colbert_embed_not_supported(vllm_runner, colbert_model_name):
             max_model_len=512,
             enforce_eager=True,
         ) as vllm_model,
-        pytest.raises(ValueError, match="Task embed is not supported"),
+        pytest.raises(ValueError, match="Embedding API is not supported"),
     ):
         vllm_model.embed([TEXTS_1[0]])
 

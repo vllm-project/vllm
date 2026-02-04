@@ -206,8 +206,6 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
-    "ColBERT": ("colbert", "ColBERTModel"),
-    "ColBERTModel": ("colbert", "ColBERTModel"),
     "HF_ColBERT": ("colbert", "ColBERTModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
