@@ -370,15 +370,15 @@ class GptOssModel(nn.Module):
             if ".w13_weight_scale" in name:
                 # Handle MLP gate and up projection weights scale
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
+                    narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w13",
                     expert_id=None,
@@ -387,9 +387,9 @@ class GptOssModel(nn.Module):
                 continue
             elif ".w2_weight_scale" in name:
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight[
+                    narrow_weight = weight[
                         ...,
                         tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
                         // OCP_MX_BLOCK_SIZE,
@@ -399,7 +399,7 @@ class GptOssModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w2",
                     expert_id=None,
@@ -413,15 +413,15 @@ class GptOssModel(nn.Module):
                 ).contiguous()
 
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
+                    narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w13",
                     expert_id=None,
@@ -435,15 +435,15 @@ class GptOssModel(nn.Module):
                 ).contiguous()
 
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight[..., tp_rank_start // 2 : tp_rank_end // 2]
+                    narrow_weight = weight[..., tp_rank_start // 2 : tp_rank_end // 2]
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w2",
                     expert_id=None,
@@ -453,15 +453,15 @@ class GptOssModel(nn.Module):
             elif ".w13_bias" in name:
                 # Handle MLP gate and up projection biases
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
+                    narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w13",
                     expert_id=None,
@@ -471,17 +471,17 @@ class GptOssModel(nn.Module):
             elif ".w2_bias" in name:
                 # Handle MLP down projection bias
                 if use_ep:
-                    sliced_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    sliced_weight = weight
+                    narrow_weight = weight
                     if tp_rank != 0:
-                        sliced_weight = sliced_weight.zero_()
+                        narrow_weight = narrow_weight.zero_()
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    sliced_weight,
+                    narrow_weight,
                     weight_name=name,
                     shard_id="w2",
                     expert_id=None,
