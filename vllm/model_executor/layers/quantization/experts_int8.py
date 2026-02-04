@@ -71,14 +71,6 @@ class ExpertsInt8Config(QuantizationConfig):
 
 
 class ExpertsInt8MoEMethod(FusedMoEMethodBase):
-    """
-    MoE method for online Int8 quantization.
-
-    Quantizes fp16/bf16 weights to int8 after loading with per-channel scales.
-    Uses the Triton fused MoE kernel with int8_w8a16 mode via the modular
-    kernel infrastructure.
-    """
-
     def __init__(
         self,
         quant_config: ExpertsInt8Config,
@@ -155,9 +147,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         vmax = torch.iinfo(torch.int8).max
         channel_max = torch.max(torch.abs(weight), dim=1)[0]
         scales = channel_max / vmax
-        # Avoid division by zero
         scales = torch.where(scales == 0, torch.ones_like(scales), scales)
-        # Quantize
         int8_weight = (
             torch.round(weight / scales.unsqueeze(1)).clamp(-vmax, vmax).to(torch.int8)
         )
@@ -171,7 +161,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        # Update layer weights with quantized versions
         layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
         layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
@@ -179,7 +168,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
-        # Only setup modular kernel for non-all2all or naive all2all cases
         if self.moe_quant_config and (
             (not self.moe.moe_parallel_config.use_all2all_kernels)
             or self.moe.moe_parallel_config.use_naive_all2all_kernels
