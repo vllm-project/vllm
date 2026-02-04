@@ -330,6 +330,7 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
+        print("jcz before ncclRecv", flush=True)
         self.nccl.ncclRecv(
             buffer_type(tensor.data_ptr()),
             tensor.numel(),
@@ -338,6 +339,7 @@ class PyNcclCommunicator:
             self.comm,
             cudaStream_t(stream.cuda_stream),
         )
+        print("jcz after ncclRecv", flush=True)
 
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:

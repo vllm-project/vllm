@@ -429,9 +429,11 @@ class UBatchWrapper:
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+                logger.info("jcz UBatchWrapper __call__ 1")
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.cudagraph_wrapper is not None
+                logger.info("jcz UBatchWrapper __call__ 2")
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
@@ -480,11 +482,13 @@ class UBatchWrapper:
                 afd_metadata=afd_metadata,
             )
             with self.sm_control:
+                logger.info("jcz UBatchWrapper __call__ 3")
                 return self._capture_ubatches(ubatch_metadata, self.model)
         elif (
             num_tokens in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
         ):
+            logger.info("jcz UBatchWrapper __call__ 4")
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
@@ -504,4 +508,5 @@ class UBatchWrapper:
                 afd_metadata=afd_metadata,
             )
             with self.sm_control:
+                logger.info("jcz UBatchWrapper __call__ 5")
                 return self._run_ubatches(ubatch_metadata, self.model)

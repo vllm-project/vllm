@@ -1151,26 +1151,26 @@ class DeepseekV2Model(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             afd_connector = afd_metadata.afd_connector
 
-            if layer.layer_idx > 0:
-                hidden_states = afd_connector.recv_ffn_output()
-
-            current_hidden, residual = layer(
+            # if layer.layer_idx > 0:
+            #     # Pass current hidden_states as ref_tensor to preserve dynamic shapes
+            #     hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
+            hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
             metadata = AFDConnectorMetadata.create_attention_metadata(
                 layer_idx=layer.layer_idx,
                 stage_idx=afd_metadata.afd_stage_idx,
-                seq_len=current_hidden.shape[0],
-                dtype=current_hidden.dtype,
-                device=current_hidden.device,
+                seq_len=hidden_states.shape[0],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
                 num_of_stages=afd_metadata.num_of_stages,
                 afd_tokens_lens=afd_metadata.afd_tokens_lens,
             )
-            afd_connector.send_attn_output(current_hidden, metadata)
+            afd_connector.send_attn_output(hidden_states, metadata)
 
-            current_hidden = apply_dbo_yield(current_hidden)
+            hidden_states = apply_dbo_yield(hidden_states)
 
-        hidden_states = afd_connector.recv_ffn_output(ubatch_idx=afd_metadata.afd_stage_idx)
+        # hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
 
         return hidden_states, residual
 
