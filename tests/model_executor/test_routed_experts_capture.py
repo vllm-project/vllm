@@ -15,7 +15,7 @@ pytestmark = pytest.mark.cpu_test
 class DummyRouter(BaseRouter):
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return RoutingMethodType.FUSED_TOPK
+        return RoutingMethodType.TopK
 
     def _compute_routing(self, hidden_states, router_logits, indices_type):
         topk_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
