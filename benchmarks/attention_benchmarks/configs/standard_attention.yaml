@@ -1,10 +1,4 @@
 # Standard attention backend benchmark configuration
-#
-# Tests Flash Attention (FA4 on Blackwell, FA3 on Hopper, FA2 on older GPUs)
-# and Triton attention backends with various workloads.
-#
-# Note: FlashInfer requires additional model layer setup and is not supported
-# in standalone benchmarks. Use 'flash' and 'triton' backends only.
 
 model:
   num_layers: 32
