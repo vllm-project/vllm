@@ -510,6 +510,7 @@ class OpenAIServingCompletion(OpenAIServing):
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+        num_preempted_total = 0
         kv_transfer_params = None
         last_final_res = None
         for final_res in final_res_batch:
@@ -518,6 +519,8 @@ class OpenAIServingCompletion(OpenAIServing):
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
+            num_preempted = final_res.num_preempted or 0
+            num_preempted_total += num_preempted
 
             token_ids: GenericSequence[int]
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
@@ -608,6 +611,7 @@ class OpenAIServingCompletion(OpenAIServing):
             created=created_time,
             model=model_name,
             choices=choices,
+            num_preempted=num_preempted_total,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
         )

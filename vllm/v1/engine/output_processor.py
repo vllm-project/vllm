@@ -143,6 +143,7 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        num_preempted: int = 0,
         stream_input: bool = False,
     ):
         self.request_id = request_id
@@ -167,6 +168,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.num_preempted = num_preempted
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -307,10 +309,15 @@ class RequestState:
                 external_req_id,
                 [self._new_pooling_output(pooling_output)],
                 finished,
+                num_preempted=self.num_preempted,
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
+            new_token_ids,
+            finish_reason,
+            stop_reason,
+            routed_experts,
+            num_preempted=self.num_preempted,
         )
 
         if self.parent_req is None:
@@ -322,7 +329,11 @@ class RequestState:
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params
+            external_req_id,
+            outputs,
+            finished,
+            kv_transfer_params,
+            num_preempted=self.num_preempted,
         )
 
     def _new_request_output(
@@ -331,6 +342,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        num_preempted: int = 0,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -343,6 +355,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
+                num_preempted=num_preempted,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -367,6 +380,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            num_preempted=num_preempted,
         )
 
     def _new_completion_output(
@@ -375,6 +389,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
+        num_preempted: int = 0,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -400,6 +415,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            num_preempted=num_preempted,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -624,6 +640,7 @@ class OutputProcessor:
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            req_state.num_preempted = engine_core_output.num_preempted
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

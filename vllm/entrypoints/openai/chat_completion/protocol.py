@@ -101,6 +101,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[ChatCompletionResponseChoice]
+    num_preempted: int = 0
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = None
     system_fingerprint: str | None = None
     usage: UsageInfo

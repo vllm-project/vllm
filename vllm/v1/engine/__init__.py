@@ -141,6 +141,7 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    num_preempted: int = 0
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.

@@ -1420,6 +1420,7 @@ class OpenAIServingChat(OpenAIServing):
             history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
+        num_preempted_total = 0
         for output in final_res.outputs:
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
@@ -1427,6 +1428,8 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
+            num_preempted = output.num_preempted or 0
+            num_preempted_total += num_preempted
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1758,6 +1761,7 @@ class OpenAIServingChat(OpenAIServing):
             created=created_time,
             model=model_name,
             choices=choices,
+            num_preempted=num_preempted_total,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(
