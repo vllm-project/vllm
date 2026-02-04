@@ -643,7 +643,7 @@ opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
     # via opencensus
-opencv-python-headless==4.13.0.90
+opencv-python-headless==4.12.0.88 #Latest FIPS Compliant version: https://github.com/opencv/opencv-python/issues/1191
     # via
     #   -r requirements/test.in
     #   albucore
