@@ -3,7 +3,7 @@
 import enum
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 import zmq
@@ -95,7 +95,9 @@ def extract_world_size_and_kv_rank(
 
 
 def create_scheduler_adapter(
-    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+    server_url: str,
+    zmq_context: zmq.Context,
+    vllm_config: VllmConfig,
 ) -> LMCacheMPSchedulerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -113,7 +115,9 @@ def create_scheduler_adapter(
 
 
 def create_worker_adapter(
-    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+    server_url: str,
+    zmq_context: zmq.Context,
+    vllm_config: VllmConfig,
 ) -> LMCacheMPWorkerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -128,12 +132,6 @@ def create_worker_adapter(
         kv_rank,
         vllm_config.cache_config.block_size,
     )
-
-
-def convert_block_hashes_to_bytes(
-    block_hashes: list["BlockHash"],
-) -> list[bytes]:
-    return cast(list[bytes], block_hashes)
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -266,6 +264,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
@@ -282,15 +281,21 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+
+            # Token mode: pass full token_ids with start/end range
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+            op = LoadStoreOp(
+                token_ids=token_ids, block_ids=block_ids,
+                start=start_token_idx, end=end_token_idx,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="STORE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
             )
 
             # Update the request tracker
@@ -303,6 +308,7 @@ class LMCacheMPRequestMetadata:
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
+        vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -310,6 +316,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -330,15 +337,21 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+
+            # Token mode: pass full token_ids with start/end range
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+            op = LoadStoreOp(
+                token_ids=token_ids, block_ids=block_ids,
+                start=start_token_idx, end=end_token_idx,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
             )
             return ret
 
@@ -394,19 +407,20 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             "lmcache.mp.host", "tcp://localhost"
         )
         server_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.port", 5555
+            "lmcache.mp.port", 9006
         )
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
+
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
-                server_url, zmq_context, vllm_config
+                server_url, zmq_context, vllm_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
-                server_url, zmq_context, vllm_config
+                server_url, zmq_context, vllm_config,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -526,7 +540,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
-
+        
         request_ids = []
         ops = []
         for meta in metadata.requests:
@@ -643,7 +657,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id, convert_block_hashes_to_bytes(request.block_hashes)
+            request.request_id,
+            list(request.all_token_ids),
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -766,6 +781,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+        # Notify LMCache to end the session for this request
+        self.scheduler_adapter.end_session(request.request_id)
+
         return True, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
@@ -846,7 +864,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
-                request_tracker, blocks_per_chunk
+                request_tracker,
+                blocks_per_chunk,
+                vllm_block_size=self.vllm_block_size,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -866,7 +886,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker, blocks_per_chunk, self.vllm_block_size,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -892,7 +912,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker, blocks_per_chunk, self.vllm_block_size,
             )
 
             if r_meta is not None:
