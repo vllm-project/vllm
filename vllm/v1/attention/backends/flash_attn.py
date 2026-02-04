@@ -263,18 +263,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
-        # FA2 does not support CUDA graphs with encoder-decoder models due to
-        # accuracy issues reported in https://github.com/vllm-project/vllm/issues/33091
-        if (
-            vllm_config.model_config.is_encoder_decoder
-            and get_flash_attn_version() == 2
-        ):
-            logger.warning_once(
-                "FlashAttention2 does not support CUDA graphs with "
-                "encoder-decoder models due to accuracy issues reported in #33091. "
-                "Disabling CUDA graph."
-            )
-            return AttentionCGSupport.NEVER
         return cls._cudagraph_support
 
     def __init__(
@@ -320,10 +308,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         if self.use_full_cuda_graph and self.aot_schedule:
+            # Times 4 due to:
+            #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
+            # For some tests max_cudagraph_size > max_num_seqs,
+            #   so we need to use the larger one.
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs + 1,
+                max(self.max_cudagraph_size or 0, max_num_seqs) * 4 + 1,
                 dtype=torch.int32,
                 device=self.device,
             )
