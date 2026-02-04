@@ -76,7 +76,6 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
         output = (M, K)
