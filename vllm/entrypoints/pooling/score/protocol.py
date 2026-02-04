@@ -14,7 +14,8 @@ from vllm.entrypoints.pooling.base.protocol import (
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
-    ScoreMultiModalParam,
+    ScoreInput,
+    ScoreInputs,
 )
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
@@ -47,13 +48,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 
 class ScoreDataRequest(ScoreRequestMixin):
-    data_1: list[str] | str | ScoreMultiModalParam
-    data_2: list[str] | str | ScoreMultiModalParam
+    data_1: ScoreInputs
+    data_2: ScoreInputs
 
 
 class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
-    queries: list[str] | str | ScoreMultiModalParam
-    documents: list[str] | str | ScoreMultiModalParam
+    queries: ScoreInputs
+    documents: ScoreInputs
 
     @property
     def data_1(self):
@@ -64,9 +65,22 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
         return self.documents
 
 
+class ScoreQueriesItemsRequest(ScoreRequestMixin):
+    queries: ScoreInputs
+    items: ScoreInputs
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.items
+
+
 class ScoreTextRequest(ScoreRequestMixin):
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
+    text_1: ScoreInputs
+    text_2: ScoreInputs
 
     @property
     def data_1(self):
@@ -78,13 +92,16 @@ class ScoreTextRequest(ScoreRequestMixin):
 
 
 ScoreRequest: TypeAlias = (
-    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+    ScoreQueriesDocumentsRequest
+    | ScoreQueriesItemsRequest
+    | ScoreDataRequest
+    | ScoreTextRequest
 )
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | ScoreMultiModalParam
-    documents: list[str] | ScoreMultiModalParam
+    query: ScoreInput
+    documents: ScoreInputs
     top_n: int = Field(default_factory=lambda: 0)
 
     # --8<-- [start:rerank-extra-params]
@@ -108,7 +125,7 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 class RerankDocument(BaseModel):
     text: str | None = None
-    multi_modal: ScoreContentPartParam | None = None
+    multi_modal: list[ScoreContentPartParam] | None = None
 
 
 class RerankResult(BaseModel):
