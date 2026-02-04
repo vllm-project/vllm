@@ -158,3 +158,26 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "scoring_func,top_k,renormalize,expected",
+    [
+        ("sigmoid", 1, False, RoutingMethodType.Llama4),
+        ("sigmoid", 2, False, RoutingMethodType.DeepSeekV3),
+        ("softmax", 2, False, RoutingMethodType.Default),
+        ("softmax", 2, True, RoutingMethodType.Renormalize),
+    ],
+)
+def test_routing_method_type_from_topk_mapping(
+    scoring_func,
+    top_k,
+    renormalize,
+    expected,
+):
+    assert RoutingMethodType.from_topk(scoring_func, top_k, renormalize) == expected
+
+
+def test_routing_method_type_from_topk_invalid_scoring_func():
+    with pytest.raises(ValueError, match="Unsupported scoring function"):
+        RoutingMethodType.from_topk("none", 1, False)
