@@ -802,6 +802,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
     ),
+    "MoonshotKimiaForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-Audio-7B-Instruct",
+        trust_remote_code=True,
+    ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
     ),
