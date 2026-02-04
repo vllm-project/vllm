@@ -238,6 +238,11 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks)
 
+    # Debug endpoints for benchmarking (sleep/wake_up, profiling, traces)
+    from vllm.entrypoints.openai.debug.api_router import register_debug_api_router
+
+    register_debug_api_router(app)
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,

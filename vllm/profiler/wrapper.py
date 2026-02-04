@@ -217,10 +217,8 @@ class TorchProfilerWrapper(WorkerProfiler):
                 profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
                 with open(profiler_out_file, "w") as f:
                     print(table, file=f)
-
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
+                if rank == 0:
+                    logger.info("Profiler results written to: %s", profiler_out_file)
         if self.dump_cpu_time_total and rank == 0:
             logger.info(
                 self.profiler.key_averages().table(
