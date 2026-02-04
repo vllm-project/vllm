@@ -33,7 +33,6 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -45,6 +44,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -295,6 +295,14 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        n_group = getattr(config, "n_group", 1)
+        topk_group = getattr(config, "topk_group", 1)
+        use_grouped_topk = True
+        if (n_group, topk_group) == (1, 1):
+            n_group = None
+            topk_group = None
+            use_grouped_topk = False
+
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
@@ -305,9 +313,9 @@ class DeepseekV2MoE(nn.Module):
             reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=n_group,
+            topk_group=topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # we do scaling outside, set factor to 1.0 to avoid double mul

@@ -23,7 +23,6 @@ from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 from transformers.video_utils import VideoInput, VideoMetadata
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -36,7 +35,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -612,6 +611,7 @@ class ImagePoolingAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 num_kv_heads=self.num_kv_heads,
+                prefix=prefix,
             )
 
     def forward_sdpa(
@@ -1861,6 +1861,12 @@ def get_frame_times_and_chosen_fps(
 
 
 class Molmo2ProcessingInfo(BaseProcessingInfo):
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_hf_processor(self, **kwargs: object) -> Molmo2ProcessorWrapper:
         processor = self.ctx.get_hf_processor(**kwargs)
         hf_config = self.ctx.get_hf_config()
@@ -2183,9 +2189,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             prompt_tokens = [bos_token_id] + prompt_tokens
 
         return prompt_tokens
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
 
     def _call_hf_processor(
         self,

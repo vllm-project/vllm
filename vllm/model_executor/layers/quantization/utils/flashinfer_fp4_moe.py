@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -15,20 +14,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
-    swizzle_blockscale,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutlass_fused_moe,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -39,10 +33,7 @@ logger = init_logger(__name__)
 
 
 __all__ = [
-    "is_flashinfer_fp4_cutlass_moe_available",
-    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
 
 #
@@ -126,26 +117,6 @@ def is_supported_config_trtllm(
     return True, None
 
 
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
-
-
-def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-    )
-
-
 def reorder_w1w3_to_w3w1(
     weight: torch.Tensor, scale: torch.Tensor, dim: int = -2
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -160,17 +131,6 @@ def reorder_w1w3_to_w3w1(
     return (
         torch.cat([w3, w1], dim=dim).contiguous(),
         torch.cat([s3, s1], dim=dim).contiguous(),
-    )
-
-
-def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
     )
 
 

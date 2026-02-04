@@ -16,6 +16,20 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+MOE_LAYER_ROUTER_GATE_SUFFIXES = {
+    "gate",
+    "router",
+    "router_gate",
+    "shared_expert_gate",
+    "expert_gate",
+}
+
+
+def is_layer_moe_router_gate(prefix: str) -> bool:
+    if not prefix:
+        return False
+    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
+
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     # Shuffle weight along the last dimension so that
@@ -137,6 +151,11 @@ def rocm_unquantized_gemm_impl(
 
     import math
 
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
@@ -155,11 +174,6 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1))
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
-
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-        return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM

@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Optional
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
-from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
@@ -56,7 +55,6 @@ from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -89,7 +87,6 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     # If FlashInfer is not available, try either Marlin or Triton
     triton_kernels_supported = (
         has_triton_kernels()
-        and is_torch_equal_or_newer("2.8.0")
         # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
         # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
         # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
@@ -151,7 +148,6 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
         # If FlashInfer is not available, try either Marlin or Triton
         triton_kernels_supported = (
             has_triton_kernels()
-            and is_torch_equal_or_newer("2.8.0")
             # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
             # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
             # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
@@ -200,7 +196,7 @@ class Mxfp4Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,

@@ -9,7 +9,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -257,6 +257,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     )
     supports_update_block_table: bool = True
 
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
+    ) -> AttentionCGSupport:
+        return cls._cudagraph_support
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -300,10 +308,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         if self.use_full_cuda_graph and self.aot_schedule:
+            # Times 4 due to:
+            #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
+            # For some tests max_cudagraph_size > max_num_seqs,
+            #   so we need to use the larger one.
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs + 1,
+                max(self.max_cudagraph_size or 0, max_num_seqs) * 4 + 1,
                 dtype=torch.int32,
                 device=self.device,
             )
