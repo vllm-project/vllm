@@ -816,22 +816,27 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
-            # Uncommon case: max_num_transfers has been set in the eplb config
-            max_num_transfers = self.parallel_config.eplb_config.max_num_transfers
-            if max_num_transfers is not None:
-                max_num_transfers = int(max_num_transfers)
+            # Uncommon case: max_num_expert_transfers has been set in the eplb
+            # config
+            max_num_expert_transfers = (
+                self.parallel_config.eplb_config.max_num_expert_transfers
+            )
+            if max_num_expert_transfers is not None:
+                max_num_expert_transfers = int(max_num_expert_transfers)
                 # Capping the number of transfers isn't supported when running
-                # with redundant experts
+                # with redundant experts or when running with async eplb
                 assert self.parallel_config.eplb_config.num_redundant_experts == 0
+                assert not self.is_async
                 logger.info_once(
                     "The maximum number of EPLB transfers has been capped at %d",
-                    max_num_transfers,
+                    max_num_expert_transfers,
                 )
 
                 # Make sure there's a __len__ method
                 assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
                 num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
 
+                max_num_transfers = max_num_expert_transfers * num_tensors_per_expert
                 cap_num_transfers(
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,

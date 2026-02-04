@@ -81,13 +81,13 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    max_num_transfers: int | None = Field(default=None, ge=0)
+    max_num_expert_transfers: int | None = Field(default=None, ge=0)
     """
-    The maximum number of tensor transfers that EPLB will execute for each layer.
-    This is a global, not a per-rank, maximum. This value should only be
+    The maximum number of expert transfers that EPLB will execute for each
+    layer. This is a global, not a per-rank, maximum. This value should only be
     set if a particular workload is hanging in EPLB. If EPLB determines
-    that the number of transfers is greater than the max, transfers will be
-    arbitrarily reverted until that number is below the max.
+    that the number of expert transfers is greater than the max, transfers will
+    be arbitrarily reverted until that number is below the max.
 
     The number of transfers for a particular layer is equal to the number of
     experts being transfered multiplied by the number of tensors associated
@@ -107,14 +107,14 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
-        if self.max_num_transfers and self.num_redundant_experts > 0:
+        if self.max_num_expert_transfers and self.num_redundant_experts > 0:
             raise ValueError(
-                "Setting max_num_transfers is not supported when using "
+                "Setting max_num_expert_transfers is not supported when using "
                 "redundant experts"
             )
-        if self.max_num_transfers and self.use_async:
+        if self.max_num_expert_transfers and self.use_async:
             raise ValueError(
-                "Setting max_num_transfers is not supported when running async"
+                "Setting max_num_expert_transfers is not supported when running async"
             )
         return self
 
