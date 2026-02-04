@@ -9,7 +9,7 @@ import torch
 
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_N_BYTES,
+    EMBED_DTYPES,
     EmbedDType,
     Endianness,
     binary2tensor,
@@ -33,7 +33,7 @@ def build_metadata_items(
     shape: tuple[int, ...],
     n_request: int,
 ) -> list[MetadataItem]:
-    n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
+    n_bytes = EMBED_DTYPES[embed_dtype].nbytes
     size = math.prod(shape)
 
     return [
