@@ -11,7 +11,6 @@ import torch.distributed
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_world_group,
@@ -398,7 +397,22 @@ def broadcast_worker_fn():
         assert torch.all(recv_tensors[i] == i).cpu().item()
 
 
-def test_ncclGetUniqueId():
+def test_nccl_get_unique_id():
+    """Test getting NCCL unique ID using nccl4py."""
+    import nccl.core as nccl
+
+    unique_id = nccl.get_unique_id()
+    # The unique ID should be a valid object with bytes representation
+    assert unique_id is not None
+    assert len(unique_id.as_bytes) == 128  # NCCL unique ID is 128 bytes
+
+
+def test_nccl_get_unique_id_legacy():
+    """Test getting NCCL unique ID using legacy ctypes bindings."""
+    from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
+        NCCLLibrary,
+    )
+
     lib = NCCLLibrary()
     unique_id = lib.ncclGetUniqueId()
     # `list(unique_id.internal)` is something like this:
