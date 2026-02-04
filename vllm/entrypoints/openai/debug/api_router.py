@@ -68,6 +68,22 @@ async def debug_list_traces(request: Request):
     )
 
 
+@router.get("/config")
+async def debug_config(request: Request):
+    """Return server parallelism configuration for benchmarking."""
+    vllm_config = request.app.state.vllm_config
+    parallel = vllm_config.parallel_config
+    return JSONResponse(
+        content={
+            "data_parallel_size": parallel.data_parallel_size,
+            "tensor_parallel_size": parallel.tensor_parallel_size,
+            "pipeline_parallel_size": parallel.pipeline_parallel_size,
+            "data_parallel_size_local": parallel.data_parallel_size_local,
+            "world_size": parallel.world_size,
+        }
+    )
+
+
 @router.get("/traces/{filename}")
 async def debug_get_trace(request: Request, filename: str):
     """Download a trace file."""
