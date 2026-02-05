@@ -708,6 +708,10 @@ class GptOssModel(nn.Module):
                                 ..., tp_rank_start // 2 : tp_rank_end // 2
                             ]
 
+                # NOTE(rob): because gpt-oss ckpt has "unique" structure with
+                # fused gate_up_proj fused on disk, we cannot use the existing
+                # weight loaders without added complexity, so just do the
+                # direct load here.
                 param = params_dict[fused_name]
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
@@ -833,11 +837,15 @@ class GptOssModel(nn.Module):
                         if tp_rank != 0:
                             sliced_weight = sliced_weight.zero_()
 
+                # NOTE(rob): because gpt-oss ckpt has "unique" structure with
+                # fused gate_up_proj fused on disk, we cannot use the existing
+                # weight loaders without added complexity, so just do the
+                # direct load here.
                 assert fused_name is not None
                 param = params_dict[fused_name]
                 expert_data = param.data[expert_id]
-                dim1 = loaded_weight.shape[0]
-                expert_data.data[:dim1].copy_(loaded_weight)
+                dim1 = sliced_weight.shape[0]
+                expert_data.data[:dim1].copy_(sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
