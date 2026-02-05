@@ -746,12 +746,43 @@ async def async_request_infinity_embeddings_clip(
     )
 
 
+async def async_request_vllm_pooling(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "vLLM Pooling API", "pooling")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "data": request_func_input.prompt["data"],
+        "truncate_prompt_tokens": -1,
+    }
+
+    _update_payload_common(payload, request_func_input)
+
+    headers = _get_headers("application/json")
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
     "openai-audio": async_request_openai_audio,
+    "vllm-pooling": async_request_vllm_pooling,
     "openai-embeddings": async_request_openai_embeddings,
     "openai-embeddings-chat": async_request_openai_embeddings_chat,
     "openai-embeddings-clip": async_request_openai_embeddings_clip,
