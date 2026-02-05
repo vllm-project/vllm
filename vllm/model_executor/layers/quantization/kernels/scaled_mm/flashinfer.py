@@ -186,6 +186,9 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
     """
 
+    base_type = type[FlashInferFp8BlockScaledMMKernel]
+    fallback_type = type[DeepGemmFp8BlockScaledMMKernel]
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # deepgemm might require post processing.
         # both flashinfer and deepgemm kernels
