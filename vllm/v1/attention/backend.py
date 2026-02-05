@@ -410,6 +410,12 @@ class CommonAttentionMetadata:
         )
 
 
+# Mapping from KV cache group ID to its CommonAttentionMetadata.
+# Each KV cache group may have different block_table_tensor and slot_mapping,
+# while sharing other fields like query_start_loc and seq_lens.
+CommonAttnMetadataByGid = dict[int, CommonAttentionMetadata]
+
+
 M = TypeVar("M")
 
 

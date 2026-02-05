@@ -828,7 +828,6 @@ def get_dcp_local_seq_lens(
 def extend_all_queries_by_1(
     common_attn_metadata: CommonAttentionMetadata,
     arange: torch.Tensor,
-    new_slot_mapping: torch.Tensor,
 ) -> CommonAttentionMetadata:
     """
     Creates a new CommonAttentionMetadata with all query lengths increased by 1.
@@ -852,7 +851,6 @@ def extend_all_queries_by_1(
         # All query lens increase by 1, so max query len increases by 1
         max_query_len=cad.max_query_len + 1,
         max_seq_len=cad.max_seq_len + 1,
-        slot_mapping=new_slot_mapping,
     )
     return new_cad
 

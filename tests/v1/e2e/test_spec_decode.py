@@ -616,6 +616,15 @@ def test_mtp_correctness(
         cleanup_dist_env_and_memory()
 
 
+def some_high_acceptance_metrics() -> dict:
+    return {
+        "sampling_config": greedy_sampling(),
+        "num_speculative_tokens": 3,
+        "expected_acceptance_len": 2.8 + 1,
+        "expected_acceptance_rate": 0.90,
+    }
+
+
 @dataclass
 class ArgsTest:
     target_model: str
@@ -631,6 +640,8 @@ class ArgsTest:
     gpu_memory_utilization: float = 0.5
     dataset: str = "test_prompts"
     num_prompts: int = 100
+    # Some settings only get 100% acceptance_rate with VLLM_BATCH_INVARIANT=1
+    use_batch_invariance: bool = False
 
 
 cases = [
@@ -652,12 +663,36 @@ cases = [
         expected_acceptance_len=2.8 + 1,
         expected_acceptance_rate=0.9,
     ),
+    # Multiple KV Cache groups
+    ArgsTest(
+        target_model="google/gemma-3-270m-it",
+        draft_model="google/gemma-3-270m-it",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=4,
+        expected_acceptance_rate=1,
+        # Without batch invariance, acceptance rate is ~86%
+        use_batch_invariance=True,
+    ),
+    # GPT-OSS MoE models with different target/draft sizes
+    # Tests MoE layer resolution in speculative decoding.
+    ArgsTest(
+        target_model="openai/gpt-oss-120b",
+        draft_model="openai/gpt-oss-20b",
+        # Leave some headroom for CUDA graph capture.
+        gpu_memory_utilization=0.85,
+        **some_high_acceptance_metrics(),
+    ),
 ]
 
 
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
+def test_draft_model_correctness(
+    args: ArgsTest, enforce_eager: bool, monkeypatch: pytest.MonkeyPatch
+):
+    if args.use_batch_invariance:
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     assert_draft_model_correctness(args, enforce_eager)
 
 
@@ -753,6 +788,8 @@ def test_draft_model_engine_args_rejects_invalid_tp_argname():
 def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
+    attention_config = {"backend": "FLASH_ATTN"} if args.use_batch_invariance else None
+
     test_prompts: list[Messages] = get_messages(
         dataset=args.dataset, n=args.num_prompts
     )
@@ -773,6 +810,7 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
         tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
+        attention_config=attention_config,
     )
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
@@ -802,15 +840,6 @@ def get_messages(dataset: str, n: int) -> list[Messages]:
         return get_instruct_coder_messages(n=n)
     else:
         raise NotImplementedError(f"Dataset '{dataset}' not implemented")
-
-
-def some_high_acceptance_metrics() -> dict:
-    return {
-        "sampling_config": greedy_sampling(),
-        "num_speculative_tokens": 3,
-        "expected_acceptance_len": 2.8 + 1,
-        "expected_acceptance_rate": 0.90,
-    }
 
 
 def test_merge_toks_kernel():
