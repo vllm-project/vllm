@@ -679,6 +679,7 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
+            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -824,6 +825,16 @@ class OpenAIServingChat(OpenAIServing):
                     i = output.index
                     tool_parser = tool_parsers[i]
 
+                    if (
+                        self.reasoning_parser
+                        and res.prompt_token_ids
+                        and prompt_is_reasoning_end_arr[i] is None
+                    ):
+                        # only check once per choice, because prompt_token_ids
+                        # are the same for all deltas in that choice
+                        prompt_is_reasoning_end_arr[i] = (
+                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                        )
                     if finish_reason_sent[i]:
                         continue
 
@@ -926,13 +937,11 @@ class OpenAIServingChat(OpenAIServing):
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning'.
-                            if reasoning_parser.is_reasoning_end(
-                                as_list(output.token_ids)
-                            ) or (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                            if (
+                                reasoning_parser.is_reasoning_end(
+                                    as_list(output.token_ids)
                                 )
+                                or prompt_is_reasoning_end_arr[i]
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -991,8 +1000,7 @@ class OpenAIServingChat(OpenAIServing):
                         if (
                             self.reasoning_parser is not None
                             and not reasoning_end_arr[i]
-                            and res.prompt_token_ids
-                            and reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                            and prompt_is_reasoning_end_arr[i]
                         ):
                             reasoning_end_arr[i] = True
 
@@ -1049,12 +1057,7 @@ class OpenAIServingChat(OpenAIServing):
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
-                            if (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
-                                )
-                            ):
+                            if prompt_is_reasoning_end_arr[i]:
                                 reasoning_end_arr[i] = True
                                 current_token_ids = output_token_ids
                                 # Don't update current_text, keep it as is from delta
