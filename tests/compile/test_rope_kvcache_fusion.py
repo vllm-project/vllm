@@ -116,10 +116,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
         backend = self.attn.backend
 
+        # TODO(luka,Rohan138) use get_kv_cache_stride_order
         # Create dummy KV cache for the selected backend
         if backend == AttentionBackendEnum.ROCM_ATTN:
             raise NotImplementedError
-            # k/v as 1st dimention
+            # k/v as 1st dimension
             # HND: [num_blocks, num_kv_heads, block_size, head_size]
             kv_cache = torch.zeros(
                 2,
@@ -131,7 +132,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
                 device=self.device,
             )
         elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            # k/v as 1st dimention
+            # k/v as 1st dimension
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
                 2,
@@ -143,7 +144,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
                 device=self.device,
             )
         elif backend == AttentionBackendEnum.TRITON_ATTN:
-            # k/v as 2nd dimention
+            # k/v as 2nd dimension
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
                 num_blocks,
@@ -182,7 +183,6 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
             k, v, self.layer_name
         )
-        # TODO (Rohan138) return and compare KV cache as well
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
@@ -230,8 +230,6 @@ def test_rope_kvcache_fusion(
     custom_ops: list[str] = []
     if enable_rope_custom_op:
         custom_ops.append("+rotary_embedding")
-    else:
-        custom_ops.append("-rotary_embedding")
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),

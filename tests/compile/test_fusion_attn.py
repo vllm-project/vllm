@@ -107,7 +107,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # TODO(luka) use get_kv_cache_stride_order
         # Create dummy KV cache for the selected backend
         if backend == AttentionBackendEnum.ROCM_ATTN:
-            # k/v as 1st dimention
+            # k/v as 1st dimension
             # HND: [num_blocks, num_kv_heads, block_size, head_size]
             kv_cache = torch.zeros(
                 2,
@@ -119,7 +119,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 device=self.device,
             )
         elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            # k/v as 1st dimention
+            # k/v as 1st dimension
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
                 2,
@@ -131,7 +131,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 device=self.device,
             )
         elif backend == AttentionBackendEnum.TRITON_ATTN:
-            # k/v as 2nd dimention
+            # k/v as 2nd dimension
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
                 num_blocks,
