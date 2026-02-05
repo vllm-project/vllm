@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import torch
 
@@ -18,15 +19,31 @@ logger = init_logger(__name__)
 
 current_platform.import_kernels()
 
+_F = TypeVar("_F", bound=Callable[..., object])
+
 if TYPE_CHECKING:
 
-    def register_fake(fn):
-        return lambda name: fn
+    def register_fake(op_name: str) -> Callable[[_F], _F]:
+        def decorator(fn: _F) -> _F:
+            return fn
+
+        return decorator
 else:
     try:
-        from torch.library import register_fake
+        from torch.library import register_fake as torch_register_fake
     except ImportError:
-        from torch.library import impl_abstract as register_fake
+        from torch.library import impl_abstract as torch_register_fake
+
+    def register_fake(op_name: str) -> Callable[[_F], _F]:
+        def decorator(fn: _F) -> _F:
+            try:
+                return torch_register_fake(op_name)(fn)
+            except RuntimeError as err:
+                if "DispatchKey::Meta" in str(err) and "already has" in str(err):
+                    return fn
+                raise
+
+        return decorator
 
 
 # page attention ops

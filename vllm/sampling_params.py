@@ -6,10 +6,14 @@ import copy
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
-from pydantic.dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from dataclasses import dataclass
+else:
+    from pydantic.dataclasses import dataclass
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger

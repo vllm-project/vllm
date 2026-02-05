@@ -344,7 +344,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 reasoning_parser = self.reasoning_parser_cls(
                     tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                    chat_template_kwargs=chat_template_kwargs,
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")

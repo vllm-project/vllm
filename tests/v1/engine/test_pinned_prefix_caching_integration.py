@@ -18,7 +18,7 @@ if not torch.cuda.is_available():
 # Heavy imports (only after CUDA check)
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
