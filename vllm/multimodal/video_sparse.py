@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.v2.functional as tvF
-from torchvision.ops import structural_similarity_index_measure as ssim
+from torchmetrics.functional.image import structural_similarity_index_measure
 
 
 class SimilarFrameDetector:
@@ -68,7 +68,7 @@ class SimilarFrameDetector:
         )
 
         downsampled = tvF.resize(
-            img=frames,
+            inpt=frames,
             size=(new_height, new_width),
             interpolation=tvF.InterpolationMode.BILINEAR,
             antialias=True,
@@ -81,11 +81,16 @@ class SimilarFrameDetector:
         assert imgs1.device == imgs2.device
         assert imgs1.dim() == 4, "Input must be 4D tensor (B, C, H, W)"
 
-        gray1 = tvF.rgb_to_grayscale(imgs1, num_output_channels=1)
-        gray2 = tvF.rgb_to_grayscale(imgs2, num_output_channels=1)
+        gray1 = tvF.rgb_to_grayscale(imgs1, num_output_channels=1).to(torch.float32)
+        gray2 = tvF.rgb_to_grayscale(imgs2, num_output_channels=1).to(torch.float32)
 
-        ssim_values = ssim(
-            gray1, gray2, win_size=11, sigma=1.5, data_range=255.0, size_average=False
+        ssim_values = structural_similarity_index_measure(
+            preds=gray1,
+            target=gray2,
+            kernel_size=11,
+            data_range=255,
+            gaussian_kernel=True,
+            reduction="none"
         )
 
         return ssim_values.float()
