@@ -111,7 +111,7 @@ def legacy_routing_from_bitmatrix(
     gate_scal = sparse_logits.vals.flatten()[combine_indx]
     routing_data = RoutingData(
         gate_scal,
-        ragged_batch_metadata.batch_sizes,
+        ragged_batch_metadata.block_sizes,
         n_expts_tot,
         n_expts_act,
         ragged_batch_metadata,
@@ -232,9 +232,9 @@ def triton_kernel_fused_experts(
     output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
     act = FusedActivation(
-        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
+        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit"),
+                reduction_n=2),
         (swiglu_alpha, swiglu_limit),
-        2,
     )
     gammas = routing_data.gate_scal if routing_data else None
 
