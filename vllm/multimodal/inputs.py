@@ -1022,18 +1022,20 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
             for modality, items in items_by_modality.items()
             if len(items) > 0
         }
-        num_batches_by_modality = {
-            modality: len(batches) for modality, batches in batches_by_modality.items()
-        }
-
-        if not all(nb == 1 for nb in num_batches_by_modality.values()):
-            raise RuntimeError(
-                f"Some modalities cannot be merged into a single batch "
-                f"({num_batches_by_modality=})"
-            )
 
         out_data: BatchedTensorInputs = {}
         for _, batches in batches_by_modality.items():
+            if len(batches) != 1:
+                num_batches_by_modality = {
+                    modality: len(batches)
+                    for modality, batches in batches_by_modality.items()
+                }
+
+                raise RuntimeError(
+                    f"Some modalities cannot be merged into a single batch "
+                    f"({num_batches_by_modality=})"
+                )
+
             out_data.update(batches[0])
 
         return out_data
