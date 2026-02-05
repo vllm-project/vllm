@@ -103,6 +103,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             device=device,
         )
 
+        # add layer to forward_context to enable fetching attn metadata
+        vllm_config.compilation_config.static_forward_context[self.attn.layer_name] = (
+            self.attn
+        )
+
     def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
         """Initialize attention metadata."""
 
@@ -251,14 +256,6 @@ def test_rope_kvcache_fusion(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-        fusion_pass = ROCmAiterTritonRopeReshapeKVCacheFusionPass(vllm_config)
-        passes = [
-            NoOpEliminationPass(vllm_config),
-            fusion_pass,
-            PostCleanupPass(vllm_config),
-        ]
-        backend = TestBackend(*passes)
-
         model = QKRoPEKVCacheTestModel(
             vllm_config=vllm_config,
             attn_backend=attn_backend,
@@ -271,6 +268,14 @@ def test_rope_kvcache_fusion(
             kv_cache_dtype=kv_cache_dtype,
             device=torch.get_default_device(),
         )
+
+        fusion_pass = ROCmAiterTritonRopeReshapeKVCacheFusionPass(vllm_config)
+        passes = [
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        ]
+        backend = TestBackend(*passes)
 
         T = 5
 

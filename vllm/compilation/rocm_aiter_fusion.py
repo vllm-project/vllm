@@ -5,14 +5,15 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.fx_passes.post_grad import view_to_reshape
-from torch._inductor.pattern_matcher import Match, PatternMatcherPass
+from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -511,7 +512,7 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
 class RopeReshapeKVCachePattern:
     """
     This pattern matches the following unfused sequence:
-      q, k = rotary_embedding(positions, q, k, head_dim, cos_sin_cache, is_neox)
+      q, k = rotary_embedding(positions, q, k, head_size, cos_sin_cache, is_neox)
       kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
 
     and replaces it with the fused AITER triton kernel:
@@ -525,23 +526,19 @@ class RopeReshapeKVCachePattern:
 
     def __init__(
         self,
-        head_dim: int,
-        num_heads: int,
-        num_kv_heads: int,
+        layer: Attention,
         is_neox: bool,
-        prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
-        self.head_dim = head_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.num_kv_heads = layer.num_kv_heads
+        self.head_size = layer.head_size
+        self.head_size_v = layer.head_size_v
         self.is_neox = is_neox
-        self.layer_name = prefix
 
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=self.is_neox,
-            head_size=self.head_dim,
+            head_size=self.head_size,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
         )
@@ -549,11 +546,12 @@ class RopeReshapeKVCachePattern:
     def get_inputs(self) -> list[torch.Tensor]:
         # Sample inputs to help pattern tracing
         T = 5
-        q = empty_bf16(T, self.q_size)
-        k = empty_bf16(T, self.kv_size)
-        v = empty_bf16(T, self.kv_size)
+        L = 4096
+        q = empty_bf16(T, self.num_heads * self.head_size)
+        k = empty_bf16(T, self.num_kv_heads * self.head_size)
+        v = empty_bf16(T, self.num_kv_heads * self.head_size_v)
         positions = empty_i64(T)
-        cos_sin_cache = empty_bf16(4096, self.head_dim)
+        cos_sin_cache = empty_bf16(L, self.head_size)
         return [
             q,
             k,
@@ -571,9 +569,9 @@ class RopeReshapeKVCachePattern:
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            k = k.view(-1, self.num_kv_heads, self.head_dim)
-            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
             # Note: dummy needs to be the first output due to an Inductor bug,
             # see https://github.com/vllm-project/vllm/issues/33666
@@ -586,9 +584,9 @@ class RopeReshapeKVCachePattern:
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            q = q.view(-1, self.num_heads, self.head_dim)
-            k = k.view(-1, self.num_kv_heads, self.head_dim)
-            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
             q, k, v, dummy = self.FUSED_OP(
                 q,
                 k,
@@ -607,11 +605,6 @@ class RopeReshapeKVCachePattern:
             view_to_reshape(gm)
             return gm
 
-        def check_batch_size_less_than_256(match: Match):
-            # TODO (Rohan138): only apply this fusion for small-batch decode
-            # i.e. batch_size < 256
-            raise NotImplementedError
-
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
         )
@@ -621,6 +614,10 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses the rotary embedding and KV cache update operations
     into a single AITER triton kernel: qk_rope_reshape_and_cache.
+
+    It uses the pattern matcher and matches each layer manually, as strings
+    cannot be wildcarded. This also lets us check support on attention layers
+    upon registration instead of during pattern matching.
 
     This fusion eliminates the need for separate kernel launches and
     intermediate memory operations between the RoPE and cache update steps.
@@ -634,25 +631,13 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
         )
 
-        # List of tuples of (head_dim, num_heads, num_kv_heads)
-        PATTERNS = [
-            (64, 64, 8),  # gpt-oss 20b, 120b
-            (128, 64, 8),  # llama 3.3 70B
-            (128, 128, 8),  # llama 3.1 405B
-            (128, 32, 8),  # mixtral 8x7b
-            (128, 48, 8),  # mixtral 8x22b
-            # Qwen also supports qk_norm_rope fusion; figure out which one to use
-            # (128, 64, 4),  # qwen 235b-a22b
-            # (128, 32, 4),  # qwen 30b-a3b
-        ]
+        attn_layers = get_layers_from_vllm_config(config, Attention)
 
         # Register patterns for common model configurations
-        for head_dim, num_heads, num_kv_heads in PATTERNS:
+        for _, layer in attn_layers.items():
             for is_neox in [True, False]:
                 RopeReshapeKVCachePattern(
-                    head_dim=head_dim,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
+                    layer=layer,
                     is_neox=is_neox,
                 ).register(self.patterns)
 
