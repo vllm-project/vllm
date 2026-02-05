@@ -16,6 +16,25 @@ from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
 
+
+def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
+    """
+    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+
+    This ensures results are sorted by batch size first, then query length,
+    then sequence length, rather than alphabetically.
+    """
+    try:
+        requests = parse_batch_spec(spec)
+        batch_size = len(requests)
+        max_q_len = max(r.q_len for r in requests) if requests else 0
+        max_kv_len = max(r.kv_len for r in requests) if requests else 0
+        return (batch_size, max_q_len, max_kv_len)
+    except Exception:
+        # Fallback for unparseable specs
+        return (0, 0, 0)
+
+
 # Mock classes for vLLM attention infrastructure
 
 
@@ -351,15 +370,16 @@ class ResultsFormatter:
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
         """
-        # Group by batch spec, preserving first-occurrence order
+        # Group by batch spec
         by_spec = {}
-        specs_order = []
         for r in results:
             spec = r.config.batch_spec
             if spec not in by_spec:
                 by_spec[spec] = {}
-                specs_order.append(spec)
             by_spec[spec][r.config.backend] = r
+
+        # Sort specs by (batch_size, q_len, kv_len) instead of alphabetically
+        specs_order = sorted(by_spec.keys(), key=batch_spec_sort_key)
 
         # Create shortened backend names for display
         def shorten_backend_name(name: str) -> str:

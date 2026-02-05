@@ -43,6 +43,7 @@ from common import (
     ModelParameterSweep,
     ParameterSweep,
     ResultsFormatter,
+    batch_spec_sort_key,
     is_mla_backend,
 )
 
@@ -218,10 +219,13 @@ def run_model_parameter_sweep(
                         by_param_and_spec[key].append(r)
                         break
 
-    # Sort by param value then spec
+    # Sort by param value then spec (batch_size, q_len, kv_len)
     sorted_keys = sorted(
         by_param_and_spec.keys(),
-        key=lambda x: (int(x[0]) if x[0].isdigit() else x[0], x[1]),
+        key=lambda x: (
+            int(x[0]) if x[0].isdigit() else x[0],
+            batch_spec_sort_key(x[1]),
+        ),
     )
 
     current_param_value = None
@@ -330,7 +334,7 @@ def run_parameter_sweep(
                 by_spec[spec] = []
             by_spec[spec].append(r)
 
-    for spec in sorted(by_spec.keys()):
+    for spec in sorted(by_spec.keys(), key=batch_spec_sort_key):
         results = by_spec[spec]
         best = min(results, key=lambda r: r.mean_time)
         console.print(
