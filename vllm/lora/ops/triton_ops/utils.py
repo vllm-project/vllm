@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
@@ -316,3 +317,103 @@ def supports_pdl(device: torch.device | None = None) -> bool:
         and current_platform.has_device_capability(90)
         and not envs.VLLM_LORA_DISABLE_PDL
     )
+
+
+@triton.jit
+def _get_lora_id(
+    lora_ids,
+    token_lora_mapping_ptr,
+    lora_idx,
+    pid_m,
+    top_k_num,
+    naive_block_assignment: tl.constexpr,
+):
+    """Returns lora_id"""
+    if naive_block_assignment:
+        token_idx = pid_m // top_k_num
+        return tl.load(token_lora_mapping_ptr + token_idx)
+    else:
+        return tl.load(lora_ids + lora_idx)
+
+
+@triton.jit
+def _get_expert_id(
+    expert_ids_ptr,
+    lora_id,
+    pid_m,
+    stride_el,
+    max_loras,
+    naive_block_assignment: tl.constexpr,
+):
+    """Returns expert_id"""
+    if naive_block_assignment:
+        return tl.load(expert_ids_ptr + pid_m)
+    else:
+        ind = lora_id * stride_el + pid_m
+        return tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
+
+
+@triton.jit
+def _get_token_offs(
+    sorted_token_ids_ptr,
+    lora_id,
+    pid_m,
+    offs,
+    stride_tl,
+    max_loras,
+    num_valid_tokens,
+    naive_block_assignment: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    """Returns token offsets"""
+    if naive_block_assignment:
+        return tl.where(offs == 0, pid_m, num_valid_tokens)
+    else:
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        token_ind = stride_tl * lora_id + offs_token_id
+        return tl.load(
+            sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
+        )
+
+
+_LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
+
+
+def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
+    """
+    `_LORA_PTR_DICT` collects the required information during `profile_run`,
+    After this, it remains constant and subsequent usage is through LUT.
+    Refer to:
+    https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
+    """
+    key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
+
+    if (ptr_tensor := _LORA_PTR_DICT.get(key)) is not None:
+        return ptr_tensor
+
+    tensor_ptrs = []
+    for lora_weight in lora_weights:
+        tensor_ptrs.append(lora_weight.data_ptr())
+    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+
+    _LORA_PTR_DICT[key] = ptr_tensor
+    return _LORA_PTR_DICT.get(key)
+
+
+def _adjust_kernel_inputs(
+    num_active_loras: int,
+    sorted_token_ids: torch.Tensor | None,
+    expert_ids: torch.Tensor,
+):
+    """
+    helper function to adjust kernel inputs when sorted_token_ids is None
+    """
+    if sorted_token_ids is None:
+        stride_tl = 0
+        stride_el = 0
+        grid_lora_dim = 1
+    else:
+        stride_tl = sorted_token_ids.stride(0)
+        stride_el = expert_ids.stride(0)
+        grid_lora_dim = num_active_loras
+    return grid_lora_dim, stride_tl, stride_el
