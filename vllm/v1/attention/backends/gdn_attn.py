@@ -45,6 +45,9 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
+    # The following tensor is only used for prefix caching in align mode
+    seq_lens: torch.Tensor
+
     has_initial_state: torch.Tensor | None = None
     block_size: int | None = None
     chunk_size: int | None = None
@@ -83,9 +86,6 @@ class GDNAttentionMetadata:
     seq_idx_p: torch.Tensor | None = None  # shape: [batch,]
     cu_chunk_seqlen_p: torch.Tensor | None = None  # shape: [batch,]
     last_chunk_indices_p: torch.Tensor | None = None  # shape: [batch,]
-
-    # The following tensor is only used for prefix caching in align mode
-    seq_lens: torch.Tensor | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -558,6 +558,7 @@ class GDNAttentionMetadataBuilder(
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            seq_lens=m.seq_lens,
             block_size=block_size,
             chunk_size=chunk_size_value,
             spec_query_start_loc=spec_query_start_loc,
