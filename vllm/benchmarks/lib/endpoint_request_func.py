@@ -758,9 +758,10 @@ async def async_request_vllm_pooling(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "data": request_func_input.prompt["data"],
         "truncate_prompt_tokens": -1,
     }
+
+    payload = payload | request_func_input.prompt
 
     _update_payload_common(payload, request_func_input)
 
