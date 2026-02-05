@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, field_validator, model_validator
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
