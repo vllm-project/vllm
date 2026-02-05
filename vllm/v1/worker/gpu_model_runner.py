@@ -1529,8 +1529,10 @@ class GPUModelRunner(
         # iteration accepted). Store in optimistic_seq_lens_cpu for use by
         # _build_attention_metadata (max_seq_len) and discard_request_mask.
         # seq_lens (GPU) will be computed later using the same optimistic values.
-        self.optimistic_seq_lens_cpu[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
+        torch.add(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            torch.from_numpy(num_scheduled_tokens),
+            out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
