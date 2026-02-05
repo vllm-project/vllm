@@ -1550,3 +1550,26 @@ def use_fresh_inductor_cache():
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.fixture(scope="function")
+def disable_log_dedup(monkeypatch):
+    """
+    Disable log deduplication such that warning_once and info_once always print.
+    """
+
+    # Patch logger._print_warning_once to remove the lru_cache decorator
+    from vllm import logger
+
+    original_print_warning_once = logger._print_warning_once
+    original_print_info_once = logger._print_info_once
+    original_print_debug_once = logger._print_debug_once
+
+    logger._print_warning_once = original_print_warning_once.__wrapped__
+    logger._print_info_once = original_print_info_once.__wrapped__
+    logger._print_debug_once = original_print_debug_once.__wrapped__
+
+    yield
+    logger._print_warning_once = original_print_warning_once
+    logger._print_info_once = original_print_info_once
+    logger._print_debug_once = original_print_debug_once
