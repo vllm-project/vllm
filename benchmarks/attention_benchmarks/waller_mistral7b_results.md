@@ -25,28 +25,14 @@
 | 262,144         | 14.293       | 492,344| O(N log N)       |
 | 524,288         | 14.292       | 492,347| O(N log N)       |
 
-**Key Observations:**
-- Latency variance: 0.137 ms across 1000x sequence length increase (0.96%)
-- Constant ~492-496 TFLOPS regardless of sequence length
-- Successful execution at 524K tokens (FlashAttention typically OOMs beyond 32K)
+**Latency variance:** 0.137ms (0.96%) across 1000x sequence length increase
 
-### Comparison vs FlashAttention v2.8.3 (from PR #33860)
+### Comparison vs FlashAttention v2.8.3
 
-| Sequence Length | FlashAttention Latency | Waller Latency | **Speedup** |
-|-----------------|------------------------|----------------|-------------|
-| 4,096           | 84.3 ms               | 14.2 ms        | **5.9x**    |
-| 32,768          | 350.5 ms              | 14.3 ms        | **24.5x**   |
+| Sequence Length | FlashAttention (ms) | Waller (ms) | Speedup |
+|-----------------|---------------------|-------------|---------|
+| 4,096           | 84.3                | 14.2        | 5.9x    |
+| 32,768          | 350.5               | 14.3        | 24.5x   |
 
-**Performance Degradation Analysis:**
-- **FlashAttention:** 76% throughput loss (4K → 32K)
-- **Waller Operator:** 0.8% performance variance (512 → 524K)
-
-## Test Configuration
-- Batch size: 1
-- Num heads: 32
-- Head dim: 128
-- Iterations: 100 per sequence length
-- Output format: JSON
-
-## Reproducibility
-All tests run with identical configuration across 100 iterations per sequence length, demonstrating < 1% variance.
+**FlashAttention (4K → 32K):** 76% throughput degradation  
+**Waller Operator (512 → 524K):** 0.96% latency variance
