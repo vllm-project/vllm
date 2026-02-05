@@ -15,29 +15,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 BLOCK_HIDDEN = 128
 BLOCK_TOKENS = 128
-
-
-class DraftInputStates:
-    def __init__(
-        self,
-        len: torch.Tensor,
-        token_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ):
-        # Keep this as a tensor to avoid device syncs from `.item()`.
-        self.len = len
-        self.token_ids = token_ids
-        self.hidden_states = hidden_states
-        self.positions = positions
-        self.slot_mapping = slot_mapping
 
 
 class MultiLayerEagleProposer(EagleProposer):
@@ -61,20 +45,6 @@ class MultiLayerEagleProposer(EagleProposer):
                 "does not match layer_num, adjusting to layer_num"
             )
             self.num_speculative_tokens = self.layer_num
-        self.running_req_ids: list[str] | None = None
-        self.draft_input_states_pool: dict[str, DraftInputStates] = {}
-
-    def set_running_req_ids(self, req_ids: list[str]):
-        self.running_req_ids = req_ids
-
-    def _get_draft_input_states(self, req_id: str, len: int) -> DraftInputStates:
-        draft_input_states = self.draft_input_states_pool.get(req_id, None)
-        assert draft_input_states is not None
-        assert draft_input_states.len >= len
-        return draft_input_states
-
-    def clean_req_cache(self, req_id: str):
-        self.draft_input_states_pool.pop(req_id, None)
 
     def adjust_input(
         self,
@@ -84,12 +54,10 @@ class MultiLayerEagleProposer(EagleProposer):
         target_hidden_states: torch.Tensor,
         last_token_indices: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
         MAX_SHIFT = self.layer_num
         assert MAX_SHIFT > 0
-
-        device = target_token_ids.device
-        hidden_size = int(target_hidden_states.shape[1])
 
         prev_token_ids = target_token_ids.clone()
         prev_positions = target_positions.clone()
@@ -131,85 +99,8 @@ class MultiLayerEagleProposer(EagleProposer):
         # common_attn_metadata.max_seq_len =
         #       int(common_attn_metadata.seq_lens_cpu.max().item())
 
-        cached_lens = torch.zeros(batch_size, dtype=torch.int32, device=device)
-        cached_prev_token_ids = torch.zeros(
-            batch_size, MAX_SHIFT, dtype=prev_token_ids.dtype, device=device
-        )
-        if prev_positions.dim() == 1:
-            cached_prev_positions: Any = torch.zeros(
-                batch_size, MAX_SHIFT, dtype=prev_positions.dtype, device=device
-            )
-        else:
-            cached_prev_positions = [
-                torch.zeros(
-                    batch_size, MAX_SHIFT, dtype=prev_positions.dtype, device=device
-                )
-                for _ in range(3)
-            ]
-        cached_prev_hidden_states = torch.zeros(
-            (batch_size, MAX_SHIFT, hidden_size),
-            dtype=prev_hidden_states.dtype,
-            device=device,
-        )
-        cached_slot_mappings = torch.zeros(
-            batch_size, MAX_SHIFT, dtype=slot_mapping.dtype, device=device
-        )
-
-        assert self.running_req_ids is not None
-        for i in range(batch_size):
-            req_id = self.running_req_ids[i]
-            draft_input_states = self.draft_input_states_pool.get(req_id, None)
-            if draft_input_states is None:
-                continue
-
-            cached_lens[i] = draft_input_states.len
-            cached_prev_token_ids[i].copy_(draft_input_states.token_ids)
-
-            if prev_positions.dim() == 1:
-                assert (
-                    cached_prev_positions[i].shape == draft_input_states.positions.shape
-                )
-                cached_prev_positions[i].copy_(draft_input_states.positions)
-            else:
-                assert prev_positions.dim() == 2
-                assert (
-                    cached_prev_positions[:, i].shape
-                    == draft_input_states.positions.shape
-                )
-                cached_prev_positions[:, i].copy_(draft_input_states.positions)
-
-            cached_prev_hidden_states[i].copy_(draft_input_states.hidden_states)
-            cached_slot_mappings[i].copy_(draft_input_states.slot_mapping)
-
+        cached_lens = multi_layer_eagle_metadata.cached_len
         shift = torch.minimum(shift, cached_lens)
-
-        # [batch_size]
-        len_buffer = torch.zeros(batch_size, dtype=torch.int32, device=device)
-        # [batch_size, MAX_SHIFT]
-        token_ids_buffer = torch.zeros(
-            (batch_size, MAX_SHIFT), dtype=prev_token_ids.dtype, device=device
-        )
-        if prev_positions.dim() == 1:
-            positions_buffer: Any = torch.zeros(
-                (batch_size, MAX_SHIFT), dtype=prev_positions.dtype, device=device
-            )
-        else:
-            positions_buffer = [
-                torch.zeros(
-                    (batch_size, MAX_SHIFT), dtype=prev_positions.dtype, device=device
-                )
-                for _ in range(3)
-            ]
-        # [batch_size, MAX_SHIFT, hidden_size]
-        hidden_states_buffer = torch.zeros(
-            (batch_size, MAX_SHIFT, hidden_size),
-            dtype=prev_hidden_states.dtype,
-            device=device,
-        )
-        # [batch_size, MAX_SHIFT]
-        slot_mapping_buffer = torch.zeros(
-            (batch_size, MAX_SHIFT), dtype=slot_mapping.dtype, device=device
-        )
 
         _multi_layer_eagle_shift_and_cache(
             batch_size=batch_size,
@@ -227,32 +118,12 @@ class MultiLayerEagleProposer(EagleProposer):
             last_token_indices=last_token_indices,
             shift=shift,
             cached_lens=cached_lens,
-            cached_prev_token_ids=cached_prev_token_ids,
-            cached_prev_positions=cached_prev_positions,
-            cached_prev_hidden_states=cached_prev_hidden_states,
-            cached_slot_mappings=cached_slot_mappings,
-            out_cached_lens=len_buffer,
-            out_cached_token_ids=token_ids_buffer,
-            out_cached_positions=positions_buffer,
-            out_cached_hidden_states=hidden_states_buffer,
-            out_cached_slot_mappings=slot_mapping_buffer,
+            cached_prev_token_ids=multi_layer_eagle_metadata.cached_token_ids,
+            cached_prev_positions=multi_layer_eagle_metadata.cached_positions,
+            cached_prev_hidden_states=multi_layer_eagle_metadata.cached_hidden_states,
+            cached_slot_mappings=multi_layer_eagle_metadata.cached_slot_mappings,
             common_attn_metadata=common_attn_metadata,
         )
-        for i in range(batch_size):
-            req_id = self.running_req_ids[i]
-            if prev_positions.dim() == 1:
-                cached_positions = positions_buffer[i].clone()
-            else:
-                cached_positions = torch.stack(
-                    [buf[i] for buf in positions_buffer], dim=0
-                ).clone()
-            self.draft_input_states_pool[req_id] = DraftInputStates(
-                len=len_buffer[i].clone(),
-                token_ids=token_ids_buffer[i].clone(),
-                hidden_states=hidden_states_buffer[i].clone(),
-                positions=cached_positions,
-                slot_mapping=slot_mapping_buffer[i].clone(),
-            )
 
         return prev_token_ids, prev_positions, prev_hidden_states, common_attn_metadata
 
@@ -354,6 +225,7 @@ class MultiLayerEagleProposer(EagleProposer):
         last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
@@ -362,6 +234,7 @@ class MultiLayerEagleProposer(EagleProposer):
     ) -> torch.Tensor:
         assert self.method == "mtp"
         assert self.runner is not None
+        assert multi_layer_eagle_metadata is not None
 
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -377,6 +250,7 @@ class MultiLayerEagleProposer(EagleProposer):
                 target_hidden_states=target_hidden_states,
                 last_token_indices=last_token_indices,
                 common_attn_metadata=common_attn_metadata,
+                multi_layer_eagle_metadata=multi_layer_eagle_metadata,
             )
         )
 
@@ -514,8 +388,6 @@ class MultiLayerEagleProposer(EagleProposer):
         else:
             slot_mapping_dict = slot_mappings or {}
 
-        self.set_running_req_ids([f"dummy_req_{i}" for i in range(1)])
-
         adjust_input_kwargs = {
             "batch_size": 1,
             "target_token_ids": self.input_ids[:num_input_tokens],
@@ -547,10 +419,14 @@ class MultiLayerEagleProposer(EagleProposer):
                 causal=True,
                 encoder_seq_lens=None,
             ),
+            "multi_layer_eagle_metadata": MultiLayerEagleMetadata.make_dummy(
+                layer_num=self.layer_num,
+                hidden_size=self.hidden_size,
+                device=self.device,
+            ),
         }
         # NOTE ensure the jit kernel in _adjust_input can be compiled
         self.adjust_input(**adjust_input_kwargs)
-        self.clean_req_cache("dummy_req_0")
 
         for fwd_idx in range(self.layer_num):
             with set_forward_context(
@@ -600,11 +476,6 @@ def _multi_layer_eagle_shift_and_cache(
     cached_prev_positions: Any,
     cached_prev_hidden_states: torch.Tensor,
     cached_slot_mappings: torch.Tensor,
-    out_cached_lens: torch.Tensor,
-    out_cached_token_ids: torch.Tensor,
-    out_cached_positions: Any,
-    out_cached_hidden_states: torch.Tensor,
-    out_cached_slot_mappings: torch.Tensor,
     common_attn_metadata: CommonAttentionMetadata,
 ):
     if batch_size == 0:
@@ -624,12 +495,11 @@ def _multi_layer_eagle_shift_and_cache(
         start_token_indices_i32,
         (last_token_indices.to(torch.int32) + 1 - max_shift),
     )
-    cache_len = torch.clamp(
+    new_cache_lens = torch.clamp(
         last_token_indices.to(torch.int32) - cache_start + 1,
         min=0,
         max=max_shift,
     ).to(torch.int32)
-    out_cached_lens.copy_(cache_len)
 
     padded_shift = triton.next_power_of_2(max_shift)
 
@@ -652,13 +522,12 @@ def _multi_layer_eagle_shift_and_cache(
     def _shift_and_gather_cache_1d_kernel(
         src: torch.Tensor,
         dst: torch.Tensor,
-        cached_prev: torch.Tensor,
-        out_cached: torch.Tensor,
+        cached: torch.Tensor,
     ):
         _shift_1d_kernel[(batch_size, num_blocks)](
             src,
             dst,
-            cached_prev,
+            cached,
             start_token_indices_i32,
             end_token_indices_i32,
             shift,
@@ -669,9 +538,9 @@ def _multi_layer_eagle_shift_and_cache(
 
         _gather_cache_1d_kernel[(batch_size,)](
             dst,
-            out_cached,
+            cached,
             cache_start,
-            cache_len,
+            new_cache_lens,
             MAX_SHIFT=max_shift,
             PADDED_SHIFT=padded_shift,
         )
@@ -680,35 +549,19 @@ def _multi_layer_eagle_shift_and_cache(
         src_token_ids,
         dst_token_ids,
         cached_prev_token_ids,
-        out_cached_token_ids,
     )
 
     _shift_and_gather_cache_1d_kernel(
         src_slot_mapping,
         dst_slot_mapping,
         cached_slot_mappings,
-        out_cached_slot_mappings,
     )
 
-    if dst_positions.dim() == 1:
-        assert isinstance(cached_prev_positions, torch.Tensor)
-        assert isinstance(out_cached_positions, torch.Tensor)
-        _shift_and_gather_cache_1d_kernel(
-            src_positions,
-            dst_positions,
-            cached_prev_positions,
-            out_cached_positions,
-        )
-    else:
-        assert isinstance(cached_prev_positions, list)
-        assert isinstance(out_cached_positions, list)
-        for row in range(3):
-            _shift_and_gather_cache_1d_kernel(
-                src_positions[row],
-                dst_positions[row],
-                cached_prev_positions[row],
-                out_cached_positions[row],
-            )
+    _shift_and_gather_cache_1d_kernel(
+        src_positions,
+        dst_positions,
+        cached_prev_positions,
+    )
 
     _shift_hidden_kernel[(batch_size, num_blocks, num_hidden_blocks)](
         src_hidden_states,
@@ -734,20 +587,22 @@ def _multi_layer_eagle_shift_and_cache(
 
     _gather_cache_hidden_kernel[(batch_size, num_hidden_blocks)](
         dst_hidden_states,
-        out_cached_hidden_states,
+        cached_prev_hidden_states,
         cache_start,
-        cache_len,
+        new_cache_lens,
         dst_hidden_states.stride(0),
         dst_hidden_states.stride(1),
-        out_cached_hidden_states.stride(0),
-        out_cached_hidden_states.stride(1),
-        out_cached_hidden_states.stride(2),
+        cached_prev_hidden_states.stride(0),
+        cached_prev_hidden_states.stride(1),
+        cached_prev_hidden_states.stride(2),
         MAX_SHIFT=max_shift,
         HIDDEN_SIZE=hidden_size,
         PADDED_SHIFT=padded_shift,
         BLOCK_HIDDEN=BLOCK_HIDDEN,
         num_warps=4,
     )
+
+    cached_lens.copy_(new_cache_lens)
     return
 
 

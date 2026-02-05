@@ -41,7 +41,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata, SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
@@ -297,6 +297,7 @@ class SpecDecodeBaseProposer:
         last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
