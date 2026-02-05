@@ -327,7 +327,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 and response_format.schema_ is not None
             ):
                 structured_outputs = StructuredOutputsParams(
-                    **{"json": response_format.schema_}
+                    json=response_format.schema_
                 )
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")

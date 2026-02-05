@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import Final
 
@@ -494,14 +494,11 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         and struct_out.all_non_structural_tag_constraints_none()
                     ):
-                        structural_tag = reasoning_parser.prepare_structured_tag(
-                            struct_out.structural_tag,
-                            self.tool_server,
-                        )
-                        merged = dict(struct_out.__dict__)
-                        merged["structural_tag"] = structural_tag
-                        sampling_params.structured_outputs = StructuredOutputsParams(
-                            **merged
+                        sampling_params.structured_outputs = replace(
+                            struct_out,
+                            structural_tag=reasoning_parser.prepare_structured_tag(
+                                struct_out.structural_tag, self.tool_server
+                            ),
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
