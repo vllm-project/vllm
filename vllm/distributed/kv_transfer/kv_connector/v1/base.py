@@ -118,6 +118,22 @@ def supports_hma(connector: Any) -> bool:
         return isinstance(connector, SupportsHMA)
 
 
+class SupportsHSE(ABC):
+    """
+    The class that indicates the corresponding connector supports hidden state
+    extraction (HSE).
+    This is required to use the connector with the `extract_hidden_states`
+    speculative method.
+    """
+
+
+def supports_hse(connector: Any) -> bool:
+    if isinstance(connector, type):
+        return issubclass(connector, SupportsHSE)
+    else:
+        return isinstance(connector, SupportsHSE)
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0

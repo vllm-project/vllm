@@ -8,6 +8,7 @@ import safetensors
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1 import SupportsHSE
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -130,7 +131,7 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
         )
 
 
-class ExampleHiddenStatesConnector(KVConnectorBase_V1):
+class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHSE):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU

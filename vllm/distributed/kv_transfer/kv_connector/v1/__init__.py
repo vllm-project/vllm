@@ -4,7 +4,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
     SupportsHMA,
+    SupportsHSE,
     supports_hma,
+    supports_hse,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (  # noqa E:501
     DecodeBenchConnector,
@@ -15,5 +17,7 @@ __all__ = [
     "KVConnectorBase_V1",
     "supports_hma",
     "SupportsHMA",
+    "supports_hse",
+    "SupportsHSE",
     "DecodeBenchConnector",
 ]

@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
-
-import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
@@ -74,7 +71,7 @@ class ExtractHiddenStatesProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, KVConnectorOutput | None]:
         """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
@@ -142,11 +139,9 @@ class ExtractHiddenStatesProposer:
                     num_tokens, common_attn_metadata.slot_mapping
                 ),
             ),
-            (
-                KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
-                if has_kv_transfer_group()
-                else nullcontext()
-            ) as kv_connecter_output,
+            KVConnectorModelRunnerMixin.maybe_get_kv_connector_output(
+                scheduler_output, use_hse_connector=True
+            ) as kv_connector_output,
         ):
             # Forward pass: caches hidden states in KV cache
             # Output is ignored - we only care about the KV cache side effects
@@ -158,7 +153,7 @@ class ExtractHiddenStatesProposer:
         # This ensures they will always verify (match) since they're identical
         # We're not actually doing speculation - just caching hidden states
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids.unsqueeze(-1)
+        return sampled_token_ids.unsqueeze(-1), kv_connector_output
 
     def _get_slot_mapping(
         self,

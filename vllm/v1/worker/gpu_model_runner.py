@@ -3077,8 +3077,8 @@ class GPUModelRunner(
         )
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3668,6 +3668,9 @@ class GPUModelRunner(
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
+                    # The extract_hidden_states drafter may set self.kv_connector_output
+                    kv_connector_output = self.kv_connector_output
+                    self.kv_connector_output = None
                 elif self.valid_sampled_token_count_event is not None:
                     assert spec_decode_common_attn_metadata is not None
                     next_token_ids, valid_sampled_tokens_count = (
@@ -3916,13 +3919,14 @@ class GPUModelRunner(
                 )
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, kv_connector_output = self.drafter.propose(
                 sampled_token_ids=sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
                 scheduler_output=scheduler_output,
                 slot_mappings=slot_mappings,
             )
+            self.kv_connector_output = kv_connector_output
 
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
@@ -3937,7 +3941,6 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-            # todo(fynn) combine kv_connector_output with existing
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
