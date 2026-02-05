@@ -1,0 +1,100 @@
+group: CPU
+depends_on: []
+steps:
+- label: CPU-Kernel Tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/
+  - cmake/cpu_extension.cmake
+  - CMakeLists.txt
+  - vllm/_custom_ops.py
+  - tests/kernels/attention/test_cpu_attn.py
+  - tests/kernels/moe/test_cpu_fused_moe.py
+  - tests/kernels/test_onednn.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+      pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
+      pytest -x -v -s tests/kernels/test_onednn.py"
+
+- label: CPU-Language Generation and Pooling Model Tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/
+  - vllm/
+  - tests/models/language/generation/
+  - tests/models/language/pooling/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      pytest -x -v -s tests/models/language/generation -m cpu_model
+      pytest -x -v -s tests/models/language/pooling -m cpu_model"
+
+- label: CPU-Quantization Model Tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/
+  - vllm/model_executor/layers/quantization/cpu_wna16.py
+  - vllm/model_executor/layers/quantization/gptq_marlin.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_int8.py
+  - vllm/model_executor/layers/quantization/kernels/scaled_mm/cpu.py
+  - vllm/model_executor/layers/quantization/kernels/mixed_precision/cpu.py
+  - tests/quantization/test_compressed_tensors.py
+  - tests/quantization/test_cpu_wna16.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
+      pytest -x -v -s tests/quantization/test_cpu_wna16.py"
+      
+- label: CPU-TP/DP/PP Tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/shm.cpp
+  - vllm/v1/worker/cpu_worker.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/platforms/cpu.py
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/device_communicators/cpu_communicator.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 10m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh"
+
+- label: CPU-Multi-Modal Model Tests %N
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  # - vllm/
+  - vllm/model_executor/layers/rotary_embedding
+  - tests/models/multimodal/generation/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
+      pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+  parallelism: 2
+
+- label: "Arm CPU Test"
+  depends_on: []
+  soft_fail: true
+  device: arm_cpu
+  no_plugin: true
+  commands: 
+  - bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
