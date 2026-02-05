@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import replace
 from functools import cached_property
 from importlib.util import find_spec
@@ -41,7 +42,10 @@ from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.core.kv_cache_utils import kv_cache_group_id_by_layer
+from vllm.v1.core.kv_cache_utils import (
+    get_slot_mappings_by_layer,
+    kv_cache_group_id_by_layer,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -280,33 +284,36 @@ class SpecDecodeBaseProposer:
         )
 
     def _get_slot_mapping(
-        self,
-        num_tokens: int,
-        cm_by_gid: CommonAttnMetadataByGid,
+        self, cm_by_gid: CommonAttnMetadataByGid
     ) -> dict[str, torch.Tensor]:
         """Return slot_mapping dict for EAGLE/draft layers during inference.
 
         Copies per-group slot mappings from CommonAttentionMetadata into
         per-gid buffers and returns views into those buffers.
         """
-        # COPY
+        slot_mapping_by_gid = dict(self._set_and_get_slot_mapping_bufs(cm_by_gid))
+        return get_slot_mappings_by_layer(
+            self.runner.kv_cache_config,
+            slot_mapping_by_gid,
+            ubatch_slices=None,
+        )
+
+    def _set_and_get_slot_mapping_bufs(
+        self, cm_by_gid: CommonAttnMetadataByGid
+    ) -> Iterator[tuple[int, torch.Tensor]]:
+        """
+        Set the slot mapping buffers for each KV cache group.
+        Then yield the buffer for each KV cache group ID.
+        """
         for gid, cm in cm_by_gid.items():
-            buf = self._slot_mapping_buffer_by_gid[gid]
             src = cm.slot_mapping
-            n = min(num_tokens, src.shape[0])
+            src_len = src.shape[0]
+            buf = self._slot_mapping_buffer_by_gid[gid]
+            n = min(cm.num_actual_tokens, src_len)
             buf[:n].copy_(src[:n])
-            if n < num_tokens:
-                buf[n:num_tokens].fill_(PADDING_SLOT_ID)
-
-        # READ
-        layer_to_buffer: dict[str, torch.Tensor] = {}
-        layer_names = [*self.attn_layer_names, *self.indexer_layer_names]
-        for layer_name in layer_names:
-            gid = self.layer_names_to_kv_cache_gid[layer_name]
-            buf = self._slot_mapping_buffer_by_gid[gid][:num_tokens]
-            layer_to_buffer[layer_name] = buf
-
-        return layer_to_buffer
+            if n < src_len:
+                buf[n:src_len].fill_(PADDING_SLOT_ID)
+            yield gid, buf[:src_len]
 
     def _get_slot_mapping_dummy_run(self, num_tokens: int) -> dict[str, torch.Tensor]:
         """Return slot_mapping dict for EAGLE/draft layers during dummy run.
@@ -449,10 +456,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                num_tokens=num_input_tokens,
-                cm_by_gid=cm_by_gid,
-            ),
+            slot_mapping=self._get_slot_mapping(cm_by_gid=cm_by_gid),
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -667,10 +671,7 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._get_slot_mapping(
-                    num_tokens=input_batch_size,
-                    cm_by_gid=cm_by_gid,
-                ),
+                slot_mapping=self._get_slot_mapping(cm_by_gid),
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -1021,10 +1022,7 @@ class SpecDecodeBaseProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._get_slot_mapping(
-                    num_tokens=num_input_tokens,
-                    cm_by_gid=cm_by_gid,
-                ),
+                slot_mapping=self._get_slot_mapping(cm_by_gid),
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
