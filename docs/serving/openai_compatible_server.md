@@ -532,7 +532,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
+    --8<-- "vllm/entrypoints/openai/translations/protocol.py:transcription-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -540,7 +540,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
+    --8<-- "vllm/entrypoints/openai/translations/protocol.py:transcription-extra-params"
     ```
 
 ### Translations API
@@ -560,13 +560,13 @@ Code example: [examples/online_serving/openai_translation_client.py](../../examp
 The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
+--8<-- "vllm/entrypoints/openai/translations/protocol.py:translation-sampling-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
+--8<-- "vllm/entrypoints/openai/translations/protocol.py:translation-extra-params"
 ```
 
 ### Realtime API
@@ -954,28 +954,34 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 
         ```python
         import requests
-
+        
         response = requests.post(
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
                 "queries": "slm markdown",
-                "documents": {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-                            },
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-                            },
-                        },
-                    ],
-                },
+                "documents": [
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ]
+                    },
+                ],
             },
         )
         response.raise_for_status()
@@ -1001,7 +1007,6 @@ The following Score API parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
@@ -1009,7 +1014,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 ### Re-rank API
@@ -1092,7 +1096,6 @@ The following Re-rank API parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
@@ -1100,7 +1103,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM

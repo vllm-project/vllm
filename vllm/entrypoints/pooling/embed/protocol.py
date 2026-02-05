@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import Field
 
@@ -59,11 +59,6 @@ class EmbeddingCompletionRequest(
 class EmbeddingChatRequest(
     PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
 ):
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
