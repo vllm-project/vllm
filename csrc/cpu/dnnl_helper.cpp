@@ -237,7 +237,14 @@ W8A8MatMulPrimitiveHandler::W8A8MatMulPrimitiveHandler(const Args& args)
   };
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});
-  constexpr dnnl_dim_t kProbeM = 128;  // dummy M size for prepacking
+#ifdef __aarch64__
+  // dummy M size for prepacking weights
+  // Prepacking weights improves performance and avoid runtime reorders
+  constexpr dnnl_dim_t kProbeM = 128;
+#else
+  constexpr dnnl_dim_t kProbeM = DNNL_RUNTIME_DIM_VAL;
+#endif
+
   prepack_weight(args.b_ptr, original_b_md,
                  create_primitive_desc(
                      MSizeCacheKey{.a_m_size = kProbeM,
