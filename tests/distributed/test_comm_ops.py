@@ -242,6 +242,7 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
         t.fill_(1)
         return _DummyWork()
 
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "irecv", fake_irecv)
 
     g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
