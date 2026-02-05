@@ -64,6 +64,18 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
+// Check if fused short-seq optimization is enabled via environment variable
+// When enabled (default), single-partition sequences skip the reduce kernel
+inline bool is_fused_short_seq_enabled() {
+  static int cached = -1;
+  if (cached == -1) {
+    const char* env = std::getenv("VLLM_ROCM_FUSED_SHORT_SEQ");
+    // Enabled by default (env not set or "1")
+    cached = (env == nullptr || std::strcmp(env, "1") == 0) ? 1 : 0;
+  }
+  return cached == 1;
+}
+
 enum class MFMAType {
   F16 = 0,
   Fp8 = 1,
@@ -3751,18 +3763,6 @@ void paged_attention_custom_launcher_navi(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);    \
       break;                                                       \
   }
-
-// Check if fused short-seq optimization is enabled via environment variable
-// When enabled (default), single-partition sequences skip the reduce kernel
-inline bool is_fused_short_seq_enabled() {
-  static int cached = -1;
-  if (cached == -1) {
-    const char* env = std::getenv("VLLM_ROCM_FUSED_SHORT_SEQ");
-    // Enabled by default (env not set or "1")
-    cached = (env == nullptr || std::strcmp(env, "1") == 0) ? 1 : 0;
-  }
-  return cached == 1;
-}
 
 bool is_navi_gpu() {
   static bool is_cached = false;
