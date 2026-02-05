@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import Request
 
@@ -43,11 +43,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
-if TYPE_CHECKING:
-    from vllm.entrypoints.pooling.score.generative_scores import (
-        OpenAIServingGenerativeScores,
-    )
-
 logger = init_logger(__name__)
 
 
@@ -60,7 +55,7 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
-        generative_scores_handler: "OpenAIServingGenerativeScores | None" = None,
+        generative_scores_handler: Any = None,  # OpenAIServingGenerativeScores
     ) -> None:
         super().__init__(
             engine_client=engine_client,
