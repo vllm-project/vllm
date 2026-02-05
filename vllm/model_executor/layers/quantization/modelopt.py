@@ -1567,13 +1567,7 @@ ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
 
 
 class ModelOptMxFp8Config(ModelOptQuantConfigBase):
-    """Config class for ModelOpt MXFP8.
-
-    MXFP8 uses block-wise FP8 weights with uint8 (E8M0) scales.
-    """
-
-    # MXFP8 block size is fixed at 32
-    MXFP8_GROUP_SIZE = 32
+    """Config class for ModelOpt MXFP8."""
 
     def __init__(
         self,
@@ -1595,20 +1589,17 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
             "the format is experimental and could change in future."
         )
 
-        # MXFP8 uses fixed group size of 32
-        self.group_size = self.MXFP8_GROUP_SIZE
         self.kv_cache_quant_algo = kv_cache_quant_algo
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mxfp8"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        # MXFP8 currently only supports bfloat16 activations
         return [torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # MXFP8 requires Blackwell (SM100) or newer
+        # MXFP8 hardware acceleration requires Blackwell (SM100) or newer
         return 100
 
     def get_quant_method(
@@ -1686,10 +1677,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
 
 class ModelOptMxFp8LinearMethod(LinearMethodBase):
-    """Linear method for ModelOpt MXFP8 quantization.
-
-    Uses FlashInfer's mm_mxfp8 with swizzled scales.
-    """
+    """Linear method for ModelOpt MXFP8 quantization."""
 
     def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
         self.quant_config = quant_config
@@ -1728,12 +1716,11 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
 
-        # K (in_features) must be divisible by MXFP8 block size (32)
-        assert input_size_per_partition % self.quant_config.group_size == 0, (
-            f"MXFP8 requires input dimension (K={input_size_per_partition}) to be "
-            f"divisible by block size ({self.quant_config.group_size}). "
-            f"This model is not compatible with MXFP8 quantization."
-        )
+        if input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
+            raise ValueError(
+                f"MXFP8 requires input dimension to be divisible by "
+                f"{MXFP8_BLOCK_SIZE}, got {input_size_per_partition}"
+            )
 
         # Weight tensor: FP8 E4M3 format
         weight = ModelWeightParameter(
@@ -1748,20 +1735,11 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        # Weight scale tensor (E8M0), one scale per block of 32 along K.
-        num_scale_cols = input_size_per_partition // self.quant_config.group_size
-
-        assert num_scale_cols > 0, (
-            f"MXFP8 weight scale requires at least one block. Got "
-            f"input_size={input_size_per_partition}, "
-            f"group_size={self.quant_config.group_size}"
-        )
-
-        # ModelOpt provides 2D non-swizzled [N, K/32]; swizzle at load time.
+        # Weight scale tensor (E8M0), one scale per block of 32 along K
         weight_scale = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
-                num_scale_cols,
+                input_size_per_partition // MXFP8_BLOCK_SIZE,
                 dtype=MXFP8_SCALE_DTYPE,
             ),
             input_dim=1,
@@ -1771,7 +1749,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Check weight is a 2D tensor
         assert layer.weight.ndim == 2, (
             f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
             f"with shape {tuple(layer.weight.shape)}"
@@ -1786,48 +1763,13 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
 
         weight = layer.weight.data  # [N, K]
         N, K = weight.shape
-
-        # Validate K (in_features) is divisible by MXFP8 block size
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"MXFP8 weight input dimension (K={K}) must be divisible by "
-            f"block size ({MXFP8_BLOCK_SIZE}). Got K % {MXFP8_BLOCK_SIZE} = "
-            f"{K % MXFP8_BLOCK_SIZE}. The checkpoint may be corrupted."
-        )
-
         scale_k = K // MXFP8_BLOCK_SIZE
 
-        weight_scale = layer.weight_scale.data
-
-        # Check weight scale dtype is uint8 (E8M0 format)
-        assert weight_scale.dtype == MXFP8_SCALE_DTYPE, (
-            f"MXFP8 weight_scale must be {MXFP8_SCALE_DTYPE} (E8M0 format), "
-            f"got {weight_scale.dtype}. The checkpoint may not be properly "
-            f"quantized with MXFP8."
-        )
-
-        # Validate weight_scale is 2D [N, K/32]
-        assert weight_scale.ndim == 2, (
-            f"MXFP8 weight_scale must be 2D [N, K/32], "
-            f"got {weight_scale.ndim}D with shape {tuple(weight_scale.shape)}."
-        )
-        assert weight_scale.shape[0] >= N, (
-            f"MXFP8 weight_scale rows ({weight_scale.shape[0]}) must be >= "
-            f"weight rows (N={N})"
-        )
-        assert weight_scale.shape[1] >= scale_k, (
-            f"MXFP8 weight_scale cols ({weight_scale.shape[1]}) must be >= "
-            f"expected scale cols (K/32={scale_k})"
-        )
-        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
+        # Slice weight_scale to match weight dimensions (handles padding)
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
 
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_2d.contiguous(), requires_grad=False
-        )
-
-        # Store dimensions for validation in apply()
-        layer.mxfp8_out_features = N
-        layer.mxfp8_in_features = K
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
     def apply(
         self,
@@ -1835,26 +1777,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Apply MXFP8 quantized linear operation."""
-        assert x.dtype == torch.bfloat16, (
-            f"MXFP8 linear requires bfloat16 input, got {x.dtype}. "
-            f"Please ensure model is using bfloat16 precision."
-        )
-
-        assert x.shape[-1] == layer.mxfp8_in_features, (
-            f"Input last dimension ({x.shape[-1]}) must match weight "
-            f"in_features ({layer.mxfp8_in_features})"
-        )
-
-        assert hasattr(layer, "mxfp8_out_features"), (
-            "Layer missing 'mxfp8_out_features'. "
-            "process_weights_after_loading may not have been called."
-        )
-        assert hasattr(layer, "mxfp8_in_features"), (
-            "Layer missing 'mxfp8_in_features'. "
-            "process_weights_after_loading may not have been called."
-        )
-
         assert layer.weight.dtype == MXFP8_VALUE_DTYPE, (
             f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
         )
@@ -1863,13 +1785,11 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f"expected {MXFP8_SCALE_DTYPE}"
         )
 
-        out_dtype = x.dtype
-
         return self.mxfp8_linear_op.apply(
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            out_dtype=out_dtype,
+            out_dtype=x.dtype,
             bias=bias,
         )
 
