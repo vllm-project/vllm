@@ -11,8 +11,8 @@ jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.61.2 # Required for N-gram speculative decoding
 --extra-index-url=https://download.pytorch.org/whl/xpu
-torch==2.9.0+xpu
+torch==2.10.0+xpu
 torchaudio
 torchvision
 
-intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.9.10.post0%2Bxpu-cp312-cp312-linux_x86_64.whl
+vllm_xpu_kernels @ https://github.com/vllm-project/vllm-xpu-kernels/releases/download/v0.1.1/vllm_xpu_kernels-0.1.1-cp312-cp312-linux_x86_64.whl

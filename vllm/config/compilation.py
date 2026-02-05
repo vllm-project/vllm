@@ -8,8 +8,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator
-from pydantic.dataclasses import dataclass
+from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -96,7 +95,6 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -267,7 +265,6 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -311,7 +308,6 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -594,6 +590,24 @@ class CompilationConfig:
 
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
+
+    fast_moe_cold_start = True
+    """Optimization for fast MOE cold start.
+
+    This is a bit of a hack that assumes that:
+    1. the only decoder forward pass being run is the current model
+    2. the decoder forward pass runs all of the MOEs in the order in which they
+       are initialized
+
+    When the above two conditions hold, this option greatly decreases cold start
+    time for MOE models.
+
+    If the above two conditions don't hold, then this option will lead to silent
+    incorrectness. The only condition in which this doesn't hold is speculative
+    decoding, where there is a draft model that may have MOEs in them.
+
+    NB: We're working on a longer-term solution that doesn't need these assumptions.
+    """
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)

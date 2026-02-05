@@ -136,7 +136,10 @@ class EVA2CLIPAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_rank, self.head_dim, self.scale
+            self.num_heads_per_rank,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 

@@ -123,7 +123,10 @@ class BlipAttention(nn.Module):
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_partition, self.head_dim, self.scale
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):

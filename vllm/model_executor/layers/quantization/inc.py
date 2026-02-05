@@ -38,7 +38,6 @@ class INCConfig(QuantizationConfig):
         "awq",
         "awq:marlin",
         "marlin",
-        "ipex",
     }
 
     def __init__(
@@ -410,30 +409,9 @@ class INCConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             else:
                 return None
-        from vllm.model_executor.layers.quantization.ipex_quant import (
-            IPEXAWQLinearMethod,
-            IPEXConfig,
-            IPEXGPTQLinearMethod,
+        raise NotImplementedError(
+            "INC quantization is not supported during xpu kernel migration."
         )
-
-        if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if "awq" in self.packing_format:
-                config = IPEXConfig(
-                    method="awq", weight_bits=weight_bits, group_size=group_size
-                )
-                return IPEXAWQLinearMethod(config)
-            elif "gptq" in self.packing_format:
-                config = IPEXConfig(
-                    method="gptq", weight_bits=weight_bits, group_size=group_size
-                )
-                return IPEXGPTQLinearMethod(config)
-            else:
-                raise ValueError(
-                    f"ipex backend only supports awq "
-                    f"and gptq format,but got {self.packing_format}"
-                )
-        else:
-            return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         if prefix and self.extra_config:

@@ -264,7 +264,7 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
   constexpr static ISA ISAType = ISA::NEON;
   constexpr static bool scale_on_logits = false;  // apply scale on q_buffer
 
-  //  static_assert(HeadDim % HeadDimAlignment == 0);
+  static_assert(HeadDim % HeadDimAlignment == 0);
   // the gemm micro kernel is Mx8
   static_assert(HeadDimAlignment % 8 == 0);
   static_assert(BlockSizeAlignment % 8 == 0);

@@ -60,6 +60,11 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
     runtime_env = {
         "env_vars": {
             "TEST_ENV_VAR": "test_value",
+            # In future ray versions, this will be default, so when setting a
+            # task or actor with num_gpus=None/0, the visible devices env var
+            # won't be overridden resulting in no GPUs being visible on a gpu
+            # machine.
+            "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
         },
     }
 

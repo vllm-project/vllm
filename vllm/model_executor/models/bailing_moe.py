@@ -300,6 +300,7 @@ class BailingMoE(nn.Module):
             num_expert_group=self.n_group,
             topk_group=self.topk_group,
             use_grouped_topk=self.use_grouped_topk,
+            router_logits_dtype=self.router_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

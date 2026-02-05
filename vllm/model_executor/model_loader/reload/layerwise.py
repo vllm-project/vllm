@@ -216,6 +216,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Materialize layer tensors onto device
     materialize_layer(layer)
 
+    # Reset FP8 online quantization flag so process_weights_after_loading
+    # will run again during reload
+    if hasattr(layer, "_already_called_process_weights_after_loading"):
+        delattr(layer, "_already_called_process_weights_after_loading")
+
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
