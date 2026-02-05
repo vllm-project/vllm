@@ -1566,13 +1566,10 @@ class Qwen3VLForConditionalGeneration(
         return image_embeds.split(sizes)
 
     def _process_video_input(
-        self,
-        video_input: Qwen2_5_VLVideoInputs,
-        mm_cudagraph_manager: Any | None = None,
+        self, video_input: Qwen2_5_VLVideoInputs
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
@@ -1585,17 +1582,15 @@ class Qwen3VLForConditionalGeneration(
                     self.use_data_parallel
                     and not self.vllm_config.in_mm_encoder_tracing
                 ):
+                    grid_thw_list = grid_thw.tolist()
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values_videos,
                         grid_thw_list,
                         rope_type="rope_3d",
-                        mm_cudagraph_manager=mm_cudagraph_manager,
                     )
                 else:
-                    video_embeds = self.visual(
-                        pixel_values_videos, grid_thw=grid_thw_list
-                    )
+                    video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
@@ -2062,9 +2057,7 @@ class Qwen3VLForConditionalGeneration(
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(
-                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
-                )
+                video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input

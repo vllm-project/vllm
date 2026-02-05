@@ -29,20 +29,9 @@ class CudagraphDispatcher:
     runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig, is_mm_encoder: bool = False):
+    def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.is_mm_encoder = is_mm_encoder
-        self.max_capture_size = (
-            self.compilation_config.max_cudagraph_capture_size
-            if not is_mm_encoder
-            else self.compilation_config.max_mm_encoder_cudagraph_capture_size
-        )
-        self.capture_sizes = (
-            self.compilation_config.cudagraph_capture_sizes
-            if not is_mm_encoder
-            else self.compilation_config.mm_encoder_cudagraph_capture_sizes
-        )
         self.uniform_decode_query_len = (
             1
             if not self.vllm_config.speculative_config
@@ -76,6 +65,8 @@ class CudagraphDispatcher:
         )
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
+        self.capture_sizes: list[int] = []
+        self.max_capture_size: int = 0
 
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
@@ -163,12 +154,22 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(
-        self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int = 1
+        self,
+        cudagraph_mode: CUDAGraphMode,
+        uniform_decode_query_len: int = 1,
+        capture_sizes: list[int] | None = None,
+        max_capture_size: int | None = None,
+        enable_lora: bool = True,
     ):
         # This should be called only after attention backend is initialized. So we can
         # get the correct cudagraph mode after backend support is resolved.
         self.cudagraph_mode = cudagraph_mode
-
+        self.capture_sizes = (
+            capture_sizes or self.compilation_config.cudagraph_capture_sizes
+        )
+        self.max_capture_size = (
+            max_capture_size or self.compilation_config.max_cudagraph_capture_size
+        )
         # Early exit if cudagraphs are disabled
         if cudagraph_mode == CUDAGraphMode.NONE:
             self.keys_initialized = True
@@ -177,7 +178,7 @@ class CudagraphDispatcher:
         self._compute_bs_to_padded_graph_size()
 
         # Get LoRA cases to capture
-        lora_cases = self._get_lora_cases() if not self.is_mm_encoder else [0]
+        lora_cases = self._get_lora_cases() if enable_lora else [0]
         self.captured_lora_counts = [
             lora_count for lora_count in lora_cases if lora_count
         ]

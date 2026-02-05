@@ -11,11 +11,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import (
-    MultiModalConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,

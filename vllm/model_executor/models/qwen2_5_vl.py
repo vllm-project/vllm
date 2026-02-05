@@ -1338,9 +1338,7 @@ class Qwen2_5_VLForConditionalGeneration(
         return tuple(image_embeds_split)
 
     def _process_video_input(
-        self,
-        video_input: Qwen2_5_VLVideoInputs,
-        mm_cudagraph_manager: Any | None = None,
+        self, video_input: Qwen2_5_VLVideoInputs
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1360,7 +1358,6 @@ class Qwen2_5_VLForConditionalGeneration(
                         pixel_values_videos,
                         grid_thw_list,
                         rope_type="rope_3d",
-                        mm_cudagraph_manager=mm_cudagraph_manager,
                     )
                 else:
                     video_embeds = self.visual(
@@ -1533,9 +1530,7 @@ class Qwen2_5_VLForConditionalGeneration(
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(
-                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
-                )
+                video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input

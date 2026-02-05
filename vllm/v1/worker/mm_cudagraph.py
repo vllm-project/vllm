@@ -27,7 +27,7 @@ class MMEncoderCudagraphManager:
         dummy_input_builder: BaseDummyInputsBuilder[Any],
     ):
         self.vllm_config = vllm_config
-        self.dispatcher = CudagraphDispatcher(self.vllm_config, is_mm_encoder=True)
+        self.dispatcher = CudagraphDispatcher(self.vllm_config)
         self.dummy_input_builder = dummy_input_builder
 
         # Check if using data parallel mode for ViT
@@ -54,7 +54,20 @@ class MMEncoderCudagraphManager:
         else:
             mm_cudagraph_mode = CUDAGraphMode.NONE
 
-        self.dispatcher.initialize_cudagraph_keys(mm_cudagraph_mode)
+        max_capture_size = (
+            self.vllm_config.compilation_config.max_mm_encoder_cudagraph_capture_size
+        )
+
+        capture_sizes = (
+            self.vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes
+        )
+
+        self.dispatcher.initialize_cudagraph_keys(
+            mm_cudagraph_mode,
+            capture_sizes=capture_sizes,
+            max_capture_size=max_capture_size,
+            enable_lora=False,
+        )
 
     def dispatch_and_pad_mm_input(
         self,
