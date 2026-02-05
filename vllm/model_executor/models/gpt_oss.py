@@ -316,6 +316,7 @@ class GptOssModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, weight scales, activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        # NOTE: this is only used for quark.
         return FusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
