@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# 
-# PATCHED: Fix for Qwen3-Thinking models where <think> is added as prompt prefix
-# The model output only contains </think>, not the opening <think> tag.
-# Original parser required both tags, this fix handles prefix format.
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -19,10 +15,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     Reasoning parser for the Qwen3 model.
 
     The Qwen3 model uses <think>...</think> tokens to denote reasoning text
-    within its output. The model provides a strict switch to disable reasoning
-    output via the 'enable_thinking=False' parameter. This parser extracts the
-    reasoning content enclosed by <think> and </think> tokens from the model's
-    output.
+    within its output. This parser extracts the reasoning content.
     
     Note: Qwen3-Thinking models add <think> as a prompt prefix, so the model
     output may only contain </think> without the opening tag. This parser
@@ -49,10 +42,6 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         1. Full format: <think>reasoning</think>content
         2. Prefix format: reasoning</think>content (when <think> is in prompt)
 
-        For text <think>abc</think>xyz or abc</think>xyz:
-        - 'abc' goes to reasoning
-        - 'xyz' goes to content
-
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
@@ -60,20 +49,17 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         if self.end_token not in model_output:
             return None, model_output
 
-        # Remove start token if present (handles full format)
-        if self.start_token in model_output:
-            model_output_parts = model_output.partition(self.start_token)
-            model_output = (
-                model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-            )
+        # Remove start token if present (partition handles missing token gracefully)
+        model_output_parts = model_output.partition(self.start_token)
+        model_output = (
+            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+        )
 
         # Extract reasoning content (everything before </think>)
         reasoning, _, content = model_output.partition(self.end_token)
         
-        # Strip leading/trailing whitespace from reasoning
+        # Strip whitespace
         reasoning = reasoning.strip() if reasoning else None
-        
-        # Content may have leading newlines from template format
         final_content = content.lstrip('\n') if content else None
         
         return reasoning, final_content
