@@ -441,16 +441,10 @@ class Attention(nn.Module, AttentionLayerBase):
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             else:
-                kv_cache_dummy_dep = None
-                # key and value may be None in the case of cross attention. They are
-                # calculated once based on the output from the encoder and then cached
-                # in KV cache.
                 # Skip this if sharing KV cache with an earlier attention layer.
                 if (
                     not self.attn_backend.forward_includes_kv_cache_update
                     and self.kv_sharing_target_layer_name is None
-                    and key is not None
-                    and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
