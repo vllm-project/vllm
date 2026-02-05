@@ -158,11 +158,18 @@ class FusedTopKBiasRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
-        )
+        if self.scoring_func == "sigmoid":
+            if self.top_k == 1:
+                return RoutingMethodType.Llama4
+            else:
+                return RoutingMethodType.DeepSeekV3
+        elif self.scoring_func == "softmax":
+            if self.renormalize:
+                return RoutingMethodType.Renormalize
+            else:
+                return RoutingMethodType.Default
+        else:
+            return RoutingMethodType.Unspecified
 
     def _compute_routing(
         self,
