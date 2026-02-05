@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    MLACommonPrefillMetadata,
     QueryLenSupport,
 )
 from vllm.model_executor.layers.batch_invariant import (
@@ -95,7 +96,9 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
 
 
 @dataclass
-class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
+class FlashAttnMLAMetadata(
+    MLACommonMetadata[MLACommonPrefillMetadata, FlashAttnMLADecodeMetadata]
+):
     pass
 
 

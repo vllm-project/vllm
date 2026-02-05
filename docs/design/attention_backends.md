@@ -184,20 +184,25 @@ MLA uses separate backends for prefill and decode phases.
 
 ### Prefill Backends
 
-The prefill backend is selected at runtime based on hardware and
-configuration.
+To explicitly select a prefill backend, use
+`-ac.mla_prefill_backend=<BACKEND>` (e.g., `FLASH_ATTN`, `FLASHINFER`).
+Otherwise, the prefill backend is selected automatically at runtime based on
+hardware and configuration.
 
-| Backend | Description | Compute Cap. | Enable | Disable | Notes |
-|---------|-------------|--------------|--------|---------|-------|
-| TRT-LLM Ragged‡ | TensorRT-LLM ragged attention | 10.x | Default on SM100 | `-ac.use_trtllm_ragged_deepseek_prefill=0` | DeepSeek R1 dims only |
-| FlashInfer | FlashInfer CUTLASS backend | 10.x | `-ac.disable_flashinfer_prefill=0` | `-ac.disable_flashinfer_prefill=1` | DeepSeek R1 dims only |
-| cuDNN | cuDNN-based attention | 10.x | `-ac.use_cudnn_prefill=1` | `-ac.use_cudnn_prefill=0` |  |
-| FlashAttention | FlashAttention varlen (FA2/FA3) | Any | Default fallback | Use other backends | FA3 on SM90, FA2 otherwise |
+| Backend | Description | Dtypes | Compute Cap. | Notes |
+|---------|-------------|--------|--------------|-------|
+| `TRTLLM_RAGGED_PREFILL`‡ | TensorRT-LLM ragged attention | fp16, bf16 | 10.x | DeepSeek R1 dims only |
+| `FLASHINFER_PREFILL` | FlashInfer CUTLASS backend | fp16, bf16 | 10.x | DeepSeek R1 dims only |
+| `CUDNN_PREFILL` | cuDNN-based attention | fp16, bf16 | 10.x | DeepSeek R1 dims only |
+| `FLASH_ATTN_PREFILL` | FlashAttention varlen (FA2/FA3) | fp16, bf16 | Any | FA3 on SM90, FA2 otherwise |
 
 > **‡** TRT-LLM Ragged is the default on Blackwell (SM100).
 > On other GPUs, FlashAttention is used as the default.
 
 ### Decode Backends
+
+MLA decode backends are selected using the standard
+`-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`).
 
 | Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |
 |---------|--------|-----------|-------------|------------|------|--------|-----------|-----------------|--------------|

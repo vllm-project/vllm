@@ -82,6 +82,9 @@ class DeviceCapability(NamedTuple):
             return NotImplemented
         return (self.major, self.minor) > (other.major, other.minor)
 
+    def __hash__(self) -> int:
+        return hash((self.major, self.minor))
+
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 
