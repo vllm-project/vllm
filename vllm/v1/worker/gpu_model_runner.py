@@ -3248,8 +3248,7 @@ class GPUModelRunner(
         Returns:
             A tuple of:
             - slot_mappings_by_gid: dict[int, torch.Tensor] for attention metadata
-            - slot_mappings_by_layer: dict[str, torch.Tensor] or list for
-              ForwardContext
+            - slot_mappings_by_layer: dict[str, torch.Tensor] or list for ForwardContext
             Or None if KV cache config is not available.
         """
         if not (
