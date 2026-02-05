@@ -102,8 +102,8 @@ def legacy_routing_from_bitmatrix(
     Creates routing data from a bitmatrix representation.
     """
     sparse_logits = SparseMatrix(indx=expt_indx, vals=expt_scal, mask=bitmatrix)
-    dispatch_indx = sparse_logits.mask_metadata.col_sorted_indx
-    combine_indx = sparse_logits.mask_metadata.row_sorted_indx
+    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
         sparse_logits.mask_metadata.col_sum,
         dispatch_indx.shape[0],
