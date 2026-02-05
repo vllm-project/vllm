@@ -9,13 +9,13 @@ from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.translations.protocol import (
+from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponseVariant,
     TranslationRequest,
     TranslationResponseVariant,
 )
-from vllm.entrypoints.openai.translations.serving import (
+from vllm.entrypoints.openai.speech_to_text.serving import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )

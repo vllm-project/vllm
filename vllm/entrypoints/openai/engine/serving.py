@@ -57,7 +57,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
 )
-from vllm.entrypoints.openai.translations.protocol import (
+from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
