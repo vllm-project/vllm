@@ -213,7 +213,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
-                    naive_block_assignment,
+                    naive_block_assignment=naive_block_assignment,
                 )
 
                 moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
