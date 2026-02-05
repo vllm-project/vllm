@@ -285,6 +285,7 @@ class Scheduler(SchedulerInterface):
         # * resumed requests: num_computed_tokens < (
         #                       num_prompt_tokens + num_output_tokens
         #                     )
+        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
         if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
             # must be a multiple of `block_size`.
