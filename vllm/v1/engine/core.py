@@ -669,6 +669,16 @@ class EngineCoreProc(EngineCore):
         *,
         engine_index: int = 0,
     ):
+        # Pause state used for fast step-barrier pausing (weight updates).
+        # Controlled via UTILITY calls (pause/resume/run_until_target_step_count).
+        self.engine_pause: bool = False
+        self.target_steps: int | None = None
+
+        # Monotonic step counter used by /pause and /run_until_target_step_count.
+        # For DP engines this is overridden and incremented in DPEngineCoreProc,
+        # but it must exist on all engine variants.
+        self.step_counter: int = 0
+
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
@@ -982,8 +992,67 @@ class EngineCoreProc(EngineCore):
         while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            # Periodic addition: if paused, do not step the engine.
+            # Keep looping so we can continue to process control-plane requests.
+            if self.is_engine_paused():
+                time.sleep(0.001)
+                continue
+
+            # If we have a target_steps barrier but no work to do, still
+            # advance step_counter so the barrier can be reached.
+            # This mirrors the DP engine behavior.
+            has_work = (self.scheduler.has_requests() or self.batch_queue
+                        or self.engines_running)
+            if self.target_steps is not None and not has_work:
+                target_steps = self.target_steps
+                logger.debug(
+                    "No work but target_steps=%d set, advancing step_counter "
+                    "from %d to %d",
+                    target_steps,
+                    self.step_counter,
+                    target_steps,
+                )
+                self.step_counter = target_steps
+                continue
+
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            self.step_counter += 1
+
+    def pause(self) -> int:
+        """Pause the engine. Returns current monotonic step counter."""
+        self.engine_pause = True
+        self.target_steps = None
+        return self.step_counter
+
+    def run_until_target_step_count(self, target_steps: int) -> None:
+        """Resume and run until the given step count is reached, then pause."""
+        logger.info(
+            "run_until_target_step_count called: target=%d, current step=%d, "
+            "has_requests=%s, batch_queue=%s, engines_running=%s",
+            target_steps,
+            self.step_counter,
+            self.scheduler.has_requests(),
+            bool(self.batch_queue),
+            self.engines_running,
+        )
+        self.engine_pause = False
+        self.target_steps = target_steps
+
+    def resume(self) -> None:
+        """Resume engine processing and clear any step target."""
+        self.engine_pause = False
+        self.target_steps = None
+
+    def get_step_counter(self) -> int:
+        """Return the current monotonic step counter."""
+        logger.debug("get_step_counter called, returning %d", self.step_counter)
+        return self.step_counter
+
+    def is_engine_paused(self) -> bool:
+        """Return True if the engine should be paused for this iteration."""
+        target = self.target_steps
+        return self.engine_pause or (target is not None and self.step_counter >= target)
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -993,6 +1062,9 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
+            # Don't block if target_steps is set - we need to advance the
+            # step counter to reach the barrier even when idle.
+            and self.target_steps is None
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1373,14 +1445,23 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
+            # Periodic addition: if paused, do not step the engine.
+            # Keep looping so we can continue to process control-plane requests.
+            if self.is_engine_paused():
+                time.sleep(0.001)
+                continue
+
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
+                # If we have a target_steps barrier and are locally idle, advance
+                # step_counter without the all-reduce (which can block) so the
+                # barrier can be reached.
+                if self.target_steps is not None and not local_unfinished_reqs:
+                    self.step_counter = self.target_steps
                     continue
 
                 # We are in a running state and so must execute a dummy pass
@@ -1410,7 +1491,6 @@ class DPEngineCoreProc(EngineCoreProc):
                     )
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
-                self.step_counter = 0
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.

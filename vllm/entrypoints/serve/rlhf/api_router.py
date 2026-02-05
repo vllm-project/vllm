@@ -163,3 +163,4 @@ def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return
     app.include_router(router)
+

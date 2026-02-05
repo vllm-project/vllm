@@ -70,6 +70,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_rlhf_router(app)
 
+    from vllm.entrypoints.serve.pause.api_router import (
+        attach_router as attach_pause_router,
+    )
+
+    attach_pause_router(app)
+
     from vllm.entrypoints.serve.instrumentator.metrics import (
         attach_router as attach_metrics_router,
     )
