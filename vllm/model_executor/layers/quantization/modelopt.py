@@ -854,7 +854,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -971,7 +971,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1542,7 +1541,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,

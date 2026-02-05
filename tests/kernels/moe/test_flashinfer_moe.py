@@ -109,6 +109,7 @@ def test_flashinfer_fp4_moe_no_graph(
         flashinfer_experts = FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
+            inplace=False,
         )
 
         flashinfer_output = flashinfer_experts(

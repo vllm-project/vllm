@@ -883,10 +883,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
 
     @property
-    def allow_inplace(self) -> bool:
-        return True
-
-    @property
     def is_monolithic(self) -> bool:
         return (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
@@ -924,6 +920,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 activation=layer.activation,
                 expert_map=layer.expert_map,
                 input_dtype=self.marlin_input_dtype,
+                inplace=not self.moe.disable_inplace,
             )
 
         assert _can_support_mxfp4(

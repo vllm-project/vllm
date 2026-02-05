@@ -480,9 +480,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
+                max_num_queries_for_spec = (
+                    1
+                    + (2 if speculative_config.parallel_drafting else 1)
+                    * speculative_config.num_speculative_tokens
+                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    1 + speculative_config.num_speculative_tokens,
+                    max_num_queries_for_spec,
                 )
 
         if (
