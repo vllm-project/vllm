@@ -293,7 +293,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
-        q_pad_num_heads: int | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -308,7 +307,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-        self.q_pad_num_heads = q_pad_num_heads
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -375,10 +373,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
-            q_pad_num_heads=q_pad_num_heads,
             **extra_impl_args,
         )
-
+        self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         compilation_config = get_current_vllm_config().compilation_config
