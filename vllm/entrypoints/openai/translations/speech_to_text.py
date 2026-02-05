@@ -38,7 +38,6 @@ from vllm.entrypoints.openai.translations.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType
-from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
@@ -298,7 +297,7 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                if not is_explicit_encoder_decoder_prompt(prompt):
+                if not (isinstance(prompt, dict) and "encoder_prompt" in prompt):
                     raise VLLMValidationError(
                         "Expected prompt to be an encoder-decoder prompt",
                         parameter="prompt",

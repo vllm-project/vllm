@@ -97,10 +97,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
-from vllm.inputs.parse import (
-    get_prompt_components,
-    is_explicit_encoder_decoder_prompt,
-)
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -271,8 +268,8 @@ class OpenAIServing:
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            raise NotImplementedError
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            raise NotImplementedError("Encoder-decoder prompt not supported")
 
         prompt_text: str | None
         prompt_token_ids: list[int]

@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict
 
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collection_utils import is_list_of
 
 from .data import (
     EmbedsPrompt,
@@ -17,12 +18,6 @@ from .data import (
 if TYPE_CHECKING:
     import torch
 
-
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
-
-from vllm.utils.collection_utils import is_list_of
 
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
 """

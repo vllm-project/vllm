@@ -4,7 +4,7 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable
 from functools import partial
 from typing import Any, Final, Literal, cast
 
@@ -105,10 +105,7 @@ class OpenAIServingPooling(OpenAIServing):
                 engine_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                if not isinstance(engine_prompts, Sequence) or isinstance(
-                    engine_prompts, (str, bytes, bytearray)
-                ):
-                    engine_prompts = [engine_prompts]
+                engine_prompts = self.renderer.prompt_to_seq(engine_prompts)
 
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(
