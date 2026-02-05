@@ -582,12 +582,15 @@ class MPClient(EngineCoreClient):
 
     async def drain_async(self, timeout: float) -> bool:
         """Signal engines to drain and wait for them to exit."""
-        assert self.resources.engine_manager is not None
+        engine_manager = self.resources.engine_manager
+        assert isinstance(engine_manager, CoreEngineProcManager), (
+            "Drain is only supported for local process-based engines"
+        )
         logger.info(
             "Sending DRAIN to %d engine(s) via shutdown pipe",
             len(self.core_engines),
         )
-        self.resources.engine_manager.signal_drain()
+        engine_manager.signal_drain()
         start_time = time.monotonic()
 
         while not self.resources.engine_dead:
