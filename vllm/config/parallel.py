@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from pydantic import Field, model_validator
-from pydantic.dataclasses import dataclass
+from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
@@ -41,13 +41,13 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "mori",
     "allgather_reducescatter",
     "flashinfer_all2allv",
 ]
 
 
 @config
-@dataclass
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
@@ -91,7 +91,6 @@ class EPLBConfig:
 
 
 @config
-@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -156,6 +155,7 @@ class ParallelConfig:
     - "pplx": Use pplx kernels\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
+    - "mori": Use mori kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
@@ -182,9 +182,12 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool = False
+    disable_nccl_for_dp_synchronization: bool = Field(default=None)
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
-    to use Gloo instead of NCCL for its all reduce"""
+    to use Gloo instead of NCCL for its all reduce.
+
+    Defaults to True when async scheduling is enabled, False otherwise.
+    """
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -292,6 +295,12 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        return None if value is None else handler(value)
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -335,6 +344,17 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuses the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+            raise ValueError(
+                f"tp_size={self.tensor_parallel_size} must be divisible by"
+                f"dcp_size={self.decode_context_parallel_size}."
+            )
+
         return self
 
     @property
@@ -350,6 +370,14 @@ class ParallelConfig:
     @property
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
+
+    @property
+    def local_engines_only(self) -> bool:
+        """
+        Client manages local+remote EngineCores in pure internal LB case.
+        Client manages local EngineCores in hybrid and external LB case.
+        """
+        return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -424,6 +452,7 @@ class ParallelConfig:
                 "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "mori",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
@@ -516,15 +545,6 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set all2all_backend from env var if not specified, with deprecation warning
-        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-            logger.warning_once(
-                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                "will be removed in v0.15.0. Please use the "
-                "--all2all-backend command-line argument instead."
-            )
-            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size

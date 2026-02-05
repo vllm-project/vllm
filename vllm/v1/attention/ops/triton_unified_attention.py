@@ -10,10 +10,12 @@
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+is_batch_invariant = vllm_is_batch_invariant()
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
@@ -82,6 +84,7 @@ def kernel_unified_attention_2d(
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_ALIBI_SQRT: tl.constexpr,  # bool
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
@@ -325,7 +328,16 @@ def kernel_unified_attention_2d(
         )
 
         if USE_ALIBI_SLOPES:
-            S += alibi_slope[:, None] * (seq_offset - context_len)
+            if USE_ALIBI_SQRT:
+                relative_pos = seq_offset - (context_len + query_pos[:, None])
+                alibi_offset = tl.where(
+                    relative_pos <= 0,
+                    -tl.sqrt((-relative_pos).to(tl.float32)),
+                    0.0,
+                )
+            else:
+                alibi_offset = seq_offset - context_len
+            S += alibi_slope[:, None] * alibi_offset
 
         if USE_QQ_BIAS:
             # compute key positions relative to query section
@@ -420,6 +432,7 @@ def kernel_unified_attention_3d(
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_ALIBI_SQRT: tl.constexpr,  # bool
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
@@ -669,7 +682,16 @@ def kernel_unified_attention_3d(
         )
 
         if USE_ALIBI_SLOPES:
-            S += alibi_slope[:, None] * (seq_offset - context_len)
+            if USE_ALIBI_SQRT:
+                relative_pos = seq_offset - (context_len + query_pos[:, None])
+                alibi_offset = tl.where(
+                    relative_pos <= 0,
+                    -tl.sqrt((-relative_pos).to(tl.float32)),
+                    0.0,
+                )
+            else:
+                alibi_offset = seq_offset - context_len
+            S += alibi_slope[:, None] * alibi_offset
 
         if USE_QQ_BIAS:
             # compute key positions relative to query section
@@ -888,6 +910,7 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    use_alibi_sqrt=False,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -951,7 +974,8 @@ def unified_attention(
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold
+    # 3. The number of sequences exceeds the configured threshold, or
+    # 4. Batch invariance is enabled
     if (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -960,6 +984,7 @@ def unified_attention(
         or softmax_segm_expsum is None
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
+        or is_batch_invariant
     ):
         kernel_unified_attention_2d[
             (
@@ -994,6 +1019,7 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
@@ -1045,6 +1071,7 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),

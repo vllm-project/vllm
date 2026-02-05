@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -215,15 +217,12 @@ class MinimaxM2ToolParser(ToolParser):
         Returns:
             The converted value
         """
-        if value.lower() == "null":
+        # Check if the VALUE itself indicates null (not just if null is allowed)
+        if value.lower() in ("null", "none", "nil"):
             return None
 
         # Normalize types
         normalized_types = [t.lower() for t in param_types]
-
-        # Try null first if it's in the list
-        if "null" in normalized_types or value.lower() in ("null", "none", "nil"):
-            return None
 
         # Try each type in order of preference (most specific first, string as fallback)
         # Priority: integer > number > boolean > object > array > string

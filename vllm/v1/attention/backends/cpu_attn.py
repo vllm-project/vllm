@@ -13,12 +13,12 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionLayer,
+    AttentionMetadataBuilder,
     AttentionType,
+    CommonAttentionMetadata,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -398,10 +398,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
 
-        if self.num_kv_heads != self.num_heads:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
-
         causal_attn = attn_type == AttentionType.DECODER
 
         sdpa_start_loc = attn_metadata.sdpa_start_loc.numpy()  # type: ignore
@@ -418,6 +414,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                     dropout_p=0.0,
                     is_causal=causal_attn and mask is None,
                     scale=self.scale,
+                    enable_gqa=self.num_heads > self.num_kv_heads,
                 )
                 .squeeze(0)
                 .movedim(query.dim() - 2, 0)

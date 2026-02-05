@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
     OffloadingConnectorMetadata,
+    OffloadingConnectorStats,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -26,6 +27,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -40,7 +42,7 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
     EOS_TOKEN_ID,
@@ -85,7 +87,14 @@ class MockOffloadingHandler(OffloadingHandler):
             if job_id in self.waiting_jobs:
                 self.waiting_jobs.remove(job_id)
                 self.completed_jobs.append(job_id)
-                self.completed_transfers.append((job_id, True))
+                result = TransferResult(
+                    job_id=job_id,
+                    success=True,
+                    transfer_size=None,
+                    transfer_time=None,
+                    transfer_type=None,
+                )
+                self.completed_transfers.append(result)
 
     def wait(self, job_ids: set[int]) -> None:
         self.flushed_jobs |= job_ids
@@ -93,8 +102,8 @@ class MockOffloadingHandler(OffloadingHandler):
 
 
 class MockOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
@@ -208,11 +217,13 @@ class RequestRunner:
         self._block_hasher = get_request_block_hasher(gpu_block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
-            no_compile_layers={}, attn_metadata={}, virtual_engine=0
+            no_compile_layers={},
+            attn_metadata={},
+            virtual_engine=0,
+            slot_mapping={},
         )
 
     def new_request(self, token_ids: list[int]):
-        assert not self.scheduler.requests
         self.req_id += 1
 
         req = Request(
@@ -337,10 +348,19 @@ class RequestRunner:
                 token_id=token_id or 0,
             )
 
+            prev_token_id = token_id
             if self.scheduler.running:
                 token_id = next(tokens_iter, None)
 
             self.scheduler.update_from_output(scheduler_output, model_runner_output)
+
+            if (
+                prev_token_id == EOS_TOKEN_ID
+                and prev_token_id != token_id
+                and self.scheduler.requests
+            ):
+                # continue for one more step to allow offloading to kick off
+                continue
 
             if token_id is None:
                 break
@@ -650,3 +670,253 @@ def test_request_preemption(request_runner):
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored_gpu_block_indexes=(9, 10, 11),
     )
+
+
+def test_concurrent_lookups_of_the_same_prefix(request_runner):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
+
+    # store 1 blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # start a request to load the first block, but don't complete
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+
+    # start a new request to load the same first block
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request did not trigger a load
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+    # complete transfers
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output([])
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # second request will use the GPU prefix cache
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+
+def test_abort_loading_requests(request_runner):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
+
+    # store 1 blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # start a request to load the first block, but don't complete
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+
+    # abort request
+    req_id = str(runner.req_id)
+    runner.scheduler.finish_requests((req_id,), RequestStatus.FINISHED_ABORTED)
+
+    # verify request is not deleted
+    assert req_id in runner.scheduler.requests
+
+    # complete loading request
+    runner.run(
+        decoded_tokens=[],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # assert request is deleted
+    assert req_id not in runner.scheduler.requests
+
+
+class TestOffloadingConnectorStats:
+    """Tests for OffloadingConnector stats reconstruction and operations."""
+
+    def test_build_kv_connector_stats_with_none(self):
+        """Test that build_kv_connector_stats returns empty stats when given None."""
+        stats = OffloadingConnector.build_kv_connector_stats(data=None)
+
+        assert stats is not None
+        assert isinstance(stats, OffloadingConnectorStats)
+        assert len(stats.data) == 0
+        assert stats.is_empty()
+
+    def test_build_kv_connector_stats_with_empty_dict(self):
+        """Test that build_kv_connector_stats returns empty stats with empty dict."""
+        stats = OffloadingConnector.build_kv_connector_stats(data={})
+
+        assert stats is not None
+        assert isinstance(stats, OffloadingConnectorStats)
+        assert len(stats.data) == 0
+        assert stats.is_empty()
+
+    def test_build_kv_connector_stats_reconstructs_offload_stats(self):
+        """Test that OffloadingConnector stats are properly reconstructed with
+        correct data."""
+        serialized_data = {
+            "CPU_to_GPU": [
+                {"op_size": 16, "op_time": 1.0},
+                {"op_size": 8, "op_time": 0.5},
+            ],
+            "GPU_to_CPU": [
+                {"op_size": 1, "op_time": 0.1},
+                {"op_size": 2, "op_time": 0.2},
+            ],
+        }
+
+        stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
+
+        offload_connector_stats = stats
+        assert isinstance(offload_connector_stats, OffloadingConnectorStats)
+        assert offload_connector_stats.data["CPU_to_GPU"] == [
+            {"op_size": 16, "op_time": 1.0},
+            {"op_size": 8, "op_time": 0.5},
+        ]
+        assert offload_connector_stats.data["GPU_to_CPU"] == [
+            {"op_size": 1, "op_time": 0.1},
+            {"op_size": 2, "op_time": 0.2},
+        ]
+
+    def test_aggregate_same_connector(self):
+        """Test aggregating stats from the same connector type."""
+        stats1 = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 16, "op_time": 1.0},
+                    {"op_size": 8, "op_time": 0.5},
+                ],
+                "GPU_to_CPU": [
+                    {"op_size": 1, "op_time": 0.1},
+                    {"op_size": 2, "op_time": 0.2},
+                ],
+            }
+        )
+
+        stats2 = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 3, "op_time": 0.2},
+                    {"op_size": 7, "op_time": 0.9},
+                ],
+                "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
+            }
+        )
+
+        result = stats1.aggregate(stats2)
+
+        assert result is stats1  # Should return self
+        offload_connector_stats = result
+        assert offload_connector_stats.data["CPU_to_GPU"] == [
+            {"op_size": 16, "op_time": 1.0},
+            {"op_size": 8, "op_time": 0.5},
+            {"op_size": 3, "op_time": 0.2},
+            {"op_size": 7, "op_time": 0.9},
+        ]
+        assert offload_connector_stats.data["GPU_to_CPU"] == [
+            {"op_size": 1, "op_time": 0.1},
+            {"op_size": 2, "op_time": 0.2},
+            {"op_size": 16, "op_time": 2},
+        ]
+
+    def test_reduce(self):
+        """Test that reduce() correctly reduces all nested connector stats."""
+        stats = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 16, "op_time": 1.0},
+                    {"op_size": 8, "op_time": 0.5},
+                    {"op_size": 3, "op_time": 0.2},
+                    {"op_size": 7, "op_time": 0.9},
+                ],
+                "GPU_to_CPU": [
+                    {"op_size": 1, "op_time": 0.1},
+                    {"op_size": 2, "op_time": 0.2},
+                    {"op_size": 16, "op_time": 2},
+                ],
+            }
+        )
+
+        reduced = stats.reduce()
+
+        assert isinstance(reduced, dict)
+        # Check that the stats were reduced (should have aggregated values)
+        assert "CPU_to_GPU_total_bytes" in reduced
+        assert "CPU_to_GPU_total_time" in reduced
+        assert "GPU_to_CPU_total_bytes" in reduced
+        assert "GPU_to_CPU_total_time" in reduced
+        assert reduced["CPU_to_GPU_total_bytes"] == 34
+        assert reduced["CPU_to_GPU_total_time"] == 2.6
+        assert reduced["GPU_to_CPU_total_time"] == 2.3
+        assert reduced["GPU_to_CPU_total_bytes"] == 19
+
+    def test_reset(self):
+        """Test that reset() resets all nested connector stats."""
+        offload_connector_stats = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 3, "op_time": 0.2},
+                    {"op_size": 7, "op_time": 0.9},
+                ],
+                "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
+            }
+        )
+
+        assert not offload_connector_stats.is_empty()
+
+        offload_connector_stats.reset()
+
+        # After reset, stats should be empty
+        assert offload_connector_stats.is_empty()
+        assert len(offload_connector_stats.data) == 0

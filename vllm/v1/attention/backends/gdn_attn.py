@@ -8,21 +8,28 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
-    AttentionCGSupport,
-    CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "GDN_ATTN"
+
     @staticmethod
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
         return GDNAttentionMetadataBuilder
@@ -108,10 +115,12 @@ class GDNAttentionMetadataBuilder(
         self.use_spec_decode = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
+        all_prefix_caching_enabled = self.cache_config.mamba_cache_mode == "all"
+
         # 64 is a hardcoded value in the FLA GDN kernel.
         # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439  # noqa: E501
         self.chunk_size = 64
-        if self.vllm_config.cache_config.enable_prefix_caching and (
+        if all_prefix_caching_enabled and (
             kv_cache_spec.block_size % self.chunk_size != 0
         ):
             raise ValueError(
@@ -119,7 +128,7 @@ class GDNAttentionMetadataBuilder(
                 f"multiple of the kernel chunk size ({self.chunk_size})."
             )
 
-        if self.vllm_config.cache_config.enable_prefix_caching and self.use_spec_decode:
+        if all_prefix_caching_enabled and self.use_spec_decode:
             raise NotImplementedError(
                 "GDN prefix caching is currently supported only for decode-only "
                 "workloads; speculative decoding with APC will be added separately."
@@ -241,10 +250,17 @@ class GDNAttentionMetadataBuilder(
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
+        query_start_loc_cpu = m.query_start_loc_cpu
         context_lens_tensor = m.compute_num_computed_tokens()
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        block_table_tensor = mamba_get_block_table_tensor(
+            m.block_table_tensor,
+            m.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
 
-        prefix_caching_enabled = self.vllm_config.cache_config.enable_prefix_caching
+        prefix_caching_enabled = self.cache_config.mamba_cache_mode == "all"
         block_size: int | None = None
         chunk_size_value: int | None = None
         if prefix_caching_enabled:
@@ -264,6 +280,7 @@ class GDNAttentionMetadataBuilder(
         last_chunk_indices_p: torch.Tensor | None = None
         non_spec_query_start_loc_cpu: torch.Tensor | None = None
 
+        spec_sequence_masks_cpu: torch.Tensor | None = None
         if (
             not self.use_spec_decode
             or num_decode_draft_tokens_cpu is None
@@ -275,12 +292,13 @@ class GDNAttentionMetadataBuilder(
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            spec_sequence_masks = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks.sum().item()
+            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
             else:
-                spec_sequence_masks = spec_sequence_masks.to(
+                spec_sequence_masks = spec_sequence_masks_cpu.to(
                     query_start_loc.device, non_blocking=True
                 )
 
@@ -292,13 +310,15 @@ class GDNAttentionMetadataBuilder(
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = m.block_table_tensor[:, 0]
+            non_spec_state_indices_tensor = block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
-            non_spec_query_start_loc_cpu = m.query_start_loc_cpu
+            non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            assert spec_sequence_masks_cpu is not None
+            query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
             non_spec_query_lens = query_lens[~spec_sequence_masks]
             num_decodes = (non_spec_query_lens == 1).sum().item()
@@ -322,10 +342,11 @@ class GDNAttentionMetadataBuilder(
                 non_spec_token_indx = torch.empty(
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
-                spec_state_indices_tensor = m.block_table_tensor[:, : self.num_spec + 1]
+                spec_state_indices_tensor = block_table_tensor[:, : self.num_spec + 1]
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc
                 non_spec_query_start_loc = None
+                non_spec_query_start_loc_cpu = None
             else:
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks, query_lens
@@ -335,10 +356,10 @@ class GDNAttentionMetadataBuilder(
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
-                spec_state_indices_tensor = m.block_table_tensor[
+                spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks, : self.num_spec + 1
                 ]
-                non_spec_state_indices_tensor = m.block_table_tensor[
+                non_spec_state_indices_tensor = block_table_tensor[
                     ~spec_sequence_masks, 0
                 ]
 
@@ -360,13 +381,12 @@ class GDNAttentionMetadataBuilder(
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
-                query_lens_cpu = m.query_start_loc_cpu[1:] - m.query_start_loc_cpu[:-1]
                 non_spec_query_start_loc_cpu = torch.zeros(
                     query_lens_cpu.size(0) - num_spec_decodes + 1,
                     dtype=torch.int32,
                 )
                 torch.cumsum(
-                    query_lens_cpu[~spec_sequence_masks.cpu()],
+                    query_lens_cpu[~spec_sequence_masks_cpu],
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
@@ -421,8 +441,12 @@ class GDNAttentionMetadataBuilder(
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
+                assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(non_spec_query_start_loc)
+                compute_causal_conv1d_metadata(
+                    non_spec_query_start_loc_cpu,
+                    device=query_start_loc.device,
+                )
             )
         else:
             has_initial_state = None

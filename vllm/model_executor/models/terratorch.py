@@ -18,7 +18,8 @@
 """Wrapper around `Terratorch` models"""
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -38,7 +39,6 @@ from vllm.model_executor.layers.pooler import IdentityPooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
@@ -56,12 +56,13 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import attn_type
@@ -69,33 +70,64 @@ from .interfaces_base import attn_type
 logger = init_logger(__name__)
 
 
-def _terratorch_field_names(pretrained_cfg: dict):
-    input_definition = InputDefinition(**pretrained_cfg["input"])
+def _terratorch_field_names(input_definition: InputDefinition):
     return set(input_definition.data.keys())
 
 
-def _terratorch_field_factory(
-    pretrained_cfg: dict,
-) -> Callable[
-    [Mapping[str, torch.Tensor]],
-    Mapping[str, MultiModalFieldConfig],
-]:
-    def _terratorch_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-        input_definition = InputDefinition(**pretrained_cfg["input"])
-        fields = {}
-        for input_name, input in input_definition.data.items():
+def _terratorch_field_factory(input_definition: InputDefinition):
+    def _terratorch_field_config(
+        hf_inputs: Mapping[str, torch.Tensor],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        fields = dict[str, MultiModalFieldConfig]()
+        for name, input in input_definition.data.items():
+            modality = "image"
             if input.type == InputTypeEnum.tensor:
-                fields[input_name] = "image"
+                fields[name] = MultiModalFieldConfig.shared(modality, batch_size=1)
 
-        return {
-            field_name: MultiModalFieldConfig.batched(modality=field_modality)
-            for field_name, field_modality in fields.items()
-        }
+        return fields
 
     return _terratorch_field_config
 
 
+class TerratorchMultiModalDataParser(MultiModalDataParser):
+    def __init__(self, input_definition: InputDefinition, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.input_definition = input_definition
+
+    def _parse_image_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=_terratorch_field_names(self.input_definition),
+                fields_factory=_terratorch_field_factory(self.input_definition),
+            )
+
+        return super()._parse_image_data(data)
+
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        if "image" not in mm_data:
+            mm_data = {"image": mm_data}
+
+        return super().parse_mm_data(mm_data)
+
+
 class TerratorchProcessingInfo(BaseProcessingInfo):
+    @cached_property
+    def input_definition(self) -> InputDefinition:
+        pretrained_cfg = self.get_hf_config().to_dict()["pretrained_cfg"]
+        return InputDefinition(**pretrained_cfg["input"])
+
+    def get_data_parser(self):
+        return TerratorchMultiModalDataParser(
+            self.input_definition,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -129,48 +161,13 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         return self.dummy_data_generator.get_dummy_mm_data()
 
 
-class TerratorchMultiModalDataParser(MultiModalDataParser):
-    def __init__(self, pretrained_cfg: dict, *args, **kwargs):
-        self._pretrained_cfg = pretrained_cfg
-        super().__init__(*args, **kwargs)
-
-    def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            terratorch_fields = _terratorch_field_names(self._pretrained_cfg)
-
-            return DictEmbeddingItems(
-                data,
-                modality="image",
-                required_fields=terratorch_fields,
-                fields_factory=_terratorch_field_factory(self._pretrained_cfg),
-            )
-
-        return super()._parse_image_data(data)
-
-
-class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
-    def __init__(
-        self,
-        info: TerratorchProcessingInfo,
-        dummy_inputs: "BaseDummyInputsBuilder[TerratorchProcessingInfo]",
-        *,
-        cache: MultiModalProcessorOnlyCache | None = None,
-    ) -> None:
-        self.pretrained_cfg = info.get_hf_config().to_dict()["pretrained_cfg"]
-        super().__init__(info=info, dummy_inputs=dummy_inputs, cache=cache)
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return TerratorchMultiModalDataParser(pretrained_cfg=self.pretrained_cfg)
-
+class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _terratorch_field_factory(self.pretrained_cfg)(hf_inputs)
+        return _terratorch_field_factory(self.info.input_definition)(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -183,28 +180,21 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if "image" in mm_data:
-            image_data = mm_data["image"]
-            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
-        else:
-            image_data = mm_data
-            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
 
-        mm_data = {"image": image_data}
-
-        mm_items = self._to_mm_items(mm_data)
-        tokenization_kwargs = tokenization_kwargs or {}
         mm_hashes = self._hash_mm_items(
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
-        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
-        mm_processed_data = BatchFeature(image_data)
+        _, passthrough_data = self._get_hf_mm_data(mm_items)
+        mm_processed_data = BatchFeature(dict(passthrough_data), tensor_type="pt")
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -272,9 +262,15 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        model_output = self.inference_runner.forward(**kwargs)
+        input_len = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
 
-        return model_output.output
+        batched_kwargs = {k: v.unsqueeze(0) for k, v in kwargs.items()}
+        model_output = self.inference_runner.forward(**batched_kwargs).output
+
+        # The leading dimension of hidden states needs to equal input length
+        return model_output.expand(
+            input_len, *(-1 for _ in range(model_output.ndim - 1))
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_list = []
