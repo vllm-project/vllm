@@ -1734,8 +1734,7 @@ class OpenAIServingChat(OpenAIServing):
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-            multimodal_metadata=request_metadata.multimodal_metadata,
+            total_tokens=num_prompt_tokens + num_generated_tokens
         )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
@@ -1755,6 +1754,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
+            multimodal_metadata=request_metadata.multimodal_metadata,
         )
 
         # Log complete response if output logging is enabled

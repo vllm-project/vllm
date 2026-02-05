@@ -865,9 +865,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if isinstance(video, tuple) and len(video) >= 2 and isinstance(video[1], dict):
             video_metadata = video[1]
             self._tracker.video_metadata.append(video_metadata)
-            placeholder = self._tracker.add("video", (video[0], uuid))
-        else:
-            placeholder = self._tracker.add("video", (video, uuid))
+
+        placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
 
@@ -1011,6 +1010,12 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         video = (
             await self._connector.fetch_video_async(video_url) if video_url else None
         )
+
+        if isinstance(video, tuple) and len(video) >= 2 and isinstance(video[1], dict):
+            print("VIDEO METADATA: ", video[1])
+            video_metadata = video[1]
+            self._tracker.video_metadata.append(video_metadata)
+            
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
