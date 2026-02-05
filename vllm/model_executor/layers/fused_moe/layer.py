@@ -494,7 +494,6 @@ class FusedMoE(CustomOp):
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
-        self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
@@ -1032,10 +1031,7 @@ class FusedMoE(CustomOp):
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        expert_id: int,
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
     ):
         param_data = param.data
 
@@ -1298,8 +1294,7 @@ class FusedMoE(CustomOp):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    # tp_rank=self.tp_rank,
-                    tp_rank=0,
+                    tp_rank=self.tp_rank,
                 )
             return True if return_success else None
 
