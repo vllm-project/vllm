@@ -906,9 +906,15 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
+
+            print("[_update_after_schedule] req_id: ", req_id)
+            print("[_update_after_schedule] request.num_scheduled_token: ", num_scheduled_token)
+
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+            print("[_update_after_schedule] request.num_computed_tokens: ", request.num_computed_tokens)
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -1215,10 +1221,15 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+
+        print("[_update_from_output] enter")
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        print("[_update_from_output] num_scheduled_tokens: ", num_scheduled_tokens)
+
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
@@ -1272,6 +1283,9 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+
+            print("[_update_from_output] scheduled_spec_token_ids: ", scheduled_spec_token_ids)
+
             if scheduled_spec_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
@@ -1282,6 +1296,7 @@ class Scheduler(SchedulerInterface):
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 if request.num_computed_tokens > 0:
+                    print("[update_from_output] Adjusting num_computed_tokens to remove %d rejected tokens" % (num_rejected))
                     request.num_computed_tokens -= num_rejected
                 # If async scheduling, num_output_placeholders also includes
                 # the scheduled spec tokens count and so is similarly adjusted.

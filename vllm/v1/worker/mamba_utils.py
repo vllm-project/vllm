@@ -136,6 +136,7 @@ def preprocess_mamba(
     num_elements_list: list[int] = []
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
+        print("[preprocess_mamba] req_state.num_computed_tokens: ", req_state.num_computed_tokens)
         prev_state_idx = mamba_state_idx.get(req_id)
         if prev_state_idx is None:
             # new / resumed request, no previous state
@@ -198,8 +199,15 @@ def postprocess_mamba(
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
+   
+        
+
         num_draft_tokens = len(scheduled_spec_decode_tokens_dict.get(req_id, []))
         num_scheduled_tokens = num_scheduled_tokens_dict[req_id]
+
+        print("[postprocess_mamba] num_computed_tokens: ", num_computed_tokens)
+        print("[postprocess_mamba] num_scheduled_tokens: ", num_scheduled_tokens)
+
         num_accepted_tokens = num_accepted_tokens_cpu[i]
         num_tokens_running_state = (
             num_computed_tokens + num_scheduled_tokens - num_draft_tokens
@@ -213,6 +221,8 @@ def postprocess_mamba(
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
+
+            print("src_block_idx: %d, dest_block_idx: %d, accept_token_bias: %d" % (src_block_idx, dest_block_idx, accept_token_bias))
             collect_mamba_copy_meta(
                 src_state_list,
                 dest_state_list,
@@ -229,3 +239,4 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(src_state_list, dest_state_list, num_elements_list)
+    print("[postprocess_mamba] finish")

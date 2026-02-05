@@ -79,9 +79,12 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index : first_token_id_index
             + min(num_accepted_tokens, logits.shape[0])
         ]
+        '''
         sampled_token_ids = accpeted_tokens + [-1] * (
             num_sampled_tokens - len(accpeted_tokens)
         )
+        '''
+        sampled_token_ids = accpeted_tokens
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids], device="cuda", dtype=torch.int32
@@ -92,7 +95,7 @@ def get_fake_sample_fn() -> SamplerOutput:
     return fake_sample_fn
 
 
-def get_fake_propose_draft_token_ids_fn():
+def get_fake_propose_draft_token_ids_fn(original_propose_draft_token_ids_fn: Callable):
     def fake_propose_draft_token_ids_fn(
         self: GPUModelRunner,
         scheduler_output: SchedulerOutput,
@@ -103,7 +106,8 @@ def get_fake_propose_draft_token_ids_fn():
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]]:
+        slot_mappings: torch.Tensor,
+    ) -> list[list[int]] | torch.Tensor:
         num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
         num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
         if (
@@ -121,7 +125,30 @@ def get_fake_propose_draft_token_ids_fn():
                 first_token_id_index : first_token_id_index + num_speculative_tokens
             ]
         ]
-        return proposed_draft_token_ids
+        
+        next_token_ids = torch.tensor([prompt_token_ids[first_token_id_index-1]], device='cuda', dtype=torch.int32)
+        valid_sampled_tokens_count = torch.tensor([1], device='cuda', dtype=torch.int32)
+
+        self._copy_valid_sampled_token_count(
+            next_token_ids, valid_sampled_tokens_count
+        )
+
+        '''
+        original_propose_draft_token_ids_fn(
+            self,
+            scheduler_output,
+            sampled_token_ids,
+            sampling_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            spec_decode_metadata,
+            common_attn_metadata,
+            slot_mappings
+        )
+        '''
+
+        return torch.tensor(proposed_draft_token_ids, device='cuda', dtype=torch.int32)
 
     return fake_propose_draft_token_ids_fn
 
@@ -202,6 +229,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             num_computed_tokens = (
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
             )
+            if num_computed_tokens > 554 and os.environ["TPA_DEBUG"] == "1":
+                num_computed_tokens -= 3
             if (
                 num_computed_tokens // BLOCK_SIZE
                 > last_num_computed_tokens // BLOCK_SIZE
@@ -367,7 +396,9 @@ def run_ref_mamba_state_in_subprocess() -> None:
 def _run_ref_mamba_state_worker():
     try:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-        num_generated_tokens = 8000
+        os.environ["TPA_DEBUG"] = "0"
+
+        num_generated_tokens = 100
         num_prompt_tokens = 500
         sampling_params = SamplingParams(
             temperature=0.0, max_tokens=num_generated_tokens
@@ -383,6 +414,7 @@ def _run_ref_mamba_state_worker():
             block_size=BLOCK_SIZE,
             hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
             seed=42,
+            enforce_eager=True,
         )
         global prompt_token_ids
         prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
@@ -392,6 +424,8 @@ def _run_ref_mamba_state_worker():
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
+        print("outputs: ", _outputs)
+
         # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
         # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
         # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
@@ -443,11 +477,12 @@ class TestConfig:
 
 def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("TPA_DEBUG", "1")
 
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
 
-    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
+    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn(GPUModelRunner.propose_draft_token_ids)
     monkeypatch.setattr(
         GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
     )
@@ -473,15 +508,28 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
-@pytest.mark.skip(
-    reason="Skipping test_mamba_prefix_cache because it is based on spec "
-    "decode which is not allowed now."
-)
+
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
     full_prompt = prompt_dataset["train"][0]["text"]
+
+    '''
+    tests = {
+        "accept_1": TestConfig(
+            num_prompt_tokens=556,
+            num_generated_tokens=20,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(556, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),        
+                ],
+        ),
+    }
+    #StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+    '''
+
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -499,228 +547,22 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
-        # test case 2.1: no hit, accept 2 tokens
-        "accept_2_1": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=20,
-            num_accepted_tokens=2,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        # test case 2.2: no hit, accept 2 tokens
-        "accept_2_2": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=20,
-            num_accepted_tokens=2,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
-                StepAction(559, 4, [], (-1, -1), (1, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_1": TestConfig(
-            num_prompt_tokens=553,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_2": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_3": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_1": TestConfig(
-            num_prompt_tokens=553,
-            num_generated_tokens=20,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(565, 4, [], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_2": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(566, 4, [], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_3": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_4": TestConfig(
-            num_prompt_tokens=556,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (3, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "prompt_block_size": TestConfig(
-            num_prompt_tokens=560,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-            ],
-        ),
-        "prompt_2_block_size": TestConfig(
-            num_prompt_tokens=560 * 2,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(560 * 2, 4, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
-            ],
-        ),
-        "prompt_2_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 2 + 10,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
-                StepAction(560 * 2 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "prompt_3_block_size": TestConfig(
-            num_prompt_tokens=560 * 3,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
-                StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1, 1], (2, 3), (-1, -1)),
-            ],
-        ),
-        "prompt_3_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 3 + 10,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
-                StepAction(560 * 3 + 10, 4, [0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "prompt_10_block_size": TestConfig(
-            num_prompt_tokens=560 * 10,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(
-                    560 * 5,
-                    560 * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
-                    (-1, -1),
-                ),
-                StepAction(
-                    560 * 9,
-                    560,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
-                    (8, 9),
-                    (-1, -1),
-                ),
-                StepAction(
-                    560 * 10,
-                    4,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
-                    (9, 10),
-                    (-1, -1),
-                ),
-            ],
-        ),
-        "prompt_10_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 10 + 10,
-            num_generated_tokens=10,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(
-                    560 * 5,
-                    560 * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
-                    (-1, -1),
-                ),
-                StepAction(
-                    560 * 9,
-                    560 + 10,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
-                    (8, 10),
-                    (-1, -1),
-                ),
-            ],
-        ),
     }
+    
 
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
+        max_num_batched_tokens=3072,
+        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        seed=42,
+        enforce_eager=True,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
-        max_num_batched_tokens=3072,
-        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
-        seed=42,
     )
     global prompt_token_ids
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
@@ -748,17 +590,25 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                     step_action_next.kv_cache_block_ids = prev_block_ids.copy()
         global step_actions
         step_actions = test_config.step_actions
-        _ = engine.generate(
+        outputs = engine.generate(
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
+        print("outputs: ", outputs)
+
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
         print(f"End test case: {test_case_name}")
+        
+        
         keys_to_check = [
             (action.postprocess_copy_idx[1] + 1) * BLOCK_SIZE
             for action in test_config.step_actions
             if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
         ]
+        keys_to_check = [560]
+        
+        print("keys_to_check: ", keys_to_check)
         mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
+        

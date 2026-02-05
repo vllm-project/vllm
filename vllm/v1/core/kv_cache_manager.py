@@ -285,6 +285,8 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+
+        print("[allocate_slots] request: ", request)
         # When loading KV data asynchronously, we may have zero new tokens to
         # compute while still allocating slots for externally computed tokens.
         if num_new_tokens == 0 and num_external_computed_tokens == 0:
