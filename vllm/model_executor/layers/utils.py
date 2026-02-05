@@ -180,7 +180,7 @@ def rocm_unquantized_gemm_impl(
         and on_gfx9()
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and x.is_contiguous()
+        # and x.is_contiguous()
     )
 
     if use_skinny is not True:
