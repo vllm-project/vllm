@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
-from transformers.tokenization_utils import TensorType
+from transformers.utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
 from vllm.config import MultiModalConfig, VllmConfig

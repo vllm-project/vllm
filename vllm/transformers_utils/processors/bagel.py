@@ -6,8 +6,16 @@
 from transformers import AutoProcessor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessorMixin
+from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+
+
+class BagelProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
+    _defaults = {
+        "images_kwargs": {
+            "return_tensors": "pt",
+        },
+    }
 
 
 class BagelProcessor(ProcessorMixin):
@@ -27,34 +35,32 @@ class BagelProcessor(ProcessorMixin):
         | list[TextInput]
         | list[PreTokenizedInput] = None,
         images: ImageInput = None,
-        **kwargs,
+        **kwargs: Unpack[BagelProcessorKwargs],
     ):
         """
         Main method to prepare for the model one or several sequences(s) and image(s).
         """
+        output_kwargs = self._merge_kwargs(
+            BagelProcessorKwargs,
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+            **kwargs,
+        )
+
         if images is not None:
             # Process images with the image processor
-            # Ensure return_tensors is set to "pt" for PyTorch tensors
-            image_kwargs = {**kwargs}
-            if "return_tensors" not in image_kwargs:
-                image_kwargs["return_tensors"] = "pt"
-            pixel_values = self.image_processor(images, **image_kwargs)
+            pixel_values = self.image_processor(
+                images, **output_kwargs["images_kwargs"]
+            )
         else:
-            pixel_values = None
+            pixel_values = {}
 
-        text_inputs = self.tokenizer(text, **kwargs) if text is not None else None
+        text_inputs = (
+            self.tokenizer(text, **output_kwargs["text_kwargs"])
+            if text is not None
+            else {}
+        )
 
-        if pixel_values is not None and text_inputs is not None:
-            # Combine text and image inputs into BatchFeature
-            combined = dict(text_inputs)
-            combined["pixel_values"] = pixel_values["pixel_values"]
-            return BatchFeature(combined)
-        elif pixel_values is not None:
-            return pixel_values
-        elif text_inputs is not None:
-            return BatchFeature(dict(text_inputs))
-        else:
-            return BatchFeature({})
+        return BatchFeature(**pixel_values, **text_inputs)
 
     def batch_decode(self, *args, **kwargs):
         """
