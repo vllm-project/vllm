@@ -152,6 +152,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 quant_config, layer.moe_config, layer
             )
 
+        # 2. Check for W4A16 INT4
+        if quant_config._is_xpu_w4a16_int4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Int4MoEMethod(
+                quant_config, layer.moe_config, layer
+            )
+
+        # 3. Check for W4A16 MXFP4
+        if quant_config._is_xpu_w4a16_mxfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Mxfp4MoEMethod(
+                quant_config, layer.moe_config, layer
+            )
+
         if quant_config._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
@@ -299,7 +311,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w13_weight", w13_weight)
+        layer.register_parameter("w13_weight_packed", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # W2: [Experts, Hidden, Inter // 2]
@@ -312,7 +324,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w2_weight", w2_weight)
+        layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # --- Scale Allocation (Block-wise) ---
@@ -346,6 +358,10 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -357,7 +373,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Post-processing / Validation for MXFP4.
         """
-        device = layer.w13_weight.device
+        device = layer.w13_weight_packed.device
 
         # Ensure scales are on the correct device
         if layer.w13_weight_scale.device != device:
@@ -403,10 +419,10 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # 2. Kernel Execution
         return xpu_fused_moe(
             hidden_states=x,
-            w13=layer.w13_weight,
+            w13=layer.w13_weight_packed,
             w13_scales=layer.w13_weight_scale,
             w13_bias=layer.w13_bias if self.moe.has_bias else None,
-            w2=layer.w2_weight,
+            w2=layer.w2_weight_packed,
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             topk_weights=routing_weights,
@@ -448,8 +464,7 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
         """
         Allocate packed INT4 weights (uint8) and group-wise scales.
         """
-        # INT4 weights are packed into UINT8 (2 weights per byte)
-        weight_dtype = torch.uint8
+        weight_dtype = torch.int32
         # Scales are usually kept in high precision (bf16/fp16)
         scale_dtype = params_dtype if params_dtype else torch.bfloat16
 
@@ -467,12 +482,14 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size // 2,  # <--- Packed: 2 int4 in 1 uint8
+                hidden_size // 8,  # <--- Packed: 2 int4 in 1 uint8
                 dtype=weight_dtype,
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w13_weight", w13_weight)
+
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        # set_weight_attrs(w13_weight, weight_loader_attrs)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # W2: [Experts, Hidden, Inter // 2]
@@ -481,12 +498,14 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // 2,  # <--- Packed
+                intermediate_size_per_partition // 8,  # <--- Packed
                 dtype=weight_dtype,
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w2_weight", w2_weight)
+
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        # set_weight_attrs(w2_weight, weight_loader_attrs)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # --- Scale Allocation (Group-wise) ---
@@ -536,7 +555,7 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
         scales are simply concatenated along the 'Out' dimension.
         """
         # Ensure scales are on the correct device
-        device = layer.w13_weight.device
+        device = layer.w13_weight_packed.device
         if layer.w13_weight_scale.device != device:
             layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
         if layer.w2_weight_scale.device != device:
@@ -544,40 +563,51 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
 
         # Validation (Optional)
         assert (
-            layer.w13_weight.dtype == torch.uint8
+            layer.w13_weight_packed.dtype == torch.int32
         ), "W13 must be uint8 packed for INT4"
-        assert layer.w2_weight.dtype == torch.uint8, "W2 must be uint8 packed for INT4"
+        assert (
+            layer.w2_weight_packed.dtype == torch.int32
+        ), "W2 must be uint8 packed for INT4"
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def apply(
-        self,
-        layer: FusedMoE,
-        router: FusedMoERouter,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Execute the MoE Layer with INT4 XPU Kernel.
-        """
+    def apply(self, layer, router, x, router_logits):
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-        # 1. Router: Select experts
         routing_weights, selected_experts = router.select_experts(
             hidden_states=x, router_logits=router_logits
         )
 
-        # 2. Expert Computation: Invoke the XPU Fused MoE Kernel
-        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+        # int32 (K/8) -> uint8 (K/2)
+        w13_uint8 = layer.w13_weight_packed.view(torch.uint8)
+        w2_uint8 = layer.w2_weight_packed.view(torch.uint8)
+
+        # # === 调试打印 (Debug) ===
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"\n[DEBUG XPU MoE] Group Size Check:")
+        #     print(f"  W13 Weight (uint8): {w13_uint8.shape}")
+        #     print(f"  W13 Scale:          {layer.w13_weight_scale.shape}")
+
+        #     # 手动模拟 Kernel 的推断逻辑
+        #     w13_k = w13_uint8.shape[-1] * 2  # uint8 * 2 = 实际参数量
+        #     w13_g = layer.w13_weight_scale.shape[-1]
+        #     if w13_g > 0:
+        #         print(f"  -> W13 Infer: {w13_k} / {w13_g} = {w13_k / w13_g}")
+
+        #     print(f"  W2 Weight (uint8):  {w2_uint8.shape}")
+        #     print(f"  W2 Scale:           {layer.w2_weight_scale.shape}")
+        #     # ...
+        # # =======================
 
         return xpu_fused_moe(
             hidden_states=x,
-            w13=layer.w13_weight,
+            w13=w13_uint8,  # 传入转换后的 uint8 视图
             w13_scales=layer.w13_weight_scale,
             w13_bias=layer.w13_bias if self.moe.has_bias else None,
-            w2=layer.w2_weight,
+            w2=w2_uint8,  # 传入转换后的 uint8 视图
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             topk_weights=routing_weights,
@@ -588,7 +618,6 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
             // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
             ep_size=self.moe.moe_parallel_config.ep_size,
-            # Key Change: Enable INT4 mode
             is_int4=True,
         )
 
