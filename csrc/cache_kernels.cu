@@ -692,9 +692,9 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
   // bytes float32)]
   const int64_t packed_data_size =
       head_dim / 2;  // packed data size in uint8 per token
-  const int64_t dst_offset = block_idx * cache_block_size * cache_stride +
-                             block_offset * packed_data_size +
-                             (block_start_idx / 2);
+  const int64_t token_base_offset =
+      block_idx * cache_block_size * cache_stride + block_offset * cache_stride;
+  const int64_t dst_offset = token_base_offset + (block_start_idx / 2);
 
   // Convert first 8 values
   float2 vec1[4];
@@ -725,8 +725,6 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
   // No need to restrict which thread writes (each thread writes a different
   // scale location)
   // Calculate scale storage location: after packed data for this token
-  const int64_t token_base_offset =
-      block_idx * cache_block_size * cache_stride + block_offset * cache_stride;
   const int64_t scale_offset_in_token =
       packed_data_size;  // bytes after packed data
   const int64_t scale_idx_in_token =

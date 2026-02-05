@@ -82,6 +82,7 @@ class AttentionSpec(KVCacheSpec):
         # For NVFP4, data is packed: 2 FP4 values per uint8, so head_size/2
         # Scales are stored in kv_cache itself (as float32), one per 16 elements
         if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
             # NVFP4: packed data (head_size/2 uint8) + scales
             # (head_size/16 * 4 bytes float32)
             packed_data_size = (self.head_size // 2) * get_dtype_size(
@@ -208,6 +209,7 @@ class FullAttentionSpec(AttentionSpec):
         # For NVFP4, data is packed: 2 FP4 values per uint8
         # Scales are stored in kv_cache itself (as float32), one per 16 elements
         if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
             # NVFP4: packed data (head_size/2 uint8) + scales
             # (head_size/16 * 4 bytes float32)
             packed_data_size = (
@@ -248,6 +250,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         # - Scales are stored in kv_cache itself (as float32), one per 16 elements
         # - MLA stores a single vector (kv_c + k_pe concatenated), not separate K and V
         if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
             # NVFP4 packs 2 FP4 values into 1 uint8, so packed data is head_size/2 bytes
             packed_data_size = self.head_size // 2  # uint8 = 1 byte per packed element
             scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes per scale
