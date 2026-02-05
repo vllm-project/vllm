@@ -428,6 +428,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 if (
                     not self.attn_backend.forward_includes_kv_cache_update
                     and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
                 ):
                     kv_cache_dummy_dep = unified_kv_cache_update(
                         key, value, self.layer_name
@@ -445,6 +447,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 if (
                     not self.attn_backend.forward_includes_kv_cache_update
                     and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
