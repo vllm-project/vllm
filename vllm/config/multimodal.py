@@ -51,7 +51,6 @@ DummyOptions: TypeAlias = (
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
@@ -108,6 +107,12 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_encoder_only: bool = False
+    """
+    When enabled, skips the language component of the model.
+
+    This is usually only valid in disaggregated Encoder process.
+    """
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).
@@ -207,7 +212,8 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

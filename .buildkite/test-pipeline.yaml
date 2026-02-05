@@ -63,7 +63,9 @@ steps:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
+  - tests/test_pooling_params.py
   - tests/multimodal
+  - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
   - tests/tool_parsers
@@ -74,7 +76,9 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pooling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
@@ -202,6 +206,7 @@ steps:
   - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - examples/offline_inference/new_weight_syncing/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -236,9 +241,15 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
+  # OLD rlhf examples
   - pushd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - popd
+  # NEW rlhf examples
+  - pushd ../examples/offline_inference/new_weight_syncing
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
@@ -360,7 +371,7 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
-    - pytest -v -s v1/spec_decode
+    - pytest -v -s -m 'not slow_test' v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
@@ -374,6 +385,8 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -396,10 +409,12 @@ steps:
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention
 
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
@@ -531,9 +546,11 @@ steps:
   commands:
     # fp8 kv scales not supported on sm89, tested on Blackwell instead
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
-    # Limit to no custom ops to reduce running time
-    # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
+    # # Limit to no custom ops to reduce running time
+    # # Wrap with quotes to escape yaml and avoid starting -k string with a -
+    # - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
+    # Old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293
+    # in favor of new tests in fusions_e2e. We avoid replicating the new jobs in this file as it's deprecated.
 
 - label: Cudagraph test
   timeout_in_minutes: 20
@@ -562,8 +579,9 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -623,6 +641,56 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  gpu: h100
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
+
+  
+- label: Kernels FP8 MoE Test (1 H100)
+  timeout_in_minutes: 90
+  gpu: h100
+  num_gpus: 1
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_cutlass_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer.py
+    - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_moe.py
+    # - pytest -v -s kernels/moe/test_block_fp8.py - failing on main
+    - pytest -v -s kernels/moe/test_block_int8.py
+    - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+
+- label: Kernels FP8 MoE Test (2 H100s)
+  timeout_in_minutes: 90
+  gpu: h100
+  num_gpus: 2
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
+    - pytest -v -s kernels/moe/test_deepep_moe.py
+    - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
+    # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
+  
+- label: Kernels Fp4 MoE Test (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  num_gpus: 1
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
@@ -736,10 +804,11 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/
+  - tests/models/test_terratorch.py
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
   commands:
-    - pytest -v -s models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
 - label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
@@ -961,7 +1030,7 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
@@ -1012,7 +1081,6 @@ steps:
   - tests/compile/test_fusion_attn.py
   - tests/compile/test_silu_mul_quant_fusion.py
   - tests/compile/distributed/test_fusion_all_reduce.py
-  - tests/compile/distributed/test_fusions_e2e.py
   - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
@@ -1020,73 +1088,14 @@ steps:
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_gpus=2 is not set
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
-    # Wrap with quotes to escape yaml
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+    #  # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
+    #  # Wrap with quotes to escape yaml
+    #  - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+    # Old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293
+    # in favor of new tests in fusions_e2e. We avoid replicating the new jobs in this file as it's deprecated.
+
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
-
-- label: Blackwell Fusion E2E Tests # 30 min
-  timeout_in_minutes: 40
-  working_dir: "/vllm-workspace/"
-  gpu: b200
-  optional: true
-  num_gpus: 2
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/distributed/test_fusions_e2e.py
-  commands:
-    - nvidia-smi
-    # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
-
-- label: Hopper Fusion E2E Tests (H100) # 10min
-  timeout_in_minutes: 70
-  working_dir: "/vllm-workspace/"
-  gpu: h100
-  optional: true
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/test_fusion_attn.py
-  commands:
-    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    - pytest -v -s tests/compile/test_fusion_attn.py
-
-- label: Hopper Fusion Distributed E2E Tests (2xH100)  # 70min
-  timeout_in_minutes: 70
-  working_dir: "/vllm-workspace/"
-  gpu: h100
-  optional: true
-  num_gpus: 2
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/distributed/test_fusions_e2e.py
-  commands:
-    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
-    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
 
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
@@ -1145,6 +1154,8 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_packed_tensor.py
+  - pytest -v -s distributed/test_weight_transfer.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
@@ -1259,7 +1270,7 @@ steps:
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
-  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - pytest -v -s plugins/lora_resolvers # unit tests for lora resolver plugins
 
 - label: Pipeline + Context Parallelism Test # 45min
   timeout_in_minutes: 60
@@ -1362,6 +1373,20 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
+- label: Acceptance Length Test (Large Models) # optional
+  timeout_in_minutes: 120
+  gpu: h100
+  optional: true
+  num_gpus: 1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/models/mlp_speculator.py
+  - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+
 - label: LM Eval Large Models # optional
   gpu: a100
   optional: true
@@ -1399,17 +1424,18 @@ steps:
     - pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
 
-##### H200 test #####
-- label: Distributed Tests (H200) # optional
-  gpu: h200
+- label: Distributed Tests (H100) # optional
+  gpu: h100
   optional: true
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
+
+##### H200 test #####
 
 - label: LM Eval Large Models (H200) # optional
   timeout_in_minutes: 60

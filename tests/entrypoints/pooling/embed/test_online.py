@@ -17,16 +17,14 @@ from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.platforms import current_platform
-from vllm.tokenizers import get_tokenizer
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
+from vllm.entrypoints.pooling.utils import (
     MetadataItem,
-    binary2tensor,
     build_metadata_items,
     decode_pooling_output,
 )
+from vllm.platforms import current_platform
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -216,64 +214,6 @@ async def test_completion_request_batched(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_conversation_embedding(
-    server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
-):
-    messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
-    ]
-
-    chat_response = requests.post(
-        server.url_for("v1/embeddings"),
-        json={
-            "model": model_name,
-            "messages": messages,
-            "encoding_format": "float",
-        },
-    )
-    chat_response.raise_for_status()
-    chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
-
-    tokenizer = get_tokenizer(tokenizer_name=model_name)
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        chat_template=DUMMY_CHAT_TEMPLATE,
-        add_generation_prompt=True,
-        continue_final_message=False,
-        tokenize=False,
-    )
-    completion_response = await client.embeddings.create(
-        model=model_name,
-        input=prompt,
-        encoding_format="float",
-        # To be consistent with chat
-        extra_body={"add_special_tokens": False},
-    )
-    completion_embeddings = EmbeddingResponse.model_validate(
-        completion_response.model_dump(mode="json")
-    )
-
-    assert chat_embeddings.id is not None
-    assert completion_embeddings.id is not None
-    assert chat_embeddings.created <= completion_embeddings.created
-    assert chat_embeddings.model_dump(exclude={"id", "created"}) == (
-        completion_embeddings.model_dump(exclude={"id", "created"})
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: str):
     input_texts = [
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
@@ -350,7 +290,129 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
 
 
 @pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_request(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
+):
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
+
+    # test chat request basic usage
+    chat_response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "encoding_format": "float",
+        },
+    )
+    chat_response.raise_for_status()
+    chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
+
+    tokenizer = get_tokenizer(tokenizer_name=model_name)
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=DUMMY_CHAT_TEMPLATE,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        tokenize=False,
+    )
+    completion_response = await client.embeddings.create(
+        model=model_name,
+        input=prompt,
+        encoding_format="float",
+        # To be consistent with chat
+        extra_body={"add_special_tokens": False},
+    )
+    completion_embeddings = EmbeddingResponse.model_validate(
+        completion_response.model_dump(mode="json")
+    )
+
+    assert chat_embeddings.id is not None
+    assert completion_embeddings.id is not None
+    assert chat_embeddings.created <= completion_embeddings.created
+    assert chat_embeddings.model_dump(exclude={"id", "created"}) == (
+        completion_embeddings.model_dump(exclude={"id", "created"})
+    )
+
+    # test add_generation_prompt
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={"model": model_name, "messages": messages, "add_generation_prompt": True},
+    )
+
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 34
+
+    # test continue_final_message
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+        },
+    )
+
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 33
+
+    # test add_special_tokens
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={"model": model_name, "messages": messages, "add_special_tokens": True},
+    )
+
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 36
+
+    # test continue_final_message with add_generation_prompt
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+            "add_generation_prompt": True,
+        },
+    )
+    assert (
+        "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        in response.json()["error"]["message"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_invocations_completion_request(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI
+):
     request_args = {
         "model": MODEL_NAME,
         "input": input_text,
@@ -381,7 +443,7 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
 
 
 @pytest.mark.asyncio
-async def test_invocations_conversation(server: RemoteOpenAIServer):
+async def test_invocations_chat_request(server: RemoteOpenAIServer):
     messages = [
         {
             "role": "user",
@@ -471,7 +533,7 @@ async def test_base64_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_base64 = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -510,7 +572,7 @@ async def test_bytes_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -554,7 +616,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     float_data = [d.embedding for d in responses_float.data]
     embedding_size = len(float_data[0])
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -695,6 +757,4 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")

@@ -16,6 +16,20 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+MOE_LAYER_ROUTER_GATE_SUFFIXES = {
+    "gate",
+    "router",
+    "router_gate",
+    "shared_expert_gate",
+    "expert_gate",
+}
+
+
+def is_layer_moe_router_gate(prefix: str) -> bool:
+    if not prefix:
+        return False
+    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
+
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     # Shuffle weight along the last dimension so that
@@ -137,6 +151,11 @@ def rocm_unquantized_gemm_impl(
 
     import math
 
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
@@ -146,6 +165,7 @@ def rocm_unquantized_gemm_impl(
             and n <= 128
             and k > 512
             and math.ceil(k / 512) * math.ceil(m / 16) < get_cu_count()
+            and x.is_contiguous()
         )
         # k == 2880 and (m == 640 or m == 128))
     )
@@ -155,16 +175,12 @@ def rocm_unquantized_gemm_impl(
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-        return gemm_a16w16(x, weight, bias)
-
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx9()
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
+        and x.is_contiguous()
     )
 
     if use_skinny is not True:
@@ -216,8 +232,14 @@ def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
 ) -> None:
+    # skip for missing layers
+    if layer.weight.is_meta:
+        layer.cpu_linear = torch.nn.functional.linear
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
+
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
