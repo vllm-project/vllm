@@ -1553,25 +1553,6 @@ class GPUModelRunner(
         )
         self.num_computed_tokens.copy_to_gpu(num_reqs)
 
-        # Compute positions and seq_lens from num_computed_tokens BEFORE async
-        # correction. This ensures positions, seq_lens, and input_ids are all
-        # consistent (all use optimistic values for async spec decode).
-        req_indices_gpu = torch.from_numpy(req_indices).to(
-            self.device, non_blocking=True
-        )
-        self.arange.copy_to_gpu(total_num_scheduled_tokens)
-        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
-            self.device, non_blocking=True
-        )
-        self.positions.gpu[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-            + self.arange.gpu[:total_num_scheduled_tokens]
-        )
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
-        )
-        self.seq_lens[num_reqs:].fill_(0)
-
         self.num_accepted_tokens.np[:num_reqs] = (
             self.input_batch.num_accepted_tokens_cpu[:num_reqs]
         )
@@ -1612,6 +1593,22 @@ class GPUModelRunner(
                 new_num_computed = scheduler_value - num_rejected
                 self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
                 self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+
+        req_indices_gpu = torch.from_numpy(req_indices).to(
+            self.device, non_blocking=True
+        )
+        self.arange.copy_to_gpu(total_num_scheduled_tokens)
+        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
+            self.device, non_blocking=True
+        )
+        self.positions.gpu[:total_num_scheduled_tokens] = (
+            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+            + self.arange.gpu[:total_num_scheduled_tokens]
+        )
+        self.seq_lens[:num_reqs] = (
+            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
+        )
+        self.seq_lens[num_reqs:].fill_(0)
 
         # Copy mrope_position_delta for M-RoPE models.
         if self.uses_mrope:
