@@ -40,7 +40,7 @@ class TestGenerativeScoresE2E:
         # For Qwen3-0.6B, let's use tokens for "Yes" and "No"
         # First, let's make a simple request to verify the endpoint works
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Is Paris the capital of France? Answer with Yes or No: ",
@@ -82,7 +82,7 @@ class TestGenerativeScoresE2E:
     ):
         """Test generative score with pre-tokenized inputs."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": [100, 200, 300, 400, 500],  # Pre-tokenized query
@@ -104,7 +104,7 @@ class TestGenerativeScoresE2E:
     ):
         """Test generative score with apply_softmax=False returns true model probs."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query ",
@@ -128,7 +128,7 @@ class TestGenerativeScoresE2E:
     async def test_generative_score_item_first(self, server: RemoteOpenAIServer):
         """Test generative score with item_first=True."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": " is the answer",
@@ -148,7 +148,7 @@ class TestGenerativeScoresE2E:
     ):
         """Test that empty items returns an error."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -168,7 +168,7 @@ class TestGenerativeScoresE2E:
     ):
         """Test that empty label_token_ids returns an error."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -188,7 +188,7 @@ class TestGenerativeScoresE2E:
     ):
         """Test that out-of-range token IDs return an error."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -212,7 +212,7 @@ class TestGenerativeScoresE2E:
         Unprocessable Entity error, not a 400 from our validation logic.
         """
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -228,7 +228,7 @@ class TestGenerativeScoresE2E:
     async def test_generative_score_usage_tracking(self, server: RemoteOpenAIServer):
         """Test that usage info is properly tracked."""
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "A test query with multiple tokens ",
@@ -285,7 +285,7 @@ class TestLogprobTokenIds:
         label_token_ids = list(range(100, 200))  # 100 tokens
 
         response = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query ",
@@ -315,11 +315,11 @@ class TestLogprobTokenIds:
         }
 
         response1 = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json=request_body,
         )
         response2 = requests.post(
-            server.url_for("v1/generative-scores"),
+            server.url_for("v1/score"),
             json=request_body,
         )
 
