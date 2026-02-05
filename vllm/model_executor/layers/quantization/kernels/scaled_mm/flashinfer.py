@@ -10,10 +10,12 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )
 from vllm.utils.flashinfer import (
+    flashinfer_fp8_blockscale_gemm,
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..base import DynamicMMLinearKernel, FP8Params
 from .BlockScaledMMLinearKernel import (
@@ -201,3 +203,36 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     ):
         input_2d = x.view(-1, x.shape[-1])
         return input_2d.shape[0] < 32
+
+
+def _flashinfer_fp8_blockscale_gemm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    return flashinfer_fp8_blockscale_gemm(
+        input=input,
+        weight=weight,
+        weight_scale=weight_scale,
+        out_dtype=torch.bfloat16,
+    )
+
+
+def _flashinfer_fp8_blockscale_gemm_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Required fake/meta implementation for torch.compile graph tracing.
+    """
+    return torch.empty(
+        input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
+    )
+
+
+direct_register_custom_op(
+    "flashinfer_fp8_blockscale_gemm",
+    _flashinfer_fp8_blockscale_gemm_impl,
+    fake_impl=_flashinfer_fp8_blockscale_gemm_fake,
+)

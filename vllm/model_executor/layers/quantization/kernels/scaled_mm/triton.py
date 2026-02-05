@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
@@ -124,3 +125,41 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             out_dtype,
         )
+
+
+# TODO we should be able to change the type of block_size to GroupShape
+# after we resolve GroupShape compilation issue
+# https://github.com/vllm-project/vllm/issues/25270
+def _w8a8_triton_block_scaled_mm_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    from ...utils.fp8_utils import w8a8_triton_block_scaled_mm
+
+    return w8a8_triton_block_scaled_mm(
+        qx, weight, x_scale, weight_scale, block_size, output_dtype
+    )
+
+
+def _w8a8_triton_block_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(0)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "w8a8_triton_block_scaled_mm_func",
+    _w8a8_triton_block_scaled_mm_func,
+    fake_impl=_w8a8_triton_block_scaled_mm_fake,
+)

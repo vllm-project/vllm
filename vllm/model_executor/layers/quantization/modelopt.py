@@ -56,7 +56,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
 )
@@ -70,6 +69,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     is_layer_skipped,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
@@ -78,7 +78,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
 from vllm.model_executor.parameter import (
@@ -594,13 +593,19 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        block_n, block_k = self._WEIGHT_BLOCK_SIZE
         self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(block_n, block_k),
-            act_quant_group_shape=GroupShape(1, block_k),
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-            use_aiter_and_is_supported=False,
+
+        activation_quant_key = create_fp8_quant_key(
+            static=False, group_shape=GroupShape(1, self.weight_block_size[0])
+        )
+        weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(*self.weight_block_size)
+        )
+        self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
 
     def create_weights(
@@ -669,7 +674,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Keep weight in [out, in] layout for W8A8BlockFp8LinearOp.
+        # Keep weight in [out, in] layout for Fp8BlockScaledMMLinearKernel.
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         scale = layer.weight_scale
@@ -690,13 +695,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
-        )
+        return self.w8a8_block_fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):

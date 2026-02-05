@@ -7,10 +7,12 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
+    fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from ...utils.fp8_utils import deepgemm_post_process_fp8_weight_block
 from .BlockScaledMMLinearKernel import (
@@ -90,3 +92,38 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
 
         return output
+
+
+def _fp8_gemm_nt_op(
+    q_input: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
+) -> None:
+    fp8_gemm_nt(
+        (q_input, input_scale),
+        (weight, weight_scale),
+        output,
+        is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
+    )
+
+
+def _fp8_gemm_nt_op_fake(
+    q_input: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    "fp8_gemm_nt_op",
+    _fp8_gemm_nt_op,
+    mutates_args=["output"],
+    fake_impl=_fp8_gemm_nt_op_fake,
+)
