@@ -430,7 +430,7 @@ class Step3VLProcessor:
 
         if len(parts) - 1 != len(repls):
             raise ValueError(
-                "The number of placeholders does not match the number of replacements."  # noqa: E501
+                "The number of placeholders does not match the number of replacements."
             )
 
         result = [parts[0]]
@@ -466,7 +466,7 @@ class Step3VLProcessor:
             image_repl_str_lst = []
             image_repl_ids_lst = []
             num_patches = []
-            for raw_img, img_patches, patch_newline_mask in splitted_images_data:  # noqa: E501
+            for raw_img, img_patches, patch_newline_mask in splitted_images_data:
                 pixel_values_lst.extend(self._convert_images_to_pixel_values([raw_img]))
 
                 if len(img_patches) > 0:
