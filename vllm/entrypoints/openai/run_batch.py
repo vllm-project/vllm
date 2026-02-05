@@ -524,61 +524,6 @@ async def make_async_error_request_output(
     return make_error_request_output(request, error_msg)
 
 
-async def create_transcription_wrapper(
-    batch_request_body: BatchTranscriptionRequest | BatchTranslationRequest,
-    handler_fn: Callable,
-    is_translation: bool,
-) -> (
-    TranscriptionResponse
-    | TranscriptionResponseVerbose
-    | TranslationResponse
-    | TranslationResponseVerbose
-    | ErrorResponse
-):
-    """
-    Wrapper function to convert BatchTranscriptionRequest or BatchTranslationRequest
-    to TranscriptionRequest or TranslationRequest and call the appropriate handler.
-
-    Args:
-        batch_request_body: BatchTranscriptionRequest or BatchTranslationRequest
-        handler_fn: The handler function to call
-        is_translation: If True, process as translation; otherwise process
-        as transcription
-    """
-    try:
-        # Download data from URL
-        audio_data = await download_bytes_from_url(batch_request_body.file_url)
-
-        # Create a mock file from the downloaded audio data
-        mock_file = UploadFile(
-            file=BytesIO(audio_data),
-            filename="audio.bin",
-        )
-
-        # Convert batch request to regular request
-        # by copying all fields except file_url and setting file to mock_file
-        request_dict = batch_request_body.model_dump(exclude={"file_url"})
-        request_dict["file"] = mock_file
-
-        if is_translation:
-            # Create TranslationRequest from BatchTranslationRequest
-            translation_request = TranslationRequest.model_validate(request_dict)
-            return await handler_fn(audio_data, translation_request)
-        else:
-            # Create TranscriptionRequest from BatchTranscriptionRequest
-            transcription_request = TranscriptionRequest.model_validate(request_dict)
-            return await handler_fn(audio_data, transcription_request)
-    except Exception as e:
-        operation = "translation" if is_translation else "transcription"
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=f"Failed to process {operation}: {str(e)}",
-                type="BadRequestError",
-                code=HTTPStatus.BAD_REQUEST.value,
-            )
-        )
-
-
 async def run_request(
     serving_engine_func: Callable,
     request: BatchRequestInput,
@@ -626,6 +571,109 @@ async def run_request(
     return batch_output
 
 
+def make_transcription_wrapper(is_translation: bool):
+    """
+    Factory function to create a wrapper for transcription/translation handlers.
+    The wrapper converts BatchTranscriptionRequest or BatchTranslationRequest
+    to TranscriptionRequest or TranslationRequest and calls the appropriate handler.
+
+    Args:
+        is_translation: If True, process as translation; otherwise process
+        as transcription
+
+    Returns:
+        A function that takes a handler and returns a wrapped handler
+    """
+
+    def wrapper(handler_fn: Callable):
+        async def transcription_wrapper(
+            batch_request_body: (BatchTranscriptionRequest | BatchTranslationRequest),
+        ) -> (
+            TranscriptionResponse
+            | TranscriptionResponseVerbose
+            | TranslationResponse
+            | TranslationResponseVerbose
+            | ErrorResponse
+        ):
+            try:
+                # Download data from URL
+                audio_data = await download_bytes_from_url(batch_request_body.file_url)
+
+                # Create a mock file from the downloaded audio data
+                mock_file = UploadFile(
+                    file=BytesIO(audio_data),
+                    filename="audio.bin",
+                )
+
+                # Convert batch request to regular request
+                # by copying all fields except file_url and setting file to mock_file
+                request_dict = batch_request_body.model_dump(exclude={"file_url"})
+                request_dict["file"] = mock_file
+
+                if is_translation:
+                    # Create TranslationRequest from BatchTranslationRequest
+                    translation_request = TranslationRequest.model_validate(
+                        request_dict
+                    )
+                    return await handler_fn(audio_data, translation_request)
+                else:
+                    # Create TranscriptionRequest from BatchTranscriptionRequest
+                    transcription_request = TranscriptionRequest.model_validate(
+                        request_dict
+                    )
+                    return await handler_fn(audio_data, transcription_request)
+            except Exception as e:
+                operation = "translation" if is_translation else "transcription"
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=f"Failed to process {operation}: {str(e)}",
+                        type="BadRequestError",
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    )
+                )
+
+        return transcription_wrapper
+
+    return wrapper
+
+
+def handle_endpoint_request(
+    request: BatchRequestInput,
+    tracker: BatchProgressTracker,
+    url_matcher: Callable[[str], bool],
+    handler_getter: Callable[[], Callable | None],
+    wrapper_fn: Callable[[Callable], Callable] | None = None,
+) -> Awaitable[BatchRequestOutput] | None:
+    """
+    Generic handler for endpoint requests that eliminates code duplication.
+
+    Args:
+        request: The batch request input
+        tracker: Progress tracker for the batch
+        url_matcher: Function that takes a URL and returns True if it matches
+        handler_getter: Function that returns the handler function or None
+        wrapper_fn: Optional function to wrap the handler (e.g., for transcriptions)
+
+    Returns:
+        Awaitable[BatchRequestOutput] if the request was handled,
+        None if URL didn't match
+    """
+    if not url_matcher(request.url):
+        return None
+
+    handler_fn = handler_getter()
+    if handler_fn is None:
+        error_msg = f"Model does not support endpoint: {request.url}"
+        return make_async_error_request_output(request, error_msg=error_msg)
+
+    # Apply wrapper if provided (e.g., for transcriptions/translations)
+    if wrapper_fn is not None:
+        handler_fn = wrapper_fn(handler_fn)
+
+    tracker.submitted()
+    return run_request(handler_fn, request, tracker)
+
+
 def validate_run_batch_args(args):
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
@@ -637,27 +685,27 @@ def validate_run_batch_args(args):
         )
 
 
-async def run_batch(
+def build_endpoint_registry(
     engine_client: EngineClient,
     args: Namespace,
-) -> None:
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
+    base_model_paths: list[BaseModelPath],
+    request_logger: RequestLogger | None,
+    supported_tasks: set[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    Build the endpoint registry with all serving objects and handler configurations.
 
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
+    Args:
+        engine_client: The engine client
+        args: Command line arguments
+        base_model_paths: List of base model paths
+        request_logger: Optional request logger
+        supported_tasks: Set of supported tasks
 
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
-
+    Returns:
+        Dictionary mapping endpoint keys to their configurations
+    """
     model_config = engine_client.model_config
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
@@ -735,6 +783,96 @@ async def run_batch(
         else None
     )
 
+    # Registry of endpoint configurations
+    endpoint_registry: dict[str, dict[str, Any]] = {
+        "completions": {
+            "url_matcher": lambda url: url == "/v1/chat/completions",
+            "handler_getter": lambda: (
+                openai_serving_chat.create_chat_completion
+                if openai_serving_chat is not None
+                else None
+            ),
+            "wrapper_fn": None,
+        },
+        "embeddings": {
+            "url_matcher": lambda url: url == "/v1/embeddings",
+            "handler_getter": lambda: (
+                openai_serving_embedding.create_embedding
+                if openai_serving_embedding is not None
+                else None
+            ),
+            "wrapper_fn": None,
+        },
+        "score": {
+            "url_matcher": lambda url: url.endswith("/score"),
+            "handler_getter": lambda: (
+                openai_serving_scores.create_score
+                if openai_serving_scores is not None
+                else None
+            ),
+            "wrapper_fn": None,
+        },
+        "rerank": {
+            "url_matcher": lambda url: url.endswith("/rerank"),
+            "handler_getter": lambda: (
+                openai_serving_scores.do_rerank
+                if openai_serving_scores is not None
+                else None
+            ),
+            "wrapper_fn": None,
+        },
+        "transcriptions": {
+            "url_matcher": lambda url: url == "/v1/audio/transcriptions",
+            "handler_getter": lambda: (
+                openai_serving_transcription.create_transcription
+                if openai_serving_transcription is not None
+                else None
+            ),
+            "wrapper_fn": make_transcription_wrapper(is_translation=False),
+        },
+        "translations": {
+            "url_matcher": lambda url: url == "/v1/audio/translations",
+            "handler_getter": lambda: (
+                openai_serving_translation.create_translation
+                if openai_serving_translation is not None
+                else None
+            ),
+            "wrapper_fn": make_transcription_wrapper(is_translation=True),
+        },
+    }
+
+    return endpoint_registry
+
+
+async def run_batch(
+    engine_client: EngineClient,
+    args: Namespace,
+) -> None:
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
+
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
+    ]
+
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
+
+    endpoint_registry = build_endpoint_registry(
+        engine_client=engine_client,
+        args=args,
+        base_model_paths=base_model_paths,
+        request_logger=request_logger,
+        supported_tasks=supported_tasks,
+    )
+
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
@@ -748,127 +886,24 @@ async def run_batch(
 
         request = BatchRequestInput.model_validate_json(request_json)
 
-        # Determine the type of request and run it.
-        if request.url == "/v1/chat/completions":
-            chat_handler_fn = (
-                openai_serving_chat.create_chat_completion
-                if openai_serving_chat is not None
-                else None
+        # Find matching endpoint in registry and handle the request
+        # Extract the last segment from the URL to use as a key
+        url_segments = [seg for seg in request.url.split("/") if seg]
+        endpoint_key = url_segments[-1] if url_segments else None
+
+        result = None
+        if endpoint_key and endpoint_key in endpoint_registry:
+            endpoint_config = endpoint_registry[endpoint_key]
+            result = handle_endpoint_request(
+                request,
+                tracker,
+                url_matcher=endpoint_config["url_matcher"],
+                handler_getter=endpoint_config["handler_getter"],
+                wrapper_fn=endpoint_config["wrapper_fn"],
             )
-            if chat_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Chat Completions API",
-                    )
-                )
-                continue
 
-            response_futures.append(run_request(chat_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url == "/v1/embeddings":
-            embed_handler_fn = (
-                openai_serving_embedding.create_embedding
-                if openai_serving_embedding is not None
-                else None
-            )
-            if embed_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Embeddings API",
-                    )
-                )
-                continue
-
-            response_futures.append(run_request(embed_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url.endswith("/score"):
-            score_handler_fn = (
-                openai_serving_scores.create_score
-                if openai_serving_scores is not None
-                else None
-            )
-            if score_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Scores API",
-                    )
-                )
-                continue
-
-            response_futures.append(run_request(score_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url.endswith("/rerank"):
-            rerank_handler_fn = (
-                openai_serving_scores.do_rerank
-                if openai_serving_scores is not None
-                else None
-            )
-            if rerank_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Rerank API",
-                    )
-                )
-                continue
-
-            response_futures.append(run_request(rerank_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url == "/v1/audio/transcriptions":
-            transcription_handler_fn = (
-                openai_serving_transcription.create_transcription
-                if openai_serving_transcription is not None
-                else None
-            )
-            if transcription_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Transcriptions API",
-                    )
-                )
-                continue
-
-            async def transcription_wrapper(
-                batch_request_body: BatchTranscriptionRequest,
-                handler_fn: Callable = transcription_handler_fn,
-            ) -> TranscriptionResponse | TranscriptionResponseVerbose | ErrorResponse:
-                return await create_transcription_wrapper(
-                    batch_request_body, handler_fn, is_translation=False
-                )
-
-            response_futures.append(
-                run_request(transcription_wrapper, request, tracker)
-            )
-            tracker.submitted()
-        elif request.url == "/v1/audio/translations":
-            translation_handler_fn = (
-                openai_serving_translation.create_translation
-                if openai_serving_translation is not None
-                else None
-            )
-            if translation_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Translations API",
-                    )
-                )
-                continue
-
-            async def translation_wrapper(
-                batch_request_body: BatchTranslationRequest,
-                handler_fn: Callable = translation_handler_fn,
-            ) -> TranslationResponse | TranslationResponseVerbose | ErrorResponse:
-                return await create_transcription_wrapper(
-                    batch_request_body, handler_fn, is_translation=True
-                )
-
-            response_futures.append(run_request(translation_wrapper, request, tracker))
-            tracker.submitted()
+        if result is not None:
+            response_futures.append(result)
         else:
             response_futures.append(
                 make_async_error_request_output(
