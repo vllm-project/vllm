@@ -85,9 +85,9 @@ class IrOp:
         self._fake_fn = native_impl
 
         # torch registration
-        dispatch_key = "CPU"  # TODO
         vllm_ir_lib.define(self.name + self._schema_str, tags=tags)
-        vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key=dispatch_key)
+        vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key="CUDA")
+        vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key="CPU")
         vllm_ir_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
         self._torch_op_call = getattr(torch.ops.vllm_ir, name).default
