@@ -34,6 +34,10 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -359,6 +363,23 @@ class LLM:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
+
+    def get_world_size(self, include_dp: bool = True) -> int:
+        """Get the world size from the parallel config.
+
+        Args:
+            include_dp: If True (default), returns the world size including
+                data parallelism (TP * PP * DP). If False, returns the world
+                size without data parallelism (TP * PP).
+
+        Returns:
+            The world size (tensor_parallel_size * pipeline_parallel_size),
+            optionally multiplied by data_parallel_size if include_dp is True.
+        """
+        parallel_config = self.llm_engine.vllm_config.parallel_config
+        if include_dp:
+            return parallel_config.world_size_across_dp
+        return parallel_config.world_size
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
@@ -1902,6 +1923,38 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest | dict
+    ) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+        init_info_dict = (
+            request["init_info"] if isinstance(request, dict) else request.init_info
+        )
+
+        self.llm_engine.collective_rpc(
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+        )
+
+    def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
+        """
+        Update the weights of the model.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+        update_info_dict = (
+            request["update_info"] if isinstance(request, dict) else request.update_info
+        )
+
+        self.llm_engine.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
