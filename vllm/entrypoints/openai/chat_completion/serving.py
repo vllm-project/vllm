@@ -67,11 +67,11 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import TokensPrompt
-from vllm.inputs.parse import get_prompt_components
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import ParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -132,13 +132,15 @@ class OpenAIServingChat(OpenAIServing):
         self.logits_processors = self.model_config.logits_processors
 
         # set up reasoning parser
-        self.reasoning_parser = self._get_reasoning_parser(
+        self.reasoning_parser = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
         )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        self.tool_parser = self._get_tool_parser(
-            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
+        self.tool_parser = ParserManager.get_tool_parser(
+            tool_parser_name=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -185,8 +187,6 @@ class OpenAIServingChat(OpenAIServing):
         start_time = time.perf_counter()
 
         try:
-            renderer = self.engine_client.renderer
-
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
                 messages=[{"role": "user", "content": "warmup"}],
@@ -201,18 +201,10 @@ class OpenAIServingChat(OpenAIServing):
             # 3. Tokenizer initialization for chat
             await self._preprocess_chat(
                 dummy_request,
-                renderer,
                 dummy_request.messages,
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                add_generation_prompt=True,
-                continue_final_message=False,
-                tool_dicts=None,
-                documents=None,
-                chat_template_kwargs=None,
-                default_chat_template_kwargs=self.default_chat_template_kwargs,
-                tool_parser=None,
-                add_special_tokens=False,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
             )
 
             elapsed = (time.perf_counter() - start_time) * 1000
@@ -225,7 +217,10 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[Any]] | ErrorResponse:
+    ) -> (
+        tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]
+        | ErrorResponse
+    ):
         """
         render chat request by validating and preprocessing inputs.
 
@@ -302,23 +297,14 @@ class OpenAIServingChat(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                chat_template_kwargs = request.chat_template_kwargs or {}
-                chat_template_kwargs.update(reasoning_effort=request.reasoning_effort)
-
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
-                    renderer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
-                    documents=request.documents,
-                    chat_template_kwargs=chat_template_kwargs,
-                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
-                    add_special_tokens=request.add_special_tokens,
                 )
             else:
                 # For GPT-OSS.
@@ -375,7 +361,7 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = engine_prompt.get("prompt")
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -428,11 +414,15 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    engine_request, tokenization_kwargs = await self._process_inputs(
+                    tok_params = request.build_tok_params(self.model_config)
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
+                    engine_request = self.input_processor.process_inputs(
                         sub_request_id,
                         engine_prompt,
                         sampling_params,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,
@@ -689,6 +679,7 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
+            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -834,6 +825,16 @@ class OpenAIServingChat(OpenAIServing):
                     i = output.index
                     tool_parser = tool_parsers[i]
 
+                    if (
+                        self.reasoning_parser
+                        and res.prompt_token_ids
+                        and prompt_is_reasoning_end_arr[i] is None
+                    ):
+                        # only check once per choice, because prompt_token_ids
+                        # are the same for all deltas in that choice
+                        prompt_is_reasoning_end_arr[i] = (
+                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                        )
                     if finish_reason_sent[i]:
                         continue
 
@@ -936,13 +937,11 @@ class OpenAIServingChat(OpenAIServing):
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning'.
-                            if reasoning_parser.is_reasoning_end(
-                                as_list(output.token_ids)
-                            ) or (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                            if (
+                                reasoning_parser.is_reasoning_end(
+                                    as_list(output.token_ids)
                                 )
+                                or prompt_is_reasoning_end_arr[i]
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -1001,8 +1000,7 @@ class OpenAIServingChat(OpenAIServing):
                         if (
                             self.reasoning_parser is not None
                             and not reasoning_end_arr[i]
-                            and res.prompt_token_ids
-                            and reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                            and prompt_is_reasoning_end_arr[i]
                         ):
                             reasoning_end_arr[i] = True
 
@@ -1059,12 +1057,7 @@ class OpenAIServingChat(OpenAIServing):
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
-                            if (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
-                                )
-                            ):
+                            if prompt_is_reasoning_end_arr[i]:
                                 reasoning_end_arr[i] = True
                                 current_token_ids = output_token_ids
                                 # Don't update current_text, keep it as is from delta
@@ -1186,8 +1179,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_content_parts = []
                         if delta_message.content:
                             delta_content_parts.append(delta_message.content)
-                        if delta_message.reasoning_content:
-                            reasoning = delta_message.reasoning_content
+                        if delta_message.reasoning:
+                            reasoning = delta_message.reasoning
                             delta_content_parts.append(f"[reasoning: {reasoning}]")
                         if delta_message.tool_calls:
                             tool_args = "".join(

@@ -32,7 +32,12 @@ IS_AITER_FOUND = is_aiter_found()
 
 
 def is_aiter_found_and_supported() -> bool:
-    if current_platform.is_rocm() and IS_AITER_FOUND:
+    """Check if AITER is available AND enabled via environment variable.
+
+    Checks: platform (ROCm), device arch (gfx9), library existence,
+    and VLLM_ROCM_USE_AITER env variable.
+    """
+    if current_platform.is_rocm() and IS_AITER_FOUND and envs.VLLM_ROCM_USE_AITER:
         from vllm.platforms.rocm import on_gfx9
 
         return on_gfx9()
@@ -41,13 +46,11 @@ def is_aiter_found_and_supported() -> bool:
 
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
-    ROCm AITER package is supported on gfx9 archs.
+    ROCm AITER package is supported and enabled on gfx9 archs.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # checks the platform, device arch and aiter library existence.
-
         if is_aiter_found_and_supported():
             return func(*args, **kwargs)
 
@@ -64,6 +67,11 @@ if is_aiter_found_and_supported():
     from aiter import dtypes
 
     AITER_FP8_DTYPE = dtypes.fp8
+else:
+    # Placeholder when AITER is disabled - prevents NameError during module load.
+    # Note: When AITER is disabled, ops are not registered, so fake implementations
+    # referencing this variable won't actually be called at runtime.
+    AITER_FP8_DTYPE = _FP8_DTYPE
 
 
 def _rocm_aiter_fused_moe_impl(
@@ -1657,7 +1665,7 @@ class rocm_aiter_ops:
     def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int = 128,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 

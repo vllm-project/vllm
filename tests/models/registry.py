@@ -484,6 +484,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step1ForCausalLM": _HfExamplesInfo(
         "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
     ),
+    "Step3p5ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/step-3.5-flash", is_available_online=False
+    ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -517,6 +520,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "HF_ColBERT": _HfExamplesInfo("answerdotai/answerai-colbert-small-v1"),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -657,6 +661,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
+    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+    ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
@@ -680,6 +687,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCRForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR",
+    ),
+    "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-OCR-2",
     ),
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
@@ -745,6 +755,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1", trust_remote_code=True
+    ),
+    "InternS1ProForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S1-Pro",
+        trust_remote_code=True,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
@@ -870,6 +884,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
     ),
+    "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
+        "FreedomIntelligence/openPangu-VL-7B",
+        trust_remote_code=True,
+        max_model_len=4096,
+        enforce_eager=True,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,
@@ -980,7 +1000,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # disable this temporarily until we support HF format
         is_available_online=False,
     ),
-    "VoxtralStreamingGeneration": _HfExamplesInfo(
+    "VoxtralRealtimeGeneration": _HfExamplesInfo(
         "<place-holder>",
         # disable this temporarily until we support HF format
         is_available_online=False,
@@ -1103,6 +1123,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
+    ),
+    "Step3p5MTP": _HfExamplesInfo(
+        "stepfun-ai/Step-3.5-Flash",
+        trust_remote_code=True,
+        speculative_model="stepfun-ai/Step-3.5-Flash",
+        is_available_online=False,
     ),
 }
 
