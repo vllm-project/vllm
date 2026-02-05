@@ -187,7 +187,7 @@ class Scheduler(SchedulerInterface):
         # multi-modal models for convenience
         # Example: https://github.com/vllm-project/bart-plugin
         if self.is_encoder_decoder:
-            assert mm_budget and len(mm_budget.mm_max_toks_per_item) == 1, (
+            assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
                 "Encoder-decoder models are expected to implement the "
                 "multimodal interface with at most one modality."
             )
@@ -206,7 +206,7 @@ class Scheduler(SchedulerInterface):
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
         self._num_encoder_max_input_tokens = (
             mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
-            if mm_budget
+            if mm_budget and mm_budget.mm_max_toks_per_item
             else 0
         )
 
