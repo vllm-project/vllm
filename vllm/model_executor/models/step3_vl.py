@@ -89,7 +89,7 @@ class Step3VLImageEmbeddingInputs(TensorSchema):
 
 Step3VLImageInputs: TypeAlias = Step3VLImagePixelInputs | Step3VLImageEmbeddingInputs
 
-ImageWithPatches = tuple[Image.Image, list[Image.Image], list[int] | None]
+ImageWithPatches = tuple[Image.Image, list[Image.Image], list[bool] | None]
 
 MAX_IMAGE_SIZE: int = 3024
 
@@ -492,9 +492,7 @@ class Step3VLProcessor:
                     if patch_pixel_values_lst
                     else torch.empty((0, 3, self.patch_size, self.patch_size))
                 ),
-                "patch_newline_mask": torch.tensor(
-                    patch_newline_mask_lst, dtype=torch.bool
-                ),
+                "patch_newline_mask": torch.tensor(patch_newline_mask_lst),
             }
 
             text = [
