@@ -22,7 +22,7 @@ from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 @dataclass
 class FP8BlockParams(FP8Params):
     weight_scale_inv: torch.Tensor
-    weight_scale: torch.Tensor | None
+    weight_scale: torch.Tensor
 
     WEIGHT_SCALE_INV: ClassVar[str] = "weight_scale_inv"
 
