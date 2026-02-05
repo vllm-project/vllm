@@ -8,6 +8,12 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# Track whether upstream flash-attn is available on ROCm.
+# Set during module initialization and never modified afterwards.
+# This module-level flag avoids repeated import attempts and ensures
+# consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
+_ROCM_FLASH_ATTN_AVAILABLE = False
+
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
@@ -26,6 +32,9 @@ elif current_platform.is_xpu():
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+
+        # Mark that upstream flash-attn is available on ROCm
+        _ROCM_FLASH_ATTN_AVAILABLE = True
     except ImportError:
 
         def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
@@ -137,19 +146,30 @@ def flash_attn_supports_mla():
 
 
 def is_flash_attn_varlen_func_available() -> bool:
+    """Check if flash_attn_varlen_func is available.
+
+    This function determines whether the flash_attn_varlen_func imported at module
+    level is a working implementation or a stub.
+
+    Platform-specific sources:
+    - CUDA: vllm.vllm_flash_attn.flash_attn_varlen_func
+    - XPU: ipex_ops.flash_attn_varlen_func
+    - ROCm: upstream flash_attn.flash_attn_varlen_func (if available)
+
+    Note: This is separate from the AITER flash attention backend (rocm_aiter_fa.py)
+    which uses rocm_aiter_ops.flash_attn_varlen_func. The condition to use AITER is
+    handled separately via _aiter_ops.is_aiter_found_and_supported().
+
+    Returns:
+        bool: True if a working flash_attn_varlen_func implementation is available.
+    """
     if current_platform.is_cuda() or current_platform.is_xpu():
+        # CUDA and XPU always have flash_attn_varlen_func available
         return True
 
-    # On ROCm, flash_attn_varlen_func is provided by the aiter package
-    # not vllm_flash_attn extension. This function checks CAPABILITY
-    # (can it work?) not PREFERENCE (should it be used by default?).
-    # Tests and other code use this to determine if the functionality
-    # exists on the system, regardless of VLLM_ROCM_USE_AITER.
-    # We use is_aiter_found_and_supported() instead of importing aiter directly
-    # to avoid triggering JIT compilation warnings during the availability check.
     if current_platform.is_rocm():
-        from vllm._aiter_ops import is_aiter_found_and_supported
-
-        return is_aiter_found_and_supported()
+        # Use the flag set during module import to check if
+        # upstream flash-attn was successfully imported
+        return _ROCM_FLASH_ATTN_AVAILABLE
 
     return False
