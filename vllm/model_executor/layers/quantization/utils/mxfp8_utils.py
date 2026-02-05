@@ -117,11 +117,16 @@ class Mxfp8LinearOp:
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Validate weight_scale dtype and shape (must be 2D for TORCH backend)
-        assert weight_scale.dtype == MXFP8_SCALE_DTYPE
-        assert weight_scale.ndim == 2, (
-            f"TORCH backend requires 2D weight_scale, got {weight_scale.ndim}D. "
-            f"Ensure process_weights_after_loading was called."
-        )
+        if weight_scale.dtype != MXFP8_SCALE_DTYPE:
+            raise ValueError(
+                f"TORCH backend requires {MXFP8_SCALE_DTYPE} weight_scale dtype, "
+                f"got {weight_scale.dtype}."
+            )
+        if weight_scale.ndim != 2:
+            raise ValueError(
+                f"TORCH backend requires 2D weight_scale, got {weight_scale.ndim}D. "
+                f"Ensure process_weights_after_loading was called."
+            )
 
         weight_bf16 = dequant_mxfp8_to_bf16(weight, weight_scale)
 

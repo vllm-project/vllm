@@ -1735,7 +1735,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        # Weight scale tensor (E8M0), one scale per block of 32 along K
+        # Weight scale tensor (E8M0 encoded as uint8), one scale per block of 32 along K
         weight_scale = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
@@ -1749,17 +1749,18 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert layer.weight.ndim == 2, (
-            f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
-            f"with shape {tuple(layer.weight.shape)}"
-        )
+        if layer.weight.ndim != 2:
+            raise ValueError(
+                f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
+                f"with shape {tuple(layer.weight.shape)}"
+            )
 
-        # Validate weight dtype is FP8 E4M3
-        assert layer.weight.dtype == MXFP8_VALUE_DTYPE, (
-            f"MXFP8 weight must be {MXFP8_VALUE_DTYPE} (FP8 E4M3), "
-            f"got {layer.weight.dtype}. The checkpoint may not be properly "
-            f"quantized with MXFP8."
-        )
+        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
+            raise ValueError(
+                f"MXFP8 weight must be {MXFP8_VALUE_DTYPE} (FP8 E4M3), "
+                f"got {layer.weight.dtype}. The checkpoint may not be properly "
+                f"quantized with MXFP8."
+            )
 
         weight = layer.weight.data  # [N, K]
         N, K = weight.shape
@@ -1777,13 +1778,15 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert layer.weight.dtype == MXFP8_VALUE_DTYPE, (
-            f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
-        )
-        assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE, (
-            f"Weight scale dtype {layer.weight_scale.dtype} != "
-            f"expected {MXFP8_SCALE_DTYPE}"
-        )
+        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
+            raise ValueError(
+                f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
+            )
+        if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
+            raise ValueError(
+                f"Weight scale dtype {layer.weight_scale.dtype} != "
+                f"expected {MXFP8_SCALE_DTYPE}"
+            )
 
         return self.mxfp8_linear_op.apply(
             input=x,
