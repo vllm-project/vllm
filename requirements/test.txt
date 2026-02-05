@@ -289,7 +289,10 @@ google-crc32c==1.7.1
 google-resumable-media==2.7.2
     # via google-cloud-storage
 googleapis-common-protos==1.70.0
-    # via google-api-core
+    # via
+    #   google-api-core
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
 gpt-oss==0.0.8
     # via -r requirements/test.in
 graphene==3.4.3
@@ -304,7 +307,9 @@ graphql-relay==3.2.0
 greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.76.0
-    # via ray
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   ray
 gunicorn==23.0.0
     # via mlflow
 h11==0.14.0
@@ -652,16 +657,35 @@ opencv-python-headless==4.13.0.90
 opentelemetry-api==1.35.0
     # via
     #   mlflow-skinny
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp==1.35.0
+    # via -r requirements/test.in
+opentelemetry-exporter-otlp-proto-common==1.35.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.35.0
+    # via opentelemetry-exporter-otlp
+opentelemetry-exporter-otlp-proto-http==1.35.0
+    # via opentelemetry-exporter-otlp
 opentelemetry-exporter-prometheus==0.56b0
     # via ray
-opentelemetry-proto==1.36.0
-    # via ray
+opentelemetry-proto==1.35.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+    #   ray
 opentelemetry-sdk==1.35.0
     # via
+    #   -r requirements/test.in
     #   mlflow-skinny
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
     #   ray
 opentelemetry-semantic-conventions==0.56b0
@@ -963,6 +987,7 @@ requests==2.32.3
     #   mistral-common
     #   mlflow-skinny
     #   mteb
+    #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   ray
     #   responses
@@ -1275,6 +1300,8 @@ typing-extensions==4.15.0
     #   mlflow-skinny
     #   mteb
     #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
     #   pqdm
