@@ -5,7 +5,7 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.fx_passes.post_grad import view_to_reshape
-from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._inductor.pattern_matcher import Match, PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
@@ -529,7 +529,6 @@ class RopeReshapeKVCachePattern:
         num_heads: int,
         num_kv_heads: int,
         is_neox: bool,
-        flash_layout: bool,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         self.head_dim = head_dim
@@ -538,7 +537,6 @@ class RopeReshapeKVCachePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.is_neox = is_neox
-        self.flash_layout = flash_layout
         self.layer_name = prefix
 
         self.rope_matcher = MatcherRotaryEmbedding(
@@ -598,7 +596,6 @@ class RopeReshapeKVCachePattern:
                 positions,
                 cos_sin_cache,
                 self.is_neox,
-                self.flash_layout,
                 self.layer_name,
             )
             return dummy, q, k, v
@@ -609,6 +606,11 @@ class RopeReshapeKVCachePattern:
             gm = pm.fwd_only(*args, **kwargs)
             view_to_reshape(gm)
             return gm
+
+        def check_batch_size_less_than_256(match: Match):
+            # TODO (Rohan138): only apply this fusion for small-batch decode
+            # i.e. batch_size < 256
+            raise NotImplementedError
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
@@ -647,14 +649,12 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         # Register patterns for common model configurations
         for head_dim, num_heads, num_kv_heads in PATTERNS:
             for is_neox in [True, False]:
-                for flash_layout in [True, False]:
-                    RopeReshapeKVCachePattern(
-                        head_dim=head_dim,
-                        num_heads=num_heads,
-                        num_kv_heads=num_kv_heads,
-                        is_neox=is_neox,
-                        flash_layout=flash_layout,
-                    ).register(self.patterns)
+                RopeReshapeKVCachePattern(
+                    head_dim=head_dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    is_neox=is_neox,
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

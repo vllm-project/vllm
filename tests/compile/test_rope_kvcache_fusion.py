@@ -23,7 +23,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
+    CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -35,12 +35,15 @@ VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 class QKRoPEKVCacheTestModel(torch.nn.Module):
     def __init__(
         self,
+        vllm_config: VllmConfig,
+        attn_backend: AttentionBackendEnum,
         num_heads: int,
         num_kv_heads: int,
         head_size: int,
+        block_size: int,
         is_neox: bool,
-        vllm_config: VllmConfig,
         dtype: torch.dtype,
+        kv_cache_dtype: torch.dtype,
         device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
     ):
@@ -48,12 +51,12 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
+        self.block_size = block_size
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
         self.is_neox = is_neox
-        self.vllm_config: VllmConfig = vllm_config
-        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.dtype = dtype
+        self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.layer_name = prefix
 
@@ -78,6 +81,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,
+            attn_backend=attn_backend.get_class(),
         )
         self.attn_backend: type[AttentionBackend] = self.attn.get_attn_backend()
         assert not self.attn_backend.forward_includes_kv_cache_update, (
@@ -85,8 +89,6 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )
         self.attn._k_scale = self.attn._k_scale.to(device)
         self.attn._v_scale = self.attn._v_scale.to(device)
-
-        self.block_size = 16
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn.attn_backend.get_builder_cls()(
@@ -97,11 +99,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
             ),
             layer_names=[self.attn.layer_name],
-            vllm_config=self.vllm_config,
+            vllm_config=vllm_config,
             device=device,
         )
 
-    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
+    def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -116,6 +118,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         # Create dummy KV cache for the selected backend
         if backend == AttentionBackendEnum.ROCM_ATTN:
+            raise NotImplementedError
             # k/v as 1st dimention
             # HND: [num_blocks, num_kv_heads, block_size, head_size]
             kv_cache = torch.zeros(
@@ -158,11 +161,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
-        self.attn_metadata = self.builder.build(
+        attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
-        return self.attn_metadata
+        return attn_metadata
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, positions: torch.Tensor
@@ -195,23 +198,29 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return [rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()]
 
 
-@pytest.mark.parametrize("is_neox", [True])
+@pytest.mark.parametrize("attn_backend", [AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN])
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_size", [64])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("is_neox", [True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", [torch.bfloat16])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
 )
 def test_rope_kvcache_fusion(
-    is_neox: bool,
+    attn_backend: AttentionBackendEnum,
     enable_rope_custom_op: bool,
-    dtype: torch.dtype,
-    head_size: int,
     num_heads: int,
     num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    is_neox: bool,
+    dtype: torch.dtype,
+    kv_cache_dtype: torch.dtype,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -242,8 +251,6 @@ def test_rope_kvcache_fusion(
         )
 
         m.setenv("VLLM_ROCM_USE_AITER", "1")
-        m.setenv("VLLM_ROCM_USE_AITER_MHA", "0")
-        m.setenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "1")
         rocm_aiter_ops.refresh_env_variables()
 
         fusion_pass = ROCmAiterTritonRopeReshapeKVCacheFusionPass(vllm_config)
@@ -255,13 +262,16 @@ def test_rope_kvcache_fusion(
         backend = TestBackend(*passes)
 
         model = QKRoPEKVCacheTestModel(
+            vllm_config=vllm_config,
+            attn_backend=attn_backend,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
+            block_size=block_size,
             is_neox=is_neox,
-            vllm_config=vllm_config,
             dtype=dtype,
-            device=torch.device("cuda"),
+            kv_cache_dtype=kv_cache_dtype,
+            device=torch.get_default_device(),
         )
 
         T = 5
@@ -277,10 +287,14 @@ def test_rope_kvcache_fusion(
         pos_unfused = pos.clone()
 
         with set_forward_context(None, vllm_config):
+            forward_context = get_forward_context()
+            attn_metadata = model.build_attn_metadata(T)
+            forward_context.slot_mapping = {
+                model.layer_name: attn_metadata.slot_mapping
+            }
             q_unfused, k_unfused, v_unfused, dummy = model(
                 q_unfused, k_unfused, v_unfused, pos_unfused
             )
-            forward_context = get_forward_context()
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
@@ -291,8 +305,12 @@ def test_rope_kvcache_fusion(
         torch._dynamo.mark_dynamic(pos, 0)
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
-            q_fused, k_fused, v_fused, dummy = model_fused(q, k, v, pos)
             forward_context = get_forward_context()
+            attn_metadata = model_fused.build_attn_metadata(T)
+            forward_context.slot_mapping = {
+                model.layer_name: attn_metadata.slot_mapping
+            }
+            q_fused, k_fused, v_fused, dummy = model_fused(q, k, v, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy

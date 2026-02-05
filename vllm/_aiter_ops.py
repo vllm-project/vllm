@@ -37,7 +37,7 @@ def is_aiter_found_and_supported() -> bool:
     Checks: platform (ROCm), device arch (gfx9), library existence,
     and VLLM_ROCM_USE_AITER env variable.
     """
-    if current_platform.is_rocm() and IS_AITER_FOUND and envs.VLLM_ROCM_USE_AITER:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
         from vllm.platforms.rocm import on_gfx9
 
         return on_gfx9()
@@ -841,7 +841,6 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    flash_layout: bool,
     layer_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -868,6 +867,8 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
         value_cache_og_dtype = value_cache.dtype
         key_cache = key_cache.view(self.fp8_dtype)
         value_cache = value_cache.view(self.fp8_dtype)
+    # TODO (Rohan138): Allow flash_layour False for ROCM_ATTN backend
+    flash_layout = True
     query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
         query,
         key,
@@ -902,7 +903,6 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    flash_layout: bool,
     layer_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q_out = torch.empty_like(query)
