@@ -234,8 +234,12 @@ def maybe_roundup_hidden_size(
     Args:
         hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config: Quantization configuration.
-        prefix: Prefix for the module path.
+        moe_parallel_config: Fused MoE parallelization strategy configuration.
+        is_lora_enabled: True if the engine is enabled with LoRA. This
+            is used in the case of mxfp4 quantization in selecting the
+            MxFP4Backend.
+        model_type: for checking if gpt-oss
+        is_mxfp4_quant: whether the layer is quantized with mxfp4
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -532,6 +536,7 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
+        self.model_type = self.vllm_config.model_config.hf_config.model_type
         hidden_size = maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
