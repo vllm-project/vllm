@@ -3,6 +3,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
 )
@@ -37,8 +38,12 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -74,7 +79,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1 = (0,)
         workspace2 = (0,)
@@ -89,7 +94,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -111,7 +116,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             n_experts_per_token=topk,
-            activation=activation,
+            activation=activation.value,
             num_experts=self.moe_config.num_local_experts,
             ep_rank=self.moe_config.ep_rank,
             ep_size=self.moe_config.ep_size,
