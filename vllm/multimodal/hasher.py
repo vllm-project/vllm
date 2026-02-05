@@ -105,7 +105,9 @@ class MultiModalHasher:
                         "data": tensor_obj.numpy(),
                     },
                 )
+
             return cls.iter_item_to_bytes("tensor", tensor_obj.numpy())
+
         if isinstance(obj, np.ndarray):
             if obj.size == 1:
                 return cls.serialize_item(obj.item())
@@ -114,6 +116,7 @@ class MultiModalHasher:
             arr_data = (
                 obj.view(np.uint8).data if obj.flags.c_contiguous else obj.tobytes()
             )
+
             return cls.iter_item_to_bytes(
                 "ndarray",
                 {
@@ -122,6 +125,7 @@ class MultiModalHasher:
                     "data": arr_data,
                 },
             )
+
         logger.warning(
             "No serialization method found for %s. Falling back to pickle.", type(obj)
         )
