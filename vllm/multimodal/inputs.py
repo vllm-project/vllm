@@ -424,8 +424,9 @@ class BaseMultiModalField(ABC):
 
     keep_on_cpu: bool = False
     """
-    If `True`, then this field is excluded from being moved to the accelerator
-    when `MultiModalKwargsItems.get_data()` is called to batch the data.
+    If `True`, then this field is excluded from being moved to the accelerator when
+    [`group_and_batch_mm_items`][vllm.multimodal.utils.group_and_batch_mm_items]
+    is called to batch the data.
     """
 
     def _field_factory(self):
@@ -998,6 +999,44 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
                     raise RuntimeError(f"Found empty mm_items[{modality}][{i}]")
 
         return self  # type: ignore[return-value]
+
+    def get_data(
+        self,
+        *,
+        device: torch.types.Device = None,
+        pin_memory: bool = False,
+    ) -> BatchedTensorInputs:
+        """Construct a dictionary of keyword arguments to pass to the model."""
+        from .utils import group_and_batch_mm_items
+
+        items_by_modality = self.require_data()
+        batches_by_modality = {
+            modality: [
+                data
+                for _, data in group_and_batch_mm_items(
+                    items,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+            ]
+            for modality, items in items_by_modality.items()
+            if len(items) > 0
+        }
+        num_batches_by_modality = {
+            modality: len(batches) for modality, batches in batches_by_modality.items()
+        }
+
+        if not all(nb == 1 for nb in num_batches_by_modality.values()):
+            raise RuntimeError(
+                f"Some modalities cannot be merged into a single batch. "
+                f"({num_batches_by_modality=})"
+            )
+
+        out_data: BatchedTensorInputs = {}
+        for _, batches in batches_by_modality.items():
+            out_data.update(batches[0])
+
+        return out_data
 
 
 MultiModalKwargsOptionalItems: TypeAlias = (
