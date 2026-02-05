@@ -63,6 +63,7 @@ N_FACTORS_WVSPLITKRC = [
     117,
     128,
 ]
+
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
@@ -90,6 +91,7 @@ def pad_weights_fp8(weight):
     return F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
 
 
+@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
@@ -98,29 +100,45 @@ def pad_weights_fp8(weight):
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, seed, bias_mode):
+def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
     torch.manual_seed(seed)
     cu_count = get_cu_count()
 
-    if (((m + 15) // 16) * ((k + 511) // 512)) * (
-        1 if (n <= 16) else (2 if (n <= 32) else 4)
-    ) > cu_count * 4:
+    # Next ^2 of n
+    N_p2 = 1 << (n - 1).bit_length()
+    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
+    # and each working on a 512-shard of K, how many CUs would we need?
+    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
+    # How many of 4 waves in a group can work on same 16 Ms at same time?
+    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
+    GrpsShrB = min(N_p2 // 16, 4)
+    # Given the above, how many CUs would we need?
+    CuNeeded = rndup_cus * GrpsShrB
+    # candidate for atomic reduce count splitk?
+    fits_wvsplitkrc = CuNeeded <= cu_count
+
+    if not fits_wvsplitkrc:
         pytest.skip("Too large for wvSplitKrc")
 
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
+    xavier = (
+        math.sqrt(2 / k) if xnorm else 1
+    )  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
 
     BIAS = None
     if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
     elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    assert torch.allclose(out, ref_out, rtol=0.05, atol=0.01)
+    if xnorm:
+        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-8)
+    else:
+        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)

@@ -1573,7 +1573,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
             __builtin_amdgcn_global_load_lds(
                 (int*)(&A[min__(
-                    K * actlN - CHUNKK,
+                    K * actlN - A_CHUNK,
                     kOffcp + K * (n / CHUNKK +
                                   (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
                                   (threadIdx.y % sprdN)))]),
