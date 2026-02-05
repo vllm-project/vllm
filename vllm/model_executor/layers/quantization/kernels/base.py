@@ -398,8 +398,7 @@ class DynamicMMLinearKernel(
         is_fallback_supported, reason_2 = cls.fallback_type.is_supported(
             compute_capability
         )
-        if is_fallback_supported and is_fallback_supported:
-            return True, None
+        if is_base_supported and is_fallback_supported:
 
         # Both unsupported: include both reasons
         if not is_base_supported and not is_fallback_supported:
