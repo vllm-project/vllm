@@ -3,7 +3,6 @@
 
 
 import torch
-from packaging import version
 
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.platforms import current_platform
@@ -97,9 +96,6 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
         if compute_capability is not None and compute_capability < 94:
             return False, "requires compute capability 94 and above."
-
-        if not version.parse(torch.__version__) >= version.parse("2.7"):
-            return False, "requires pytorch version >=2.7."
 
         return True, None
 

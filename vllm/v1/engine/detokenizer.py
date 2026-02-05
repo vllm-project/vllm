@@ -287,7 +287,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Prompt embedding requests cannot be detokenized, in general.
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
-            self.read_offest = 0
+            self.read_offset = 0
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 

@@ -25,7 +25,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
@@ -33,6 +32,7 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -45,6 +45,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -143,11 +145,12 @@ class NemotronHMoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
+        router_logits_dtype = torch.float32
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=router_logits_dtype,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -185,10 +188,29 @@ class NemotronHMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        if self.use_latent_moe:
+            self.fc1_latent_proj = ReplicatedLinear(
+                input_size=config.hidden_size,
+                output_size=self.moe_hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc1_latent_proj",
+            )
+            self.fc2_latent_proj = ReplicatedLinear(
+                input_size=self.moe_hidden_size,
+                output_size=config.hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc2_latent_proj",
+            )
+        else:
+            self.fc1_latent_proj = None
+            self.fc2_latent_proj = None
+
         self.experts = SharedFusedMoE(
-            # TODO: make it possible for shared experts to have
-            # different input in SharedFusedMoE
-            shared_experts=self.shared_experts if not self.use_latent_moe else None,
+            shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=self.moe_hidden_size,
@@ -207,29 +229,9 @@ class NemotronHMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            router_logits_dtype=router_logits_dtype,
+            routed_input_transform=self.fc1_latent_proj,
         )
-
-        if self.use_latent_moe:
-            self.fc1_latent_proj = ReplicatedLinear(
-                input_size=config.hidden_size,
-                output_size=self.moe_hidden_size,
-                bias=config.mlp_bias,
-                quant_config=quant_config,
-                disable_tp=self.is_sequence_parallel,
-                prefix=f"{prefix}.fc1_latent_proj",
-            )
-            self.fc2_latent_proj = ReplicatedLinear(
-                input_size=self.moe_hidden_size,
-                output_size=config.hidden_size,
-                bias=config.mlp_bias,
-                quant_config=quant_config,
-                disable_tp=self.is_sequence_parallel,
-                prefix=f"{prefix}.fc2_latent_proj",
-            )
-
-        else:
-            self.fc1_latent_proj = None
-            self.fc2_latent_proj = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -240,38 +242,28 @@ class NemotronHMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
-        shared_output = None
-        if self.use_latent_moe:
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
-            hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
-        fused_moe_out = self.experts(
+        # SharedFusedMoE handles:
+        #   - shared experts (with original hidden_states)
+        #   - routed_input_transform (fc1_latent_proj) for latent MoE
+        #   - multistream parallelism between shared and routed experts
+        shared_output, final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        if self.use_latent_moe:
-            _, final_hidden_states = fused_moe_out
-        else:
-            shared_output, final_hidden_states = fused_moe_out
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
             final_hidden_states *= self.routed_scaling_factor
         elif self.shared_experts is not None:
-            assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor
 
-        # TODO: currently latent up_proj is done before all-reduce for simplicity.
-        #  if and when shared experts will be part of SharedFusedMoE,
-        #  we should do the up_proj after all-reduce,
-        #  to have the all-reduce in the smaller latent dimension.
+        # TODO: See SharedFusedMoE.apply_routed_input_transform
+        # for bandwidth optimization
         if self.use_latent_moe:
             final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)
 
         if self.shared_experts is not None:
-            assert shared_output is not None
             final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
@@ -352,8 +344,12 @@ class NemotronHMoEDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
 
+        # Get per-layer config for heterogeneous models if exsist
+        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+
         self.mixer = NemotronHMoE(
-            config,
+            layer_config,
             quant_config=quant_config,
             parallel_config=parallel_config,
             prefix=f"{prefix}.mixer",
@@ -477,6 +473,9 @@ class NemotronHAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # Get per-layer sliding window from config (for heterogeneous models)
+        sliding_window = getattr(config, "sliding_window", None)
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -485,6 +484,7 @@ class NemotronHAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            per_layer_sliding_window=sliding_window,
         )
 
     def forward(
@@ -512,8 +512,12 @@ class NemotronHAttentionDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
 
+        # Get per-layer config for heterogeneous models if exsist
+        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+
         self.mixer = NemotronHAttention(
-            config,
+            layer_config,
             layer_idx,
             model_config,
             cache_config,
@@ -599,7 +603,7 @@ class NemotronHModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -629,6 +633,34 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def _get_max_n_routed_experts(self) -> int:
+        """Get max n_routed_experts from config or block_configs for puzzle models.
+
+        For heterogeneous models with varying expert counts per layer,
+        returns the MAX to ensure all expert weights can be loaded.
+        """
+        # First try top-level attribute
+        n_routed_experts = getattr(self.config, "n_routed_experts", None)
+        if n_routed_experts is not None:
+            return n_routed_experts
+
+        # For puzzle models, get MAX from all MoE blocks in block_configs
+        # (different layers may have different expert counts)
+        max_experts = 0
+        block_configs = getattr(self.config, "block_configs", None)
+        if block_configs:
+            for block in block_configs:
+                if isinstance(block, dict):
+                    if block.get("block_type") == "moe":
+                        max_experts = max(max_experts, block.get("n_routed_experts", 0))
+                else:
+                    # HF converts dicts to objects with attributes
+                    if getattr(block, "block_type", "") == "moe":
+                        max_experts = max(
+                            max_experts, getattr(block, "n_routed_experts", 0)
+                        )
+        return max_experts
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
@@ -641,7 +673,7 @@ class NemotronHModel(nn.Module):
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="",
-                num_experts=self.config.n_routed_experts,
+                num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
             return expert_params_mapping
@@ -769,6 +801,9 @@ class NemotronHForCausalLM(
         "lm_head": "output_embeddings",
     }
 
+    # Skip MTP (Multi-Token Prediction) layers during LoRA loading
+    lora_skip_prefixes = ["mtp."]
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
@@ -808,6 +843,10 @@ class NemotronHForCausalLM(
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -881,7 +920,7 @@ class NemotronHForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
