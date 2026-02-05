@@ -190,7 +190,7 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
         register_generate_api_routers(app)
 
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
             attach_router as register_translations_api_router,
         )
 
@@ -318,7 +318,7 @@ async def init_app_state(
         )
 
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
             init_transcription_state,
         )
 
