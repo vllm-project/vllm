@@ -527,29 +527,20 @@ def get_attention_scale(head_dim: int) -> float:
 
 def is_mla_backend(backend: str) -> bool:
     """
-    Check if backend is an MLA backend.
-
-    Uses a simple name-based heuristic to avoid import issues when CUDA ops
-    are not built. This is more robust than trying to import the backend class.
+    Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
-        backend: Backend name (e.g., "cutlass_mla", "flashinfer_mla_sparse")
+        backend: Backend name matching AttentionBackendEnum exactly
+        (e.g., "FLASHMLA_SPARSE")
 
     Returns:
         True if the backend is an MLA backend, False otherwise
     """
-    # Known MLA backends (lowercase for comparison)
-    mla_backends = {
-        "cutlass_mla",
-        "flashinfer_mla",
-        "flashinfer_mla_sparse",
-        "flashmla",
-        "flashmla_sparse",
-        "flashattn_mla",
-        "flash_attn_mla",
-        "triton_mla",
-        "rocm_aiter_mla",
-        "rocm_aiter_mla_sparse",
-        "rocm_aiter_triton_mla",
-    }
-    return backend.lower() in mla_backends
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    try:
+        backend_enum = AttentionBackendEnum[backend]
+        backend_class = backend_enum.get_class()
+        return backend_class.is_mla()
+    except (KeyError, ValueError, ImportError, AttributeError):
+        return False

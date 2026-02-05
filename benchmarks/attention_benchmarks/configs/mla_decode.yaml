@@ -40,10 +40,10 @@ batch_specs:
   - "32q1s32k"     # 32 requests, 32k KV cache
 
 backends:
-  - cutlass_mla
-  - flashinfer_mla
-  - flashattn_mla  # Hopper only
-  - flashmla        # Hopper only
+  - CUTLASS_MLA
+  - FLASHINFER_MLA
+  - FLASH_ATTN_MLA  # Hopper only
+  - FLASHMLA        # Hopper only
 
 device: "cuda:0"
 repeats: 100
@@ -51,11 +51,11 @@ warmup_iters: 10
 profile_memory: true
 
 # Backend-specific tuning
-cutlass_mla:
+CUTLASS_MLA:
   num_kv_splits: auto  # or specific value like 4, 8, 16
 
-flashattn_mla:
+FLASH_ATTN_MLA:
   reorder_batch_threshold: 512
 
-flashmla:
+FLASHMLA:
   reorder_batch_threshold: 1

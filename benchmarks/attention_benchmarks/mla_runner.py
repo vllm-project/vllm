@@ -8,8 +8,6 @@ This module provides helpers for running MLA backends without
 needing full VllmConfig integration.
 """
 
-import importlib
-
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec
@@ -180,68 +178,65 @@ def create_minimal_vllm_config(
 # ============================================================================
 
 
-# Backend name to class name prefix mapping
-_BACKEND_NAME_MAP = {
-    "flashattn_mla": "FlashAttnMLA",
-    "flashmla": "FlashMLA",
-    "flashinfer_mla": "FlashInferMLA",
-    "cutlass_mla": "CutlassMLA",
-    "flashinfer_mla_sparse": "FlashInferMLASparse",
-    "flashmla_sparse": "FlashMLASparse",
-}
-
-# Special properties that differ from defaults
+# Backend-specific properties that can't be inferred from the backend class
+# Keys are AttentionBackendEnum names (uppercase)
 _BACKEND_PROPERTIES = {
-    "flashmla": {
+    "FLASHMLA": {
         "query_format": "concat",  # Single concatenated tensor (vs tuple)
-        "block_size": 64,  # FlashMLA uses fixed block size
     },
-    "flashinfer_mla": {
-        "block_size": 64,  # FlashInfer MLA only supports 32 or 64
-    },
-    "flashinfer_mla_sparse": {
-        "block_size": 64,  # FlashInfer MLA sparse only supports 32 or 64
-        "is_sparse": True,
-    },
-    "flashmla_sparse": {
+    "FLASHMLA_SPARSE": {
         "query_format": "concat",  # Single concatenated tensor (vs tuple)
-        "block_size": 64,  # FlashMLA sparse uses fixed block size
-        "is_sparse": True,
     },
 }
 
 
 def _get_backend_config(backend: str) -> dict:
     """
-    Get backend configuration using naming conventions.
+    Get backend configuration from AttentionBackendEnum.
 
-    All MLA backends follow the pattern:
-    - Module: vllm.v1.attention.backends.mla.{backend}
-    - Impl: {Name}Impl
-    - Metadata: {Name}Metadata (or MLACommonMetadata)
-    - DecodeMetadata: {Name}DecodeMetadata (or MLACommonDecodeMetadata)
-    - MetadataBuilder: {Name}MetadataBuilder
+    Uses the registry to get the backend class and extract configuration
+    from its methods (get_impl_cls, get_builder_cls, is_sparse, etc.).
+
+    Args:
+        backend: Backend name matching AttentionBackendEnum exactly
+        (e.g., "FLASHMLA_SPARSE")
+
+    Returns:
+        Dict with backend configuration
     """
-    if backend not in _BACKEND_NAME_MAP:
-        raise ValueError(f"Unknown backend: {backend}")
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    name = _BACKEND_NAME_MAP[backend]
+    try:
+        backend_enum = AttentionBackendEnum[backend]
+        backend_class = backend_enum.get_class()
+    except (KeyError, ValueError) as e:
+        valid_backends = [e.name for e in AttentionBackendEnum if e.name != "CUSTOM"]
+        raise ValueError(
+            f"Unknown backend: {backend}. "
+            f"Valid MLA backends: {[b for b in valid_backends if 'MLA' in b]}"
+        ) from e
+
+    # Get block size from backend class
+    block_sizes = backend_class.get_supported_kernel_block_sizes()
+    # Use first supported block size (backends typically support one for MLA)
+    block_size = block_sizes[0] if block_sizes else None
+    if hasattr(block_size, "value"):
+        # Handle MultipleOf enum
+        block_size = None
+
+    # Check if sparse via class method if available
+    is_sparse = getattr(backend_class, "is_sparse", lambda: False)()
+
+    # Get properties that can't be inferred
     props = _BACKEND_PROPERTIES.get(backend, {})
 
-    # Check if backend uses common metadata (FlashInfer, CUTLASS)
-    uses_common = backend in ("flashinfer_mla", "cutlass_mla")
-
     return {
-        "module": f"vllm.v1.attention.backends.mla.{backend}",
-        "impl_class": f"{name}Impl",
-        "metadata_class": "MLACommonMetadata" if uses_common else f"{name}Metadata",
-        "decode_metadata_class": "MLACommonDecodeMetadata"
-        if uses_common
-        else f"{name}DecodeMetadata",
-        "builder_class": f"{name}MetadataBuilder",
+        "backend_class": backend_class,
+        "impl_class": backend_class.get_impl_cls(),
+        "builder_class": backend_class.get_builder_cls(),
         "query_format": props.get("query_format", "tuple"),
-        "block_size": props.get("block_size", None),
-        "is_sparse": props.get("is_sparse", False),
+        "block_size": block_size,
+        "is_sparse": is_sparse,
     }
 
 
@@ -466,7 +461,7 @@ def _create_backend_impl(
     Create backend implementation instance.
 
     Args:
-        backend_cfg: Backend configuration dict
+        backend_cfg: Backend configuration dict from _get_backend_config()
         mla_dims: MLA dimension configuration
         vllm_config: VllmConfig instance
         device: Target device
@@ -476,9 +471,9 @@ def _create_backend_impl(
     Returns:
         Tuple of (impl, layer, builder_instance, indexer)
     """
-    # Import backend classes
-    backend_module = importlib.import_module(backend_cfg["module"])
-    impl_class = getattr(backend_module, backend_cfg["impl_class"])
+    # Get classes from backend config (already resolved by _get_backend_config)
+    impl_class = backend_cfg["impl_class"]
+    builder_class = backend_cfg["builder_class"]
 
     # Calculate scale
     scale = 1.0 / np.sqrt(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"])
@@ -549,9 +544,7 @@ def _create_backend_impl(
 
     # Create builder instance if needed
     builder_instance = None
-    if backend_cfg["builder_class"]:
-        builder_class = getattr(backend_module, backend_cfg["builder_class"])
-
+    if builder_class:
         # Populate static_forward_context so builder can find the layer
         # MockLayer inherits from AttentionLayerBase, so isinstance checks pass
         vllm_config.compilation_config.static_forward_context = {"placeholder": layer}

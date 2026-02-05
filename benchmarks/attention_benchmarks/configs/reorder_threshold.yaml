@@ -6,7 +6,7 @@
 description: "Decode vs Prefill pipeline crossover analysis"
 
 # Test FlashAttn MLA
-backend: flashattn_mla
+backend: FLASH_ATTN_MLA
 
 # Mode: decode_vs_prefill comparison (special sweep mode)
 # For each batch spec, we'll test both decode and prefill pipelines
