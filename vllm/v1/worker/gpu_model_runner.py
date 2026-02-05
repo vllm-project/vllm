@@ -5150,19 +5150,15 @@ class GPUModelRunner(
                         )
 
                         # Run multimodal encoder.
-                        dummy_encoder_outputs = (
-                            self.model.embed_multimodal(
-                                **batched_dummy_mm_inputs
-                            )
+                        dummy_encoder_outputs = self.model.embed_multimodal(
+                            **batched_dummy_mm_inputs
                         )
 
                         sanity_check_mm_encoder_outputs(
                             dummy_encoder_outputs,
                             expected_num_items=max_mm_items_per_batch,
                         )
-                        for i, output in enumerate(
-                            dummy_encoder_outputs
-                        ):
+                        for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
