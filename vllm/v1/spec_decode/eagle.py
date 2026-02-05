@@ -285,7 +285,7 @@ class SpecDecodeBaseProposer:
 
     def _get_slot_mapping(
         self, cm_by_gid: CommonAttnMetadataByGid
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]:
         """Return slot_mapping dict for EAGLE/draft layers during inference.
 
         Copies per-group slot mappings from CommonAttentionMetadata into
