@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -293,8 +294,6 @@ class RejectionSampler(nn.Module):
             )
 
         # Apply min_tokens constraint via MinTokensLogitsProcessor.
-        from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
-
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
                 logits = processor.apply_with_spec_decode(

@@ -3,6 +3,7 @@
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -241,38 +242,71 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         logits: torch.Tensor,
         num_draft_tokens: list[int],
     ) -> torch.Tensor:
+        """Apply min_tokens constraint for speculative decoding using vectorized ops."""
         if not self.min_toks:
             return logits
 
-        logit_rows: list[int] = []
-        tok_ids: list[int] = []
+        num_requests = len(num_draft_tokens)
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
 
-        logit_idx = 0
-        for req_idx, n_draft in enumerate(num_draft_tokens):
+        # Build arrays for requests that have min_tokens constraints
+        req_indices = []
+        min_tokens_arr = []
+        current_lens_arr = []
+        stop_token_lists = []
+
+        for req_idx in range(num_requests):
             if req_idx not in self.min_toks:
-                logit_idx += n_draft
                 continue
-
             min_tok, out_tok_ids, stop_tok_ids = self.min_toks[req_idx]
-            current_output_len = len(out_tok_ids)
-
             if not stop_tok_ids:
-                logit_idx += n_draft
                 continue
+            req_indices.append(req_idx)
+            min_tokens_arr.append(min_tok)
+            current_lens_arr.append(len(out_tok_ids))
+            stop_token_lists.append(list(stop_tok_ids))
 
-            for draft_pos in range(n_draft):
-                effective_output_len = current_output_len + draft_pos
-                if effective_output_len < min_tok:
-                    for stop_tok in stop_tok_ids:
-                        logit_rows.append(logit_idx + draft_pos)
-                        tok_ids.append(stop_tok)
+        if not req_indices:
+            return logits
 
-            logit_idx += n_draft
+        req_indices = np.array(req_indices, dtype=np.int64)
+        min_tokens_arr = np.array(min_tokens_arr, dtype=np.int64)
+        current_lens_arr = np.array(current_lens_arr, dtype=np.int64)
+
+        # Compute logit row offsets for each request
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+        logit_offsets = cumsum[req_indices]
+        n_drafts_per_req = num_draft_arr[req_indices]
+
+        # For each request with min_tokens, compute how many draft positions
+        # need masking: positions where current_len + draft_pos < min_tokens
+        remaining_to_min = np.subtract(min_tokens_arr, current_lens_arr)
+        positions_to_mask = np.clip(remaining_to_min, 0, n_drafts_per_req)
+
+        # Build the (logit_row, stop_token) pairs using vectorized operations
+        logit_rows = []
+        tok_ids = []
+
+        for i, (offset, n_mask, stop_toks) in enumerate(
+            zip(logit_offsets, positions_to_mask, stop_token_lists)
+        ):
+            if n_mask == 0:
+                continue
+            # Generate logit row indices for positions 0..n_mask-1
+            row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
+            # Repeat each row index for each stop token
+            n_stop = len(stop_toks)
+            repeated_rows = np.repeat(row_indices, n_stop)
+            tiled_toks = np.tile(stop_toks, n_mask)
+            logit_rows.append(repeated_rows)
+            tok_ids.append(tiled_toks)
 
         if logit_rows:
+            all_rows = np.concatenate(logit_rows)
+            all_toks = np.concatenate(tok_ids)
             logits_slice = (
-                self._device_tensor(logit_rows, torch.int64),
-                self._device_tensor(tok_ids, torch.int64),
+                self._device_tensor(all_rows.tolist(), torch.int64),
+                self._device_tensor(all_toks.tolist(), torch.int64),
             )
             logits.index_put_(logits_slice, self.neg_inf_tensor)
 
