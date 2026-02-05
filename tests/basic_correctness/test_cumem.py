@@ -278,3 +278,48 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_wake_up_invalid_tags():
+    """Test that invalid tags don't affect memory management"""
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    free, total = torch.cuda.mem_get_info()
+    used_bytes_baseline = total - free
+    
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+    
+    # Enter sleep mode
+    llm.sleep(level=1)
+    free_after_sleep, _ = torch.cuda.mem_get_info()
+    used_after_sleep = total - free_after_sleep - used_bytes_baseline
+    
+    # Memory should be mostly freed (less than 7 GiB as in test_end_to_end)
+    assert used_after_sleep < 7 * GiB_bytes
+    
+    # Try to wake up with completely invalid tag - memory should stay the same
+    llm.wake_up(tags=["invalid_tag"])
+    free_after_invalid, _ = torch.cuda.mem_get_info()
+    used_after_invalid = total - free_after_invalid - used_bytes_baseline
+    
+    # Memory should not change significantly (within 100MB tolerance)
+    assert abs(used_after_sleep - used_after_invalid) < 100 * 1024 * 1024
+    
+    # Wake up with mixed valid and invalid tags (only weights should wake up)
+    llm.wake_up(tags=["weights", "invalid_tag", "another_invalid"])
+    free_after_weights, _ = torch.cuda.mem_get_info()
+    used_after_weights = total - free_after_weights - used_bytes_baseline
+    
+    # Memory should increase for weights (should be less than 10 GiB as in test_end_to_end)
+    assert used_after_weights > used_after_sleep
+    assert used_after_weights < 10 * GiB_bytes
+    
+    # Fully wake up by awakening kv_cache
+    llm.wake_up(tags=["kv_cache"])
+    
+    # Verify functionality after full wake up
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
