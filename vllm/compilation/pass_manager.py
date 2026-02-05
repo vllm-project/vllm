@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 from torch import fx as fx
 
@@ -154,15 +154,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        passes = []
-
-        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
-        for pass_ in self.passes:
-            passes.append(pass_.uuid())
+        passes: list[str] = [pass_.uuid() for pass_ in self.passes]
+        passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
+        state = {"pass_config": self.pass_config.compile_factors(), "passes": passes}
 
         # Include the compile range in the uuid to ensure that inductor
         # recompiles the graph for the new dynamic compile range.
         state["compile_range"] = str(get_pass_context().compile_range)
-        state["passes"] = passes
         return InductorPass.hash_dict(state)

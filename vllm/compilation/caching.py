@@ -6,6 +6,7 @@ import inspect
 import os
 import pickle
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
@@ -26,7 +27,28 @@ except ImportError:
 
 assert isinstance(SerializableCallable, type)
 
+
 logger = init_logger(__name__)
+
+
+def get_code_factors(forward_code_files: list[Path]) -> list[dict[str, str]]:
+    """Return per-file factors for compile cache hashing."""
+    code_factors: list[dict[str, str]] = []
+    for filepath in forward_code_files:
+        path_str = str(filepath)
+        entry: dict[str, str] = {"path": path_str}
+        if path_str == "<string>":
+            # Dynamically generated code (e.g., exec); nothing to hash.
+            code_factors.append(entry)
+            continue
+        try:
+            with filepath.open() as f:
+                content = f.read()
+                entry["hash"] = hash_factors({"content": content})
+        except Exception:
+            logger.warning("Failed to read file %s", path_str)
+        code_factors.append(entry)
+    return code_factors
 
 
 class StandaloneCompiledArtifacts:
@@ -331,6 +353,22 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         Used for depyf debugging.
         """
         return "VllmSerializableFunction"
+
+
+def compute_env_and_config_hashes(
+    vllm_config: VllmConfig,
+) -> tuple[str, str, dict[str, object], dict[str, object]]:
+    """
+    Return the hashed environment factors, config hash, and raw factors.
+    Both AOT and JIT cache paths rely on this helper to ensure their cache keys
+    stay in sync.
+    """
+
+    env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
+    config_factors = vllm_config.compile_factors()
+    config_hash = hash_factors(config_factors)
+    return env_hash, config_hash, env_factors, config_factors
 
 
 def reconstruct_serializable_fn_from_mega_artifact(

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import format_gib, get_cpu_memory
@@ -168,17 +168,20 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        WARNING: Whenever a new field is added to this config, review
+        `ignored_factors` to decide whether the field should be excluded.
+        All other dataclass fields participate in the hash automatically.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This config uses an opt-out hash: start from every dataclass field and
+        then drop the `ignored_factors` below.
         """
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
@@ -197,10 +200,7 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

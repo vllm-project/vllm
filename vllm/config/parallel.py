@@ -11,7 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -497,7 +497,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compile_factors(self) -> CompileFactors:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -507,6 +507,10 @@ class ParallelConfig:
 
         This hash is also used for DP worker configuration validation
         to prevent hangs from mismatched collective communication patterns.
+
+        When adding new fields to this config, review `ignored_factors` to
+        decide whether they should be excluded. All other dataclass fields are
+        included automatically by the opt-out hashing scheme.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
@@ -539,10 +543,7 @@ class ParallelConfig:
             "_api_process_rank",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization

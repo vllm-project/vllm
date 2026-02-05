@@ -32,6 +32,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+CompileFactors = dict[str, object]
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -185,8 +186,8 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
 
 @runtime_checkable
-class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> CompileFactors: ...
 
 
 class SupportsMetricsInfo(Protocol):
@@ -299,22 +300,37 @@ def normalize_value(x):
     )
 
 
-def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
+def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFactors:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
+    - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
+    # dataclasses.fields() skips InitVar entries; __dataclass_fields__ keeps
+    # them. Include both so ignored_factors can safely name InitVars.
+    dataclass_fields = getattr(config, "__dataclass_fields__", {})
+    field_names = {f.name for f in fields(config)} | set(dataclass_fields)
+    unknown_ignored = ignored_factors - field_names
+    if unknown_ignored:
+        raise ValueError(
+            f"get_compile_factors: ignored_factors contain unknown fields "
+            f"{sorted(unknown_ignored)} for {type(config).__name__}"
+        )
     factors: dict[str, object] = {}
     for dc_field in fields(config):
         factor = dc_field.name
         if factor in ignored_factors:
             continue
         value = getattr(config, factor, None)
+        # Nested configs expose factors via compile_factors; unwrap first.
+        if isinstance(value, SupportsCompileFactors):
+            factors[factor] = value.compile_factors()
+            continue
         try:
             factors[factor] = normalize_value(value)
         except TypeError as e:
             raise TypeError(
-                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"get_compile_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
     return factors

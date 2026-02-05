@@ -15,9 +15,8 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.config.utils import CompileFactors, Range, normalize_value
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -50,17 +49,17 @@ class CompilerInterface:
         """
         pass
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         """
-        Gather all the relevant information from the vLLM config,
-        to compute a hash so that we can cache the compiled model.
+        Gather compiler-specific factors that influence the generated code.
 
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
-        to check what information
-        is already considered by default. This function should only
-        consider the information that is specific to the compiler.
+        See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
+        for the base configuration factors. This method should return any
+        additional data that uniquely identifies the compiler's contribution to
+        the cache key. Subclasses must return a dictionary; use an empty dict
+        when no compiler-specific data is needed.
         """
-        return ""
+        return {}
 
     def compile(
         self,
@@ -156,13 +155,13 @@ def get_inductor_factors() -> list[Any]:
     # summarize system state
     from torch._inductor.codecache import CacheBase
 
-    system_factors = CacheBase.get_system()
+    system_factors = normalize_value(CacheBase.get_system())
     factors.append(system_factors)
 
     # summarize pytorch state
     from torch._inductor.codecache import torch_key
 
-    torch_factors = torch_key()
+    torch_factors = normalize_value(torch_key())
     factors.append(torch_factors)
     return factors
 
@@ -199,12 +198,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
         self.save_format = save_format
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str: str = safe_hash(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor_standalone": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -268,7 +263,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
             # since we can serialize the bytes using to_bytes
             # and reload it using the key when reading
             return compiled_graph, None
-
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
@@ -336,12 +330,8 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str: str = safe_hash(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""

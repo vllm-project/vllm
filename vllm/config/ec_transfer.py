@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 
 ECProducer = Literal["ec_producer"]
 ECConsumer = Literal["ec_consumer"]
@@ -57,7 +56,7 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -69,11 +68,8 @@ class ECTransferConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        # This config does not affect the compiled graph.
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

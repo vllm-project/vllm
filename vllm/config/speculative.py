@@ -9,10 +9,9 @@ from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
@@ -152,7 +151,7 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -164,12 +163,13 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        factors: list[Any] = [
+            # Eagle3 affects the computation graph because it returns
+            # intermediate hidden states in addition to the final hidden state.
+            self.method == "eagle3"
+        ]
+        normalized = normalize_value(factors)
+        return {"factors": normalized} if normalized else {}
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

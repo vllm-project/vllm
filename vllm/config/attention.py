@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -43,19 +43,13 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        Provide the factors that affect the compiled computation graph.
+        All dataclass fields participate; add fields to an ignore set if
+        they should not influence compilation cache keys.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        ignored_factors: list[str] = []
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, set())
 
     @field_validator("backend", mode="before")
     @classmethod

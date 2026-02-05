@@ -5,9 +5,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
@@ -87,7 +86,7 @@ class LoadConfig:
     see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
     """
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -99,11 +98,8 @@ class LoadConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        # This config does not affect the compiled graph.
+        return {}
 
     @field_validator("load_format", mode="after")
     def _lowercase_load_format(cls, load_format: str) -> str:

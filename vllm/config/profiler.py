@@ -7,7 +7,8 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from vllm.config.utils import config
+import vllm.envs as envs
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
@@ -98,6 +99,43 @@ class ProfilerConfig:
         factors: list[Any] = []
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    def compile_factors(self) -> CompileFactors:
+        # Profiling setup does not affect the computation graph, so hash neutral.
+        return {}
+
+    def _get_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
+        """Get field from env var if set, with deprecation warning."""
+
+        if envs.is_set(env_var_name):
+            value = getattr(envs, env_var_name)
+            logger.warning_once(
+                "Using %s environment variable is deprecated and will be removed in "
+                "v0.15.0 or v1.0.0, whichever is soonest. Please use "
+                "--profiler-config.%s command line argument or "
+                "ProfilerConfig(%s=...) config field instead.",
+                env_var_name,
+                field_name,
+                field_name,
+            )
+            return value
+        return None
+
+    def _set_from_env_if_set(
+        self,
+        field_name: str,
+        env_var_name: str,
+        to_bool: bool = True,
+        to_int: bool = False,
+    ) -> None:
+        """Set field from env var if set, with deprecation warning."""
+        value = self._get_from_env_if_set(field_name, env_var_name)
+        if value is not None:
+            if to_bool:
+                value = value == "1"
+            if to_int:
+                value = int(value)
+            setattr(self, field_name, value)
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:

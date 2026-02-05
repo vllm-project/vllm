@@ -3,13 +3,12 @@
 
 import copy
 import getpass
-import json
 import os
 import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import is_dataclass, replace
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -23,7 +22,6 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
-from vllm.utils.hashing import safe_hash
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -41,7 +39,12 @@ from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import (
+    CompileFactors,
+    SupportsCompileFactors,
+    config,
+    hash_factors,
+)
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -243,7 +246,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = Field(default_factory=dict)
+    additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -255,7 +258,7 @@ class VllmConfig:
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -267,93 +270,48 @@ class VllmConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-
-        # summarize vllm config
-        vllm_factors: list[Any] = []
         from vllm import __version__
 
-        vllm_factors.append(__version__)
-        if self.model_config:
-            vllm_factors.append(self.model_config.compute_hash())
-            if (
-                self.compilation_config
-                and getattr(self.compilation_config, "compile_mm_encoder", False)
-                and self.model_config.multimodal_config
-            ):
-                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.cache_config:
-            vllm_factors.append(self.cache_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.parallel_config:
-            vllm_factors.append(self.parallel_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.scheduler_config:
-            vllm_factors.append(self.scheduler_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.device_config:
-            vllm_factors.append(self.device_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.load_config:
-            vllm_factors.append(self.load_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.attention_config:
-            vllm_factors.append(self.attention_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.lora_config:
-            vllm_factors.append(self.lora_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.speculative_config:
-            vllm_factors.append(self.speculative_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.structured_outputs_config:
-            vllm_factors.append(self.structured_outputs_config.compute_hash())
-        if self.profiler_config:
-            vllm_factors.append(self.profiler_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        vllm_factors.append(self.observability_config.compute_hash())
-        if self.quant_config:
-            pass  # should be captured by model_config.quantization
-        if self.compilation_config:
-            vllm_factors.append(self.compilation_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.kv_transfer_config:
-            vllm_factors.append(self.kv_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.ec_transfer_config:
-            vllm_factors.append(self.ec_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.additional_config:
-            if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = safe_hash(
-                    json.dumps(additional_config, sort_keys=True).encode(),
-                    usedforsecurity=False,
-                ).hexdigest()
-            else:
-                additional_config_hash = additional_config.compute_hash()
-            vllm_factors.append(additional_config_hash)
-        else:
-            vllm_factors.append("None")
-        factors.append(vllm_factors)
+        def get_factors(config_obj: SupportsCompileFactors | None) -> CompileFactors:
+            return {} if config_obj is None else config_obj.compile_factors()
 
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
-        return hash_str
+        factors: dict[str, Any] = {
+            "version": __version__,
+            "model": get_factors(self.model_config),
+            "cache": get_factors(self.cache_config),
+            "parallel": get_factors(self.parallel_config),
+            "scheduler": get_factors(self.scheduler_config),
+            "device": get_factors(self.device_config),
+            "load": get_factors(self.load_config),
+            "attention": get_factors(self.attention_config),
+            "speculative": get_factors(self.speculative_config),
+            "structured_outputs": get_factors(self.structured_outputs_config),
+            "observability": get_factors(self.observability_config),
+            "profiler": get_factors(self.profiler_config),
+            "compilation": get_factors(self.compilation_config),
+            "kv_transfer": get_factors(self.kv_transfer_config),
+            "ec_transfer": get_factors(self.ec_transfer_config),
+            "lora": get_factors(self.lora_config),
+        }
+
+        if self.additional_config:
+            additional_config = self.additional_config
+            if isinstance(additional_config, dict):
+                factors["additional"] = additional_config
+            elif isinstance(additional_config, SupportsCompileFactors):
+                factors["additional"] = additional_config.compile_factors()
+            else:
+                raise TypeError(
+                    "additional_config must be a dict or SupportsCompileFactors"
+                )
+        else:
+            factors["additional"] = {}
+
+        return factors
+
+    def compute_hash(self) -> str:
+        """Return a stable hash of the compilation-relevant factors."""
+        return hash_factors(self.compile_factors())
 
     @property
     def needs_dp_coordinator(self) -> bool:
