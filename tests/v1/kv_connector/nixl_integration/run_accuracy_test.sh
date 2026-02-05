@@ -4,6 +4,7 @@ set -xe
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
+CROSS_LAYERS_BLOCKS="False"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -13,6 +14,10 @@ while [[ $# -gt 0 ]]; do
     --attention-backend)
       ATTENTION_BACKEND="$2"
       shift 2
+      ;;
+    --enable-cross-layers)
+      CROSS_LAYERS_BLOCKS="True"
+      shift 1
       ;;
     *)
       echo "Unknown option $1"
@@ -34,11 +39,17 @@ else
   KV_CONFIG_HETERO_LAYOUT=''
 fi
 
+if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
+  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
+else
+  KV_EXTRA_CONFIG=''
+fi
+
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
