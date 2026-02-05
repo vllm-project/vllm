@@ -5,7 +5,6 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TypeAlias
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -28,6 +27,7 @@ from vllm.v1.metrics.stats import (
     PromptTokenStats,
     SchedulerStats,
 )
+from vllm.v1.metrics.utils import make_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -414,9 +414,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        per_engine_labelvalues: dict[int, list[object]] = {
+        self.per_engine_labelvalues: dict[int, list[object]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
+        per_engine_labelvalues = self.per_engine_labelvalues
 
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config, labelnames, per_engine_labelvalues
@@ -435,7 +436,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.gauge_scheduler_running = make_per_engine(
-            gauge_scheduler_running, engine_indexes, model_name
+            gauge_scheduler_running, per_engine_labelvalues
         )
 
         gauge_scheduler_waiting = self._gauge_cls(
@@ -445,7 +446,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.gauge_scheduler_waiting = make_per_engine(
-            gauge_scheduler_waiting, engine_indexes, model_name
+            gauge_scheduler_waiting, per_engine_labelvalues
         )
 
         gauge_engine_sleep_state = self._gauge_cls(
@@ -481,7 +482,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.gauge_kv_cache_usage = make_per_engine(
-            gauge_kv_cache_usage, engine_indexes, model_name
+            gauge_kv_cache_usage, per_engine_labelvalues
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -494,7 +495,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames,
             )
             self.counter_corrupted_requests = make_per_engine(
-                counter_corrupted_requests, engine_indexes, model_name
+                counter_corrupted_requests, per_engine_labelvalues
             )
 
         counter_prefix_cache_queries = self._counter_cls(
@@ -505,7 +506,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_prefix_cache_queries = make_per_engine(
-            counter_prefix_cache_queries, engine_indexes, model_name
+            counter_prefix_cache_queries, per_engine_labelvalues
         )
 
         counter_prefix_cache_hits = self._counter_cls(
@@ -514,7 +515,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_prefix_cache_hits = make_per_engine(
-            counter_prefix_cache_hits, engine_indexes, model_name
+            counter_prefix_cache_hits, per_engine_labelvalues
         )
 
         #
@@ -530,7 +531,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_connector_prefix_cache_queries = make_per_engine(
-            counter_connector_prefix_cache_queries, engine_indexes, model_name
+            counter_connector_prefix_cache_queries, per_engine_labelvalues
         )
 
         counter_connector_prefix_cache_hits = self._counter_cls(
@@ -542,7 +543,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_connector_prefix_cache_hits = make_per_engine(
-            counter_connector_prefix_cache_hits, engine_indexes, model_name
+            counter_connector_prefix_cache_hits, per_engine_labelvalues
         )
 
         #
@@ -557,7 +558,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_mm_cache_queries = make_per_engine(
-            counter_mm_cache_queries, engine_indexes, model_name
+            counter_mm_cache_queries, per_engine_labelvalues
         )
 
         counter_mm_cache_hits = self._counter_cls(
@@ -568,7 +569,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_mm_cache_hits = make_per_engine(
-            counter_mm_cache_hits, engine_indexes, model_name
+            counter_mm_cache_hits, per_engine_labelvalues
         )
 
         #
@@ -580,7 +581,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_num_preempted_reqs = make_per_engine(
-            counter_num_preempted_reqs, engine_indexes, model_name
+            counter_num_preempted_reqs, per_engine_labelvalues
         )
 
         counter_prompt_tokens = self._counter_cls(
@@ -589,7 +590,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_prompt_tokens = make_per_engine(
-            counter_prompt_tokens, engine_indexes, model_name
+            counter_prompt_tokens, per_engine_labelvalues
         )
 
         # Labeled prompt token counters by source
@@ -614,7 +615,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_prompt_tokens_cached = make_per_engine(
-            counter_prompt_tokens_cached, engine_indexes, model_name
+            counter_prompt_tokens_cached, per_engine_labelvalues
         )
 
         # Recomputed tokens (last token recomputed when entire prompt is cached)
@@ -624,7 +625,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_prompt_tokens_recomputed = make_per_engine(
-            counter_prompt_tokens_recomputed, engine_indexes, model_name
+            counter_prompt_tokens_recomputed, per_engine_labelvalues
         )
 
         counter_generation_tokens = self._counter_cls(
@@ -633,7 +634,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.counter_generation_tokens = make_per_engine(
-            counter_generation_tokens, engine_indexes, model_name
+            counter_generation_tokens, per_engine_labelvalues
         )
 
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
@@ -660,7 +661,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_num_prompt_tokens_request = make_per_engine(
-            histogram_num_prompt_tokens_request, engine_indexes, model_name
+            histogram_num_prompt_tokens_request, per_engine_labelvalues
         )
 
         histogram_num_generation_tokens_request = self._histogram_cls(
@@ -670,7 +671,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_num_generation_tokens_request = make_per_engine(
-            histogram_num_generation_tokens_request, engine_indexes, model_name
+            histogram_num_generation_tokens_request, per_engine_labelvalues
         )
 
         # TODO: This metric might be incorrect in case of using multiple
@@ -683,7 +684,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_iteration_tokens = make_per_engine(
-            histogram_iteration_tokens, engine_indexes, model_name
+            histogram_iteration_tokens, per_engine_labelvalues
         )
 
         histogram_max_num_generation_tokens_request = self._histogram_cls(
@@ -693,7 +694,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_max_num_generation_tokens_request = make_per_engine(
-            histogram_max_num_generation_tokens_request, engine_indexes, model_name
+            histogram_max_num_generation_tokens_request, per_engine_labelvalues
         )
 
         histogram_n_request = self._histogram_cls(
@@ -703,7 +704,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_n_request = make_per_engine(
-            histogram_n_request, engine_indexes, model_name
+            histogram_n_request, per_engine_labelvalues
         )
 
         histogram_max_tokens_request = self._histogram_cls(
@@ -713,7 +714,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_max_tokens_request = make_per_engine(
-            histogram_max_tokens_request, engine_indexes, model_name
+            histogram_max_tokens_request, per_engine_labelvalues
         )
 
         #
@@ -749,7 +750,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_time_to_first_token = make_per_engine(
-            histogram_time_to_first_token, engine_indexes, model_name
+            histogram_time_to_first_token, per_engine_labelvalues
         )
 
         histogram_inter_token_latency = self._histogram_cls(
@@ -779,7 +780,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_inter_token_latency = make_per_engine(
-            histogram_inter_token_latency, engine_indexes, model_name
+            histogram_inter_token_latency, per_engine_labelvalues
         )
 
         histogram_request_time_per_output_token = self._histogram_cls(
@@ -809,7 +810,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_request_time_per_output_token = make_per_engine(
-            histogram_request_time_per_output_token, engine_indexes, model_name
+            histogram_request_time_per_output_token, per_engine_labelvalues
         )
 
         request_latency_buckets = [
@@ -842,7 +843,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_e2e_time_request = make_per_engine(
-            histogram_e2e_time_request, engine_indexes, model_name
+            histogram_e2e_time_request, per_engine_labelvalues
         )
 
         histogram_queue_time_request = self._histogram_cls(
@@ -852,7 +853,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_queue_time_request = make_per_engine(
-            histogram_queue_time_request, engine_indexes, model_name
+            histogram_queue_time_request, per_engine_labelvalues
         )
 
         histogram_inference_time_request = self._histogram_cls(
@@ -862,7 +863,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_inference_time_request = make_per_engine(
-            histogram_inference_time_request, engine_indexes, model_name
+            histogram_inference_time_request, per_engine_labelvalues
         )
 
         histogram_prefill_time_request = self._histogram_cls(
@@ -872,7 +873,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_prefill_time_request = make_per_engine(
-            histogram_prefill_time_request, engine_indexes, model_name
+            histogram_prefill_time_request, per_engine_labelvalues
         )
 
         histogram_decode_time_request = self._histogram_cls(
@@ -882,7 +883,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_decode_time_request = make_per_engine(
-            histogram_decode_time_request, engine_indexes, model_name
+            histogram_decode_time_request, per_engine_labelvalues
         )
 
         histogram_prefill_kv_computed_request = self._histogram_cls(
@@ -895,7 +896,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=labelnames,
         )
         self.histogram_prefill_kv_computed_request = make_per_engine(
-            histogram_prefill_kv_computed_request, engine_indexes, model_name
+            histogram_prefill_kv_computed_request, per_engine_labelvalues
         )
 
         #
@@ -936,7 +937,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames,
             )
             self.histogram_kv_block_lifetime = make_per_engine(
-                histogram_kv_block_lifetime, engine_indexes, model_name
+                histogram_kv_block_lifetime, per_engine_labelvalues
             )
 
             histogram_kv_block_idle_before_evict = self._histogram_cls(
@@ -949,7 +950,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames,
             )
             self.histogram_kv_block_idle_before_evict = make_per_engine(
-                histogram_kv_block_idle_before_evict, engine_indexes, model_name
+                histogram_kv_block_idle_before_evict, per_engine_labelvalues
             )
 
             histogram_kv_block_reuse_gap = self._histogram_cls(
@@ -964,7 +965,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames,
             )
             self.histogram_kv_block_reuse_gap = make_per_engine(
-                histogram_kv_block_reuse_gap, engine_indexes, model_name
+                histogram_kv_block_reuse_gap, per_engine_labelvalues
             )
         else:
             self.histogram_kv_block_lifetime = {}
@@ -1194,15 +1195,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
-
-
-PromMetric: TypeAlias = Gauge | Counter | Histogram
-
-
-def make_per_engine(
-    metric: PromMetric, engine_idxs: list[int], model_name: object
-) -> dict[int, PromMetric]:
-    return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
