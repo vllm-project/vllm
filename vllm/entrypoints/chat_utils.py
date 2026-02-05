@@ -530,8 +530,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         mm_config = self.model_config.multimodal_config
         if (
-            mm_config.enable_mm_embeds
+            mm_config is not None
+            and mm_config.enable_mm_embeds
             and mm_config.get_limit_per_prompt(input_modality) == 0
+            and original_modality.endswith("_embeds")
         ):
             # Skip validation: embeddings bypass limit when enable_mm_embeds=True
             pass
