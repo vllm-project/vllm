@@ -544,7 +544,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         start_non_spec_prefill = num_decodes
         end_non_spec_prefill = start_non_spec_prefill + num_prefills
 
-        # APC is enabled if pointers are available to the blocks, the last
+        # Full APC is enabled if pointers are available to the blocks, the last
         # computed token (the cache position), and the block to which the state
         # for each request should be written after the forward.
         prefix_caching_enabled = bool(
