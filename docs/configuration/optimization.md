@@ -291,6 +291,54 @@ Based on the configuration, the content of the multi-modal caches on `P0` and `P
 K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
 
+## CPU Resources for GPU Deployments
+
+vLLM V1 uses a multi-process architecture (see [V1 Process Architecture](../design/arch_overview.md#v1-process-architecture)) where each process requires CPU resources. Underprovisioning CPU cores is a common source of performance degradation, especially in virtualized environments.
+
+### Minimum CPU Requirements
+
+For a deployment with `N` GPUs, there are at minimum:
+
+- **1 API server process** -- handles HTTP requests, tokenization, and input processing
+- **1 engine core process** -- runs the scheduler and coordinates GPU workers
+- **N GPU worker processes** -- one per GPU, executes model forward passes
+
+This means there are always at least **`2 + N` processes** competing for CPU time.
+
+!!! warning
+    Using fewer physical CPU cores than processes will cause contention and significantly degrade throughput and latency. The engine core process runs a busy loop and is particularly sensitive to CPU starvation.
+
+The minimum is `2 + N` physical cores (1 for the API server, 1 for the engine core, and 1 per GPU worker). In practice, allocating more cores improves performance because the OS, PyTorch background threads, and other system processes also need CPU time.
+
+!!! important
+    Please note we are referring to **physical CPU cores** here. If your system has hyperthreading enabled, then 1 vCPU = 1 hyperthread = 1/2 physical CPU core, so you need `2 x (2 + N)` minimum vCPUs.
+
+### Data Parallel and Multi-API Server Deployments
+
+When using data parallelism or multiple API servers, the CPU requirements increase:
+
+```
+Minimum physical cores = A + DP + N + (1 if DP > 1 else 0)
+```
+
+where `A` is the API server count, `DP` is the data parallel size, and `N` is
+the total number of GPUs. For example, with `DP=4, TP=2` on 8 GPUs with 2 API
+servers:
+
+```
+2 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = 15 processes
+```
+
+### Performance Impact
+
+CPU underprovisioning particularly impacts:
+
+- **Input processing throughput** -- tokenization, chat template rendering, and multi-modal data loading all run on CPU
+- **Scheduling latency** -- the engine core scheduler runs on CPU and directly affects how quickly new tokens are dispatched to the GPU workers
+- **Output processing** -- detokenization, networking, and especially streaming token responses use CPU cycles
+
+If you observe that GPU utilization is lower than expected, CPU contention may be the bottleneck. Increasing the number of available CPU cores and even the clock speed can significantly improve end-to-end performance.
+
 ## Attention Backend Selection
 
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
