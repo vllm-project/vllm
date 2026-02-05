@@ -184,13 +184,23 @@ def group_and_batch_mm_items(
     pin_memory: bool = False,
 ) -> Generator[tuple[int, BatchedTensorInputs]]:
     """
-    Yield `(num_items, kwargs)`, where `kwargs` is a dictionary of
-    keyword arguments to pass to the model for the given modality, and
-    `num_items` is the corresponding number of `MultiModalKwargsItem`s.
+    Group consecutive items (possibly from different requests) into batches.
+
+    Items must be split across groups if any of the following occurs,
+    as the batch would otherwise be invalid:
+    - They have different fields (e.g. mixed image and embedding inputs).
+    - They have different values in `MultiModalSharedField`.
+
+    Args:
+        mm_kwargs: List of `MultiModalKwargsItem`.
+        device: The device to place the grouped tensors on.
+        pin_memory: Whether to pin memory for faster host-to-device transfer.
+
+    Yields:
+        A tuple `(num_items, grouped_kwargs)`, where:
+        - `kwargs` is a dictionary of keyword arguments to pass to the model;
+        - `num_items` is the corresponding number of items.
     """
-    # We cannot safely call `reduce_data` across requests in the following cases:
-    # - When requests have different fields (e.g. mixed image and embedding inputs)
-    # - When requests have different values in `MultiModalSharedField`
     group_ids = [
         tuple(
             (key, _get_group_hash(elem))
@@ -221,8 +231,16 @@ def group_mm_kwargs_by_modality(
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
-    modality together into the same `MultiModalKwargs` instance.
+    """
+    Group consecutive items (possibly from different requests) into batches.
+
+    Items must be split across groups if any of the following occurs,
+    as the batch would otherwise be invalid:
+    - They have different fields (e.g. mixed image and embedding inputs).
+    - They have different values in `MultiModalSharedField`.
+
+    To simplify the implementation of `embed_multimodal`, we add another
+    restriction that the items in a batch must belong to the same modality.
 
     Args:
         mm_kwargs: List of `MultiModalKwargsItem`.
@@ -230,7 +248,10 @@ def group_mm_kwargs_by_modality(
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
-        A tuple `(modality, num_items, grouped_kwargs)`.
+        A tuple `(modality, num_items, grouped_kwargs)`, where:
+        - `modality` is the modality of the batch;
+        - `kwargs` is a dictionary of keyword arguments to pass to the model;
+        - `num_items` is the corresponding number of items.
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
