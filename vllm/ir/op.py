@@ -155,18 +155,26 @@ class IrOp:
 
     def _inner_call(self, *args, **kwargs) -> Any:
         """Direct call to torch op, could also skip the torch layer if eager?"""
+        impl = self.dispatch(*args, **kwargs)
+        return impl.impl_fn(*args, **kwargs)
+
+    def dispatch(self, *args, **kwargs) -> "IrOpImpl":
+        """
+        Dispatch to the appropriate implementation based on current priority
+        and argument support checks. Returns the selected IrOpImpl.
+        """
         if not self._priority_impls:
             logger.warning_once(
                 "Priority not set for op %s, using native implementation.", self.name
             )
-            return self.impls["native"].impl_fn(*args, **kwargs)
+            return self.impls["native"]
 
         for impl in self._priority_impls:
             assert impl.supported, (
                 "All implementations in priority list must be supported."
             )
             if impl.supports_args is None or impl.supports_args(*args, **kwargs):
-                return impl.impl_fn(*args, **kwargs)
+                return impl
 
         raise RuntimeError(
             "Priority set incorrectly: the last implementation must "

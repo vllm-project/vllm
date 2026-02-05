@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
+
 import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -63,6 +65,7 @@ class TestIrOpCustomAdd:
         x = torch.randn(4, 5)
         y = torch.randn(4, 5)
 
+        # Calls native by default
         out = _custom_add(x, y)
         ref = x + y
 
@@ -193,11 +196,21 @@ class TestIrOpImplDispatch:
         y = torch.tensor(2, dtype=torch.int32)
 
         with _custom_add.set_priority(["impl_b", "impl_a"]):
+            assert _custom_add.dispatch(x, y) is impl_b
             out1 = _custom_add(x, y)
             out2 = torch.ops.vllm_ir._custom_add(x, y)
 
+            with _custom_add.set_priority(["impl_a"]):
+                assert _custom_add.dispatch(x, y) is impl_a
+                out3 = _custom_add(x, y)
+                out4 = torch.ops.vllm_ir._custom_add(x, y)
+
+        # impl_b
         assert out1.item() == 1 + 2 + 20
         assert out2.item() == 1 + 2 + 20
+        # impl_a
+        assert out3.item() == 1 + 2 + 10
+        assert out4.item() == 1 + 2 + 10
 
     def test_unsupported_impl_filtered(self):
         @_custom_add.register_impl("unsupported", supported=False)
@@ -214,20 +227,58 @@ class TestIrOpImplDispatch:
         # impl_bad skipped → impl_a
         assert out.item() == 1 + 2 + 10
 
-    def test_supports_args_runtime_dispatch(self):
+    def test_supports_args_runtime_dispatch_and_warning(
+        self, caplog_vllm: pytest.LogCaptureFixture
+    ):
         x1 = torch.ones((2, 2), dtype=torch.int32)
         y1 = torch.full((2, 2), 2, dtype=torch.int32)
 
         x2 = torch.ones((2, 3), dtype=torch.int32)
         y2 = torch.full((2, 3), 2, dtype=torch.int32)
 
-        with _custom_add.set_priority(["impl_even"]):
+        with (
+            caplog_vllm.at_level(logging.WARNING),
+            _custom_add.set_priority(["impl_even"]),
+        ):
+            # Test the warning about native fallback is logged (before even dispatching)
+            assert len(caplog_vllm.records) == 1
+            message = caplog_vllm.records[0].message
+            assert "_custom_add" in message
+            assert "fallback to native" in message
+            assert "priority" in message
+
+            # Check dispatching
             assert _custom_add.get_priority() == ["impl_even", "native"]
+            assert _custom_add.dispatch(x1, y1) is impl_even
+            assert _custom_add.dispatch(x2, y2) is _custom_add.impls["native"]
 
             out1 = _custom_add(x1, y1)  # size(1) == 2 → impl_even
             out2 = _custom_add(x2, y2)  # size(1) == 3 → native fallback
 
+        # no other warnings
+        assert len(caplog_vllm.records) == 1
         assert torch.all(out1 == 1 + 2 + 50)
         assert torch.all(out2 == 1 + 2)
 
-    # TODO(luka) test various warnings
+    def test_default_priority(
+        self, caplog_vllm: pytest.LogCaptureFixture, disable_log_dedup
+    ):
+        # Make sure logs are not deduplicated to properly test the warning
+        x = torch.tensor([3], dtype=torch.int32)
+        y = torch.tensor([4], dtype=torch.int32)
+
+        # No priority set → falls back to native
+        assert _custom_add.get_priority() == []
+        with caplog_vllm.at_level(logging.WARNING):
+            # Native by default
+            assert _custom_add.dispatch(x, y) is _custom_add.impls["native"]
+            out = _custom_add(x, y)
+
+        # Check dispatching to native by default
+        assert out.item() == 3 + 4
+
+        # Check warning
+        assert len(caplog_vllm.records) == 2
+        message = caplog_vllm.records[0].message.lower()
+        assert "_custom_add" in message
+        assert "priority not set" in message
