@@ -58,8 +58,8 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         # Extract reasoning content (everything before </think>)
         reasoning, _, content = model_output.partition(self.end_token)
 
-        # Strip whitespace
+        # Strip whitespace for consistency
         reasoning = reasoning.strip() if reasoning else None
-        final_content = content.lstrip("\n") if content else None
+        final_content = content.strip() if content else None
 
         return reasoning, final_content
