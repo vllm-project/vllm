@@ -48,7 +48,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -62,19 +65,14 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-MCP_BUILTIN_TOOLS: set[str] = {
-    "web_search_preview",
-    "code_interpreter",
-    "container",
-}
-
-# Mapping from built-in tool recipient names to their MCP server labels.
-# This ensures consistency between streaming and non-streaming responses.
 _BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
     "python": "code_interpreter",
     "browser": "web_search_preview",
     "container": "container",
 }
+
+# Derive MCP_BUILTIN_TOOLS from the canonical mapping
+MCP_BUILTIN_TOOLS: set[str] = set(_BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
@@ -115,6 +113,8 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
         )
+    if start_date is None:
+        start_date = envs.VLLM_GPT_OSS_SYSTEM_START_DATE
     if start_date is None:
         # NOTE(woosuk): This brings non-determinism in vLLM. Be careful.
         start_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -497,6 +497,10 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
     try:
         browser_call = json.loads(content.text)
     except json.JSONDecodeError:
+        logger.warning(
+            "Invalid JSON in browser tool call, using error placeholder: %s",
+            content.text,
+        )
         json_retry_output_message = (
             f"Invalid JSON args, caught and retried: {content.text}"
         )
@@ -730,22 +734,7 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 )
             ]
 
-    if parser.current_channel == "commentary":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "analysis":
+    if parser.current_channel in ("commentary", "analysis"):
         return [
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",

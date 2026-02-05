@@ -15,6 +15,8 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
+    from .conftest import BASE_TEST_ENV
+
     assert importlib.util.find_spec("gpt_oss") is not None, (
         "Harmony tests require gpt_oss package to be installed"
     )
@@ -32,12 +34,12 @@ def server():
         "--tool-server",
         "demo",
     ]
-    env_dict = dict(
-        VLLM_ENABLE_RESPONSES_API_STORE="1",
-        VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT="1",
-        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
-    )
-
+    env_dict = {
+        **BASE_TEST_ENV,
+        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+        "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": "1",
+        "PYTHON_EXECUTION_BACKEND": "dangerously_use_uv",
+    }
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
