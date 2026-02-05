@@ -42,23 +42,26 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalDataItems,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer,
 )
-from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+)
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -346,11 +349,8 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
-        )
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
@@ -556,7 +556,7 @@ class Idefics3Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -605,9 +605,16 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.model = Idefics3Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=LlamaModel,
+            tower_targets={"image": (Idefics3VisionTransformer, Idefics3Connector)},
+        ):
+            self.model = Idefics3Model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
+
         self.image_token_id = self.config.image_token_id
 
         self.lm_head = ParallelLMHead(
@@ -670,9 +677,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         num_patches = image_input["num_patches"]
         return [e.flatten(0, 1) for e in image_features.split(num_patches.tolist())]
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -682,7 +686,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

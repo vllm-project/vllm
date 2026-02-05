@@ -11,30 +11,22 @@ logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
-    "deepspeedfp",
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "modelopt",
     "modelopt_fp4",
-    "bitblas",
     "gguf",
-    "gptq_marlin_24",
     "gptq_marlin",
-    "gptq_bitblas",
     "awq_marlin",
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "hqq",
     "experts_int8",
-    "ipex",
     "quark",
     "moe_wna16",
     "torchao",
-    "auto-round",
-    "rtn",
     "inc",
     "mxfp4",
     "petit_nvfp4",
@@ -43,19 +35,11 @@ QuantizationMethods = Literal[
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
-    "deepspeedfp",
     "tpu_int8",
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "bitblas",
-    "gptq_marlin_24",
-    "gptq_bitblas",
-    "hqq",
     "experts_int8",
-    "ipex",
-    "auto-round",
-    "rtn",
     "petit_nvfp4",
 ]
 
@@ -120,62 +104,47 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
-    from .bitblas import BitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
     from .cpu_wna16 import CPUAWQConfig
-    from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
-    from .gptq_bitblas import GPTQBitBLASConfig
     from .gptq_marlin import GPTQMarlinConfig
-    from .gptq_marlin_24 import GPTQMarlin24Config
-    from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
-    from .ipex_quant import IPEXConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
-    from .rtn import RTNConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
-        "deepspeedfp": DeepSpeedFPConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
-        "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
-        "gptq_marlin_24": GPTQMarlin24Config,
         "gptq_marlin": GPTQMarlinConfig,
-        "gptq_bitblas": GPTQBitBLASConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
-        "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
-        "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
-        "auto-round": AutoRoundConfig,
-        "rtn": RTNConfig,
+        "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
@@ -191,5 +160,6 @@ __all__ = [
     "QuantizationConfig",
     "QuantizationMethods",
     "get_quantization_config",
+    "register_quantization_config",
     "QUANTIZATION_METHODS",
 ]

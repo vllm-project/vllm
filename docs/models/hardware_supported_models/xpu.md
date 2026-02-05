@@ -6,7 +6,7 @@
 | ----------------------------------------- |
 | [Intel® Arc™ Pro B-Series Graphics](https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/workstations/b-series/overview.html)                   |
 
-## Supported Models
+## Recommended Models
 
 ### Text-only Language Models
 
