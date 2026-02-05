@@ -283,9 +283,9 @@ class OpenAISpeechToText(OpenAIServing):
             self.asr_config.allow_audio_chunking
             and duration > self.asr_config.max_audio_clip_s
         )
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+        chunks = [(y, 0.0)] if not do_split_audio else self._split_audio(y, int(sr))
         prompts = []
-        for chunk in chunks:
+        for chunk, start_time in chunks:
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
@@ -304,10 +304,25 @@ class OpenAISpeechToText(OpenAIServing):
                         parameter="prompt",
                         value=type(prompt).__name__,
                     )
+<<<<<<< HEAD
 
                 prompt = self._preprocess_verbose_prompt(prompt)
 
             prompts.append(prompt)
+=======
+                prompt_dict = cast(dict, prompt)
+                decoder_prompt = prompt.get("decoder_prompt")
+                if not isinstance(decoder_prompt, str):
+                    raise VLLMValidationError(
+                        "Expected decoder_prompt to be str",
+                        parameter="decoder_prompt",
+                        value=type(decoder_prompt).__name__,
+                    )
+                prompt_dict["decoder_prompt"] = decoder_prompt.replace(
+                    "<|notimestamps|>", "<|0.00|>"
+                )
+            prompts.append((prompt, start_time))
+>>>>>>> e337b517c (Bug fix-Corrected timestamp after 30 sec)
         return prompts, duration
 
     def _repl_verbose_text(self, text: str):
@@ -444,10 +459,11 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            prompts, duration_s = await self._preprocess_speech_to_text(
+            prompts_with_times, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
             )
+            prompts = [p for p, _ in prompts_with_times]
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -506,15 +522,8 @@ class OpenAISpeechToText(OpenAIServing):
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
-            chunk_size_in_s = self.asr_config.max_audio_clip_s
-            if chunk_size_in_s is None:
-                assert len(list_result_generator) == 1, (
-                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
-                )
-            for idx, result_generator in enumerate(list_result_generator):
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+            start_times = [t for _, t in prompts_with_times]
+            for start_time, result_generator in zip(start_times, list_result_generator):
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         assert op.outputs[0].logprobs
@@ -696,7 +705,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     def _split_audio(
         self, audio_data: np.ndarray, sample_rate: int
-    ) -> list[np.ndarray]:
+    ) -> list[tuple[np.ndarray, float]]:
         assert self.asr_config.max_audio_clip_s is not None, (
             f"{self.asr_config.max_audio_clip_s=} cannot be None to"
             " split audio into chunks."
@@ -708,7 +717,7 @@ class OpenAISpeechToText(OpenAIServing):
         while i < audio_data.shape[-1]:
             if i + chunk_size >= audio_data.shape[-1]:
                 # handle last chunk
-                chunks.append(audio_data[..., i:])
+                chunks.append((audio_data[..., i:], i / sample_rate))
                 break
 
             # Find the best split point in the overlap region
@@ -717,7 +726,7 @@ class OpenAISpeechToText(OpenAIServing):
             split_point = self._find_split_point(audio_data, search_start, search_end)
 
             # Extract chunk up to the split point
-            chunks.append(audio_data[..., i:split_point])
+            chunks.append((audio_data[..., i:split_point], i / sample_rate))
             i = split_point
         return chunks
 
