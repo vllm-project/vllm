@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+import vllm.envs as envs
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -99,6 +100,63 @@ class AllGatherGEMMPattern(BasePattern):
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+class HelionAllGatherScaledMMPattern(BasePattern):
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = (
+            torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+            .contiguous()
+            .transpose(0, 1)
+        )
+        s1 = x.shape[0] * self.tp_size
+
+        scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        return [x, weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
+            )
+            
+            return torch.ops.aten._scaled_mm.default(
+                all_gather,
+                mat2=weight,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                bias=None,
+                scale_result=None,
+                out_dtype=self.dtype,
+            )
+
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+
+            ag_output, mm_outputs =  torch.ops.vllm.helion_all_gather_fp8_gemm(
+                x,
+                weight,
+                scale_a,
+                scale_b,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+
+            return mm_outputs
+        
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
 
 class ScaledMMReduceScatterPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
@@ -392,9 +450,15 @@ class AsyncTPPass(VllmPatternMatcherPass):
             ScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
-            AllGatherScaledMMPattern(self.model_dtype, self.device).register(
-                self.patterns
-            )
+
+            if envs.VLLM_USE_HELION_BACKEND:
+                HelionAllGatherScaledMMPattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
+            else:
+                AllGatherScaledMMPattern(self.model_dtype, self.device).register(
+                    self.patterns
+              )
 
             CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
                 self.patterns
