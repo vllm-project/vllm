@@ -84,6 +84,9 @@ class GDNAttentionMetadata:
     cu_chunk_seqlen_p: torch.Tensor | None = None  # shape: [batch,]
     last_chunk_indices_p: torch.Tensor | None = None  # shape: [batch,]
 
+    # The following tensor is only used for prefix caching in align mode
+    seq_lens: torch.Tensor | None = None
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
@@ -115,7 +118,7 @@ class GDNAttentionMetadataBuilder(
         self.use_spec_decode = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
-        all_prefix_caching_enabled = self.cache_config.mamba_cache_mode == "all"
+        all_prefix_caching_enabled = vllm_config.cache_config.mamba_cache_mode == "all"
 
         # 64 is a hardcoded value in the FLA GDN kernel.
         # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439  # noqa: E501
@@ -260,7 +263,7 @@ class GDNAttentionMetadataBuilder(
             self.vllm_config.cache_config.mamba_cache_mode,
         )
 
-        prefix_caching_enabled = self.cache_config.mamba_cache_mode == "all"
+        prefix_caching_enabled = self.vllm_config.cache_config.mamba_cache_mode == "all"
         block_size: int | None = None
         chunk_size_value: int | None = None
         if prefix_caching_enabled:
