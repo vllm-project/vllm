@@ -846,7 +846,7 @@ def mamba_get_block_table_tensor(
                1 + num_speculative_blocks of each request.
     """
     if mamba_cache_mode in ("all", "none"):
-        return block_table
+        out = block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
@@ -859,4 +859,12 @@ def mamba_get_block_table_tensor(
             1 + kv_cache_spec.num_speculative_blocks, device=block_table.device
         )
         indices_to_gather = start_indices.unsqueeze(1) + offsets
-        return torch.gather(block_table, 1, indices_to_gather)
+        out = torch.gather(block_table, 1, indices_to_gather)
+
+    # Block id 0 is reserved for BlockPool.null_block (never allocated) but can
+    # appear in block tables as a placeholder (e.g. Mamba align mode). Mamba
+    # kernels treat PAD_SLOT_ID (-1) as padding and will happily read/write
+    # state for block id 0 if we pass it through, causing cross-request state
+    # corruption via the shared null block.
+    pad = out.new_full((), PAD_SLOT_ID)
+    return torch.where(out == 0, pad, out)
