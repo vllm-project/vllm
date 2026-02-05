@@ -1135,11 +1135,12 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
         for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
+            if param.task is None:
+                param.task = pooling_task
+            elif param.task != pooling_task:
+                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                raise ValueError(msg)
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1472,8 +1473,9 @@ class LLM:
 
         if pooling_params is None:
             pooling_params = PoolingParams(task="score")
+        elif pooling_params.task is None:
+            pooling_params.task = "score"
 
-        pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
         prompts = list[PromptType]()
@@ -1836,6 +1838,7 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            supported_tasks=self.supported_tasks,
         )
 
         self.llm_engine.add_request(

@@ -201,7 +201,11 @@ class LLMEngine:
         return outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.engine_core.get_supported_tasks()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = self.engine_core.get_supported_tasks()
+
+        return self._supported_tasks
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
@@ -245,6 +249,7 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                supported_tasks=self.get_supported_tasks(),
             )
             prompt_text = get_prompt_text(prompt)
 

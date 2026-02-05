@@ -6,6 +6,7 @@ from typing import Any, TypeAlias
 
 from pydantic import Field
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
@@ -14,8 +15,11 @@ from vllm.entrypoints.pooling.base.protocol import (
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class ClassificationCompletionRequest(
@@ -31,6 +35,13 @@ class ClassificationCompletionRequest(
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="classify",
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
         )
 
 
@@ -53,6 +64,13 @@ class ClassificationChatRequest(
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="classify",
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
         )
 
 
