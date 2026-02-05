@@ -68,7 +68,7 @@ class SimilarFrameDetector:
         )
 
         downsampled = tvF.resize(
-            inpt=frames,
+            frames,
             size=(new_height, new_width),
             interpolation=tvF.InterpolationMode.BILINEAR,
             antialias=True,
