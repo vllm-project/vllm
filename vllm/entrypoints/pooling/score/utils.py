@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from typing import Any, TypeAlias, cast
 
+import torch
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
@@ -32,6 +33,23 @@ ScoreContentPartParam: TypeAlias = (
     | ChatCompletionContentPartTextParam
     | ChatCompletionContentPartVideoParam
 )
+
+
+def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
+    """
+    Compute ColBERT MaxSim score.
+
+    Args:
+        q_emb: Query token embeddings [query_len, dim]
+        d_emb: Document token embeddings [doc_len, dim]
+
+    Returns:
+        MaxSim score (sum over query tokens of max similarity to any doc token)
+    """
+    # [query_len, doc_len]
+    token_scores = torch.matmul(q_emb, d_emb.T)
+    # Max over document tokens, sum over query tokens
+    return token_scores.amax(dim=-1).sum()
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
@@ -123,18 +141,11 @@ def validate_score_input(
     is_multimodal_model: bool,
     architecture: str,
 ) -> tuple[list[ScoreData], list[ScoreData]]:
-    def _normalize(data: ScoreInputs) -> list[ScoreInput]:
-        if isinstance(data, str):
-            return [data]
-        if isinstance(data, dict):
-            # Single ScoreMultiModalParam: each content item is a
-            # separate scoring input (preserves 1:N scoring behavior)
-            content = data.get("content", [])
-            return [{"content": [item]} for item in content]
-        return data
+    if not isinstance(data_1, list):
+        data_1 = [data_1]
 
-    data_1 = _normalize(data_1)
-    data_2 = _normalize(data_2)
+    if not isinstance(data_2, list):
+        data_2 = [data_2]
 
     score_input_1 = _validate_mm_score_input(data_1, is_multimodal_model, architecture)
     score_input_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
