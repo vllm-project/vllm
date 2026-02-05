@@ -33,6 +33,11 @@ class MoEActivation(Enum):
         """
         return not self.value.endswith("_no_mul")
 
+    @property
+    def op_name(self) -> str:
+        """Return the base activation function name without the _no_mul suffix."""
+        return self.value.replace("_no_mul", "")
+
     def without_mul(self) -> "MoEActivation":
         """Get the non-gated variant of this activation.
 

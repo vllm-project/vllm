@@ -363,7 +363,7 @@ class CPUFusedMOE:
             getattr(layer, "w2_bias", None),
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             self.isa,
         )
         return output

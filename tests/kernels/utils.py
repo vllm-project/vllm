@@ -884,7 +884,7 @@ def torch_experts(
 
     f32 = torch.float32
 
-    act = op_registry[activation.without_mul().value]
+    act = op_registry[activation.op_name]
 
     for i in range(num_experts):
         mask = topk_ids == i
