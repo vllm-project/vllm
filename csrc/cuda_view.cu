@@ -22,10 +22,10 @@ torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   auto strides = cpu_tensor.strides();
   auto options = cpu_tensor.options().device(torch::kCUDA);
 
-  // use default no-op deleter, since the memory is owned by the original CPU
-  // tensor
-  torch::Tensor cuda_tensor =
-      torch::from_blob(device_ptr, sizes, strides, options);
+  torch::Tensor cuda_tensor = torch::from_blob(
+      device_ptr, sizes, strides,
+      [base = cpu_tensor](void*) {},  // keep the cpu data alive
+      options);
 
   TORCH_CHECK(cuda_tensor.device().is_cuda(),
               "Resulting tensor is not on CUDA device");
