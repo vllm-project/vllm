@@ -62,16 +62,12 @@ def init_pooling_state(
     from vllm.tasks import POOLING_TASKS
 
     resolved_chat_template = load_chat_template(args.chat_template)
-    supported_pooling_tasks = tuple(
-        task for task in supported_tasks if task in POOLING_TASKS
-    )
 
     state.openai_serving_pooling = (
         (
             OpenAIServingPooling(
                 engine_client,
                 state.openai_serving_models,
-                supported_tasks=supported_pooling_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
@@ -79,7 +75,7 @@ def init_pooling_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if supported_pooling_tasks
+        if any(t in supported_tasks for t in POOLING_TASKS)
         else None
     )
     state.openai_serving_embedding = (

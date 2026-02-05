@@ -35,7 +35,6 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -48,7 +47,6 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        supported_tasks: tuple[SupportedTask, ...],
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -62,7 +60,6 @@ class OpenAIServingPooling(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
-        self.supported_tasks = supported_tasks
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
