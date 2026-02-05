@@ -27,14 +27,12 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any
 
 import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -44,6 +42,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -57,7 +56,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -66,8 +64,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -143,8 +142,6 @@ class HunYuanAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -178,7 +175,6 @@ class HunYuanAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
         self.layer_id = layer_id
@@ -203,10 +199,8 @@ class HunYuanAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -255,8 +249,6 @@ class HunYuanCrossAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -290,7 +282,6 @@ class HunYuanCrossAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
         self.layer_id = layer_id
@@ -313,10 +304,8 @@ class HunYuanCrossAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -374,7 +363,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -438,6 +427,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_mlp",
             )
         else:
             self.shared_mlp = None
@@ -495,14 +485,6 @@ class HunYuanDecoderLayer(nn.Module):
             if isinstance(config.intermediate_size, int)
             else config.intermediate_size[layer_id]
         )
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
@@ -521,8 +503,6 @@ class HunYuanDecoderLayer(nn.Module):
                 num_kv_heads=getattr(
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,
@@ -538,8 +518,6 @@ class HunYuanDecoderLayer(nn.Module):
                 num_kv_heads=getattr(
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,
@@ -598,7 +576,16 @@ class HunYuanDecoderLayer(nn.Module):
         return hidden_states, residual, ori_kv_states
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (xd, seq_len) if xdrope is enabled for hunyuan-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class HunYuanModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -606,7 +593,7 @@ class HunYuanModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         eplb_config = vllm_config.parallel_config.eplb_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         self.num_redundant_experts = eplb_config.num_redundant_experts
@@ -614,20 +601,15 @@ class HunYuanModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
@@ -648,8 +630,9 @@ class HunYuanModel(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -663,7 +646,7 @@ class HunYuanModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -672,9 +655,13 @@ class HunYuanModel(nn.Module):
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
+        aux_hidden_states = []
         for i, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+
             hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
@@ -693,6 +680,9 @@ class HunYuanModel(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def _split_qkv_weight(self, qkv: torch.Tensor):
@@ -724,6 +714,7 @@ class HunYuanModel(nn.Module):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             return SharedFusedMoE.make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
@@ -914,7 +905,7 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
+class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -937,12 +928,9 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
 
         self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -951,14 +939,21 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size, logit_scale
+                config.vocab_size, scale=logit_scale
             )
         else:
             self.lm_head = PPMissingLayer()
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -996,8 +991,8 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
         )
         return loader.load_weights(weights)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
 
 class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
@@ -1007,7 +1002,7 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         # Set MoE hyperparameters
         self.expert_weights = []
         self.num_expert_groups = 1
-        self.moe_layers: list[SharedFusedMoE] = []
+        self.moe_layers = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -1027,22 +1022,6 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         self.num_local_physical_experts = example_layer.n_local_physical_experts
         self.num_routed_experts = example_layer.n_routed_experts
         self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            self.expert_weights.append(layer.get_expert_weights())
-            # Register the expert weights.
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def update_physical_experts_metadata(
         self,

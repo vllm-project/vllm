@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -138,7 +139,12 @@ class EngineCoreClient(ABC):
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
-    def reset_prefix_cache(self) -> None:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        raise NotImplementedError
+
+    def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
     def unpin_all_pinned_prefixes(self) -> int:
@@ -211,7 +217,12 @@ class EngineCoreClient(ABC):
     async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def reset_prefix_cache_async(self) -> None:
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        raise NotImplementedError
+
+    async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
     async def unpin_all_pinned_prefixes_async(self) -> int:
@@ -270,7 +281,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step_fn()
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -293,8 +305,15 @@ class InprocClient(EngineCoreClient):
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self) -> None:
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
+
+    def reset_encoder_cache(self) -> None:
+        self.engine_core.reset_encoder_cache()
 
     def unpin_all_pinned_prefixes(self) -> int:
         return self.engine_core.unpin_all_pinned_prefixes()
@@ -394,10 +413,11 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if in_loop(loop):
-                close_sockets_and_tasks()
-            elif loop and not loop.is_closed():
-                loop.call_soon_threadsafe(close_sockets_and_tasks)
+            if loop is not None:
+                if in_loop(loop):
+                    close_sockets_and_tasks()
+                elif not loop.is_closed():
+                    loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
                 del tasks
@@ -500,17 +520,12 @@ class MPClient(EngineCoreClient):
 
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
-            dp_rank = parallel_config.data_parallel_rank
+            dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
             # Client manages local EngineCores in hybrid and external LB case.
-            local_engines_only = (
-                parallel_config.data_parallel_hybrid_lb
-                or parallel_config.data_parallel_external_lb
-            )
-
-            num_ranks = dp_local_size if local_engines_only else dp_size
+            num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
             self.engine_ranks_managed = (
                 [dp_rank] if offline_mode else list(range(dp_rank, dp_rank + num_ranks))
             )
@@ -527,9 +542,11 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+                ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send"
+                        "Timed out waiting for engines to send "
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
@@ -759,8 +776,15 @@ class SyncMPClient(MPClient):
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
-    def reset_prefix_cache(self) -> None:
-        self.call_utility("reset_prefix_cache")
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.call_utility(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
+
+    def reset_encoder_cache(self) -> None:
+        self.call_utility("reset_encoder_cache")
 
     def unpin_all_pinned_prefixes(self) -> int:
         return self.call_utility("unpin_all_pinned_prefixes")
@@ -966,8 +990,15 @@ class AsyncMPClient(MPClient):
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
 
-    async def reset_prefix_cache_async(self) -> None:
-        await self.call_utility_async("reset_prefix_cache")
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.call_utility_async(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
+
+    async def reset_encoder_cache_async(self) -> None:
+        await self.call_utility_async("reset_encoder_cache")
 
     async def unpin_all_pinned_prefixes_async(self) -> int:
         return await self.call_utility_async("unpin_all_pinned_prefixes")
@@ -1059,6 +1090,7 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
+        stats_addr: str = self.stats_update_address
         assert len(self.engine_ranks_managed) > 0
         # NOTE: running and waiting counts are all global from
         # the Coordinator include all global EngineCores. This
@@ -1069,9 +1101,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         async def run_engine_stats_update_task():
             with (
-                make_zmq_socket(
-                    self.ctx, self.stats_update_address, zmq.XSUB, linger=0
-                ) as socket,
+                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
                     self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
                 ) as first_req_rcv_socket,
@@ -1338,7 +1368,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
-            if not sync_input_socket.poll(timeout=600_000):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
                     "message on input socket."

@@ -7,12 +7,18 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
-import pandas as pd
+from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .server import ServerProcess
 from .utils import sanitize_filename
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 @contextlib.contextmanager
@@ -23,6 +29,7 @@ def run_server(
     show_stdout: bool,
     serve_overrides: ParameterSweepItem,
     dry_run: bool,
+    server_ready_timeout: int = 300,
 ):
     server_cmd = serve_overrides.apply_to_cmd(serve_cmd)
 
@@ -36,6 +43,7 @@ def run_server(
         return
 
     with ServerProcess(server_cmd, after_bench_cmd, show_stdout=show_stdout) as server:
+        server.wait_until_ready(timeout=server_ready_timeout)
         yield server
 
     print("[END SERVER]")
@@ -66,6 +74,8 @@ def run_benchmark(
 ):
     benchmark_cmd = [
         *bench_overrides.apply_to_cmd(bench_cmd),
+        "--percentile-metrics",
+        "ttft,tpot,itl,e2el",
         "--save-result",
         "--result-dir",
         str(output_path.parent),
@@ -130,9 +140,9 @@ def _get_comb_base_path(
 ):
     parts = list[str]()
     if serve_comb:
-        parts.extend(("SERVE-", serve_comb.as_text(sep="-")))
+        parts.extend(("SERVE-", serve_comb.name))
     if bench_comb:
-        parts.extend(("BENCH-", bench_comb.as_text(sep="-")))
+        parts.extend(("BENCH-", bench_comb.name))
 
     return output_dir / sanitize_filename("-".join(parts))
 
@@ -203,6 +213,8 @@ def run_combs(
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
+    links: list[tuple[str, str]],
+    server_ready_timeout: int = 300,
 ):
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
@@ -213,11 +225,20 @@ def run_combs(
                 show_stdout=show_stdout,
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
+                server_ready_timeout=server_ready_timeout,
             )
             if _comb_needs_server(serve_comb, bench_params, output_dir)
             else contextlib.nullcontext()
         ) as server:
             for bench_comb in bench_params:
+                should_run = all(
+                    serve_key in serve_comb
+                    and bench_key in bench_comb
+                    and serve_comb[serve_key] == bench_comb[bench_key]
+                    for serve_key, bench_key in links
+                )
+                if not should_run:
+                    continue
                 base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
 
                 comb_data = run_comb(
@@ -254,6 +275,11 @@ class SweepServeArgs:
     num_runs: int
     dry_run: bool
     resume: str | None
+    link_vars: list[tuple[str, str]] | None
+    server_ready_timeout: int
+
+    parser_name: ClassVar[str] = "serve"
+    parser_help: ClassVar[str] = "Run vLLM server benchmark under multiple settings."
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -274,7 +300,7 @@ class SweepServeArgs:
         else:
             # i.e.: run bench_cmd without any modification
             bench_params = ParameterSweep.from_records([{}])
-
+        link_vars = cls.parse_link_vars(args.link_vars)
         num_runs = args.num_runs
         if num_runs < 1:
             raise ValueError("`num_runs` should be at least 1.")
@@ -290,6 +316,8 @@ class SweepServeArgs:
             num_runs=num_runs,
             dry_run=args.dry_run,
             resume=args.resume,
+            link_vars=link_vars,
+            server_ready_timeout=args.server_ready_timeout,
         )
 
     @classmethod
@@ -320,11 +348,18 @@ class SweepServeArgs:
             "Useful for debugging but can be quite spammy.",
         )
         parser.add_argument(
+            "--server-ready-timeout",
+            type=int,
+            default=300,
+            help="Timeout in seconds to wait for the server to become ready.",
+        )
+        parser.add_argument(
             "--serve-params",
             type=str,
             default=None,
-            help="Path to JSON file containing a list of parameter combinations "
-            "for the `vllm serve` command. "
+            help="Path to JSON file containing parameter combinations "
+            "for the `vllm serve` command. Can be either a list of dicts or a dict "
+            "where keys are benchmark names. "
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
@@ -332,8 +367,9 @@ class SweepServeArgs:
             "--bench-params",
             type=str,
             default=None,
-            help="Path to JSON file containing a list of parameter combinations "
-            "for the `vllm bench serve` command. "
+            help="Path to JSON file containing parameter combinations "
+            "for the `vllm bench serve` command. Can be either a list of dicts or "
+            "a dict where keys are benchmark names. "
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
@@ -365,7 +401,27 @@ class SweepServeArgs:
             "parameter combinations for which there are still no output files.",
         )
 
+        parser.add_argument(
+            "--link-vars",
+            type=str,
+            default="",
+            help=(
+                "Comma-separated list of linked variables between serve and bench, "
+                "e.g. max_num_seqs=max_concurrency,max_model_len=random_input_len"
+            ),
+        )
+
         return parser
+
+    @staticmethod
+    def parse_link_vars(s: str) -> list[tuple[str, str]]:
+        if not s:
+            return []
+        pairs = []
+        for item in s.split(","):
+            a, b = item.split("=")
+            pairs.append((a.strip(), b.strip()))
+        return pairs
 
 
 def run_main(args: SweepServeArgs):
@@ -386,6 +442,8 @@ def run_main(args: SweepServeArgs):
             output_dir=output_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
+            links=args.link_vars,
+            server_ready_timeout=args.server_ready_timeout,
         )
     except BaseException as exc:
         raise RuntimeError(
@@ -399,9 +457,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Run vLLM server benchmark under multiple settings."
-    )
+    parser = argparse.ArgumentParser(description=SweepServeArgs.parser_help)
     SweepServeArgs.add_cli_args(parser)
 
     main(parser.parse_args())

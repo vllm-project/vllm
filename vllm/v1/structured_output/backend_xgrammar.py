@@ -10,7 +10,8 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -55,6 +56,27 @@ class XgrammarBackend(StructuredOutputBackend):
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
+            )
+        elif isinstance(self.tokenizer, DeepseekV32Tokenizer):
+            # copy from xgr.TokenizerInfo.from_huggingface()
+            # because we are using a custom tokenizer wrapper here.
+            vocab_dict = self.tokenizer.get_vocab()
+            tokenizer_vocab_size = max(len(vocab_dict), self.tokenizer.max_token_id + 1)
+            vocab_size = self.vocab_size or tokenizer_vocab_size
+            # maintain tokenizer's indexing
+            encoded_vocab = [""] * vocab_size
+            for token, idx in vocab_dict.items():
+                if idx < vocab_size:
+                    encoded_vocab[idx] = token
+            stop_token_ids = [self.tokenizer.eos_token_id]
+            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()  # type: ignore[attr-defined]
+            metadata = xgr.TokenizerInfo._detect_metadata_from_hf(backend_str)
+            tokenizer_info = xgr.TokenizerInfo(
+                encoded_vocab=encoded_vocab,
+                vocab_type=metadata["vocab_type"],
+                vocab_size=vocab_size,
+                stop_token_ids=stop_token_ids,
+                add_prefix_space=metadata["add_prefix_space"],
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
@@ -103,7 +125,6 @@ class XgrammarBackend(StructuredOutputBackend):
                 ]
                 ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
             else:
-                logger.info("Compiling structural tag grammar_spec: %s", grammar_spec)
                 ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
@@ -247,13 +268,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 

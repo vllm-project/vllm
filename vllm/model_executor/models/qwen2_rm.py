@@ -14,7 +14,8 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import Pooler
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -43,10 +44,8 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = Qwen2Model(
@@ -75,12 +74,12 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -97,7 +96,7 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights)
 
 
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class Qwen2ForRewardModel(Qwen2RewardBaseModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         vllm_config.model_config.hf_config.num_labels = 1
@@ -106,12 +105,10 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {"token_classify": Pooler.for_token_classify(pooler_config)}
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
 
-@default_pooling_type("STEP")
+@default_pooling_type(tok_pooling_type="STEP")
 class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         vllm_config.model_config.hf_config.num_labels = 2
@@ -120,6 +117,4 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {"token_classify": Pooler.for_token_classify(pooler_config)}
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)

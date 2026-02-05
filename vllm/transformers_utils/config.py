@@ -1,42 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import os
-import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import (
-    get_safetensors_metadata,
-    hf_hub_download,
-    try_to_load_from_cache,
-)
-from huggingface_hub import list_repo_files as hf_list_repo_files
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
+from huggingface_hub import get_safetensors_metadata
+from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_MAPPING_NAMES,
+)
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import (
+from vllm.transformers_utils.repo_utils import is_mistral_model_repo
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+
+from .config_parser_base import ConfigParserBase
+from .gguf_utils import (
     check_gguf_file,
-    parse_safetensors_file_metadata,
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
 )
+from .repo_utils import (
+    file_or_path_exists,
+    get_hf_file_to_dict,
+    list_repo_files,
+    try_get_local_file,
+    with_retry,
+)
+
+try:
+    # Transformers v5
+    from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
+except ImportError:
+    # Transformers v4
+    from transformers.configuration_utils import (
+        ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
+    )
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -48,36 +60,29 @@ MISTRAL_CONFIG_NAME = "params.json"
 logger = init_logger(__name__)
 
 
-def _get_hf_token() -> str | None:
-    """
-    Get the HuggingFace token from environment variable.
-
-    Returns None if the token is not set, is an empty string,
-    or contains only whitespace.
-    This follows the same pattern as huggingface_hub library which
-    treats empty string tokens as None to avoid authentication errors.
-    """
-    token = os.getenv("HF_TOKEN")
-    if token and token.strip():
-        return token
-    return None
-
-
 class LazyConfigDict(dict):
     def __getitem__(self, key):
+        if isinstance(value := super().__getitem__(key), type):
+            return value
+
         import vllm.transformers_utils.configs as configs
 
-        return getattr(configs, super().__getitem__(key))
+        return getattr(configs, value)
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    afmoe="AfmoeConfig",
+    bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v3="DeepseekV3Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    funaudiochat="FunAudioChatConfig",
+    hunyuan_vl="HunYuanVLConfig",
+    isaac="IsaacConfig",
+    kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
+    kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -92,8 +97,11 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
+    step3p5="Step3p5Config",
+    qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
+    tarsier2="Tarsier2Config",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -102,8 +110,17 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
 
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
+    "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
+
+
+def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
+    """Check if rope_parameters is nested by layer types."""
+    # Cannot be nested if rope_parameters is empty
+    if not rope_parameters:
+        return False
+    return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
 
 
 class HFConfigParser(ConfigParserBase):
@@ -120,7 +137,7 @@ class HFConfigParser(ConfigParserBase):
             model,
             revision=revision,
             code_revision=code_revision,
-            token=_get_hf_token(),
+            trust_remote_code=trust_remote_code,
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -131,6 +148,9 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            model_type = hf_overrides.get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -138,7 +158,7 @@ class HFConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=_get_hf_token(),
+                trust_remote_code=trust_remote_code,
                 **kwargs,
             )
         else:
@@ -149,7 +169,6 @@ class HFConfigParser(ConfigParserBase):
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -193,20 +212,18 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
 
-        # Mistral configs may define sliding_window as list[int]. Convert it
-        # to int and add the layer_types list[str] to make it HF compatible
-        if (sliding_window := getattr(config, "sliding_window", None)) and isinstance(
-            sliding_window, list
-        ):
-            pattern_repeats = config.num_hidden_layers // len(sliding_window)
-            layer_types = sliding_window * pattern_repeats
-            config.layer_types = [
-                "full_attention" if layer_type is None else "sliding_attention"
-                for layer_type in layer_types
-            ]
-            config.sliding_window = next(filter(None, sliding_window), None)
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         return config_dict, config
 
@@ -281,152 +298,107 @@ def register_config_parser(config_format: str):
     return _wrapper
 
 
-_R = TypeVar("_R")
+def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
+    """Some models may have no rope_theta in their config but still use RoPE.
+    This function sets a default rope_theta if it's missing."""
+    if getattr(config, "rope_parameters", None) is None:
+        config.rope_parameters = {"rope_type": "default"}
+    if "rope_theta" not in config.rope_parameters:
+        config.rope_parameters["rope_theta"] = default_theta
 
 
-def with_retry(
-    func: Callable[[], _R],
-    log_msg: str,
-    max_retries: int = 2,
-    retry_delay: int = 2,
-) -> _R:
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as e:
-            if attempt == max_retries - 1:
-                logger.error("%s: %s", log_msg, e)
-                raise
-            logger.error(
-                "%s: %s, retrying %d of %d", log_msg, e, attempt + 1, max_retries
-            )
-            time.sleep(retry_delay)
-            retry_delay *= 2
-
-    raise AssertionError("Should not be reached")
-
-
-# @cache doesn't cache exceptions
-@cache
-def list_repo_files(
-    repo_id: str,
-    *,
-    revision: str | None = None,
-    repo_type: str | None = None,
-    token: str | bool | None = None,
-) -> list[str]:
-    def lookup_files() -> list[str]:
-        # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
-            return [
-                str(file.relative_to(local_path))
-                for file in local_path.rglob("*")
-                if file.is_file()
-            ]
-        # if model is remote, use hf_hub api to list files
-        try:
-            if envs.VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import modelscope_list_repo_files
-
-                return modelscope_list_repo_files(
-                    repo_id,
-                    revision=revision,
-                    token=os.getenv("MODELSCOPE_API_TOKEN", None),
-                )
-            return hf_list_repo_files(
-                repo_id, revision=revision, repo_type=repo_type, token=token
-            )
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            # Don't raise in offline mode,
-            # all we know is that we don't have this
-            # file cached.
-            return []
-
-    return with_retry(lookup_files, "Error retrieving file list")
-
-
-def file_exists(
-    repo_id: str,
-    file_name: str,
-    *,
-    repo_type: str | None = None,
-    revision: str | None = None,
-    token: str | bool | None = None,
-) -> bool:
-    file_list = list_repo_files(
-        repo_id, repo_type=repo_type, revision=revision, token=token
-    )
-    return file_name in file_list
-
-
-# In offline mode the result can be a false negative
-def file_or_path_exists(
-    model: str | Path, config_name: str, revision: str | None
-) -> bool:
-    if (local_path := Path(model)).exists():
-        return (local_path / config_name).is_file()
-
-    # Offline mode support: Check if config file is cached already
-    cached_filepath = try_to_load_from_cache(
-        repo_id=model, filename=config_name, revision=revision
-    )
-    if isinstance(cached_filepath, str):
-        # The config file exists in cache- we can continue trying to load
-        return True
-
-    # NB: file_exists will only check for the existence of the config file on
-    # hf_hub. This will fail in offline mode.
-
-    # Call HF to check if the file exists
-    return file_exists(
-        str(model), config_name, revision=revision, token=_get_hf_token()
-    )
-
-
-def patch_rope_scaling(config: PretrainedConfig) -> None:
+def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        patch_rope_scaling(text_config)
+    from vllm.config.utils import getattr_iter
 
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is not None:
-        patch_rope_scaling_dict(rope_scaling)
+    # Older custom models may use non-standard field names
+    # which need patching for both Transformers v4 and v5.
+    names = ["rope_theta", "rotary_emb_base"]
+    rope_theta = getattr_iter(config, names, None, warn=True)
+    names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
+    partial_rotary_factor = getattr_iter(config, names, None, warn=True)
+    ompe = getattr(config, "original_max_position_embeddings", None)
+
+    if Version(version("transformers")) < Version("5.0.0"):
+        # Transformers v4 installed, legacy config fields may be present
+        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
+            config.rope_parameters = rope_scaling
+        if (
+            rope_theta is not None
+            or partial_rotary_factor is not None
+            or ompe is not None
+        ) and not getattr(config, "rope_parameters", None):
+            config.rope_parameters = {"rope_type": "default"}
+        # Patch legacy fields into rope_parameters
+        if rope_theta is not None:
+            config.rope_parameters["rope_theta"] = rope_theta
+        if partial_rotary_factor is not None:
+            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+        if ompe is not None:
+            config.rope_parameters["original_max_position_embeddings"] = ompe
+    elif rope_theta is not None or getattr(config, "rope_parameters", None):
+        # Transformers v5 installed
+        # Patch these fields in case they used non-standard names
+        if rope_theta is not None:
+            config.rope_theta = rope_theta
+        if partial_rotary_factor is not None:
+            config.partial_rotary_factor = partial_rotary_factor
+        # Standardize and validate RoPE parameters
+        config.standardize_rope_params()
+        config.validate_rope()
+
+    # No RoPE parameters to patch
+    if getattr(config, "rope_parameters", None) is None:
+        return
+
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if is_rope_parameters_nested(config.rope_parameters):
+        for rope_parameters_layer_type in config.rope_parameters.values():
+            patch_rope_parameters_dict(rope_parameters_layer_type)
+    else:
+        patch_rope_parameters_dict(config.rope_parameters)
 
 
-def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
-    if "rope_type" in rope_scaling and "type" in rope_scaling:
-        rope_type = rope_scaling["rope_type"]
-        rope_type_legacy = rope_scaling["type"]
-        if rope_type != rope_type_legacy:
+def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
+    if "rope_type" in rope_parameters and "type" in rope_parameters:
+        rope_type = rope_parameters["rope_type"]
+        rope_type_legacy = rope_parameters["type"]
+        if (rope_type_legacy == "su" and rope_type == "longrope") or (
+            rope_type_legacy == "mrope" and rope_type == "default"
+        ):
+            pass  # No action needed
+        elif rope_type != rope_type_legacy:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
                 f"field) and 'type={rope_type_legacy}' (legacy field). "
                 "You should only specify one of them."
             )
 
-    if "rope_type" not in rope_scaling and "type" in rope_scaling:
-        rope_scaling["rope_type"] = rope_scaling["type"]
+    if "rope_type" not in rope_parameters and "type" in rope_parameters:
+        rope_parameters["rope_type"] = rope_parameters["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
 
-    if "rope_type" not in rope_scaling:
-        raise ValueError("rope_scaling should have a 'rope_type' key")
+    if "rope_type" not in rope_parameters:
+        raise ValueError("rope_parameters should have a 'rope_type' key")
 
-    if rope_scaling["rope_type"] == "su":
-        rope_scaling["rope_type"] = "longrope"
+    if rope_parameters["rope_type"] == "su":
+        rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_scaling["rope_type"] == "mrope":
-        assert "mrope_section" in rope_scaling
-        rope_scaling["rope_type"] = "default"
+    elif rope_parameters["rope_type"] == "mrope":
+        if "mrope_section" not in rope_parameters:
+            raise ValueError(
+                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
+            )
+        rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is None:
         return False
 
-    return "mrope_section" in rope_scaling
+    return "mrope_section" in rope_parameters
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
@@ -451,6 +423,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
+
+
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
 
@@ -466,8 +455,7 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     """
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
+        return len(set(layer_types)) > 1
     return False
 
 
@@ -492,12 +480,12 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
 
 def maybe_override_with_speculators(
     model: str,
-    tokenizer: str,
+    tokenizer: str | None,
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
     **kwargs,
-) -> tuple[str, str, dict[str, Any] | None]:
+) -> tuple[str, str | None, dict[str, Any] | None]:
     """
     Resolve model configuration when speculators are detected.
 
@@ -514,10 +502,12 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    if check_gguf_file(model):
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+    elif is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        gguf_model_repo = Path(repo_id)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -525,7 +515,6 @@ def maybe_override_with_speculators(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        token=_get_hf_token(),
         **kwargs,
     )
     speculators_config = config_dict.get("speculators_config")
@@ -563,17 +552,48 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        model = Path(model).parent
+    _is_gguf = is_gguf(model)
+    _is_remote_gguf = is_remote_gguf(model)
+    if _is_gguf:
+        if check_gguf_file(model):
+            # Local GGUF file
+            kwargs["gguf_file"] = Path(model).name
+            model = Path(model).parent
+        elif _is_remote_gguf:
+            # Remote GGUF - extract repo_id from repo_id:quant_type format
+            # The actual GGUF file will be downloaded later by GGUFModelLoader
+            # Keep model as repo_id:quant_type for download, but use repo_id for config
+            model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
-            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
-                config_format = "hf"
-            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            # First check for Mistral to avoid defaulting to
+            # Transformers implementation.
+            if is_mistral_model_repo(
+                model_name_or_path=str(model), revision=revision
+            ) and file_or_path_exists(
+                model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
+            ):
                 config_format = "mistral"
+            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                config_format = "hf"
+            # Remote GGUF models must have config.json in repo,
+            # otherwise the config can't be parsed correctly.
+            # FIXME(Isotr0py): Support remote GGUF repos without config.json
+            elif _is_remote_gguf and not file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                err_msg = (
+                    "Could not find config.json for remote GGUF model repo. "
+                    "To load remote GGUF model through `<repo_id>:<quant_type>`, "
+                    "ensure your model has config.json (HF format) file. "
+                    "Otherwise please specify --hf-config-path <original_repo> "
+                    "in engine args to fetch config from unquantized hf model."
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
@@ -594,9 +614,6 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
-                "   Loading GGUF from a remote repo directly is not yet "
-                "supported.\n"
             ).format(model=model)
 
             raise ValueError(error_message) from e
@@ -607,14 +624,49 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
+        hf_overrides=hf_overrides_kw,
         **kwargs,
     )
+
+    # Patching defaults for GGUF models
+    if _is_gguf:
+        # Some models have different default values between GGUF and HF.
+        def apply_gguf_default(key: str, gguf_default: Any):
+            """
+            Apply GGUF defaults unless explicitly configured.
+
+            This function reads/writes external `config` and `config_dict`.
+            If the specified `key` is not in `config_dict` (i.e. not explicitly
+            configured and the default HF value is used), it updates the
+            corresponding `config` value to `gguf_default`.
+            """
+            if key not in config_dict:
+                config.update({key: gguf_default})
+
+        # Apply architecture-specific GGUF defaults.
+        if config.model_type in {"qwen3_moe"}:
+            # Qwen3 MoE: norm_topk_prob is always true.
+            # Note that, this parameter is always false (HF default) on Qwen2 MoE.
+            apply_gguf_default("norm_topk_prob", True)
+
     # Special architecture mapping check for GGUF models
-    if is_gguf:
+    if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # Architecture mapping for models without explicit architectures field
+    if not config.architectures:
+        if config.model_type not in MODEL_MAPPING_NAMES:
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
+        else:
+            model_type = MODEL_MAPPING_NAMES[config.model_type]
+            config.update({"architectures": [model_type]})
 
     # ModelOpt 0.31.0 and after saves the quantization config in the model
     # config file.
@@ -661,7 +713,14 @@ def get_config(
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
 
-    patch_rope_scaling(config)
+    # Exhaustively patch RoPE parameters everywhere they might be
+    patch_rope_parameters(config)
+    patch_rope_parameters(config.get_text_config())
+    SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+    sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
+    if sub_configs:
+        for sub_config in sub_configs:
+            patch_rope_parameters(getattr(config, sub_config))
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
@@ -669,74 +728,11 @@ def get_config(
     return config
 
 
-def try_get_local_file(
-    model: str | Path, file_name: str, revision: str | None = "main"
-) -> Path | None:
-    file_path = Path(model) / file_name
-    if file_path.is_file():
-        return file_path
-    else:
-        try:
-            cached_filepath = try_to_load_from_cache(
-                repo_id=model, filename=file_name, revision=revision
-            )
-            if isinstance(cached_filepath, str):
-                return Path(cached_filepath)
-        except ValueError:
-            ...
-    return None
-
-
-def get_hf_file_to_dict(
-    file_name: str, model: str | Path, revision: str | None = "main"
-):
-    """
-    Downloads a file from the Hugging Face Hub and returns
-    its contents as a dictionary.
-
-    Parameters:
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
-
-    Returns:
-    - config_dict (dict): A dictionary containing
-    the contents of the downloaded file.
-    """
-
-    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
-
-    if file_path is None:
-        try:
-            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            return None
-        except (
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-            EntryNotFoundError,
-            LocalEntryNotFoundError,
-        ) as e:
-            logger.debug("File or repository not found in hf_hub_download", e)
-            return None
-        except HfHubHTTPError as e:
-            logger.warning(
-                "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
-                file_name,
-                exc_info=e,
-            )
-            return None
-        file_path = Path(hf_hub_file)
-
-    if file_path is not None and file_path.is_file():
-        with open(file_path) as file:
-            return json.load(file)
-
-    return None
-
-
 @cache
-def get_pooling_config(model: str, revision: str | None = "main") -> dict | None:
+def get_pooling_config(
+    model: str,
+    revision: str | None = "main",
+) -> dict[str, Any] | None:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
@@ -751,6 +747,8 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
     """
+    if is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
 
     modules_file_name = "modules.json"
 
@@ -785,44 +783,46 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
     )
 
     if pooling:
-        pooling_file_name = "{}/config.json".format(pooling["path"])
-        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
-        pooling_type_name = next(
-            (item for item, val in pooling_dict.items() if val is True), None
-        )
+        from vllm.config.pooler import SEQ_POOLING_TYPES, TOK_POOLING_TYPES
 
-        if pooling_type_name is not None:
-            pooling_type_name = get_pooling_config_name(pooling_type_name)
+        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
 
         logger.info("Found pooling configuration.")
-        return {"pooling_type": pooling_type_name, "normalize": normalize}
+
+        config: dict[str, Any] = {"use_activation": normalize}
+        for key, val in pooling_dict.items():
+            if val is True:
+                pooling_type = parse_pooling_type(key)
+                if pooling_type in SEQ_POOLING_TYPES:
+                    config["seq_pooling_type"] = pooling_type
+                elif pooling_type in TOK_POOLING_TYPES:
+                    config["tok_pooling_type"] = pooling_type
+                else:
+                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        return config
 
     return None
 
 
-def get_pooling_config_name(pooling_name: str) -> str | None:
+def parse_pooling_type(pooling_name: str):
     if "pooling_mode_" in pooling_name:
         pooling_name = pooling_name.replace("pooling_mode_", "")
 
     if "_" in pooling_name:
-        pooling_name = pooling_name.split("_")[0]
+        pooling_name = pooling_name.split("_", 1)[0]
 
     if "lasttoken" in pooling_name:
         pooling_name = "last"
 
-    supported_pooling_types = ["LAST", "ALL", "CLS", "STEP", "MEAN"]
-    pooling_type_name = pooling_name.upper()
-
-    if pooling_type_name in supported_pooling_types:
-        return pooling_type_name
-
-    raise NotImplementedError(f"Pooling type {pooling_type_name} not supported")
+    return pooling_name.upper()
 
 
 @cache
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
-):
+) -> dict[str, Any] | None:
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
@@ -860,9 +860,7 @@ def get_sentence_transformer_tokenizer_config(
     if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(
-                model, revision=revision, token=_get_hf_token()
-            )
+            repo_files = list_repo_files(model, revision=revision)
         except Exception:
             repo_files = []
 
@@ -970,6 +968,8 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
+    elif is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
@@ -981,11 +981,13 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
-    if text_config is not config:
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(text_config, "num_attention_heads")
+    if text_config is not config and not hasattr(text_config, "num_attention_heads"):
+        raise ValueError(
+            "The text_config extracted from the model config does not have "
+            "`num_attention_heads` attribute. This indicates a mismatch "
+            "between the model config and vLLM's expectations. Please "
+            "ensure that the model config is compatible with vLLM."
+        )
 
     return text_config
 
@@ -996,6 +998,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,
@@ -1020,10 +1029,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata,
-        model,
-        revision=revision,
-        token=_get_hf_token(),
+        get_safetensors_metadata, model, revision=revision
     )
 
     try:
@@ -1145,41 +1151,3 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
         )
 
     return max_position_embeddings
-
-
-def get_model_path(model: str | Path, revision: str | None = None):
-    if os.path.exists(model):
-        return model
-    assert huggingface_hub.constants.HF_HUB_OFFLINE
-    common_kwargs = {
-        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
-        "revision": revision,
-    }
-
-    if envs.VLLM_USE_MODELSCOPE:
-        from modelscope.hub.snapshot_download import snapshot_download
-
-        return snapshot_download(model_id=model, **common_kwargs)
-
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(repo_id=model, **common_kwargs)
-
-
-def get_hf_file_bytes(
-    file_name: str, model: str | Path, revision: str | None = "main"
-) -> bytes | None:
-    """Get file contents from HuggingFace repository as bytes."""
-    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
-
-    if file_path is None:
-        hf_hub_file = hf_hub_download(
-            model, file_name, revision=revision, token=_get_hf_token()
-        )
-        file_path = Path(hf_hub_file)
-
-    if file_path is not None and file_path.is_file():
-        with open(file_path, "rb") as file:
-            return file.read()
-
-    return None

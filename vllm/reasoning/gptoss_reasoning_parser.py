@@ -5,11 +5,14 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.harmony_utils import parse_chat_output
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -57,7 +60,6 @@ def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) 
     return new_tag
 
 
-@ReasoningParserManager.register_module("openai_gptoss")
 class GptOssReasoningParser(ReasoningParser):
     """
     Reasoning parser for GptOss model.
@@ -68,18 +70,35 @@ class GptOssReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-        self.reasoning_end_token_ids = self.model_tokenizer.encode(
-            "<|start|>assistant<|channel|>final<|message|>"
+        # The model can output some special tokens between "final" and "<|message|>"
+        # So we need to look for both sequences to determine the end of reasoning.
+        self.reasoning_end_token_ids_prefix = self.model_tokenizer.encode(
+            "<|channel|>final"
         )
+        self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
+        self.reasoning_max_num_between_tokens = 20
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        end_token_ids = self.reasoning_end_token_ids
-        assert len(end_token_ids) > 0, "reasoning_end_token_ids is empty"
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        end_token_ids_prefix = self.reasoning_end_token_ids_prefix
+        end_token_ids_suffix = self.reasoning_end_token_ids_suffix
+        assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"
+        assert len(end_token_ids_suffix) > 0, "reasoning_end_token_ids_suffix is empty"
         # Check if the end sequence is present in the input_ids.
         # We search from the end of input_ids to find the last match.
-        for i in range(len(input_ids) - len(end_token_ids), -1, -1):
-            if input_ids[i : i + len(end_token_ids)] == end_token_ids:
-                return True
+        for i in range(len(input_ids) - len(end_token_ids_prefix), -1, -1):
+            if input_ids[i : i + len(end_token_ids_prefix)] == end_token_ids_prefix:
+                # We have found the prefix, now we look for the suffix after the prefix.
+                suffix_start = i + len(end_token_ids_prefix)
+                for j in range(
+                    suffix_start, len(input_ids) - len(end_token_ids_suffix) + 1
+                ):
+                    if j - suffix_start >= self.reasoning_max_num_between_tokens:
+                        break
+                    if (
+                        input_ids[j : j + len(end_token_ids_suffix)]
+                        == end_token_ids_suffix
+                    ):
+                        return True
         return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -88,7 +107,7 @@ class GptOssReasoningParser(ReasoningParser):
             return []
         return self.model_tokenizer.encode(content)
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -115,9 +134,9 @@ class GptOssReasoningParser(ReasoningParser):
                 content_delta = cur_content
         if reasoning_delta is None and content_delta is None:
             return None
-        return DeltaMessage(reasoning_content=reasoning_delta, content=content_delta)
+        return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest,
@@ -129,7 +148,7 @@ class GptOssReasoningParser(ReasoningParser):
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
         self, original_tag: str | None, tool_server: ToolServer | None
-    ) -> str:
+    ) -> str | None:
         if original_tag is None:
             if tool_server is None:
                 return json.dumps(no_func_reaonsing_tag)

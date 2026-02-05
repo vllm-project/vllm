@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import base64
 import mimetypes
 import os
@@ -8,18 +9,20 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image, ImageChops
 
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.utils import MediaConnector, argsort_mm_positions
+from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.utils import argsort_mm_positions
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
-    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
 ]
 
 TEST_VIDEO_URLS = [
@@ -186,6 +189,7 @@ async def test_fetch_image_error_conversion():
         connector.fetch_image(broken_img)
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
@@ -198,8 +202,12 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
         }
     )
 
-    video_sync, metadata_sync = connector.fetch_video(video_url)
-    video_async, metadata_async = await connector.fetch_video_async(video_url)
+    try:
+        video_sync, metadata_sync = connector.fetch_video(video_url)
+        video_async, metadata_async = await connector.fetch_video_async(video_url)
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
+
     assert np.array_equal(video_sync, video_async)
     assert metadata_sync == metadata_async
 
@@ -402,6 +410,97 @@ def test_argsort_mm_positions(case):
     modality_idxs = argsort_mm_positions(mm_positions)
 
     assert modality_idxs == expected_modality_idxs
+
+
+@pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, 5),
+        (torch.tensor([True, True, True, True, True]), 5),
+        (torch.tensor([False, False, False, False, False]), 0),
+        (torch.tensor([True, False, True, False, True]), 3),
+        (torch.tensor([True]), 1),
+    ],
+)
+def test_placeholder_range_get_num_embeds(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_num_embeds == expected
+
+
+@pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, None),
+        (
+            torch.tensor([False, True, False, True, True]),
+            torch.tensor([0, 1, 1, 2, 3]),
+        ),
+        (torch.tensor([True, True, True]), torch.tensor([1, 2, 3])),
+    ],
+)
+def test_placeholder_range_embeds_cumsum(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+
+    if expected is None:
+        assert pr.embeds_cumsum is None
+        return
+
+    assert torch.equal(pr.embeds_cumsum, expected)
+    # cached_property should return the same object on repeated access
+    assert pr.embeds_cumsum is pr.embeds_cumsum
+
+
+@pytest.mark.parametrize(
+    "is_embed,start_idx,end_idx,expected",
+    [
+        (None, 2, 4, (2, 4)),
+        (
+            torch.tensor([False, True, False, True, True]),
+            3,
+            5,
+            (1, 3),
+        ),
+        (
+            torch.tensor([False, True, False, True, True]),
+            0,
+            2,
+            (0, 1),
+        ),
+        (
+            torch.tensor([True, False, True, False]),
+            2,
+            2,
+            (1, 1),
+        ),
+    ],
+)
+def test_placeholder_range_get_embeds_indices_in_range(
+    is_embed, start_idx, end_idx, expected
+):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_embeds_indices_in_range(start_idx, end_idx) == expected
+
+
+@pytest.mark.parametrize(
+    "offset,is_embed,expected",
+    [
+        (0, None, [(0, 4)]),
+        (
+            2,
+            torch.tensor([False, True, False, True, True]),
+            [(3, 3), (5, 6)],
+        ),
+        (0, torch.tensor([True, True, True, True]), [(0, 3)]),
+        (0, torch.tensor([False, False, False, False]), []),
+    ],
+)
+def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+    assert pr.extract_embeds_range() == expected
 
 
 @pytest.mark.asyncio

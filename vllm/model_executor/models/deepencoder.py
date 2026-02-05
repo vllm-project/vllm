@@ -18,7 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -78,6 +79,7 @@ class ImageEncoderViT(nn.Module):
         rel_pos_zero_init: bool = True,
         window_size: int = 0,
         global_attn_indexes: tuple[int, ...] = (),
+        last_conv_output: int = 1024,
     ) -> None:
         """
         Args:
@@ -133,14 +135,14 @@ class ImageEncoderViT(nn.Module):
             self.blocks.append(block)
 
         self.neck = nn.Sequential(
-            nn.Conv2d(
+            Conv2dLayer(
                 embed_dim,
                 out_chans,
                 kernel_size=1,
                 bias=False,
             ),
             LayerNorm2d(out_chans),
-            nn.Conv2d(
+            Conv2dLayer(
                 out_chans,
                 out_chans,
                 kernel_size=3,
@@ -150,9 +152,11 @@ class ImageEncoderViT(nn.Module):
             LayerNorm2d(out_chans),
         )
 
-        self.net_2 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False)
-        self.net_3 = nn.Conv2d(
-            512, 1024, kernel_size=3, stride=2, padding=1, bias=False
+        self.net_2 = Conv2dLayer(
+            256, 512, kernel_size=3, stride=2, padding=1, bias=False
+        )
+        self.net_3 = Conv2dLayer(
+            512, last_conv_output, kernel_size=3, stride=2, padding=1, bias=False
         )
 
     def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
@@ -500,7 +504,7 @@ class PatchEmbed(nn.Module):
         """
         super().__init__()
 
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding
         )
 
@@ -625,7 +629,7 @@ class DeepCLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
+            attn_cls=MMEncoderAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers

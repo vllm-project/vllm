@@ -12,10 +12,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
+    dbo_get_previous_event,
     dbo_switch_to_comm,
     dbo_switch_to_compute,
     dbo_switch_to_compute_sync,
@@ -102,6 +103,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> Callable:
         has_scales = token_scales is not None
 
@@ -109,6 +111,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # kernel will block the CPU so we want to queue up all the compute
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
+
+        # capture a DeepEP event and pass it as previous_event so
+        # DeepEP honors the dependency internally.
+        previous_event = dbo_get_previous_event(self.buffer.capture)
 
         (
             num_tokens_per_rank,
@@ -119,7 +125,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         ) = self.buffer.get_dispatch_layout(
             topk_idx=rank_topk_ids,
             num_experts=num_experts,
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=False,
             allocate_on_comm_stream=False,
         )
@@ -148,7 +154,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # to this value.
             expert_alignment=1,
             config=self._get_dispatch_config(),
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
@@ -169,6 +175,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_topk_weights,
             a1_scale,
             quant_config,
+            defer_input_quant=defer_input_quant,
         )
 
     def _receiver(
@@ -182,6 +189,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_topk_weights: torch.Tensor | None,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> mk.PrepareResultType:
         if event.event is not None:
             event.current_stream_wait()
@@ -216,14 +224,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_num_tokens_per_expert_list, device=expert_x.device
         )
 
-        # Dispatch and Quant
-        # DeepEP kernels only support dispatching block-quantized
-        # activation scales.
-        # Dispatch in bfloat16 and quantize afterwards
-        if not quant_config.is_block_quantized:
+        # * For non-block quant, dispatch in b16 and quantize now as
+        #   DeepEP kernels only support dispatching block scales.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if not quant_config.is_block_quantized and not defer_input_quant:
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
+                # TODO: support per_act_token_quant,
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     a1_scale,
@@ -252,6 +261,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.ReceiverType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -261,8 +271,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized:
-            # Quant and Dispatch
+        # * DeepEP only supports fp8 block scales so quantize
+        #   before the dispatch for these models.
+        # * For all other quantization, dispatch after.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if quant_config.is_block_quantized and not defer_input_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
@@ -276,7 +290,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             a1q = a1
             a1q_scale = None
-            a1_post_scale = quant_config.a1_scale
+            a1_post_scale = (
+                quant_config.a1_gscale
+                if quant_config.quant_dtype == "nvfp4"
+                else quant_config.a1_scale
+            )
 
         return self._do_dispatch(
             tokens=a1q,
@@ -286,6 +304,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts=num_experts,
             a1_scale=a1_post_scale,
             quant_config=quant_config,
+            defer_input_quant=defer_input_quant,
         )
 
     def prepare(
@@ -297,6 +316,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         receiver = self.prepare_async(
             a1,
@@ -306,6 +326,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            defer_input_quant,
         )
         return receiver()
 
@@ -339,13 +360,14 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
+        previous_event = dbo_get_previous_event(self.buffer.capture)
         combined_x, _, event = self.buffer.combine(
             # HT combine only supports BF16
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
             config=self._get_combine_config(),
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )

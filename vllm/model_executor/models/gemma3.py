@@ -19,16 +19,18 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -38,14 +40,17 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
@@ -155,25 +160,29 @@ class Gemma3Attention(nn.Module):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        layer_type = config.layer_types[layer_idx]
+        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize the rotary embedding.
-        if self.is_sliding:
-            # Local attention. Override the values in config.json.
-            self.rope_theta = config.rope_local_base_freq
-            self.rope_scaling = {"rope_type": "default"}
+        if layer_type in config.rope_parameters:
+            # Transformers v5 rope config.
+            rope_parameters = config.rope_parameters[layer_type]
         else:
+            # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            self.rope_theta = config.rope_theta
-            self.rope_scaling = config.rope_scaling
+            rope_parameters = config.rope_parameters
+            # Local attention. Override the values in config.json.
+            if self.is_sliding:
+                rope_parameters = dict(
+                    rope_type="default", rope_theta=config.rope_local_base_freq
+                )
+
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=self.rope_scaling,
         )
 
         if getattr(config, "is_causal", True):
@@ -218,76 +227,8 @@ class Gemma3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-
-        if not kwargs.get("has_images", False):
-            # Fast path for text-only inputs. The performance for the text-only
-            # inputs are not affected by the naive attention below.
-            output, _ = self.o_proj(attn_output)
-            return output
-
-        # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
-        # that correspond to the same image while using causal attention
-        # otherwise. Current attention backends cannot handle this pattern, so
-        # we temporarily use a naive attention implementation with mask tensors.
-
-        # We intentionally keep the attention backend as-is and only override
-        # `attn_output` with the naive implementation's output. This minimizes
-        # changes to existing model runners and attention backends. The call to
-        # `self.attn(q, k, v)` is only used to populate the KV cache - its
-        # output is discarded and overwritten below. While this duplicates
-        # computation, it maintains compatibility.
-        # TODO(woosuk): Optimize by implementing custom attention kernels.
-        attn_output = self.naive_attn_with_masks(q, k, v, out=attn_output, **kwargs)
         output, _ = self.o_proj(attn_output)
         return output
-
-    def naive_attn_with_masks(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        out: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        # NOTE(woosuk): As described in the comment above, this code is not
-        # meant to be performant. It is only meant to be correct.
-        q = q.view(-1, self.num_heads, self.head_dim)
-        # Expand the key and value to handle GQA.
-        num_queries_per_kv = self.num_heads // self.num_kv_heads
-        k = k.view(-1, self.num_kv_heads, self.head_dim)
-        k = k.repeat_interleave(num_queries_per_kv, dim=-2)
-        v = v.view(-1, self.num_kv_heads, self.head_dim)
-        v = v.repeat_interleave(num_queries_per_kv, dim=-2)
-
-        if self.is_sliding:
-            attn_masks = kwargs["local_attn_masks"]
-        else:
-            attn_masks = kwargs["global_attn_masks"]
-
-        seq_lens = kwargs["seq_lens"]
-        start_idx = 0
-        for seq_len, attn_mask in zip(seq_lens, attn_masks):
-            end_idx = start_idx + seq_len
-            query = q[start_idx:end_idx].unsqueeze(0)
-            key = k[start_idx:end_idx].unsqueeze(0)
-            value = v[start_idx:end_idx].unsqueeze(0)
-
-            # Transpose.
-            query = query.transpose(1, 2)
-            key = key.transpose(1, 2)
-            value = value.transpose(1, 2)
-
-            output = F.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask,
-                self.scaling,
-            )
-            output = output.transpose(1, 2).flatten(-2, -1)
-            out[start_idx:end_idx] = output
-            start_idx = end_idx
-        return out
 
 
 class Gemma3DecoderLayer(nn.Module):
@@ -393,7 +334,7 @@ class Gemma3Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         # NOTE(woosuk): Only apply the normalizer to the output of
         # vocab embedding. Don't apply it to the vision embedding.
         return self.embed_tokens(input_ids) * self.normalizer
@@ -410,7 +351,7 @@ class Gemma3Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -524,16 +465,23 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+
         super().__init__()
         self.config = config
-        # currently all existing Gemma models have `tie_word_embeddings` enabled
-        assert config.tie_word_embeddings
         self.quant_config = quant_config
         self.model = Gemma3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping
         )
@@ -541,12 +489,12 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -561,7 +509,7 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.model.embed_tokens, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

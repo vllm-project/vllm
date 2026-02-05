@@ -142,7 +142,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
-* Additional mistral function-calling models are compatible as well.
+* Additional Mistral function-calling models are compatible as well.
 
 Known issues:
 
@@ -158,12 +158,25 @@ Known issues:
 
 Recommended flags:
 
-1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+1. To use the official Mistral AI's format:
 
-    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+    `--tool-call-parser mistral`
 
-2. To use the default Transformers tokenization backend:
-    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+2. To use the Transformers format when available:
+
+    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+!!! note
+    Models officially released by Mistral AI have two possible formats:
+
+    1. The official format that is used by default with `auto` or `mistral` arguments:
+
+        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
+
+    2. The Transformers format, when available, that is used with `hf` arguments:
+
+        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -304,6 +317,15 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
+### OpenAI OSS Models ('openai`)
+
+Supported models:
+
+* `openai/gpt-oss-20b`
+* `openai/gpt-oss-120b`
+
+Flags: `--tool-call-parser openai`
+
 ### Kimi-K2 Models (`kimi_k2`)
 
 Supported models:
@@ -321,7 +343,7 @@ Supported models:
 Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
-* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
 ### LongCat-Flash-Chat Models (`longcat`)
 
@@ -339,15 +361,47 @@ Supported models:
 * `zai-org/GLM-4.5`
 * `zai-org/GLM-4.5-Air`
 * `zai-org/GLM-4.6`
-* `zai-org/GLM-4.6-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### GLM-4.7 Models (`glm47`)
+
+Supported models:
+
+* `zai-org/GLM-4.7`
+* `zai-org/GLM-4.7-Flash`
+
+Flags: `--tool-call-parser glm47`
+
+### FunctionGemma Models (`functiongemma`)
+
+Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.
+It's built on Gemma 3 and optimized for edge deployment on devices like laptops and phones.
+
+Supported models:
+
+* `google/functiongemma-270m-it`
+
+FunctionGemma uses a unique output format with `<start_function_call>` and `<end_function_call>` tags:
+
+```text
+<start_function_call>call:get_weather{location:<escape>London<escape>}<end_function_call>
+```
+
+The model is designed to be fine-tuned for specific function-calling tasks for best results.
+
+Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_template_functiongemma.jinja`
+
+!!! note
+    FunctionGemma is intended to be fine-tuned for your specific function-calling task.
+    The base model provides general function calling capabilities, but best results
+    are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
@@ -358,9 +412,23 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 
 Supported models:
 
-* TODO (will be updated after Olmo 3 release)
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
 
 Flags: `--tool-call-parser olmo3`
+
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -393,7 +461,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py](../../vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py).
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -407,9 +475,8 @@ Here is a summary of a plugin file:
     # the name list in register_module can be used
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
-    @ToolParserManager.register_module(["example"])
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens
@@ -439,6 +506,12 @@ Here is a summary of a plugin file:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=text)
+    # register the tool parser to ToolParserManager
+    ToolParserManager.register_lazy_module(
+        name="example",
+        module_path="vllm.tool_parsers.example",
+        class_name="ExampleToolParser",
+    )
 
     ```
 

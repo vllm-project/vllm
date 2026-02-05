@@ -8,12 +8,19 @@ import torch
 from tests.kernels.utils import torch_experts
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassBatchedExpertsFp8
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -78,6 +85,8 @@ def pplx_cutlass_moe(
         PplxPrepareAndFinalize,
     )
 
+    init_workspace_manager(torch.cuda.current_device())
+
     assert torch.cuda.current_device() == pgi.local_rank
 
     num_tokens, hidden_dim = a.shape
@@ -131,28 +140,23 @@ def pplx_cutlass_moe(
         num_dispatchers=num_dispatchers,
     )
 
-    ab_strides1 = torch.full(
-        (num_local_experts,), hidden_dim, device="cuda", dtype=torch.int64
-    )
-    ab_strides2 = torch.full(
-        (num_local_experts,), intermediate_dim, device="cuda", dtype=torch.int64
-    )
-    c_strides1 = torch.full(
-        (num_local_experts,), 2 * intermediate_dim, device="cuda", dtype=torch.int64
-    )
-    c_strides2 = torch.full(
-        (num_local_experts,), hidden_dim, device="cuda", dtype=torch.int64
-    )
+    def make_moe_config() -> FusedMoEConfig:
+        return FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_dim,
+            intermediate_size_per_partition=intermediate_dim,
+            num_local_experts=num_local_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation="silu",
+            in_dtype=torch.bfloat16,
+            device="cuda",
+            routing_method=RoutingMethodType.Llama4,
+        )
 
     experts = CutlassBatchedExpertsFp8(
-        num_local_experts,
-        num_dispatchers,
-        out_dtype,
-        ab_strides1,
-        ab_strides2,
-        c_strides1,
-        c_strides2,
-        fp8_w8a8_moe_quant_config(
+        moe_config=make_moe_config(),
+        quant_config=fp8_w8a8_moe_quant_config(
             per_act_token_quant=per_act_token,
             per_out_ch_quant=per_out_ch,
             w1_scale=chunk_by_rank(w1_scale, rank, world_size),
@@ -161,6 +165,8 @@ def pplx_cutlass_moe(
             if per_act_token
             else a1_scale[rank],
         ),
+        max_num_tokens=max_num_tokens,
+        num_dispatchers=num_dispatchers,
     )
 
     fused_cutlass_experts = FusedMoEModularKernel(
@@ -192,8 +198,6 @@ def pplx_cutlass_moe(
 
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def _pplx_moe(
@@ -292,7 +296,7 @@ def test_cutlass_moe_pplx(
     world_dp_size: tuple[int, int],
     use_internode: bool,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
