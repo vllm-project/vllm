@@ -73,7 +73,11 @@ def _terratorch_field_names(input_definition: InputDefinition):
     return set(input_definition.data.keys())
 
 
-def _terratorch_field_factory(input_definition: InputDefinition, *, is_shared: bool):
+def _terratorch_field_factory(
+    input_definition: InputDefinition,
+    *,
+    is_shared: bool = True,  # True for unprocessed data, False for processed data
+):
     def _terratorch_field_config(
         hf_inputs: Mapping[str, torch.Tensor],
     ) -> Mapping[str, MultiModalFieldConfig]:
@@ -107,9 +111,7 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
                 data,
                 modality="image",
                 required_fields=_terratorch_field_names(self.input_definition),
-                fields_factory=_terratorch_field_factory(
-                    self.input_definition, is_shared=True
-                ),
+                fields_factory=_terratorch_field_factory(self.input_definition),
             )
 
         return super()._parse_image_data(data)
@@ -171,8 +173,13 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        is_shared: bool = True,
     ) -> Mapping[str, MultiModalFieldConfig]:
-        factory = _terratorch_field_factory(self.info.input_definition, is_shared=False)
+        factory = _terratorch_field_factory(
+            self.info.input_definition,
+            is_shared=is_shared,
+        )
         return factory(hf_inputs)
 
     def _get_prompt_updates(
@@ -207,7 +214,11 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
-            self._get_mm_fields_config(mm_processed_data, hf_processor_mm_kwargs),
+            self._get_mm_fields_config(
+                mm_processed_data,
+                hf_processor_mm_kwargs,
+                is_shared=False,
+            ),
         )
 
         return MultiModalInputs(
