@@ -35,6 +35,7 @@ class MockModelConfig:
     encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
 
 @pytest.fixture
