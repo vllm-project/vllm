@@ -22,7 +22,6 @@ class SharedFusedMoE(FusedMoE):
         self,
         shared_experts: torch.nn.Module | None,
         use_overlapped: bool = True,
-        routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
         # Pass has_shared_experts so FusedMoE.__init__ can set disable_inplace
@@ -31,7 +30,6 @@ class SharedFusedMoE(FusedMoE):
         kwargs["has_shared_experts"] = shared_experts is not None
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
-        self._routed_input_transform = routed_input_transform
 
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues

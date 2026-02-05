@@ -325,11 +325,13 @@ class FusedMoE(CustomOp):
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
+        routed_input_transform: torch.nn.Module | None = None,
         has_shared_experts: bool = False,
     ):
         super().__init__()
 
         self._gate = gate
+        self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -487,7 +489,8 @@ class FusedMoE(CustomOp):
         self.reduce_results = reduce_results
         self.renormalize = renormalize
 
-        # TODO(bnell): these attributes are only used by cpu/xpu/mxfp4
+        # TODO(bnell): these attributes are only used by monolithic kernels.
+        # Put them in a MoERouterConfig dataclass?
         self.use_grouped_topk = use_grouped_topk
         if self.use_grouped_topk:
             assert num_expert_group is not None and topk_group is not None
@@ -620,12 +623,12 @@ class FusedMoE(CustomOp):
             moe_config=self.moe_config,
             moe_quant_config=self.moe_quant_config,
             router=self.router,
+            routed_input_transform=self._routed_input_transform,
             gate=self.gate,
             shared_experts=self.shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            capture=self.capture,
         )
 
     @property
@@ -1440,7 +1443,10 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.runner.forward(hidden_states, router_logits)
+        return self.runner.forward(
+            hidden_states,
+            router_logits,
+        )
 
     @property
     def expert_map(self) -> torch.Tensor | None:
