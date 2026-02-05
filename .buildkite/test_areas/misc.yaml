@@ -16,7 +16,7 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
-    - pytest -v -s v1/spec_decode
+    - pytest -v -s -m 'not slow_test' v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
@@ -122,6 +122,7 @@ steps:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
+  - tests/test_pooling_params.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -134,6 +135,7 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pooling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -167,3 +169,17 @@ steps:
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  
+- label: Acceptance Length Test (Large Models) # optional
+  timeout_in_minutes: 25
+  gpu: h100
+  optional: true
+  num_gpus: 1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/models/mlp_speculator.py
+  - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test

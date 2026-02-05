@@ -57,7 +57,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
 )
-from vllm.entrypoints.openai.translations.protocol import (
+from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
@@ -107,11 +107,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -245,50 +244,6 @@ class OpenAIServing:
         self.renderer = self.models.renderer
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
-
-    def _get_tool_parser(
-        self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
-    ) -> Callable[[TokenizerLike], ToolParser] | None:
-        """Get the tool parser based on the name."""
-        parser = None
-        if not enable_auto_tools or tool_parser_name is None:
-            return parser
-        logger.info('"auto" tool choice has been enabled.')
-
-        try:
-            if tool_parser_name == "pythonic" and self.model_config.model.startswith(
-                "meta-llama/Llama-3.2"
-            ):
-                logger.warning(
-                    "Llama3.2 models may struggle to emit valid pythonic tool calls"
-                )
-            parser = ToolParserManager.get_tool_parser(tool_parser_name)
-        except Exception as e:
-            raise TypeError(
-                "Error: --enable-auto-tool-choice requires "
-                f"tool_parser:'{tool_parser_name}' which has not "
-                "been registered"
-            ) from e
-        return parser
-
-    def _get_reasoning_parser(
-        self,
-        reasoning_parser_name: str,
-    ) -> Callable[[TokenizerLike], ReasoningParser] | None:
-        """Get the reasoning parser based on the name."""
-        parser = None
-        if not reasoning_parser_name:
-            return None
-        try:
-            parser = ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)
-            assert parser is not None
-        except Exception as e:
-            raise TypeError(f"{reasoning_parser_name=} has not been registered") from e
-        return parser
-
-    async def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
-        await self.engine_client.reset_mm_cache()
 
     async def beam_search(
         self,
@@ -1120,7 +1075,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text, _, _ = get_prompt_components(engine_prompt)
+        prompt_text = engine_prompt.get("prompt")
 
         orig_priority = priority
         sub_request = 0
@@ -1190,7 +1145,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = engine_prompt.get("prompt")
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from typing import TYPE_CHECKING, Any, Protocol
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
@@ -19,19 +20,26 @@ if TYPE_CHECKING:
     )
 
 
-class RendererLike(Protocol):
-    config: "ModelConfig"
-    _async_tokenizer: AsyncMicrobatchTokenizer
-
+class BaseRenderer(ABC):
     @classmethod
+    @abstractmethod
     def from_config(
         cls,
         config: "ModelConfig",
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         raise NotImplementedError
 
+    def __init__(self, config: "ModelConfig") -> None:
+        super().__init__()
+
+        self.config = config
+
+        # Lazy initialization since offline LLM doesn't use async
+        self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
+
     @property
+    @abstractmethod
     def tokenizer(self) -> TokenizerLike | None:
         raise NotImplementedError
 
@@ -43,8 +51,7 @@ class RendererLike(Protocol):
         return tokenizer
 
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
-        # Lazy initialization since offline LLM doesn't use async
-        if not hasattr(self, "_async_tokenizer"):
+        if self._async_tokenizer is None:
             self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
 
         return self._async_tokenizer
@@ -104,6 +111,7 @@ class RendererLike(Protocol):
     ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
         return self.render_completions(prompt_input, prompt_embeds)
 
+    @abstractmethod
     def render_messages(
         self,
         messages: list["ChatCompletionMessageParam"],
