@@ -27,48 +27,24 @@
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
+
+// Define before including nvfp4_utils.cuh so the header
+// can use this macro during compilation.
+#define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
 
 namespace vllm {
 
-// silu in float32
-__device__ __forceinline__ float silu(float x) {
-  return __fdividef(x, (1.f + __expf(-x)));
-}
-
-__device__ __forceinline__ float2 silu2(float2 x) {
-  return make_float2(silu(x.x), silu(x.y));
-}
-
-template <class Type>
-__inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
-                                                       PackedVec<Type>& vec2) {
-  PackedVec<Type> result;
-  using packed_type = typename TypeConverter<Type>::Type;
-
-#pragma unroll
-  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    // silu_mul in float32
-    if constexpr (std::is_same_v<Type, half>) {
-      float2 silu_vec = silu2(__half22float2(vec.elts[i]));
-      result.elts[i] =
-          __float22half2_rn(__fmul2_rn(silu_vec, __half22float2(vec2.elts[i])));
-    } else {
-      float2 silu_vec = silu2(__bfloat1622float2(vec.elts[i]));
-      result.elts[i] = __float22bfloat162_rn(
-          __fmul2_rn(silu_vec, __bfloat1622float2(vec2.elts[i])));
-    }
-  }
-  return result;
-}
-
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
-    silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
-                             float const* SFScale, uint32_t* out,
-                             uint32_t* SFout) {
-  using PackedVec = PackedVec<Type>;
+__global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
+    silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
+                             int32_t num_padded_cols,
+                             Type const* __restrict__ in,
+                             float const* __restrict__ SFScale,
+                             uint32_t* __restrict__ out,
+                             uint32_t* __restrict__ SFout) {
+  using PackedVec = vllm::PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
@@ -80,34 +56,60 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
   // (448.f / (Alpha_A / 6.f)).
-  float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[0];
+  float const SFScaleVal = (SFScale == nullptr) ? 1.0f : SFScale[0];
+
+  int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
+  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
   // Input tensor row/col loops.
   for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
-    for (int colIdx = threadIdx.x; colIdx < numCols / CVT_FP4_ELTS_PER_THREAD;
-         colIdx += blockDim.x) {
+    if (colIdx < num_padded_cols) {
+      PackedVec in_vec;
+      PackedVec in_vec2;
       int64_t inOffset =
           rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) + colIdx;
       int64_t inOffset2 = rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) +
                           numCols / CVT_FP4_ELTS_PER_THREAD + colIdx;
-      PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
-      PackedVec in_vec2 = reinterpret_cast<PackedVec const*>(in)[inOffset2];
 
-      // Get the output tensor offset.
-      // Same as inOffset because 8 elements are packed into one uint32_t.
-      int64_t outOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-      auto& out_pos = out[outOffset];
+      bool valid = (rowIdx < numRows) && (elem_idx < numCols);
+      if constexpr (CVT_FP4_PACK16) {
+        ld256_or_zero_cg_u32<Type>(
+            in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8],
+            valid);
+        ld256_or_zero_cg_u32<Type>(
+            in_vec2, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 8],
+            valid);
+      } else {
+        ld128_or_zero_cg_u32<Type>(
+            in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4],
+            valid);
+        ld128_or_zero_cg_u32<Type>(
+            in_vec2, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 4],
+            valid);
+      }
 
       // Compute silu and mul
-      PackedVec out_silu_mul = compute_silu_mul(in_vec, in_vec2);
+      PackedVec out_silu_mul = compute_silu_mul<Type>(in_vec, in_vec2);
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, numKTiles, SFout);
 
-      out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(out_silu_mul, SFScaleVal,
-                                                     sf_out);
+      auto out_val =
+          cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+              out_silu_mul, SFScaleVal, sf_out);
+
+      if (valid) {
+        if constexpr (CVT_FP4_PACK16) {
+          int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;
+          uint64_t packed64 =
+              (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+          reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+        } else {
+          out[inOffset] = out_val;
+        }
+      }
     }
   }
 }
@@ -134,17 +136,23 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
-  dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
+
+  int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
+
+  int grid_y = vllm::div_round_up(sf_n_unpadded, static_cast<int>(block.x));
+  int grid_x = std::min(
+      int(m), std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
+  dim3 grid(grid_x, grid_y);
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
         vllm::silu_mul_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
-            m, n, input_ptr, input_sf_ptr,
+            m, n, sf_n_unpadded, input_ptr, input_sf_ptr,
             reinterpret_cast<uint32_t*>(output_ptr),
             reinterpret_cast<uint32_t*>(sf_out));
       });

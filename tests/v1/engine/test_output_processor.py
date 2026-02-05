@@ -274,12 +274,28 @@ def _validate_logprobs(
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[lp_tok].decoded_token
                     ref_decoded_token = _ref_convert_id_to_token(dtv.tokenizer, lp_tok)
-                    assert decoded_token == ref_decoded_token, (
-                        f"Sampled logprob token id {lp_tok} decodes to"
-                        f" {ref_decoded_token} but Logprob decoded"
-                        f" token is {decoded_token} instead"
-                        f" (at position {idx})"
-                    )
+
+                    # With UTF-8 correction logic, tokens ending with "�"
+                    # (incomplete byte sequences) are corrected to either
+                    # empty string or proper UTF-8 characters
+                    if ref_decoded_token.endswith("�"):
+                        # Token needs UTF-8 correction
+                        assert not decoded_token.endswith("�"), (
+                            f"Sampled logprob token id {lp_tok} decodes to"
+                            f" '{ref_decoded_token}' (ends with replacement char)"
+                            f" but corrected decoded token '{decoded_token}'"
+                            f" still ends with replacement char"
+                            f" (at position {idx}). UTF-8 correction should"
+                            f" have removed it."
+                        )
+                    else:
+                        # No correction needed, should match exactly
+                        assert decoded_token == ref_decoded_token, (
+                            f"Sampled logprob token id {lp_tok} decodes to"
+                            f" {ref_decoded_token} but Logprob decoded"
+                            f" token is {decoded_token} instead"
+                            f" (at position {idx})"
+                        )
 
                 ref_cumulative_logprob += pos_logprob_dict[sampled_token].logprob
             # Assert that cumulative logprobs are correct
@@ -319,6 +335,7 @@ def _validate_logprobs(
                 ref_prompt_logprob_toks,
                 ref_prompt_logprob_vals,
                 ref_prompt_token_ranks,
+                _,
             ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                 zip(prompt_token_ids[1:], prompt_logprobs[1:])
@@ -420,12 +437,28 @@ def _validate_logprobs(
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[plp_tok].decoded_token
                     ref_decoded_token = _ref_convert_id_to_token(dtv.tokenizer, plp_tok)
-                    assert decoded_token == ref_decoded_token, (
-                        f"Prompt logprob token id {plp_tok} decodes to"
-                        f" {ref_decoded_token} but Logprob decoded"
-                        f" token is {decoded_token} instead"
-                        f" (at position {idx})"
-                    )
+
+                    # With UTF-8 correction logic, tokens ending with "�"
+                    # (incomplete byte sequences) are corrected to either
+                    # empty string or proper UTF-8 characters
+                    if ref_decoded_token.endswith("�"):
+                        # Token needs UTF-8 correction
+                        assert not decoded_token.endswith("�"), (
+                            f"Prompt logprob token id {plp_tok} decodes to"
+                            f" '{ref_decoded_token}' (ends with replacement char)"
+                            f" but corrected decoded token '{decoded_token}'"
+                            f" still ends with replacement char"
+                            f" (at position {idx}). UTF-8 correction should"
+                            f" have removed it."
+                        )
+                    else:
+                        # No correction needed, should match exactly
+                        assert decoded_token == ref_decoded_token, (
+                            f"Prompt logprob token id {plp_tok} decodes to"
+                            f" {ref_decoded_token} but Logprob decoded"
+                            f" token is {decoded_token} instead"
+                            f" (at position {idx})"
+                        )
         else:
             # Prompt logprobs disabled for this request
             assert prompt_logprobs is None

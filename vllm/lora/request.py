@@ -15,14 +15,19 @@ class LoRARequest(
 
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
+
+    load_inplace: If True, forces reloading the adapter even if one
+        with the same lora_int_id already exists in the cache. This replaces
+        the existing adapter in-place. If False (default), only loads if the
+        adapter is not already loaded.
     """
 
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
-    long_lora_max_len: int | None = None
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
+    load_inplace: bool = False
 
     def __post_init__(self):
         if self.lora_int_id < 1:

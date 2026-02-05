@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+from collections.abc import Generator
 
 import torch
 
@@ -38,7 +39,9 @@ def should_split(node: torch.fx.Node, splitting_ops: list[str]) -> bool:
 
 
 @contextlib.contextmanager
-def inductor_partition_rule_context(splitting_ops: list[str]):
+def inductor_partition_rule_context(
+    splitting_ops: list[str] | None,
+) -> Generator[None, None, None]:
     """Context manager to temporarily register Inductor partition rules.
 
     Registers custom partition rules for specified operators, forcing the

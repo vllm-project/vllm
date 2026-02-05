@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -25,6 +26,12 @@ class ExllamaLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return (
+                False,
+                "Exllama is only supported on CUDA and ROCm",
+            )
+
         if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return (
                 False,
@@ -104,7 +111,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                 # indices
                 return torch.argsort(x).to(torch.int)
 
-            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)
+            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
         else:
             self.w_gidx_name = "g_idx"
             empty_g_idx = torch.nn.Parameter(

@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 import gguf
 import torch
@@ -16,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -74,7 +77,7 @@ class GGUFConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping
@@ -630,7 +633,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert layer.activation == "silu", "Only SiLU activation is supported."
         if layer.apply_router_weight_on_input:
@@ -639,10 +643,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "fused GGUF MoE method."
             )
 
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
         return fused_moe_gguf(
             x,
             layer.w13_qweight,

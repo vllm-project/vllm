@@ -1,8 +1,8 @@
-FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
+FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
 
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -25,13 +25,20 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
+RUN apt update && apt upgrade -y && \
+    apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc && \
+    apt install -y intel-oneapi-compiler-dpcpp-cpp-2025.3
+
 
 # This oneccl contains the BMG support which is not the case for default version of oneapi 2025.2.
-RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.6/intel-oneccl-2021.15.6.9_offline.sh
-RUN bash intel-oneccl-2021.15.6.9_offline.sh -a --silent --eula accept && \
+ARG ONECCL_INSTALLER="intel-oneccl-2021.15.7.8_offline.sh"
+RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/${ONECCL_INSTALLER}" && \
+    bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
+    rm "${ONECCL_INSTALLER}" && \
     echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
     echo "source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force" >> /root/.bashrc
+RUN rm -f /opt/intel/oneapi/ccl/latest && \
+    ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
 
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
@@ -80,6 +87,9 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 # install nixl from source code
 ENV NIXL_VERSION=0.7.0
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
+
+# FIX triton
+RUN --mount=type=cache,target=/root/.cache/pip pip uninstall triton triton-xpu -y && pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/xpu
 
 # PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
 RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf

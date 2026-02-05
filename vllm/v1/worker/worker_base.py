@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -12,7 +11,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -118,13 +116,19 @@ class WorkerBase:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
 
+    def get_model_inspection(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        from vllm.model_inspection import format_model_inspection
+
+        return format_model_inspection(self.get_model())
+
     def load_model(self) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """If this method returns None, sample_tokens should be called immediately after
         to obtain the ModelRunnerOutput.
 
@@ -178,7 +182,6 @@ class WorkerWrapperBase:
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
         rpc_rank: int = 0,
         global_rank: int | None = None,
     ) -> None:
@@ -194,21 +197,10 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.global_rank = self.rpc_rank if global_rank is None else global_rank
-        self.worker: WorkerBase | None = None
 
-        # do not store this `vllm_config`, `init_worker` will set the final
-        # one.
-        # TODO: investigate if we can remove this field in `WorkerWrapperBase`,
-        # `init_cached_hf_modules` should be unnecessary now.
-        self.vllm_config: VllmConfig | None = None
-
-        # `model_config` can be None in tests
-        model_config = vllm_config.model_config
-        if model_config and model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-
-            init_cached_hf_modules()
+        # Initialized after init_worker is called
+        self.worker: WorkerBase
+        self.vllm_config: VllmConfig
 
     def shutdown(self) -> None:
         if self.worker is not None:
@@ -228,11 +220,6 @@ class WorkerWrapperBase:
         envs_list: list[dict[str, str]],
     ) -> None:
         envs = envs_list[self.rpc_rank]
-        key = "CUDA_VISIBLE_DEVICES"
-        if key in envs and key in os.environ:
-            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
-            # suppress the warning in `update_environment_variables`
-            del os.environ[key]
         update_environment_variables(envs)
 
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
@@ -241,27 +228,34 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config = kwargs.get("vllm_config")
-        assert self.vllm_config is not None, (
+
+        vllm_config: VllmConfig | None = kwargs.get("vllm_config")
+        assert vllm_config is not None, (
             "vllm_config is required to initialize the worker"
         )
-        self.vllm_config.enable_trace_function_call_for_thread()
+        self.vllm_config = vllm_config
+
+        vllm_config.enable_trace_function_call_for_thread()
 
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
 
-        if isinstance(self.vllm_config.parallel_config.worker_cls, str):
-            worker_class = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.worker_cls
+        parallel_config = vllm_config.parallel_config
+        if isinstance(parallel_config.worker_cls, str):
+            worker_class: type[WorkerBase] = resolve_obj_by_qualname(
+                parallel_config.worker_cls
             )
         else:
             raise ValueError(
-                "passing worker_cls is no longer supported. Please pass keep the class in a separate module and pass the qualified name of the class as a string."  # noqa: E501
+                "passing worker_cls is no longer supported. "
+                "Please pass keep the class in a separate module "
+                "and pass the qualified name of the class as a string."
             )
-        if self.vllm_config.parallel_config.worker_extension_cls:
+
+        if parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.worker_extension_cls
+                parallel_config.worker_extension_cls
             )
             extended_calls = []
             if worker_extension_cls not in worker_class.__bases__:
@@ -294,7 +288,7 @@ class WorkerWrapperBase:
                 "This argument is needed for mm_processor_cache_type='shm'."
             )
 
-            mm_config = self.vllm_config.model_config.multimodal_config
+            mm_config = vllm_config.model_config.multimodal_config
             if mm_config and mm_config.mm_processor_cache_type == "shm":
                 raise ValueError(msg)
             else:
@@ -302,16 +296,16 @@ class WorkerWrapperBase:
 
             self.mm_receiver_cache = None
         else:
-            self.mm_receiver_cache = worker_receiver_cache_from_config(
-                self.vllm_config,
-                MULTIMODAL_REGISTRY,
-                shared_worker_lock,
+            self.mm_receiver_cache = (
+                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
+                    vllm_config,
+                    shared_worker_lock,
+                )
             )
 
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
-            assert self.worker is not None
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
@@ -358,20 +352,15 @@ class WorkerWrapperBase:
             )
 
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        *args,
-        **kwargs,
-    ) -> ModelRunnerOutput | None:
+        self, scheduler_output: SchedulerOutput
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self._apply_mm_cache(scheduler_output)
 
-        assert self.worker is not None
-        return self.worker.execute_model(scheduler_output, *args, **kwargs)
+        return self.worker.execute_model(scheduler_output)
 
     def reset_mm_cache(self) -> None:
         mm_receiver_cache = self.mm_receiver_cache
         if mm_receiver_cache is not None:
             mm_receiver_cache.clear_cache()
 
-        assert self.worker is not None
         self.worker.reset_mm_cache()
