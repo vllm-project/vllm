@@ -304,7 +304,7 @@ class OpenAISpeechToText(OpenAIServing):
                         value=type(prompt).__name__,
                     )
 
-                prompt = self._preprocess_verbose_prompt(prompt)
+                prompt = self._preprocess_verbose_prompt(prompt)  # type: ignore[arg-type]
 
             prompts.append(prompt)
         return prompts, duration
