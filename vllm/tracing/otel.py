@@ -183,6 +183,31 @@ def instrument_otel(func, span_name, attributes, record_exception):
     return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
 
 
+def manual_instrument_otel(
+    span_name: str,
+    start_time: int,
+    end_time: int | None = None,
+    attributes: dict[str, str] | None = None,
+):
+    """Manually create and end a span with explicit timestamps."""
+    if not _IS_OTEL_AVAILABLE:
+        return
+
+    tracer = trace.get_tracer(__name__)
+    ctx = _get_smart_context()
+    span = tracer.start_span(
+        span_name,
+        context=ctx,
+        start_time=start_time,
+    )
+    if attributes:
+        span.set_attributes(attributes)
+    if end_time is not None:
+        span.end(end_time=end_time)
+    else:
+        span.end()
+
+
 def _get_smart_context() -> Context | None:
     """
     Determines the parent context.

@@ -3,15 +3,15 @@
 
 import functools
 from collections.abc import Callable
+from typing import Any, TypeAlias
 
 # Import the implementation details
 from .otel import (
     extract_trace_context,
-    init_otel_worker,
     init_tracer,
     instrument_otel,
     is_otel_available,
-    otel_import_error_traceback,
+    manual_instrument_otel,
 )
 from .utils import (
     SpanAttributes,
@@ -24,14 +24,21 @@ __all__ = [
     "instrument",
     "init_tracer",
     "is_tracing_available",
-    "is_otel_available",
-    "otel_import_error_traceback",
     "SpanAttributes",
     "extract_trace_context",
     "extract_trace_headers",
     "log_tracing_disabled_warning",
     "contains_trace_headers",
 ]
+
+BackendAvailableFunc: TypeAlias = Callable[[], bool]
+InstrumentFunc: TypeAlias = Callable[..., Any]
+InstrumentManualFunc: TypeAlias = Callable[..., Any]
+_REGISTERED_TRACING_BACKENDS: dict[
+    str, tuple[BackendAvailableFunc, InstrumentFunc, InstrumentManualFunc]
+] = {
+    "otel": (is_otel_available, instrument_otel, manual_instrument_otel),
+}
 
 
 def instrument(
@@ -53,12 +60,29 @@ def instrument(
         )
 
     # Dispatch to OTel (and potentially others later)
-    return instrument_otel(
-        func=obj,
-        span_name=span_name,
-        attributes=attributes,
-        record_exception=record_exception,
-    )
+    is_otel_available, otel_instrument, _ = _REGISTERED_TRACING_BACKENDS["otel"]
+    if is_otel_available():
+        return otel_instrument(
+            func=obj,
+            span_name=span_name,
+            attributes=attributes,
+            record_exception=record_exception,
+        )
+    else:
+        return obj
+
+
+def instrument_manual(
+    span_name: str,
+    start_time: int,
+    end_time: int | None = None,
+    attributes: dict[str, str] | None = None,
+):
+    is_otel_available, _, manual_instrument_otel = _REGISTERED_TRACING_BACKENDS["otel"]
+    if is_otel_available():
+        return manual_instrument_otel(span_name, start_time, end_time, attributes)
+    else:
+        return None
 
 
 def is_tracing_available() -> bool:
@@ -66,27 +90,7 @@ def is_tracing_available() -> bool:
     Returns True if any tracing backend (OTel, Profiler, etc.) is available.
     Use this to guard expensive tracing logic in the main code.
     """
-
-    return is_otel_available()
-
-
-_WORKER_TRACING_INITIALIZED = False
-
-
-def maybe_init_worker_tracer(
-    instrumenting_module_name: str = "vllm.worker",
-    process_kind: str = "worker",
-    process_name: str = "",
-):
-    """
-    Generic entry point to initialize tracing in sub-processes.
-    Dispatches to OTel, Profiler, etc.
-    """
-    global _WORKER_TRACING_INITIALIZED
-
-    if _WORKER_TRACING_INITIALIZED:
-        return
-
-    init_otel_worker(instrumenting_module_name, process_kind, process_name)
-
-    _WORKER_TRACING_INITIALIZED = True
+    check_available = [
+        is_available for is_available, _, _ in _REGISTERED_TRACING_BACKENDS.values()
+    ]
+    return any(check_available)

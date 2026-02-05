@@ -33,11 +33,11 @@ from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
-from vllm.tracing import instrument, is_tracing_available
+from vllm.tracing import instrument, instrument_manual, is_tracing_available
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if is_tracing_available():
-    from opentelemetry import trace
+    pass
 
 from .compiler_interface import (
     CompilerInterface,
@@ -929,14 +929,9 @@ class VllmBackend:
         self.compilation_config.compilation_time += dynamo_time
 
         # Record Dynamo time in tracing if available
-        if is_tracing_available():
-            tracer = trace.get_tracer(__name__)
-            span = tracer.start_span(
-                "Dynamo bytecode transform",
-                start_time=int(torch_compile_start_time * 1e9),
-            )
-            span.set_attribute("dynamo.time_seconds", dynamo_time)
-            span.end(end_time=int(time.time() * 1e9))
+        start_time = int(torch_compile_start_time * 1e9)
+        attributes = {"dynamo.time_seconds": dynamo_time}
+        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
 
         # we control the compilation process, each instance can only be
         # called once
