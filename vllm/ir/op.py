@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Callable
-from typing import Any
+from typing import Any, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -15,6 +15,20 @@ logger = init_logger(__name__)
 
 RESERVED_PROVIDERS = ["native", "unfused"]
 """Providers that are reserved and cannot be used for custom implementations."""
+
+
+# 0-param decorator overload
+@overload
+def register_op(f: Callable[..., Any]) -> "IrOp": ...
+
+
+# parametrized decorator overload
+@overload
+def register_op(
+    *,
+    name: str | None = None,
+    tags: tuple[torch.Tag, ...] = (),
+) -> Callable[[Callable[..., Any]], "IrOp"]: ...
 
 
 def register_op(
@@ -110,6 +124,9 @@ class IrOp:
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check.
         :return: A decorator that registers the implementation.
+
+        The decorated function must have the same semantics and signature as
+        the native implementation.
 
         The provider name must be unique and not one of the RESERVED_PROVIDERS.
         The supported and supports_args parameters should not be used to implement
