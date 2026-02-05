@@ -15,7 +15,6 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-from tests.utils import fork_new_process_for_each_test
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
@@ -62,7 +61,6 @@ def create_qwen3_lora_with_lm_head(save_dir: str, rank: int = 8) -> None:
     save_file(lora_weights, os.path.join(save_dir, "adapter_model.safetensors"))
 
 
-@fork_new_process_for_each_test
 def test_qwen3_unembed_lora():
     """Verify Qwen3 can load and generate with LoRA adapters with lm_head."""
     with tempfile.TemporaryDirectory() as tmpdir:
