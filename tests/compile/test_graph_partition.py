@@ -163,17 +163,17 @@ def test_consecutive_ops_in_split():
     split_gm, split_items = split_graph(gm, splitting_ops)
 
     # Validate the number of partitions
-    assert len(split_items) == 3, (
-        "Consecutive splitting operations were not grouped correctly."
-    )
+    assert (
+        len(split_items) == 3
+    ), "Consecutive splitting operations were not grouped correctly."
 
     # Validate that correctness is preserved
     new_x = torch.randn(8, 4)
     output_original = gm(new_x)
     output_split = split_gm(new_x)
-    assert torch.allclose(output_original, output_split), (
-        "Output mismatch after splitting."
-    )
+    assert torch.allclose(
+        output_original, output_split
+    ), "Output mismatch after splitting."
 
     # Check the splitting item has 2 nodes exactly (relu and attn)
     splitting_items = list(s for s in split_items if s.is_splitting_graph)

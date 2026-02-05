@@ -26,10 +26,7 @@ def sample_token_ids():
 
 @pytest.fixture
 def sample_regex():
-    return (
-        r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-        r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
-    )
+    return r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
 
 
 @pytest.fixture

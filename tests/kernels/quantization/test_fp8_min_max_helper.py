@@ -53,12 +53,12 @@ class TestGetFp8MinMax:
         fp8_min, fp8_max = get_fp8_min_max()
         finfo = torch.finfo(torch.float8_e4m3fn)
 
-        assert fp8_max == finfo.max, (
-            f"Non-fnuz platform should use finfo.max={finfo.max}, got {fp8_max}"
-        )
-        assert fp8_min == finfo.min, (
-            f"Non-fnuz platform should use finfo.min={finfo.min}, got {fp8_min}"
-        )
+        assert (
+            fp8_max == finfo.max
+        ), f"Non-fnuz platform should use finfo.max={finfo.max}, got {fp8_max}"
+        assert (
+            fp8_min == finfo.min
+        ), f"Non-fnuz platform should use finfo.min={finfo.min}, got {fp8_min}"
 
 
 if __name__ == "__main__":

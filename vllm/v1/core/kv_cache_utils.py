@@ -244,10 +244,10 @@ class FreeKVCacheBlockQueue:
 
     def popleft_n(self, n: int) -> list[KVCacheBlock]:
         """Pop the first n free blocks and reduce num_free_blocks by n.
-
+    
         Args:
             n: The number of blocks to pop.
-
+    
         Returns:
             A list of n free blocks.
         """
@@ -255,24 +255,22 @@ class FreeKVCacheBlockQueue:
             return []
         assert self.num_free_blocks >= n
         self.num_free_blocks -= n
-
+    
         curr_block = self.fake_free_list_head.next_free_block
-        # Pop n blocks from the head of the list
-        ret = []
-        for _ in range(n):
-            assert curr_block is not None
-            ret.append(curr_block)
-            last_block = curr_block
+        # Pre-allocate list for better performance
+        ret = [None] * n
+        for i in range(n):
+            ret[i] = curr_block
             curr_block = curr_block.next_free_block
-            # Reset prev_free_block and next_free_block of all popped blocks
-            last_block.prev_free_block = None
-            last_block.next_free_block = None
-
+    
+        # Update head pointer
+        self.fake_free_list_head.next_free_block = curr_block
         if curr_block is not None:
-            # The queue is not empty, connect the fake head to
-            # the new first block.
-            self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
+    
+        # Batch cleanup pointers (only update first and last block)
+        ret[0].prev_free_block = None
+        ret[-1].next_free_block = None
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:

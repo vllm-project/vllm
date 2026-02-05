@@ -34,16 +34,16 @@ def test_is_supported_is_abstract():
 
 def test_cpu_kernel_implements_is_supported():
     """Test that CPUInt8ScaledMMLinearKernel implements is_supported() method."""
-    assert hasattr(CPUInt8ScaledMMLinearKernel, "is_supported"), (
-        "CPUInt8ScaledMMLinearKernel missing is_supported() method"
-    )
+    assert hasattr(
+        CPUInt8ScaledMMLinearKernel, "is_supported"
+    ), "CPUInt8ScaledMMLinearKernel missing is_supported() method"
     # Verify it's a classmethod by checking if it can be called with the class
     # and by checking the method type
     assert inspect.ismethod(
         CPUInt8ScaledMMLinearKernel.is_supported
-    ) or inspect.isfunction(CPUInt8ScaledMMLinearKernel.is_supported), (
-        "CPUInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
-    )
+    ) or inspect.isfunction(
+        CPUInt8ScaledMMLinearKernel.is_supported
+    ), "CPUInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
     # Verify it can be called as a classmethod
     result, reason = CPUInt8ScaledMMLinearKernel.is_supported()
     assert isinstance(result, bool), "is_supported() should return a bool"
@@ -52,16 +52,16 @@ def test_cpu_kernel_implements_is_supported():
 
 def test_aiter_kernel_implements_is_supported():
     """Test that AiterInt8ScaledMMLinearKernel implements is_supported() method."""
-    assert hasattr(AiterInt8ScaledMMLinearKernel, "is_supported"), (
-        "AiterInt8ScaledMMLinearKernel missing is_supported() method"
-    )
+    assert hasattr(
+        AiterInt8ScaledMMLinearKernel, "is_supported"
+    ), "AiterInt8ScaledMMLinearKernel missing is_supported() method"
     # Verify it's a classmethod by checking if it can be called with the class
     # and by checking the method type
     assert inspect.ismethod(
         AiterInt8ScaledMMLinearKernel.is_supported
-    ) or inspect.isfunction(AiterInt8ScaledMMLinearKernel.is_supported), (
-        "AiterInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
-    )
+    ) or inspect.isfunction(
+        AiterInt8ScaledMMLinearKernel.is_supported
+    ), "AiterInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
     # Verify it can be called as a classmethod
     # (will return False on CPU, which is expected)
     result, reason = AiterInt8ScaledMMLinearKernel.is_supported()
@@ -88,6 +88,6 @@ def test_cpu_kernel_accepts_all_configs():
 
     for config in configs:
         can_impl, reason = CPUInt8ScaledMMLinearKernel.can_implement(config)
-        assert can_impl, (
-            f"CPUInt8ScaledMMLinearKernel should accept config {config}: {reason}"
-        )
+        assert (
+            can_impl
+        ), f"CPUInt8ScaledMMLinearKernel should accept config {config}: {reason}"

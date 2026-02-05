@@ -56,12 +56,12 @@ def test_pooling_params(llm: LLM):
     w_activation = get_outputs(use_activation=True)
     wo_activation = get_outputs(use_activation=False)
 
-    assert torch.allclose(default, w_activation, atol=1e-2), (
-        "Default should use activation."
-    )
-    assert not torch.allclose(w_activation, wo_activation, atol=1e-2), (
-        "wo_activation should not use activation."
-    )
-    assert torch.allclose(softmax(wo_activation), w_activation, atol=1e-2), (
-        "w_activation should be close to activation(wo_activation)."
-    )
+    assert torch.allclose(
+        default, w_activation, atol=1e-2
+    ), "Default should use activation."
+    assert not torch.allclose(
+        w_activation, wo_activation, atol=1e-2
+    ), "wo_activation should not use activation."
+    assert torch.allclose(
+        softmax(wo_activation), w_activation, atol=1e-2
+    ), "w_activation should be close to activation(wo_activation)."

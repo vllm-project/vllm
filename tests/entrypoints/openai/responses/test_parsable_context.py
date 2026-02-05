@@ -15,9 +15,9 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
-    assert importlib.util.find_spec("gpt_oss") is not None, (
-        "Harmony tests require gpt_oss package to be installed"
-    )
+    assert (
+        importlib.util.find_spec("gpt_oss") is not None
+    ), "Harmony tests require gpt_oss package to be installed"
 
     args = [
         "--reasoning-parser",

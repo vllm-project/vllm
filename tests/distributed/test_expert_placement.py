@@ -31,16 +31,16 @@ def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts)
                 f"{expected_local_id}, got {local_expert_id}"
             )
         else:
-            assert expert_map[global_expert_id] == -1, (
-                f"Global expert {global_expert_id} should not be mapped to this rank"
-            )
+            assert (
+                expert_map[global_expert_id] == -1
+            ), f"Global expert {global_expert_id} should not be mapped to this rank"
 
     # Verify that all local expert IDs are consecutive starting from 0
     local_expert_ids = [expert_map[global_id] for global_id in expected_expert_ids]
     expected_local_ids = list(range(local_num_experts))
-    assert local_expert_ids == expected_local_ids, (
-        f"Expected local expert IDs {expected_local_ids}, got {local_expert_ids}"
-    )
+    assert (
+        local_expert_ids == expected_local_ids
+    ), f"Expected local expert IDs {expected_local_ids}, got {local_expert_ids}"
 
 
 @pytest.mark.parametrize("expert_placement_strategy", ["round_robin"])
@@ -71,9 +71,9 @@ def test_expert_placement_various_sizes(expert_placement_strategy, world_size):
 
     for test_global_experts, test_ep_size in test_cases:
         # Ensure ep_size matches world_size
-        assert test_ep_size == world_size, (
-            f"ep_size {test_ep_size} must equal world_size {world_size}"
-        )
+        assert (
+            test_ep_size == world_size
+        ), f"ep_size {test_ep_size} must equal world_size {world_size}"
 
         # Test each rank
         for ep_rank in range(world_size):

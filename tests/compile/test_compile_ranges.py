@@ -56,9 +56,9 @@ class PostGradRangeChecker(InductorPass):
 
     def __call__(self, graph: fx.Graph):
         compile_range = get_pass_context().compile_range
-        assert compile_range in self.ranges, (
-            f"Compile range {compile_range} not in {self.ranges}"
-        )
+        assert (
+            compile_range in self.ranges
+        ), f"Compile range {compile_range} not in {self.ranges}"
         self.num_calls += 1
 
     def uuid(self) -> str:

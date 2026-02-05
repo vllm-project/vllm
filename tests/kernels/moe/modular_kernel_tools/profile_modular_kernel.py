@@ -129,9 +129,9 @@ if __name__ == "__main__":
         )
     )
     args = parser.parse_args()
-    assert args.torch_trace_dir_path is not None, (
-        "Please pass in a directory to store torch traces"
-    )
+    assert (
+        args.torch_trace_dir_path is not None
+    ), "Please pass in a directory to store torch traces"
     config = make_config(args)
 
     run(config)

@@ -77,9 +77,9 @@ async def accumulate_streaming_response(
                                 )
 
                             if tool_call_delta.id:
-                                accumulated_tool_calls[tool_call_delta.index]["id"] = (
-                                    tool_call_delta.id
-                                )
+                                accumulated_tool_calls[tool_call_delta.index][
+                                    "id"
+                                ] = tool_call_delta.id
                             if tool_call_delta.function:
                                 if tool_call_delta.function.name:
                                     accumulated_tool_calls[tool_call_delta.index][

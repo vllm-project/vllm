@@ -119,9 +119,11 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.static_scaled_fp8_quant.default
-            if self.fp8_linear_layers[0].is_quant_fp8_enabled()
-            else torch.ops.aten.reciprocal.default,
+            (
+                torch.ops._C.static_scaled_fp8_quant.default
+                if self.fp8_linear_layers[0].is_quant_fp8_enabled()
+                else torch.ops.aten.reciprocal.default
+            ),
         ]
 
 
@@ -315,9 +317,9 @@ def all_reduce_fusion_pass_on_test_model(
         compiled_model = torch.compile(model, backend=backend)
         compiled_model(hidden_states)
 
-        assert all_reduce_fusion_pass.matched_count == 4, (
-            f"{all_reduce_fusion_pass.matched_count=}"
-        )
+        assert (
+            all_reduce_fusion_pass.matched_count == 4
+        ), f"{all_reduce_fusion_pass.matched_count=}"
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
         del all_reduce_fusion_pass

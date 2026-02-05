@@ -100,9 +100,9 @@ def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
             model(torch.randn(8, MLP_SIZE))
 
     config_artifacts = capture.get("artifact", "vllm_compilation_config")
-    assert len(config_artifacts) == 1, (
-        f"Expected 1 vllm_compilation_config, got {len(config_artifacts)}"
-    )
+    assert (
+        len(config_artifacts) == 1
+    ), f"Expected 1 vllm_compilation_config, got {len(config_artifacts)}"
     vllm_piecewise_split_graph = capture.get("graph_dump", "vllm_piecewise_split_graph")
     assert len(vllm_piecewise_split_graph) == 1, (
         "Expected 1 toplevel piecewise split graph, "

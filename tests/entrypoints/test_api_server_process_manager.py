@@ -239,19 +239,19 @@ def test_external_process_monitoring(api_server_args):
         wait_thread.join(timeout=1.0)
 
         # The wait thread should have completed
-        assert not wait_thread.is_alive(), (
-            "wait_for_completion_or_failure thread still running"
-        )
+        assert (
+            not wait_thread.is_alive()
+        ), "wait_for_completion_or_failure thread still running"
 
         # Verify that an exception was raised with appropriate error message
         assert result["exception"] is not None, "No exception was raised"
         error_message = str(result["exception"])
-        assert "died with exit code" in error_message, (
-            f"Unexpected error message: {error_message}"
-        )
-        assert "MockExternalProcess" in error_message, (
-            f"Error doesn't mention external process: {error_message}"
-        )
+        assert (
+            "died with exit code" in error_message
+        ), f"Unexpected error message: {error_message}"
+        assert (
+            "MockExternalProcess" in error_message
+        ), f"Error doesn't mention external process: {error_message}"
 
         # Verify that all API server processes were terminated as a result
         for i, proc in enumerate(manager.processes):

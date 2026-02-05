@@ -61,8 +61,7 @@ class TestMiddlewareIntegration:
 
         # Customer writes a middleware script with multiple decorators
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+            f.write("""
 from model_hosting_container_standards.common.fastapi.middleware import (
     custom_middleware, input_formatter, output_formatter
 )
@@ -97,8 +96,7 @@ async def customer_output_formatter(response):
     order = response.headers.get("X-Middleware-Order", "")
     response.headers["X-Middleware-Order"] = order + "output_formatter,"
     return response
-"""
-            )
+""")
             script_path = f.name
 
         try:
@@ -195,8 +193,7 @@ async def customer_output_formatter(response):
 
         # Customer writes a middleware script
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+            f.write("""
 from model_hosting_container_standards.common.fastapi.middleware import (
     custom_middleware
 )
@@ -207,8 +204,7 @@ async def ping_tracking_middleware(request, call_next):
     if request.url.path == "/ping":
         response.headers["X-Ping-Tracked"] = "true"
     return response
-"""
-            )
+""")
             script_path = f.name
 
         try:
@@ -258,8 +254,7 @@ async def ping_tracking_middleware(request, call_next):
 
         # Create a script with middleware functions specified via env vars
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+            f.write("""
 from fastapi import Request
 
 # Global flag to track if pre_process was called
@@ -286,8 +281,7 @@ async def env_post_process(response):
         if _pre_process_called:
             response.headers["X-Pre-Process-Called"] = "true"
     return response
-"""
-            )
+""")
             script_path = f.name
 
         try:
@@ -326,20 +320,20 @@ async def env_post_process(response):
                 headers = response.headers
 
                 # Verify that env var middlewares were applied
-                assert "X-Env-Throttle" in headers, (
-                    "Throttle middleware should be applied via env var"
-                )
+                assert (
+                    "X-Env-Throttle" in headers
+                ), "Throttle middleware should be applied via env var"
                 assert headers["X-Env-Throttle"] == "applied"
 
-                assert "X-Env-Post-Process" in headers, (
-                    "Post-process middleware should be applied via env var"
-                )
+                assert (
+                    "X-Env-Post-Process" in headers
+                ), "Post-process middleware should be applied via env var"
                 assert headers["X-Env-Post-Process"] == "applied"
 
                 # Verify that pre_process was called
-                assert "X-Pre-Process-Called" in headers, (
-                    "Pre-process should be called via env var"
-                )
+                assert (
+                    "X-Pre-Process-Called" in headers
+                ), "Pre-process should be called via env var"
                 assert headers["X-Pre-Process-Called"] == "true"
 
         finally:

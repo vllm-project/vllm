@@ -80,9 +80,9 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
     assert chunk_count > 0
     assert first_chunk is not None, "message_start chunk was never observed"
     assert first_chunk.message is not None, "first chunk should include message"
-    assert first_chunk.message.usage is not None, (
-        "first chunk should include usage stats"
-    )
+    assert (
+        first_chunk.message.usage is not None
+    ), "first chunk should include usage stats"
     assert first_chunk.message.usage.output_tokens == 0
     assert first_chunk.message.usage.input_tokens > 5
 

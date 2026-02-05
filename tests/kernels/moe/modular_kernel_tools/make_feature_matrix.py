@@ -186,11 +186,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     csv_path = args.feature_matrix_csv_file_path
-    assert csv_path.endswith("csv"), (
-        f"Need a file path ending with .csv, got {csv_path}"
-    )
-    assert Path(csv_path).parent.is_dir(), (
-        f"Cannot find parent directory for {Path(csv_path).parent}"
-    )
+    assert csv_path.endswith(
+        "csv"
+    ), f"Need a file path ending with .csv, got {csv_path}"
+    assert Path(
+        csv_path
+    ).parent.is_dir(), f"Cannot find parent directory for {Path(csv_path).parent}"
 
     make_feature_matrix(args.feature_matrix_csv_file_path)

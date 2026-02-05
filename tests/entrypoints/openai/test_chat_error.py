@@ -223,7 +223,7 @@ async def test_chat_error_stream():
         chunks.append(chunk)
 
     assert len(chunks) >= 2
-    assert any("Internal server error" in chunk for chunk in chunks), (
-        f"Expected error message in chunks: {chunks}"
-    )
+    assert any(
+        "Internal server error" in chunk for chunk in chunks
+    ), f"Expected error message in chunks: {chunks}"
     assert chunks[-1] == "data: [DONE]\n\n"
