@@ -6,7 +6,7 @@ The actual execution of the rearrangement.
 This involves the exchange of expert weights between GPUs.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -153,7 +153,7 @@ def move_to_buffer(
     num_local_experts: int,
     old_indices: np.ndarray,
     new_indices: np.ndarray,
-    expert_weights: Iterable[torch.Tensor],
+    expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
@@ -355,7 +355,7 @@ def move_to_buffer(
 
 
 def move_from_buffer(
-    expert_weights: Iterable[torch.Tensor],
+    expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: list[torch.Tensor],
     is_unchanged: np.ndarray,
     is_received_locally: np.ndarray,
@@ -436,7 +436,7 @@ def move_from_buffer(
 async def transfer_layer(
     old_layer_indices: torch.Tensor,
     new_layer_indices: torch.Tensor,
-    expert_weights: Iterable[torch.Tensor],
+    expert_weights: Sequence[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
@@ -496,7 +496,8 @@ async def transfer_layer(
 
     assert old_layer_indices.shape == new_layer_indices.shape
     num_physical_experts = old_layer_indices.shape[0]
-    num_local_physical_experts = next(iter(expert_weights)).shape[0]
+    assert len(expert_weights[0]) >= 1
+    num_local_physical_experts = expert_weights[0].shape[0]
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     old_layer_indices_np = old_layer_indices.cpu().numpy()
@@ -517,7 +518,7 @@ async def transfer_layer(
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Iterable[torch.Tensor]],
+    expert_weights: Sequence[Sequence[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
@@ -560,8 +561,9 @@ def rearrange_expert_weights_inplace(
 
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
+    assert len(expert_weights[0]) >= 1
 
-    num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
+    num_local_physical_experts = expert_weights[0][0].shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_size = ep_group.size()
