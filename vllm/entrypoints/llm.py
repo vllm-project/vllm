@@ -44,6 +44,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreMultiModalParam,
     _cosine_similarity,
     compress_token_type_ids,
+    compute_maxsim_score,
     get_score_prompt,
     validate_score_input,
 )
@@ -174,8 +175,8 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling model,
+            e.g., `PoolerConfig(seq_pooling_type="MEAN", use_activation=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -1134,11 +1135,12 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
         for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
+            if param.task is None:
+                param.task = pooling_task
+            elif param.task != pooling_task:
+                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                raise ValueError(msg)
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1368,6 +1370,87 @@ class LLM:
         items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
         return [ScoringRequestOutput.from_base(item) for item in items]
 
+    def _late_interaction_score(
+        self,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
+        *,
+        use_tqdm: bool | Callable[..., tqdm],
+        pooling_params: PoolingParams | None,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        tokenization_kwargs: dict[str, Any],
+    ) -> list[ScoringRequestOutput]:
+        """
+        Late interaction scoring (ColBERT MaxSim).
+
+        Encodes queries and documents into per-token embeddings, then computes
+        MaxSim: sum over query tokens of max similarity to any document token.
+        """
+        from vllm.outputs import PoolingOutput
+
+        tokenizer = self.get_tokenizer()
+
+        # Extract text from ScoreData
+        text_1: list[str] = []
+        for text in data_1:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_1.append(text)
+
+        text_2: list[str] = []
+        for text in data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_2.append(text)
+
+        encoded_output: list[PoolingRequestOutput] = self.encode(
+            text_1 + text_2,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            pooling_task="token_embed",
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
+        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1) :]
+
+        if len(encoded_output_1) == 1:
+            encoded_output_1 = encoded_output_1 * len(encoded_output_2)
+
+        # Compute MaxSim scores
+        scores: list[PoolingRequestOutput] = []
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
+            padding = [pad_token_id]
+
+        for emb_1, emb_2 in zip(encoded_output_1, encoded_output_2):
+            # emb_1.outputs.data: [query_len, dim]
+            # emb_2.outputs.data: [doc_len, dim]
+            q_emb = emb_1.outputs.data
+            d_emb = emb_2.outputs.data
+
+            maxsim_score = compute_maxsim_score(q_emb, d_emb)
+
+            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+
+            scores.append(
+                PoolingRequestOutput(
+                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
+                    outputs=PoolingOutput(data=maxsim_score),
+                    prompt_token_ids=tokens,
+                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    finished=True,
+                )
+            )
+
+        items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
     def _cross_encoding_score(
         self,
         data_1: list[ScoreData],
@@ -1390,8 +1473,9 @@ class LLM:
 
         if pooling_params is None:
             pooling_params = PoolingParams(task="score")
+        elif pooling_params.task is None:
+            pooling_params.task = "score"
 
-        pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
         prompts = list[PromptType]()
@@ -1497,7 +1581,11 @@ class LLM:
             )
 
         supported_tasks = self.supported_tasks
-        if all(t not in supported_tasks for t in ("embed", "classify")):
+        # Late interaction models (e.g., ColBERT) use token_embed for scoring
+        is_late_interaction = model_config.is_late_interaction
+        if not is_late_interaction and all(
+            t not in supported_tasks for t in ("embed", "classify")
+        ):
             raise ValueError(
                 "Score API is not supported by this model. "
                 "Try converting the model using "
@@ -1537,6 +1625,15 @@ class LLM:
                 lora_request=lora_request,
                 tokenization_kwargs=encode_kwargs,
                 score_template=chat_template,
+            )
+        elif is_late_interaction:
+            return self._late_interaction_score(
+                score_data_1,
+                score_data_2,
+                use_tqdm=use_tqdm,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
+                tokenization_kwargs=encode_kwargs,
             )
         else:
             return self._embedding_score(
@@ -1741,6 +1838,7 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            supported_tasks=self.supported_tasks,
         )
 
         self.llm_engine.add_request(
