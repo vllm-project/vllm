@@ -482,12 +482,13 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     """Kimi-Audio ASR example.
 
-    This model uses vLLM's Transcriptions support under the hood; offline usage
-    is similar to other audio-language models in this file (pass audio via
-    `multi_modal_data`).
+    Note: Kimi-Audio uses a custom preprocessing stack (kimia_infer) to produce
+    the multimodal tensors (whisper features + token streams). For an offline
+    example we construct those tensors directly and pass them via
+    `multi_modal_data`.
 
-    Note: Kimi-Audio native preprocessing may require the upstream Kimi-Audio
-    repo (kimia_infer) to be available.
+    This example is intended as a minimal smoke-test and only builds inputs for
+    a single audio clip.
     """
     assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
 
@@ -498,20 +499,93 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     else:
         model_path = snapshot_download("moonshotai/Kimi-Audio-7B-Instruct")
 
+    # Build multimodal tensors using the reference Kimi prompt manager.
+    # (Same approach as vLLM's KimiAudioForConditionalGeneration.get_generation_prompt)
+    from vllm.model_executor.models.kimi_audio_asr import (  # noqa: PLC0415
+        _get_kimia_prompt_manager,
+        _write_wav_tmp,
+    )
+
+    audio, sr = audio_assets[0].audio_and_sample_rate
+    # Kimi expects 16kHz audio features.
+    if sr != 16000:
+        import librosa
+
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+        sr = 16000
+
+    wav_path = _write_wav_tmp(audio, sr)
+
+    try:
+        # Ensure kimia_infer is importable.
+        try:
+            import kimia_infer.api.prompt_manager  # noqa: F401
+        except ModuleNotFoundError:
+            # In some dev setups, the Kimi-Audio repo is checked out next to vLLM.
+            import sys
+            from pathlib import Path
+
+            kimi_audio_root = Path(__file__).resolve().parents[2] / "Kimi-Audio"
+            sys.path.insert(0, str(kimi_audio_root))
+            import kimia_infer.api.prompt_manager  # noqa: F401
+
+        # Match defaults used in the model code.
+        kimia_token_offset = 152064
+        kimia_text_audiodelaytokens = 0
+
+        prompt_manager = _get_kimia_prompt_manager(
+            model_path=str(model_path),
+            kimia_token_offset=kimia_token_offset,
+            kimia_text_audiodelaytokens=kimia_text_audiodelaytokens,
+        )
+
+        instruction = question.strip() or "Please transcribe the following audio:"
+        messages = [
+            {"role": "user", "message_type": "text", "content": instruction},
+            {"role": "user", "message_type": "audio", "content": wav_path},
+        ]
+
+        content = prompt_manager.get_prompt(messages, output_type="text")
+        (
+            audio_ids,
+            text_ids,
+            is_continuous_mask,
+            _audio_loss_mask,
+            _text_loss_mask,
+        ) = content.to_tensor()
+
+        whisper_feats = content.continuous_feature[0]
+        if whisper_feats.dim() == 2:
+            whisper_feats = whisper_feats.unsqueeze(0)
+
+        mm_audio = {
+            "whisper_input_features": whisper_feats.detach(),
+            "is_continuous_mask": is_continuous_mask,
+            "text_input_ids": text_ids,
+            "audio_input_ids": audio_ids,
+        }
+    finally:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            os.unlink(wav_path)
+
     engine_args = EngineArgs(
         model=model_path,
+        trust_remote_code=True,
         max_model_len=2048,
         max_num_seqs=1,
         limit_mm_per_prompt={"audio": audio_count},
+        enable_mm_embeds=True,
         enforce_eager=True,
     )
 
-    # Prompt text is optional; if empty, the model uses its default instruction.
-    prompt = question or ""
-
+    # Provide a single placeholder token id for multimodal replacement.
+    # (Matches the placeholder id used in vllm.model_executor.models.kimi_audio_asr)
     return ModelRequestData(
         engine_args=engine_args,
-        prompt=prompt,
+        prompt_token_ids=[151666],
+        multi_modal_data={"audio": mm_audio},
     )
 
 
