@@ -232,8 +232,9 @@ def triton_kernel_fused_experts(
     output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
     act = FusedActivation(
-        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit"),
-                reduction_n=2),
+        FnSpecs(
+            "swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit"), reduction_n=2
+        ),
         (swiglu_alpha, swiglu_limit),
     )
     gammas = routing_data.gate_scal if routing_data else None
