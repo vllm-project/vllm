@@ -75,7 +75,11 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import aux_stream, direct_register_custom_op
+from vllm.utils.torch_utils import (
+    aux_stream,
+    current_stream,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -309,8 +313,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.aux_stream = aux_stream()
-        if self.aux_stream:
-            self.in_proj_event = torch.cuda.Event()
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -456,10 +458,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        if not torch.compiler.is_compiling() and self.aux_stream is not None:
-            projected_states_qkvz, projected_states_ba = self._in_proj_parallel(
-                hidden_states
-            )
+        use_in_proj_stream, hidden_states_clone = self._setup_in_proj_stream(
+            hidden_states
+        )
+        use_in_proj_stream = False
+        if use_in_proj_stream:
+            assert self.aux_stream is not None
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            with torch.cuda.stream(self.aux_stream):
+                projected_states_ba, _ = self.in_proj_ba(hidden_states_clone)
+            current_stream().wait_stream(self.aux_stream)
         else:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -502,25 +510,32 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
-    def _in_proj_parallel(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Parallel input projection of qkvz and ba by using CUDA streams.
-        """
-        # Launch the first projection on the default stream.
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+    def _setup_in_proj_stream(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[bool, torch.Tensor | None]:
+        use_in_proj_stream = (
+            current_platform.is_cuda()
+            and not torch.compiler.is_compiling()
+            and self.aux_stream is not None
+        )
 
-        # Launch the second projection on the auxiliary stream.
-        with torch.cuda.stream(self.aux_stream):
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
-            self.in_proj_event.record()
+        hidden_states_clone: torch.Tensor | None = None
+        if use_in_proj_stream:
+            assert self.aux_stream is not None
 
-        # Wait for the auxiliary stream to finish.
-        # The default stream will implicitly wait for the first projection before
-        # the result is used.
-        self.in_proj_event.wait()
-        return projected_states_qkvz, projected_states_ba
+            # Clone BEFORE switching streams to avoid race conditions where
+            # other ops may mutate hidden_states on the default stream.
+            hidden_states_clone = hidden_states.clone()
+
+            # Record that the clone will be used by aux_stream to avoid
+            # premature deallocation.
+            hidden_states_clone.record_stream(self.aux_stream)
+
+            # Ensure aux_stream waits for the default stream before launch.
+            self.aux_stream.wait_stream(current_stream())
+
+        return use_in_proj_stream, hidden_states_clone
 
     def _forward_core(
         self,
