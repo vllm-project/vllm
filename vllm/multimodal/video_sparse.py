@@ -77,11 +77,6 @@ class SimilarFrameDetector:
 
     def _calculate_ssim(self, imgs1: torch.Tensor, imgs2: torch.Tensor) -> torch.Tensor:
         """Calculate SSIM for batch of frames."""
-        assert imgs1.shape == imgs2.shape
-        assert imgs1.device == imgs2.device
-        assert imgs1.dim() == 4, "Input must be 4D tensor (B, C, H, W)"
-        assert imgs1.shape[1] == 1, "Input must be grayscale (1 channel)"
-
         gray1 = imgs1.to(torch.float32)
         gray2 = imgs2.to(torch.float32)
 
