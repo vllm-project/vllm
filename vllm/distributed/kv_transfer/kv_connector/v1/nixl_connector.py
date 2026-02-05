@@ -1354,6 +1354,9 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
+                logger.debug(
+                    "Registering layer %s with cache shape: %s", layer_name, cache.shape
+                )
                 kernel_block_size = cache.shape[self.kv_topo.block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
