@@ -713,34 +713,6 @@ class GptOssModel(nn.Module):
                 dim1 = sliced_weight.shape[0]
                 dim2 = sliced_weight.shape[1]
                 expert_data.data[:dim1, :dim2].copy_(sliced_weight)
-
-                # default_weight_loader(param, sliced_weight, weight_name=fused_name)
-
-                # if is_w13:
-                #     weight_loader(
-                #         param,
-                #         sliced_weight[..., :sliced_weight.shape[1] // 2],
-                #         weight_name=fused_name,
-                #         shard_id="w1",
-                #         expert_id=expert_id,
-                #     )
-
-                #     weight_loader(
-                #         param,
-                #         sliced_weight[..., sliced_weight.shape[1] // 2:],
-                #         weight_name=fused_name,
-                #         shard_id="w3",
-                #         expert_id=expert_id,
-                #     )
-                # else:
-                #     weight_loader(
-                #         param,
-                #         sliced_weight,
-                #         weight_name=fused_name,
-                #         shard_id="w2",
-                #         expert_id=expert_id,
-                #     )
-
                 loaded_params.add(fused_name)
                 continue
 
