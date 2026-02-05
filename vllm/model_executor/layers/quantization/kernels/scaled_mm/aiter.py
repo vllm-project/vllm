@@ -127,16 +127,18 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
         act_quant_desc = config.activation_quant_key.scale
-        if (
-            act_quant_desc.group_shape != GroupShape(1, 12)
-            and not act_quant_desc.static
-        ):
+        if act_quant_desc.group_shape != GroupShape(1, 12):
             return (
                 False,
-                "Supports only dynamic per token group activation \
-                quantization with group_shape=(1,12).",
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,12).",
             )
+        return True, None
 
     @classmethod
     def ordered_fallback_kernels(cls):
