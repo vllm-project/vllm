@@ -38,6 +38,14 @@ if __name__ == "__main__":
         "sources", help="Source files to hipify.", nargs="*", default=[]
     )
 
+    # Search project root for includes (needed for files in subdirectories
+    # that include headers from the project root).
+    parser.add_argument(
+        "--search-project-root",
+        action="store_true",
+        help="Add project root to header include search paths.",
+    )
+
     args = parser.parse_args()
 
     # Limit include scope to project_dir only
@@ -53,7 +61,10 @@ if __name__ == "__main__":
     hipify_result = hipify(
         project_directory=args.project_dir,
         output_directory=args.output_dir,
-        header_include_dirs=[],
+        # When --search-project-root is set, include the project directory root
+        # so that includes like #include "cuda_compat.h" from csrc/stable/
+        # can find csrc/cuda_compat.h
+        header_include_dirs=[""] if args.search_project_root else [],
         includes=includes,
         extra_files=extra_files,
         show_detailed=True,
