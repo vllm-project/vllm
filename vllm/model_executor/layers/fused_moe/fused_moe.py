@@ -2081,7 +2081,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
-            ocp_mx_scheme=None,
         )
 
         invoke_fused_moe_triton_kernel(
@@ -2264,7 +2263,6 @@ class TritonWNA16Experts(TritonExperts):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
-            ocp_mx_scheme=None,
         )
 
         invoke_fused_moe_wna16_triton_kernel(
