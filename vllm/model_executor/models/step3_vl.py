@@ -71,9 +71,7 @@ class Step3VLImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
     pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
-    patch_pixel_values: Annotated[
-        torch.Tensor | None, TensorShape("bnp", 3, "hp", "wp")
-    ]
+    patch_pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "hp", "wp")]
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
@@ -489,13 +487,15 @@ class Step3VLProcessor:
             image_inputs = {
                 "pixel_values": torch.cat(pixel_values_lst),
                 "num_patches": num_patches,
-            }
-            if patch_pixel_values_lst:
-                image_inputs["patch_pixel_values"] = torch.cat(patch_pixel_values_lst)
-            if patch_newline_mask_lst:
-                image_inputs["patch_newline_mask"] = torch.tensor(
+                "patch_pixel_values": (
+                    torch.cat(patch_pixel_values_lst)
+                    if patch_pixel_values_lst
+                    else torch.empty((0, 3, self.patch_size, self.patch_size))
+                ),
+                "patch_newline_mask": torch.tensor(
                     patch_newline_mask_lst, dtype=torch.bool
-                )
+                ),
+            }
 
             text = [
                 self.replace_placeholder(t, self.image_token, image_repl_str_lst)
@@ -998,13 +998,11 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         if pixel_values is None and image_embeds is None:
             return None
 
-        if pixel_values is not None:
+        if pixel_values is not None and patch_pixel_values is not None:
             return Step3VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values.to(self.dtype),
-                patch_pixel_values=patch_pixel_values.to(self.dtype)
-                if patch_pixel_values is not None
-                else None,
+                patch_pixel_values=patch_pixel_values.to(self.dtype),
                 num_patches=num_patches,
             )
 
@@ -1039,7 +1037,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             image_features = self._get_vision_model_output(image_input["pixel_values"])
             patch_image_features = (
                 self._get_vision_model_output(image_input["patch_pixel_values"])
-                if image_input["patch_pixel_values"] is not None
+                if len(image_input["patch_pixel_values"]) > 0
                 else None
             )
             num_patches = image_input["num_patches"]
