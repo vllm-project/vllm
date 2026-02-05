@@ -31,7 +31,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader, DownloadType
 from vllm.model_executor.model_loader.utils import ParamMapping
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -815,3 +815,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
+
+    def get_download_type(self, model_name_or_path: str) -> DownloadType:
+        if os.path.isdir(model_name_or_path):
+            return DownloadType.LOCAL_FILE
+        return DownloadType.HUGGINGFACE_HUB

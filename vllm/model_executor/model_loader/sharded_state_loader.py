@@ -14,7 +14,7 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader, DownloadType
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
@@ -212,3 +212,10 @@ class ShardedStateLoader(BaseModelLoader):
                 state_dict_part,
                 os.path.join(path, filename),
             )
+
+    def get_download_type(self, model_name_or_path: str) -> DownloadType:
+        if os.path.isdir(model_name_or_path):
+            return DownloadType.LOCAL_FILE
+        if is_s3(model_name_or_path):
+            return DownloadType.S3
+        return DownloadType.HUGGINGFACE_HUB

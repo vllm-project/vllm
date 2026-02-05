@@ -1272,6 +1272,7 @@ def num_gpus_available():
 
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_opt_unmodified_path = os.path.join(temp_dir, "dummy_opt_unmodified")
 _dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
 _dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 
@@ -1292,6 +1293,19 @@ def dummy_opt_path():
         with open(json_path, "w") as f:
             json.dump(config, f)
     return _dummy_opt_path
+
+
+@pytest.fixture
+def dummy_opt_unmodified_path():
+    json_path = os.path.join(_dummy_opt_unmodified_path, "config.json")
+    if not os.path.exists(_dummy_opt_unmodified_path):
+        snapshot_download(
+            repo_id="facebook/opt-125m",
+            local_dir=_dummy_opt_unmodified_path,
+            ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
+        )
+        assert os.path.exists(json_path)
+    return _dummy_opt_unmodified_path
 
 
 @pytest.fixture

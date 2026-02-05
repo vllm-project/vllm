@@ -105,6 +105,10 @@ class WorkerLoRAManager:
                 lora_request.tensorizer_config_dict,
             )
 
+            # Security-validate the LoRA adapter (e.g. signature verification),
+            # throwing an exception if validation fails.
+            lora_request.validate()
+
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)

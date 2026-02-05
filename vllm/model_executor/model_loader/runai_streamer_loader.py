@@ -9,7 +9,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader, DownloadType
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -113,3 +113,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model.load_weights(
             self._get_weights_iterator(model_weights, model_config.revision)
         )
+
+    def get_download_type(self, model_name_or_path: str) -> DownloadType:
+        if os.path.isdir(model_name_or_path):
+            return DownloadType.LOCAL_FILE
+        if is_runai_obj_uri(model_name_or_path):
+            return DownloadType.S3
+        return DownloadType.HUGGINGFACE_HUB
