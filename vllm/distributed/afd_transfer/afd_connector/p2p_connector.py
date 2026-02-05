@@ -37,16 +37,6 @@ logger = init_logger(__name__)
 _AFD_COMMUNICATORS: dict[int, PyNcclCommunicator] = {}
 _AFD_COMM_ID_COUNTER = 0
 
-# Side stream for shadow eager execution during graph capture
-_AFD_SIDE_STREAM: torch.cuda.Stream | None = None
-
-def _get_side_stream() -> torch.cuda.Stream:
-    global _AFD_SIDE_STREAM
-    if _AFD_SIDE_STREAM is None:
-        _AFD_SIDE_STREAM = torch.cuda.Stream()
-    return _AFD_SIDE_STREAM
-
-
 def _register_comm(comm: PyNcclCommunicator) -> int:
     global _AFD_COMM_ID_COUNTER
     comm_id = _AFD_COMM_ID_COUNTER
@@ -64,12 +54,9 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    print("jcz before afd_p2p_send_impl", flush=True)
     comm.send(tensor, dst)
-    print("jcz after afd_p2p_send_impl", flush=True)
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
-    print("jcz afd_p2p_send_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -89,9 +76,7 @@ def afd_p2p_recv_impl(
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    print("jcz before afd_p2p_recv_impl", flush=True)
     comm.recv(out, src)
-    print("jcz after afd_p2p_recv_impl", flush=True)
 
 
 def afd_p2p_recv_fake(
@@ -316,11 +301,20 @@ class P2PAFDConnector(AFDConnectorBase):
                 # Assume dimension 0 is the dynamic batch/seq_len dimension
                 size[0] = ref_tensor.shape[0]
 
-            hidden_states = torch.empty(
-                tuple(size),
-                dtype=tensor_metadata.dtype,
-                device=tensor_metadata.device,
-            )
+            if (
+                ref_tensor is not None
+                and ref_tensor.shape == tuple(size)
+                and ref_tensor.dtype == tensor_metadata.dtype
+                and ref_tensor.device == tensor_metadata.device
+            ):
+                hidden_states = ref_tensor
+            else:
+                # Note: If using cudagraph, this branch should not be taken
+                hidden_states = torch.empty(
+                    tuple(size),
+                    dtype=tensor_metadata.dtype,
+                    device=tensor_metadata.device,
+                )
             torch.ops.vllm.afd_p2p_recv(hidden_states, src, comm_id)
         else:
             raise RuntimeError("PyNCCL communicator is required but not available.")
