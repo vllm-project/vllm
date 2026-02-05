@@ -172,6 +172,7 @@ def pplx_cutlass_moe(
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
         experts,
+        inplace=False,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
