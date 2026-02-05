@@ -1,103 +1,82 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.v1.attention.backend import AttentionMetadataBuilder
-from vllm.v1.spec_decode.multi_layer_eagle import (
-    DraftInputStates,
-    MultiLayerEagleProposer,
-)
+from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
+from vllm.v1.spec_decode.multi_layer_eagle import MultiLayerEagleProposer
 
 HIDDEN_SIZE = 3
 
 
-class DummyBuilder(AttentionMetadataBuilder):
-    def __init__(self, return_value: str):
-        # attention metadata builders normally take multiple runtime args;
-        # the test double shortcuts that setup.
-        self.return_value = return_value
-        self.calls: list[dict] = []
-        self.kv_cache_spec = None
-        self.layer_names: list[str] = []
-        self.vllm_config = None
-        self.device = torch.device("cuda")
+def _make_multi_layer_eagle_metadata(
+    *,
+    initial_cache: list[dict],
+    max_shift: int,
+    device: torch.device,
+) -> MultiLayerEagleMetadata:
+    for row in initial_cache:
+        assert "len" in row
+        row_len = int(row["len"])
+        assert 0 <= row_len <= max_shift
 
-    def build(
-        self, common_prefix_len: int, common_attn_metadata, fast_build: bool = False
-    ):
-        self.calls.append(
-            {
-                "common_prefix_len": common_prefix_len,
-                "common_attn_metadata": common_attn_metadata,
-                "fast_build": fast_build,
-            }
+        # Test cases pad cache rows to `layer_num` (== max_shift) and specify the
+        # number of valid entries via `len`.
+        assert (
+            len(row["token_ids"])
+            == len(row["positions"])
+            == len(row["slot_mapping"])
+            == max_shift
         )
-        return self.return_value
+        assert all(v == 0 for v in row["token_ids"][row_len:])
+        assert all(v == 0 for v in row["positions"][row_len:])
+        assert all(v == 0 for v in row["slot_mapping"][row_len:])
+
+    cached_len = torch.tensor(
+        [min(int(row["len"]), max_shift) for row in initial_cache],
+        dtype=torch.int64,
+        device=device,
+    )
+    cached_token_ids = torch.tensor(
+        [row["token_ids"] for row in initial_cache],
+        dtype=torch.int32,
+        device=device,
+    )
+    cached_positions = torch.tensor(
+        [row["positions"] for row in initial_cache],
+        dtype=torch.int64,
+        device=device,
+    )
+    cached_slot_mappings = torch.tensor(
+        [row["slot_mapping"] for row in initial_cache],
+        dtype=torch.int64,
+        device=device,
+    )
+    cached_hidden_states = torch.zeros(
+        (len(initial_cache), max_shift, HIDDEN_SIZE),
+        dtype=torch.float32,
+        device=device,
+    )
+    return MultiLayerEagleMetadata(
+        cached_len=cached_len,
+        cached_token_ids=cached_token_ids,
+        cached_hidden_states=cached_hidden_states,
+        cached_slot_mappings=cached_slot_mappings,
+        cached_positions=cached_positions,
+    )
 
 
 @pytest.fixture
 def proposer_stub():
     if not torch.cuda.is_available():
         pytest.skip("MultiLayerEagleProposer.adjust_input is CUDA/Triton-only.")
-    device = torch.device("cuda")
     proposer = MultiLayerEagleProposer.__new__(MultiLayerEagleProposer)
     proposer.layer_num = 3
-    proposer.running_req_ids = ["req-0"]
-    proposer.attn_layer_names = ["attn_layer"]
-    proposer.indexer_layer_names = ["indexer_layer"]
-    proposer.attn_metadata_builder = DummyBuilder("attn_meta")
-    proposer.draft_indexer_metadata_builder = DummyBuilder("indexer_meta")
-    proposer.draft_input_states_pool = {
-        "req-0": DraftInputStates(
-            len=torch.tensor(3, dtype=torch.int32, device=device),
-            token_ids=torch.tensor([800, 801, 802], dtype=torch.int32, device=device),
-            hidden_states=torch.tensor(
-                [[30.0, 31.0, 32.0], [33.0, 34.0, 35.0], [36.0, 37.0, 38.0]],
-                device=device,
-            ),
-            positions=torch.tensor([40, 41, 42], dtype=torch.int64, device=device),
-            slot_mapping=torch.tensor(
-                [900, 901, 902], dtype=torch.int32, device=device
-            ),
-        ),
-        "req-1": DraftInputStates(
-            len=torch.tensor(2, dtype=torch.int32, device=device),
-            token_ids=torch.tensor([910, 911, 0], dtype=torch.int32, device=device),
-            hidden_states=torch.tensor(
-                [[40.0, 41.0, 42.0], [43.0, 44.0, 45.0], [0.0, 0.0, 0.0]], device=device
-            ),
-            positions=torch.tensor([60, 61, 0], dtype=torch.int64, device=device),
-            slot_mapping=torch.tensor([990, 991, 0], dtype=torch.int32, device=device),
-        ),
-        "req-2": DraftInputStates(
-            len=torch.tensor(3, dtype=torch.int32, device=device),
-            token_ids=torch.tensor([820, 821, 822], dtype=torch.int32, device=device),
-            hidden_states=torch.tensor(
-                [[46.0, 47.0, 48.0], [49.0, 50.0, 51.0], [52.0, 53.0, 54.0]],
-                device=device,
-            ),
-            positions=torch.tensor([50, 51, 52], dtype=torch.int64, device=device),
-            slot_mapping=torch.tensor(
-                [920, 921, 922], dtype=torch.int32, device=device
-            ),
-        ),
-        "req-3": DraftInputStates(
-            len=torch.tensor(3, dtype=torch.int32, device=device),
-            token_ids=torch.tensor([830, 831, 832], dtype=torch.int32, device=device),
-            hidden_states=torch.tensor(
-                [[55.0, 56.0, 57.0], [58.0, 59.0, 60.0], [61.0, 62.0, 63.0]],
-                device=device,
-            ),
-            positions=torch.tensor([70, 71, 72], dtype=torch.int64, device=device),
-            slot_mapping=torch.tensor(
-                [930, 931, 932], dtype=torch.int32, device=device
-            ),
-        ),
-    }
     return proposer
 
 
@@ -105,7 +84,14 @@ LAYER3_CASES = [
     {
         "name": "shift_0_at_sequence_end",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [10, 11, 12, 13],
         "target_positions": [0, 1, 2, 3],
         "last_token_indices": [3],
@@ -122,23 +108,34 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 2, 3],
             "last_token_indices": [3],
             "seq_lens": [4],
-            "seq_lens_cpu": [4],
-            "num_computed_tokens_cpu": [0],
             "slot_mapping": [100, 101, 102, 103],
-            "max_seq_len": 4,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 3,
                     "token_ids": [11, 12, 13],
                     "positions": [1, 2, 3],
-                },
-            },
+                    "slot_mapping": [101, 102, 103],
+                }
+            ],
         },
     },
     {
         "name": "batch2_short_seq_no_shift",
         "batch_size": 2,
-        "running_req_ids": ["req-0", "req-1"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+        ],
         "target_token_ids": [10, 11, 20],
         "target_positions": [0, 1, 0],
         "last_token_indices": [1, 2],
@@ -155,28 +152,40 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 0],
             "last_token_indices": [1, 2],
             "seq_lens": [2, 1],
-            "seq_lens_cpu": [2, 1],
-            "num_computed_tokens_cpu": [0, 0],
             "slot_mapping": [100, 101, 200],
-            "max_seq_len": 2,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [10, 11],
-                    "positions": [0, 1],
+                    "token_ids": [10, 11, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [100, 101, 0],
                 },
-                "req-1": {
+                {
                     "len": 1,
-                    "token_ids": [20],
-                    "positions": [0],
+                    "token_ids": [20, 0, 0],
+                    "positions": [0, 0, 0],
+                    "slot_mapping": [200, 0, 0],
                 },
-            },
+            ],
         },
     },
     {
         "name": "batch2_short_seq_shift_on_first",
         "batch_size": 2,
-        "running_req_ids": ["req-0", "req-1"],
+        "initial_cache": [
+            {
+                "len": 1,
+                "token_ids": [99, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [999, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+        ],
         "target_token_ids": [10, 11, 20],
         "target_positions": [1, 2, 0],
         "last_token_indices": [0, 2],
@@ -189,32 +198,38 @@ LAYER3_CASES = [
             "max_seq_len": 2,
         },
         "expected": {
-            "prev_token_ids": [802, 10, 20],
-            "prev_positions": [42, 1, 0],
+            "prev_token_ids": [99, 10, 20],
+            "prev_positions": [0, 1, 0],
             "last_token_indices": [1, 2],
             "seq_lens": [1, 1],
-            "seq_lens_cpu": [1, 1],
-            "num_computed_tokens_cpu": [0, 0],
-            "slot_mapping": [902, 100, 200],
-            "max_seq_len": 1,
-            "cached_by_req": {
-                "req-0": {
+            "slot_mapping": [999, 100, 200],
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [802, 10],
-                    "positions": [42, 1],
+                    "token_ids": [99, 10, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [999, 100, 0],
                 },
-                "req-1": {
+                {
                     "len": 1,
-                    "token_ids": [20],
-                    "positions": [0],
+                    "token_ids": [20, 0, 0],
+                    "positions": [0, 0, 0],
+                    "slot_mapping": [200, 0, 0],
                 },
-            },
+            ],
         },
     },
     {
         "name": "short_seq_len_2_shift_0_cache_len_1",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [7, 8],
         "target_positions": [0, 1],
         "last_token_indices": [0],
@@ -231,23 +246,28 @@ LAYER3_CASES = [
             "prev_positions": [0, 1],
             "last_token_indices": [0],
             "seq_lens": [2],
-            "seq_lens_cpu": [2],
-            "num_computed_tokens_cpu": [0],
             "slot_mapping": [1000, 1001],
-            "max_seq_len": 2,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 1,
-                    "token_ids": [7],
-                    "positions": [0],
-                },
-            },
+                    "token_ids": [7, 0, 0],
+                    "positions": [0, 0, 0],
+                    "slot_mapping": [1000, 0, 0],
+                }
+            ],
         },
     },
     {
         "name": "short_seq_len_2_shift_1_cache_len_2",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 1,
+                "token_ids": [6, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [999, 0, 0],
+            }
+        ],
         "target_token_ids": [7, 8],
         "target_positions": [1, 2],
         "last_token_indices": [0],
@@ -260,27 +280,32 @@ LAYER3_CASES = [
             "max_seq_len": 2,
         },
         "expected": {
-            "prev_token_ids": [802, 7],
-            "prev_positions": [42, 1],
+            "prev_token_ids": [6, 7],
+            "prev_positions": [0, 1],
             "last_token_indices": [1],
             "seq_lens": [1],
-            "seq_lens_cpu": [1],
-            "num_computed_tokens_cpu": [0],
-            "slot_mapping": [902, 1000],
-            "max_seq_len": 1,
-            "cached_by_req": {
-                "req-0": {
+            "slot_mapping": [999, 1000],
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [802, 7],
-                    "positions": [42, 1],
-                },
-            },
+                    "token_ids": [6, 7, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [999, 1000, 0],
+                }
+            ],
         },
     },
     {
         "name": "shift_bounded_by_start_pos_zero",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [10, 11, 12, 13],
         "target_positions": [0, 2, 3, 4],
         "last_token_indices": [1],
@@ -297,23 +322,28 @@ LAYER3_CASES = [
             "prev_positions": [0, 2, 3, 4],
             "last_token_indices": [1],
             "seq_lens": [4],
-            "seq_lens_cpu": [4],
-            "num_computed_tokens_cpu": [0],
             "slot_mapping": [100, 101, 102, 103],
-            "max_seq_len": 4,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [10, 11],
-                    "positions": [0, 2],
-                },
-            },
+                    "token_ids": [10, 11, 0],
+                    "positions": [0, 2, 0],
+                    "slot_mapping": [100, 101, 0],
+                }
+            ],
         },
     },
     {
         "name": "shift_bounded_by_start_pos",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [10, 11, 12, 13, 14],
         "target_positions": [0, 1, 2, 3, 4],
         "last_token_indices": [1],
@@ -330,23 +360,28 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 2, 3, 4],
             "last_token_indices": [1],
             "seq_lens": [5],
-            "seq_lens_cpu": [5],
-            "num_computed_tokens_cpu": [1],
             "slot_mapping": [100, 101, 102, 103, 104],
-            "max_seq_len": 5,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [10, 11],
-                    "positions": [0, 1],
-                },
-            },
+                    "token_ids": [10, 11, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [100, 101, 0],
+                }
+            ],
         },
     },
     {
         "name": "shift_2_bounded_by_remaining",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [10, 11, 12, 13, 14],
         "target_positions": [0, 1, 2, 3, 4],
         "last_token_indices": [2],
@@ -363,23 +398,28 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 2, 3, 4],
             "last_token_indices": [2],
             "seq_lens": [5],
-            "seq_lens_cpu": [5],
-            "num_computed_tokens_cpu": [2],
             "slot_mapping": [100, 101, 102, 103, 104],
-            "max_seq_len": 5,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 3,
                     "token_ids": [10, 11, 12],
                     "positions": [0, 1, 2],
-                },
-            },
+                    "slot_mapping": [100, 101, 102],
+                }
+            ],
         },
     },
     {
         "name": "shift_3_full_cache_window",
         "batch_size": 1,
-        "running_req_ids": ["req-0"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            }
+        ],
         "target_token_ids": [20, 21, 22, 23, 24],
         "target_positions": [0, 3, 4, 5, 6],
         "last_token_indices": [1],
@@ -396,23 +436,34 @@ LAYER3_CASES = [
             "prev_positions": [0, 3, 4, 5, 6],
             "last_token_indices": [1],
             "seq_lens": [5],
-            "seq_lens_cpu": [5],
-            "num_computed_tokens_cpu": [3],
             "slot_mapping": [100, 101, 102, 103, 104],
-            "max_seq_len": 5,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [20, 21],
-                    "positions": [0, 3],
-                },
-            },
+                    "token_ids": [20, 21, 0],
+                    "positions": [0, 3, 0],
+                    "slot_mapping": [100, 101, 0],
+                }
+            ],
         },
     },
     {
         "name": "batch2_shift_1_and_1",
         "batch_size": 2,
-        "running_req_ids": ["req-0", "req-1"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+        ],
         "target_token_ids": [10, 11, 12, 13, 20, 21, 22],
         "target_positions": [0, 1, 2, 3, 0, 1, 2],
         "last_token_indices": [1, 5],
@@ -429,28 +480,52 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 2, 3, 0, 1, 2],
             "last_token_indices": [1, 5],
             "seq_lens": [4, 3],
-            "seq_lens_cpu": [4, 3],
-            "num_computed_tokens_cpu": [1, 1],
             "slot_mapping": [100, 101, 102, 103, 200, 201, 202],
-            "max_seq_len": 4,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [10, 11],
-                    "positions": [0, 1],
+                    "token_ids": [10, 11, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [100, 101, 0],
                 },
-                "req-1": {
+                {
                     "len": 2,
-                    "token_ids": [20, 21],
-                    "positions": [0, 1],
+                    "token_ids": [20, 21, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [200, 201, 0],
                 },
-            },
+            ],
         },
     },
     {
         "name": "batch4_mixed_shifts",
         "batch_size": 4,
-        "running_req_ids": ["req-0", "req-1", "req-2", "req-3"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+            {
+                "len": 1,
+                "token_ids": [19, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [119, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+        ],
         "target_token_ids": [10, 11, 20, 21, 22, 30, 31, 32, 33, 40, 41, 42],
         "target_positions": [0, 1, 1, 2, 3, 0, 2, 3, 4, 0, 1, 2],
         "last_token_indices": [1, 2, 6, 10],
@@ -476,16 +551,14 @@ LAYER3_CASES = [
             "max_seq_len": 4,
         },
         "expected": {
-            "prev_token_ids": [10, 11, 911, 20, 21, 30, 31, 32, 33, 40, 41, 42],
-            "prev_positions": [0, 1, 61, 1, 2, 0, 2, 3, 4, 0, 1, 2],
+            "prev_token_ids": [10, 11, 19, 20, 21, 30, 31, 32, 33, 40, 41, 42],
+            "prev_positions": [0, 1, 0, 1, 2, 0, 2, 3, 4, 0, 1, 2],
             "last_token_indices": [1, 3, 6, 10],
             "seq_lens": [2, 2, 4, 3],
-            "seq_lens_cpu": [2, 2, 4, 3],
-            "num_computed_tokens_cpu": [0, 0, 2, 1],
             "slot_mapping": [
                 100,
                 101,
-                991,
+                119,
                 102,
                 103,
                 105,
@@ -496,35 +569,51 @@ LAYER3_CASES = [
                 110,
                 111,
             ],
-            "max_seq_len": 4,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 2,
-                    "token_ids": [10, 11],
-                    "positions": [0, 1],
+                    "token_ids": [10, 11, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [100, 101, 0],
                 },
-                "req-1": {
+                {
                     "len": 2,
-                    "token_ids": [911, 20],
-                    "positions": [61, 1],
+                    "token_ids": [19, 20, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [119, 102, 0],
                 },
-                "req-2": {
+                {
                     "len": 2,
-                    "token_ids": [30, 31],
-                    "positions": [0, 2],
+                    "token_ids": [30, 31, 0],
+                    "positions": [0, 2, 0],
+                    "slot_mapping": [105, 106, 0],
                 },
-                "req-3": {
+                {
                     "len": 2,
-                    "token_ids": [40, 41],
-                    "positions": [0, 1],
+                    "token_ids": [40, 41, 0],
+                    "positions": [0, 1, 0],
+                    "slot_mapping": [109, 110, 0],
                 },
-            },
+            ],
         },
     },
     {
         "name": "batch2_shift_0_and_2",
         "batch_size": 2,
-        "running_req_ids": ["req-0", "req-1"],
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
+            },
+        ],
         "target_token_ids": [30, 31, 32, 40, 41, 42, 43],
         "target_positions": [0, 1, 2, 0, 3, 4, 5],
         "last_token_indices": [2, 4],
@@ -541,71 +630,269 @@ LAYER3_CASES = [
             "prev_positions": [0, 1, 2, 0, 3, 4, 5],
             "last_token_indices": [2, 4],
             "seq_lens": [3, 4],
-            "seq_lens_cpu": [3, 4],
-            "num_computed_tokens_cpu": [0, 2],
             "slot_mapping": [100, 101, 102, 200, 201, 202, 203],
-            "max_seq_len": 4,
-            "cached_by_req": {
-                "req-0": {
+            "cached": [
+                {
                     "len": 3,
                     "token_ids": [30, 31, 32],
                     "positions": [0, 1, 2],
+                    "slot_mapping": [100, 101, 102],
                 },
-                "req-1": {
+                {
                     "len": 2,
-                    "token_ids": [40, 41],
-                    "positions": [0, 3],
+                    "token_ids": [40, 41, 0],
+                    "positions": [0, 3, 0],
+                    "slot_mapping": [200, 201, 0],
                 },
+            ],
+        },
+    },
+    {
+        "name": "continue_req_shift_1_cache_tail_3",
+        "batch_size": 1,
+        "initial_cache": [
+            {
+                "len": 3,
+                "token_ids": [70, 71, 72],
+                "positions": [7, 8, 9],
+                "slot_mapping": [170, 171, 172],
+            }
+        ],
+        "target_token_ids": [100, 101, 102, 103, 104],
+        "target_positions": [10, 11, 12, 13, 14],
+        "last_token_indices": [3],
+        "common_attn_metadata": {
+            "query_start_loc": [0, 5],
+            "seq_lens": [5],
+            "seq_lens_cpu": [5],
+            "num_computed_tokens_cpu": [0],
+            "slot_mapping": [200, 201, 202, 203, 204],
+            "max_seq_len": 5,
+        },
+        "expected": {
+            "prev_token_ids": [72, 100, 101, 102, 103],
+            "prev_positions": [9, 10, 11, 12, 13],
+            "last_token_indices": [4],
+            "seq_lens": [4],
+            "slot_mapping": [172, 200, 201, 202, 203],
+            "cached": [
+                {
+                    "len": 3,
+                    "token_ids": [101, 102, 103],
+                    "positions": [11, 12, 13],
+                    "slot_mapping": [201, 202, 203],
+                }
+            ],
+        },
+    },
+    {
+        "name": "continue_req_shift_3_cache_tail_3",
+        "batch_size": 1,
+        "initial_cache": [
+            {
+                "len": 3,
+                "token_ids": [270, 271, 272],
+                "positions": [27, 28, 29],
+                "slot_mapping": [370, 371, 372],
+            }
+        ],
+        "target_token_ids": [300, 301, 302, 303, 304, 305, 306],
+        "target_positions": [30, 31, 32, 33, 34, 35, 36],
+        "last_token_indices": [3],
+        "common_attn_metadata": {
+            "query_start_loc": [0, 7],
+            "seq_lens": [7],
+            "seq_lens_cpu": [7],
+            "num_computed_tokens_cpu": [0],
+            "slot_mapping": [400, 401, 402, 403, 404, 405, 406],
+            "max_seq_len": 7,
+        },
+        "expected": {
+            "prev_token_ids": [270, 271, 272, 300, 301, 302, 303],
+            "prev_positions": [27, 28, 29, 30, 31, 32, 33],
+            "last_token_indices": [6],
+            "seq_lens": [4],
+            "slot_mapping": [370, 371, 372, 400, 401, 402, 403],
+            "cached": [
+                {
+                    "len": 3,
+                    "token_ids": [301, 302, 303],
+                    "positions": [31, 32, 33],
+                    "slot_mapping": [401, 402, 403],
+                }
+            ],
+        },
+    },
+    {
+        "name": "batch3_mixed_shifts_0_1_2_all_full_cache",
+        "batch_size": 3,
+        "initial_cache": [
+            {
+                "len": 0,
+                "token_ids": [0, 0, 0],
+                "positions": [0, 0, 0],
+                "slot_mapping": [0, 0, 0],
             },
+            {
+                "len": 3,
+                "token_ids": [70, 71, 72],
+                "positions": [7, 8, 9],
+                "slot_mapping": [170, 171, 172],
+            },
+            {
+                "len": 3,
+                "token_ids": [270, 271, 272],
+                "positions": [17, 18, 19],
+                "slot_mapping": [370, 371, 372],
+            },
+        ],
+        "target_token_ids": [
+            10,
+            11,
+            12,
+            13,
+            100,
+            101,
+            102,
+            103,
+            104,
+            200,
+            201,
+            202,
+            203,
+            204,
+            205,
+        ],
+        "target_positions": [
+            0,
+            1,
+            2,
+            3,
+            10,
+            11,
+            12,
+            13,
+            14,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+        ],
+        "last_token_indices": [3, 7, 12],
+        "common_attn_metadata": {
+            "query_start_loc": [0, 4, 9, 15],
+            "seq_lens": [4, 5, 6],
+            "seq_lens_cpu": [4, 5, 6],
+            "num_computed_tokens_cpu": [0, 0, 0],
+            "slot_mapping": [
+                100,
+                101,
+                102,
+                103,
+                200,
+                201,
+                202,
+                203,
+                204,
+                300,
+                301,
+                302,
+                303,
+                304,
+                305,
+            ],
+            "max_seq_len": 6,
+        },
+        "expected": {
+            "prev_token_ids": [
+                10,
+                11,
+                12,
+                13,
+                72,
+                100,
+                101,
+                102,
+                103,
+                271,
+                272,
+                200,
+                201,
+                202,
+                203,
+            ],
+            "prev_positions": [
+                0,
+                1,
+                2,
+                3,
+                9,
+                10,
+                11,
+                12,
+                13,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+            ],
+            "last_token_indices": [3, 8, 14],
+            "seq_lens": [4, 4, 4],
+            "slot_mapping": [
+                100,
+                101,
+                102,
+                103,
+                172,
+                200,
+                201,
+                202,
+                203,
+                371,
+                372,
+                300,
+                301,
+                302,
+                303,
+            ],
+            "cached": [
+                {
+                    "len": 3,
+                    "token_ids": [11, 12, 13],
+                    "positions": [1, 2, 3],
+                    "slot_mapping": [101, 102, 103],
+                },
+                {
+                    "len": 3,
+                    "token_ids": [101, 102, 103],
+                    "positions": [11, 12, 13],
+                    "slot_mapping": [201, 202, 203],
+                },
+                {
+                    "len": 3,
+                    "token_ids": [201, 202, 203],
+                    "positions": [21, 22, 23],
+                    "slot_mapping": [301, 302, 303],
+                },
+            ],
         },
     },
 ]
 
 
 def _run_adjust_input_case(proposer_stub, case, layer_num):
-    proposer_stub.layer_num = layer_num
-    proposer_stub.running_req_ids = case["running_req_ids"]
-    max_shift = proposer_stub.layer_num
+    proposer = proposer_stub
+    proposer.layer_num = layer_num
+    max_shift = proposer.layer_num
     device = torch.device("cuda")
 
-    # Tests may reuse the same proposer stub across different layer_num values.
-    # Ensure the cached per-request state tensors are always stored with shape
-    # [MAX_SHIFT, ...] (padded), matching the production invariant.
-    padded_pool = {}
-    for req_id, state in proposer_stub.draft_input_states_pool.items():
-        if state.token_ids.numel() == max_shift:
-            padded_pool[req_id] = state
-            continue
-        old = state
-        max_shift_tensor = old.len.new_tensor(max_shift, dtype=torch.int32)
-        new_len = torch.minimum(old.len.to(dtype=torch.int32), max_shift_tensor)
-        token_ids = torch.zeros(
-            (max_shift,), dtype=old.token_ids.dtype, device=old.token_ids.device
-        )
-        positions = torch.zeros(
-            (max_shift,), dtype=old.positions.dtype, device=old.positions.device
-        )
-        slot_mapping = torch.zeros(
-            (max_shift,), dtype=old.slot_mapping.dtype, device=old.slot_mapping.device
-        )
-        hidden_states = torch.zeros(
-            (max_shift, old.hidden_states.shape[1]),
-            dtype=old.hidden_states.dtype,
-            device=old.hidden_states.device,
-        )
-        n_copy = min(old.token_ids.numel(), max_shift)
-        token_ids[:n_copy].copy_(old.token_ids[:n_copy])
-        positions[:n_copy].copy_(old.positions[:n_copy])
-        slot_mapping[:n_copy].copy_(old.slot_mapping[:n_copy])
-        hidden_states[:n_copy].copy_(old.hidden_states[:n_copy])
-        padded_pool[req_id] = DraftInputStates(
-            len=new_len,
-            token_ids=token_ids,
-            hidden_states=hidden_states,
-            positions=positions,
-            slot_mapping=slot_mapping,
-        )
-    proposer_stub.draft_input_states_pool = padded_pool
+    initial_cache = case["initial_cache"]
+    batch_size = case["batch_size"]
+    assert len(initial_cache) == batch_size
 
     meta = case["common_attn_metadata"]
     query_start_loc_cpu = torch.tensor(
@@ -622,7 +909,7 @@ def _run_adjust_input_case(proposer_stub, case, layer_num):
             meta["num_computed_tokens_cpu"], dtype=torch.int32, device="cpu"
         ),
         slot_mapping=torch.tensor(
-            meta["slot_mapping"], dtype=torch.int32, device=device
+            meta["slot_mapping"], dtype=torch.int64, device=device
         ),
         max_seq_len=meta["max_seq_len"],
     )
@@ -640,57 +927,56 @@ def _run_adjust_input_case(proposer_stub, case, layer_num):
         case["last_token_indices"], dtype=torch.int32, device=device
     )
 
-    # `MultiLayerEagleProposer.adjust_input` changed its return signature over
-    # time (it now returns 4 values in this repo). Only the first two are used
-    # by these tests; the rest are verified via side effects on
-    # `last_token_indices`, `common_attn_metadata`, and the request cache.
-    out = proposer_stub.adjust_input(
-        batch_size=case["batch_size"],
+    multi_layer_eagle_metadata = _make_multi_layer_eagle_metadata(
+        initial_cache=initial_cache,
+        max_shift=max_shift,
+        device=device,
+    )
+
+    prev_token_ids, prev_positions, _, _ = proposer.adjust_input(
+        batch_size=batch_size,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         last_token_indices=last_token_indices,
         common_attn_metadata=common_attn_metadata,
+        multi_layer_eagle_metadata=multi_layer_eagle_metadata,
     )
-    prev_token_ids, prev_positions = out[0], out[1]
 
     expected = case["expected"]
+    assert len(expected["cached"]) == batch_size
     assert prev_token_ids.cpu().tolist() == expected["prev_token_ids"]
     assert prev_positions.cpu().tolist() == expected["prev_positions"]
     assert last_token_indices.cpu().tolist() == expected["last_token_indices"]
     assert common_attn_metadata.seq_lens.cpu().tolist() == expected["seq_lens"]
-
-    # NOTE ignore check for num_computed_tokens_cpu and seq_lens_cpu
-    # assert common_attn_metadata.seq_lens_cpu.tolist(
-    # ) == expected["seq_lens_cpu"]
-    # query_lens = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
-    # expected_num_computed_tokens_cpu = [
-    #     seq_len - query_len
-    #     for seq_len, query_len in zip(expected["seq_lens"], query_lens)
-    # ]
-    # assert common_attn_metadata.num_computed_tokens_cpu.tolist(
-    # ) == expected_num_computed_tokens_cpu
-
     assert common_attn_metadata.slot_mapping.cpu().tolist() == expected["slot_mapping"]
 
-    for req_id, cached_expect in expected["cached_by_req"].items():
-        cached = proposer_stub.draft_input_states_pool[req_id]
-        cache_len = cached_expect["len"]
-        expected_len = torch.tensor(
-            cache_len, dtype=cached.len.dtype, device=cached.len.device
+    for row, cached_expect in enumerate(expected["cached"]):
+        assert cached_expect["len"] <= max_shift
+        assert (
+            len(cached_expect["token_ids"])
+            == len(cached_expect["positions"])
+            == len(cached_expect["slot_mapping"])
+            == max_shift
         )
-        assert torch.equal(cached.len, expected_len)
-        assert cached.token_ids[:cache_len].cpu().tolist() == cached_expect["token_ids"]
-        if cached.positions.dim() == 1:
-            assert (
-                cached.positions[:cache_len].cpu().tolist()
-                == cached_expect["positions"]
-            )
-        else:
-            assert (
-                cached.positions[:, :cache_len].cpu().tolist()
-                == cached_expect["positions"]
-            )
+
+        cache_len = int(cached_expect["len"])
+        assert int(multi_layer_eagle_metadata.cached_len[row].item()) == cache_len
+        assert all(v == 0 for v in cached_expect["token_ids"][cache_len:])
+        assert all(v == 0 for v in cached_expect["positions"][cache_len:])
+        assert all(v == 0 for v in cached_expect["slot_mapping"][cache_len:])
+        assert (
+            multi_layer_eagle_metadata.cached_token_ids[row].cpu().tolist()
+            == cached_expect["token_ids"]
+        )
+        assert (
+            multi_layer_eagle_metadata.cached_positions[row].cpu().tolist()
+            == cached_expect["positions"]
+        )
+        assert (
+            multi_layer_eagle_metadata.cached_slot_mappings[row].cpu().tolist()
+            == cached_expect["slot_mapping"]
+        )
 
 
 @pytest.mark.parametrize(
