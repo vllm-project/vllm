@@ -433,9 +433,8 @@ class OutputProcessor:
         return len(self.request_states) > 0
 
     async def wait_for_requests_to_drain(self) -> None:
-        if not self.request_states:
-            return
-        await self._requests_drained.wait()
+        if self.request_states:
+            await self._requests_drained.wait()
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
@@ -532,8 +531,7 @@ class OutputProcessor:
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
         )
-        if self._requests_drained.is_set():
-            self._requests_drained.clear()
+        self._requests_drained.clear()
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req

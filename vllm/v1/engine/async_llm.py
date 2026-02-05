@@ -370,10 +370,6 @@ class AsyncLLM(EngineClient):
         # to handle startup failure gracefully in the OpenAI server.
         self._run_output_handler()
 
-        # Respect pause state before accepting new requests.
-        async with self._pause_cond:
-            await self._pause_cond.wait_for(lambda: not self._paused)
-
         # Create a new output collector for the request.
         queue = RequestOutputCollector(params.output_kind, request.request_id)
 
@@ -407,8 +403,13 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, prompt, parent_req, index, queue)
+        # Respect pause state before accepting new requests.
+        async with self._pause_cond:
+            if self._paused:
+                await self._pause_cond.wait_for(lambda: not self._paused)
+
+            # Add the request to OutputProcessor (this process).
+            self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
