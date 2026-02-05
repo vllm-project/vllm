@@ -153,9 +153,7 @@ class TestGenerativeScoreProtocol:
                 {
                     "apply_softmax": True,
                     "item_first": False,
-                    "temperature": 0.0,
-                    "top_k": 0,
-                    "top_p": 1.0,
+                    "add_special_tokens": True,
                 },
             ),
             # Pre-tokenized input
@@ -174,13 +172,11 @@ class TestGenerativeScoreProtocol:
                 {
                     "apply_softmax": False,
                     "item_first": True,
-                    "temperature": 0.5,
                     "add_special_tokens": False,
                 },
                 {
                     "apply_softmax": False,
                     "item_first": True,
-                    "temperature": 0.5,
                     "add_special_tokens": False,
                 },
             ),
