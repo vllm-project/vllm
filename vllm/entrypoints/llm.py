@@ -40,12 +40,13 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    ScoreContentPartParam,
+    ScoreData,
     ScoreMultiModalParam,
     _cosine_similarity,
-    _validate_score_input_lens,
     compress_token_type_ids,
+    compute_maxsim_score,
     get_score_prompt,
+    validate_score_input,
 )
 from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs import (
@@ -174,8 +175,8 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling model,
+            e.g., `PoolerConfig(seq_pooling_type="MEAN", use_activation=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -1326,8 +1327,8 @@ class LLM:
 
     def _embedding_score(
         self,
-        text_1: list[SingletonPrompt],
-        text_2: list[SingletonPrompt],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
@@ -1336,8 +1337,16 @@ class LLM:
     ) -> list[ScoringRequestOutput]:
         tokenizer = self.get_tokenizer()
 
+        input_texts: list[str] = []
+        for text in data_1 + data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Embedding scores currently do not support multimodal input."
+                )
+            input_texts.append(text)
+
         encoded_output = self.encode(
-            text_1 + text_2,
+            input_texts,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             pooling_params=pooling_params,
@@ -1345,8 +1354,8 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        encoded_output_1 = encoded_output[0 : len(text_1)]
-        encoded_output_2 = encoded_output[len(text_1) :]
+        encoded_output_1 = encoded_output[0 : len(data_1)]
+        encoded_output_2 = encoded_output[len(data_1) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
@@ -1360,10 +1369,91 @@ class LLM:
         items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
         return [ScoringRequestOutput.from_base(item) for item in items]
 
+    def _late_interaction_score(
+        self,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
+        *,
+        use_tqdm: bool | Callable[..., tqdm],
+        pooling_params: PoolingParams | None,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        tokenization_kwargs: dict[str, Any],
+    ) -> list[ScoringRequestOutput]:
+        """
+        Late interaction scoring (ColBERT MaxSim).
+
+        Encodes queries and documents into per-token embeddings, then computes
+        MaxSim: sum over query tokens of max similarity to any document token.
+        """
+        from vllm.outputs import PoolingOutput
+
+        tokenizer = self.get_tokenizer()
+
+        # Extract text from ScoreData
+        text_1: list[str] = []
+        for text in data_1:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_1.append(text)
+
+        text_2: list[str] = []
+        for text in data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            text_2.append(text)
+
+        encoded_output: list[PoolingRequestOutput] = self.encode(
+            text_1 + text_2,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            pooling_task="token_embed",
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
+        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1) :]
+
+        if len(encoded_output_1) == 1:
+            encoded_output_1 = encoded_output_1 * len(encoded_output_2)
+
+        # Compute MaxSim scores
+        scores: list[PoolingRequestOutput] = []
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
+            padding = [pad_token_id]
+
+        for emb_1, emb_2 in zip(encoded_output_1, encoded_output_2):
+            # emb_1.outputs.data: [query_len, dim]
+            # emb_2.outputs.data: [doc_len, dim]
+            q_emb = emb_1.outputs.data
+            d_emb = emb_2.outputs.data
+
+            maxsim_score = compute_maxsim_score(q_emb, d_emb)
+
+            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+
+            scores.append(
+                PoolingRequestOutput(
+                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
+                    outputs=PoolingOutput(data=maxsim_score),
+                    prompt_token_ids=tokens,
+                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    finished=True,
+                )
+            )
+
+        items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
     def _cross_encoding_score(
         self,
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
@@ -1424,8 +1514,14 @@ class LLM:
 
     def score(
         self,
-        data_1: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
-        data_2: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
+        data_1: SingletonPrompt
+        | Sequence[SingletonPrompt]
+        | ScoreMultiModalParam
+        | list[ScoreMultiModalParam],
+        data_2: SingletonPrompt
+        | Sequence[SingletonPrompt]
+        | ScoreMultiModalParam
+        | list[ScoreMultiModalParam],
         /,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
@@ -1483,7 +1579,11 @@ class LLM:
             )
 
         supported_tasks = self.supported_tasks
-        if all(t not in supported_tasks for t in ("embed", "classify")):
+        # Late interaction models (e.g., ColBERT) use token_embed for scoring
+        is_late_interaction = model_config.is_late_interaction
+        if not is_late_interaction and all(
+            t not in supported_tasks for t in ("embed", "classify")
+        ):
             raise ValueError(
                 "Score API is not supported by this model. "
                 "Try converting the model using "
@@ -1501,83 +1601,42 @@ class LLM:
                 "chat_template is only supported for cross-encoder models."
             )
 
-        # the tokenizer for models such as
-        # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
-        # lists of tokens to the `text` and `text_pair` kwargs
-        tokenizer = self.get_tokenizer()
+        is_multimodal_model = model_config.is_multimodal_model
+        architecture = model_config.architecture
 
-        if not model_config.is_multimodal_model:
-
-            def check_data_type(
-                data: SingletonPrompt
-                | Sequence[SingletonPrompt]
-                | ScoreMultiModalParam,
-            ):
-                if isinstance(data, dict) and "content" in data:
-                    raise ValueError(
-                        "ScoreMultiModalParam is not supported "
-                        f"for {model_config.architecture}"
-                    )
-
-            check_data_type(data_1)
-            check_data_type(data_2)
-
-            def ensure_str(prompt: SingletonPrompt):
-                if isinstance(prompt, dict):
-                    if "multi_modal_data" in prompt:
-                        raise ValueError(
-                            "Multi-modal prompt is not supported for scoring"
-                        )
-                    elif "prompt_token_ids" in prompt:
-                        prompt = tokenizer.decode(
-                            cast(TokensPrompt, prompt)["prompt_token_ids"]
-                        )
-                    elif "prompt" in prompt:
-                        prompt = cast(TextPrompt, prompt)["prompt"]
-                assert type(prompt) is str
-                return prompt
-
-            if isinstance(data_1, (str, dict)):
-                # Convert a single prompt to a list.
-                data_1 = [data_1]  # type: ignore[list-item]
-
-            data_1 = [ensure_str(t) for t in data_1]
-
-            if isinstance(data_2, (str, dict)):
-                # Convert a single prompt to a list.
-                data_2 = [data_2]  # type: ignore[list-item]
-
-            data_2 = [ensure_str(t) for t in data_2]
-
-        if isinstance(data_1, dict) and "content" in data_1:
-            data_1 = data_1.get("content")  # type: ignore[assignment]
-        elif isinstance(data_1, str):
-            data_1 = [data_1]
-
-        if isinstance(data_2, dict) and "content" in data_2:
-            data_2 = data_2.get("content")  # type: ignore[assignment]
-        elif isinstance(data_2, str):
-            data_2 = [data_2]
-
-        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
+        score_data_1, score_data_2 = validate_score_input(
+            data_1,  # type: ignore[arg-type]
+            data_2,  # type: ignore[arg-type]
+            is_multimodal_model=is_multimodal_model,
+            architecture=architecture,
+        )
 
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
         if model_config.is_cross_encoder:
             return self._cross_encoding_score(
-                data_1,  # type: ignore[arg-type]
-                data_2,  # type: ignore[arg-type]
+                score_data_1,
+                score_data_2,
                 use_tqdm=use_tqdm,
                 pooling_params=pooling_params,
                 lora_request=lora_request,
                 tokenization_kwargs=encode_kwargs,
                 score_template=chat_template,
             )
+        elif is_late_interaction:
+            return self._late_interaction_score(
+                score_data_1,
+                score_data_2,
+                use_tqdm=use_tqdm,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
+                tokenization_kwargs=encode_kwargs,
+            )
         else:
             return self._embedding_score(
-                data_1,  # type: ignore[arg-type]
-                data_2,  # type: ignore[arg-type]
+                score_data_1,
+                score_data_2,
                 use_tqdm=use_tqdm,
                 pooling_params=pooling_params,
                 lora_request=lora_request,
