@@ -12,11 +12,13 @@ from vllm.sampling_params import SamplingParams
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
         MultiModalDataDict,
+        MultiModalEncDecInputs,
         MultiModalInputs,
         MultiModalUUIDDict,
     )
 else:
     MultiModalDataDict = object
+    MultiModalEncDecInputs = object
     MultiModalInputs = object
     MultiModalUUIDDict = object
 
@@ -241,7 +243,7 @@ class EncoderDecoderInputs(TypedDict):
     This specifies the required data for encoder-decoder models.
     """
 
-    encoder: TokenInputs | MultiModalInputs
+    encoder: TokenInputs | MultiModalEncDecInputs
     """The inputs for the encoder portion."""
 
     decoder: TokenInputs | MultiModalInputs

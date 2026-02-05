@@ -83,6 +83,8 @@ class EngineCoreRequest(
     # Used in outputs and to support abort(req_id, internal=False).
     external_req_id: str | None = None
 
+    reasoning_ended: bool | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

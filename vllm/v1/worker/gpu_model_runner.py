@@ -5037,7 +5037,7 @@ class GPUModelRunner(
 
         model = cast(VllmModelForPooling, self.get_model())
         dummy_pooling_params = PoolingParams(task=task)
-        dummy_pooling_params.verify(task=task, model_config=self.model_config)
+        dummy_pooling_params.verify(self.model_config)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
 
