@@ -589,26 +589,26 @@ class AsyncLLM(EngineClient):
                 Default is ``True`` (clear caches).
 
         """
+        if wait_for_inflight_requests:
+            warnings.warn(
+                "The `wait_for_inflight_requests` parameter in "
+                "`AsyncLLM.pause_generation()` is deprecated. "
+                "Please use `mode` argument instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            mode = "wait"
 
-        if self._client_count > 1:
+        if not mode == "keep" and self._client_count > 1:
             raise NotImplementedError(
                 "pause_generation is not supported with --api-server-count > 1"
+                " when mode is not 'keep'"
             )
 
         async with self._pause_cond:
             if self._paused:
                 return
             self._paused = True
-
-            if wait_for_inflight_requests:
-                warnings.warn(
-                    "The `wait_for_inflight_requests` parameter in "
-                    "`AsyncLLM.pause_generation()` is deprecated. "
-                    "Please use `mode` argument instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                mode = "wait"
 
             if mode == "abort":
                 request_ids = list(self.output_processor.request_states.keys())
@@ -629,11 +629,6 @@ class AsyncLLM(EngineClient):
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
-
-        if self._client_count > 1:
-            raise NotImplementedError(
-                "resume_generation is not supported with --api-server-count > 1"
-            )
 
         async with self._pause_cond:
             await self.engine_core.resume_scheduler_async()
