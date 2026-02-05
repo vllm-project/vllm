@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
+from vllm.attention.backends.abstract import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
@@ -22,7 +24,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.model_executor.models.llama import (
+    LlamaAttention,
+    LlamaDecoderLayer,
+    LlamaForCausalLM,
+    LlamaMLP,
+)
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
@@ -43,14 +50,66 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         config: LlamaConfig | None = None,
         layer_idx: int = 0,
     ) -> None:
-        super().__init__(vllm_config, prefix=prefix, config=config)
+        nn.Module.__init__(self)
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
+        cache_config = self.get_cache_config(vllm_config)
 
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
+        self.hidden_size = config.hidden_size
         qkv_input_size = 2 * self.hidden_size if layer_idx == 0 else self.hidden_size
+
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        # Support abacusai/Smaug-72B-v0.1 with attention_bias
+        # Support internlm/internlm-7b with bias
+        attention_bias = getattr(config, "attention_bias", False) or getattr(
+            config, "bias", False
+        )
+        bias_o_proj = attention_bias
+        # support internlm/internlm3-8b with qkv_bias
+        if hasattr(config, "qkv_bias"):
+            attention_bias = config.qkv_bias
+
+        # By default, Llama uses causal attention as it is a decoder-only model.
+        # You can override the HF config with `is_causal=False` to enable
+        # bidirectional attention, which is used in some embedding models
+        # (e.g. parasail-ai/GritLM-7B-vllm)
+        if getattr(config, "is_causal", True):
+            attn_type = AttentionType.DECODER
+        else:
+            attn_type = AttentionType.ENCODER_ONLY
+
+        # override self_attn
+        self.self_attn = LlamaAttention(
+            config=config,
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=getattr(
+                config, "num_key_value_heads", config.num_attention_heads
+            ),
+            max_position_embeddings=max_position_embeddings,
+            quant_config=quant_config,
+            bias=attention_bias,
+            bias_o_proj=bias_o_proj,
+            cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
+            attn_type=attn_type,
+        )
+        # override mlp
+        self.mlp = LlamaMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            bias=getattr(config, "mlp_bias", False),
+            prefix=f"{prefix}.mlp",
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -70,6 +129,13 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self._residual_norm = self._norm_before_residual
         else:
             self._residual_norm = self._norm_after_residual
+
+    def get_cache_config(self, vllm_config: VllmConfig):
+        cache_config = copy.deepcopy(vllm_config.cache_config)
+        kv_cache_dtype = vllm_config.speculative_config.kv_cache_dtype
+        if kv_cache_dtype is not None:
+            cache_config.cache_dtype = kv_cache_dtype
+        return cache_config
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""

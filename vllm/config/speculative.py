@@ -86,6 +86,11 @@ class SpeculativeConfig:
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+
+    kv_cache_dtype: str | None = None
+    """Data type used for storing Key-Value (KV) cache during inference.
+    If `None`, the KV cache uses the model's default kv_cache_dtype."""
+
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
