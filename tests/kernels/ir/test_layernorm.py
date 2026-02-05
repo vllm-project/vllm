@@ -67,11 +67,11 @@ class TestRMSNorm:
 
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter"])
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
-        if provider == "aiter" and not current_platform.is_rocm():
-            pytest.skip("aiter impl not supported on this platform")
+        impl = ir.ops.rms_norm.impls[provider]
+        if not impl.supported:
+            pytest.skip(f"{provider} impl not supported on this platform")
 
         x, weight = rms_norm_inputs(n_tokens, hidden_size, dtype)
-        impl = ir.ops.rms_norm.impls[provider]
         args = (x, weight, epsilon, None)
 
         assert impl.supported
@@ -88,3 +88,26 @@ class TestRMSNorm:
         torch.testing.assert_close(
             out_impl, out_native, rtol=get_default_rtol(out_impl), atol=1e-4
         )
+
+        # check that dispatched call matches direct call
+        with ir.ops.rms_norm.set_priority([provider, "native"]):
+            out_impl2 = ir.ops.rms_norm(*args)
+
+        # exact match
+        torch.testing.assert_close(out_impl2, out_impl, rtol=0.0, atol=0.0)
+
+        # none of these support variance_size override
+        assert not impl.supports_args(x, weight, epsilon, 4)
+        assert not impl.supports_args(x, weight, epsilon, variance_size=4)
+
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
+    def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
+        if not ir.ops.rms_norm.impls[provider].supported:
+            pytest.skip(f"{provider} impl not supported on this platform")
+
+        x, weight = rms_norm_inputs(n_tokens, hidden_size, dtype)
+        args = (x, weight, epsilon, None)
+
+        # When checking the torch op, we have to set priority and use dispatch
+        with ir.ops.rms_norm.set_priority([provider, "native"]):
+            torch.library.opcheck(torch.ops.vllm_ir.rms_norm, args)
