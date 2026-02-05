@@ -14,8 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -43,6 +43,38 @@ def reshape_hidden_states_from_kv_cache(
     hidden_states = hidden_states.split(split_size, dim=1)
 
     return torch.stack(hidden_states, dim=0)
+
+
+def extract_hidden_states_from_layer(
+    layer: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_tokens: int,
+    num_hidden_states: int,
+) -> torch.Tensor:
+    """Extract the KV cache from the layer.
+
+    Assume the shape of the layer is (num_pages, 2, page_size, ...)
+    """
+    # todo(fynn): This is hardcoded to the kv cache shape
+    # We might want to make this more flexible or at the very least add shape asserts
+    keys = layer[:, 0].flatten(0, 1)
+    values = layer[:, 1].flatten(0, 1)
+    # shape: [num_pages * page_size, ...]
+
+    keys = keys[slot_mapping, ...][:num_tokens]
+    values = values[slot_mapping, ...][:num_tokens]
+    # shape: [num_tokens, ...]
+
+    combined = torch.cat([keys, values], dim=1)
+    # shape: [num_tokens, hidden_size * num_hidden_states]
+
+    assert combined.shape[1] % num_hidden_states == 0
+    split_size = combined.shape[1] // num_hidden_states
+    hidden_states = combined.split(split_size, dim=1)
+
+    return torch.stack(
+        hidden_states, dim=0
+    )  # shape: [num_hidden_states, num_tokens, hidden_size]
 
 
 @dataclass
@@ -132,8 +164,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         # Filter layers to only include CacheOnlyAttentionLayers
+        # todo(fynn): cleanup filtering
+        kv_caches = {k: v for k, v in kv_caches.items() if "cache_only" in k}
         layers = get_layers_from_vllm_config(
-            self._vllm_config, CacheOnlyAttentionLayer, kv_caches.keys()
+            self._vllm_config, Attention, kv_caches.keys()
         )
         self.cache_layers = list(layers.keys())
         logger.info(f"Found {len(self.cache_layers)} CacheOnlyAttentionLayers")
@@ -183,34 +217,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         if layer_name not in self.cache_layers:
             return
 
-        def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
-            num_tokens: int,
-        ) -> torch.Tensor:
-            """Extract the KV cache from the layer.
-
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-            """
-            if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            padded_kv = layer.reshape(2, num_pages * page_size, -1)[
-                :, slot_mapping, ...
-            ]
-            return padded_kv[:, :num_tokens, ...]
-
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
         os.makedirs(self._storage_path, exist_ok=True)
         for request in connector_metadata.requests:
-            kv_cache = extract_kv_from_layer(
-                kv_layer, request.slot_mapping, request.token_ids.shape[0]
-            )
-            hidden_states = reshape_hidden_states_from_kv_cache(
-                kv_cache, self.num_hidden_states
+            hidden_states = extract_hidden_states_from_layer(
+                kv_layer,
+                request.slot_mapping,
+                request.token_ids.shape[0],
+                self.num_hidden_states,
             )
             tensors = {
                 "hidden_states": hidden_states.detach().cpu(),
