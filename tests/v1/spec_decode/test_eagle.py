@@ -596,6 +596,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     )
     kv_cache_group_id = 0
     common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
+    proposer.layer_names_to_kv_cache_gid = {"layer.0": kv_cache_group_id}
 
     result = proposer.propose(
         target_token_ids=target_token_ids,
@@ -733,6 +734,8 @@ def test_propose_tree(spec_token_tree):
     proposer._get_attention_metadata_builder = mock.MagicMock(
         return_value=attn_metadata_builder
     )
+    kv_cache_group_id = 0
+    proposer.layer_names_to_kv_cache_gid = {"layer.0": kv_cache_group_id}
 
     # Setup inputs for the proposer.
     target_token_ids = torch.randint(0, vocab_size, (total_tokens,), device=device)
@@ -752,7 +755,6 @@ def test_propose_tree(spec_token_tree):
         block_size=16,
         device=device,
     )
-    kv_cache_group_id = 0
     common_attn_metadata_by_gid = {kv_cache_group_id: common_attn_metadata}
     sampling_metadata = mock.MagicMock()
 
