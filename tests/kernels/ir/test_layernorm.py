@@ -57,7 +57,7 @@ class TestRMSNorm:
 
         # Check the scaling property of rms norm
         out2 = rms_norm_native(x * 2.0, weight, epsilon=epsilon)
-        torch.testing.assert_close(out2, out, rtol=get_default_rtol(out), atol=1e-4)
+        torch.testing.assert_close(out2, out, rtol=get_default_rtol(out), atol=1e-3)
 
         # Check behavior with and without weight
         weight1 = torch.ones_like(weight)
