@@ -10,7 +10,10 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -158,18 +161,11 @@ class FusedTopKBiasRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        if self.scoring_func == "sigmoid":
-            if self.top_k == 1:
-                return RoutingMethodType.Llama4
-            else:
-                return RoutingMethodType.DeepSeekV3
-        elif self.scoring_func == "softmax":
-            if self.renormalize:
-                return RoutingMethodType.Renormalize
-            else:
-                return RoutingMethodType.Default
-        else:
-            return RoutingMethodType.Unspecified
+        return get_routing_method_type(
+            scoring_func=self.scoring_func,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+        )
 
     def _compute_routing(
         self,
