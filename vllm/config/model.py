@@ -1920,8 +1920,11 @@ def _get_and_verify_max_len(
         max_len_key = "sliding_window"
         derived_max_model_len = sliding_window
 
-    # Consider model_max_length in tokenizer_config
-    if tokenizer_config:
+    # Consider model_max_length in tokenizer_config only when the user
+    # has not explicitly specified max_model_len. The tokenizer's
+    # model_max_length should serve as a default, not override explicit
+    # user configuration.
+    if tokenizer_config and (max_model_len is None or max_model_len == -1):
         tokenizer_model_max_length = tokenizer_config.get(
             "model_max_length", derived_max_model_len
         )

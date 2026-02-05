@@ -440,7 +440,11 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
     [
         ("BAAI/bge-reranker-base", None, 512, False),
         ("BAAI/bge-reranker-base", 256, 256, False),
-        ("BAAI/bge-reranker-base", 513, 512, True),
+        # User can specify 513 even though tokenizer says 512, because the
+        # model's max_position_embeddings is 514
+        ("BAAI/bge-reranker-base", 513, 513, False),
+        # But 515 exceeds the model's actual capacity (514)
+        ("BAAI/bge-reranker-base", 515, 514, True),
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
     ],
@@ -457,6 +461,69 @@ def test_get_and_verify_max_len(
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
+
+
+def test_explicit_max_model_len_overrides_tokenizer():
+    """Test that explicit max_model_len overrides tokenizer's model_max_length.
+
+    Regression test for issue where tokenizer's model_max_length was
+    incorrectly constraining user-specified max_model_len, preventing users
+    from using extended context lengths even when the model supports them.
+    """
+    from unittest.mock import MagicMock
+    from vllm.config.model import _get_and_verify_max_len
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        ModelArchitectureConfig,
+    )
+
+    # Simulate a model with 256K context support (like Qwen3-4B-Instruct-2507)
+    # but tokenizer config incorrectly limited to 8192
+    mock_hf_config = MagicMock()
+    mock_hf_config.model_type = "qwen2"
+    mock_hf_config.rope_parameters = None
+    mock_hf_config.model_max_length = None
+
+    mock_arch_config = MagicMock()
+    # Model supports 262144 tokens
+    mock_arch_config.derived_max_model_len_and_key = (262144, "max_position_embeddings")
+
+    # Tokenizer config has outdated limit of 8192
+    tokenizer_config = {"model_max_length": 8192}
+
+    # User explicitly requests 262144 tokens
+    user_max_model_len = 262144
+
+    # The result should respect user's explicit value, not tokenizer's limit
+    result = _get_and_verify_max_len(
+        hf_config=mock_hf_config,
+        model_arch_config=mock_arch_config,
+        tokenizer_config=tokenizer_config,
+        max_model_len=user_max_model_len,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    # User's explicit max_model_len should be honored
+    assert result == 262144, (
+        f"Expected user's explicit max_model_len (262144) to override "
+        f"tokenizer's model_max_length (8192), but got {result}"
+    )
+
+    # When user doesn't specify max_model_len, tokenizer limit should apply
+    result_auto = _get_and_verify_max_len(
+        hf_config=mock_hf_config,
+        model_arch_config=mock_arch_config,
+        tokenizer_config=tokenizer_config,
+        max_model_len=None,  # User didn't specify
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    # Without explicit user value, should use tokenizer's limit
+    assert result_auto == 8192, (
+        f"Expected tokenizer's model_max_length (8192) to be used as default "
+        f"when user doesn't specify max_model_len, but got {result_auto}"
+    )
 
 
 class MockConfig:
