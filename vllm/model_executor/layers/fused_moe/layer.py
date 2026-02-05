@@ -1162,46 +1162,8 @@ class FusedMoE(CustomOp):
             else:
                 loaded_weight = loaded_weight
 
-        if shard_id not in ("w1", "w2", "w3", "w13"):
-            raise ValueError(
-                f"shard_id must be ['w1','w2','w3','w13'] but got {shard_id}."
-            )
-
-        # # Special handling for mxfp4/quark pre-sliced weights AND all biases
-        # if (
-        #     self.quant_config is not None
-        #     and self.model_type == "gpt_oss"
-        #     and any(
-        #         self.quant_config.get_name() == quant_name
-        #         for quant_name in ["mxfp4", "quark"]
-        #     )
-        #     and (
-        #         shard_id == "w13"
-        #         or ".w13_" in weight_name
-        #         or ".w2_" in weight_name
-        #         or expert_id is None
-        #         or "bias" in weight_name
-        #     )
-        # ):
-        #     # Copy with dimension-based slicing to handle potential size mismatches
-        #     # from MXFP4 block alignment
-        #     if expert_id is None:
-        #         dim1 = loaded_weight.shape[1]
-        #         if "bias" in weight_name:
-        #             param.data[:, :dim1].copy_(loaded_weight)
-        #         else:
-        #             dim2 = loaded_weight.shape[2]
-        #             param.data[:, :dim1, :dim2].copy_(loaded_weight)
-        #     else:
-        #         expert_data = param.data[expert_id]
-        #         dim1 = loaded_weight.shape[0]
-        #         if "bias" in weight_name:
-        #             expert_data.data[:dim1].copy_(loaded_weight)
-        #         else:
-        #             dim2 = loaded_weight.shape[1]
-        #             expert_data.data[:dim1, :dim2].copy_(loaded_weight)
-
-        #     return True if return_success else None
+        if shard_id not in ("w1", "w2", "w3"):
+            raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
