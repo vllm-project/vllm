@@ -97,6 +97,10 @@ class GDNAttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[GDNAttentionMetadata]  # type: ignore
 ):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    # GDN metadata has additional fields (non_spec_state_indices_tensor, etc.)
+    # that are NOT handled by the base class update_block_table(), so we must
+    # always rebuild via build() to keep every field consistent.
+    supports_update_block_table: bool = False
 
     def __init__(
         self,
@@ -445,9 +449,19 @@ class GDNAttentionMetadataBuilder(
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
                 assert non_spec_query_start_loc_cpu is not None
+            # Use the correct query_start_loc variant:
+            # - When APC is enabled and spec masks are active, use
+            #   non_spec_query_start_loc_cpu (non-spec queries only).
+            # - Otherwise, use query_start_loc_cpu to match the original
+            #   (main branch) behavior.
+            conv_metadata_qsl_cpu = (
+                non_spec_query_start_loc_cpu
+                if prefix_caching_enabled and spec_sequence_masks is not None
+                else query_start_loc_cpu
+            )
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
+                    conv_metadata_qsl_cpu,
                     device=query_start_loc.device,
                 )
             )
