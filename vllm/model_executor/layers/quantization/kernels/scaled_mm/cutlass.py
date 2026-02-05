@@ -7,10 +7,12 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -171,3 +173,52 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
         return output.view(*output_shape)
+
+
+class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    is_hopper: bool = current_platform.is_device_capability(90)
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not CUTLASS_BLOCK_FP8_SUPPORTED:
+            return (
+                False,
+                f"The device compute capability of \
+                {compute_capability} is not supported.",
+            )
+
+    @classmethod
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
+        # TODO This import is to avoid circular import
+        # this import can be global
+        # after all scaled MM kernels inherit from base
+        from .triton import TritonFp8BlockScaledMMKernel
+
+        return [TritonFp8BlockScaledMMKernel]
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        if self.is_hopper:
+            return torch.ops.vllm.padded_cutlass(
+                A,
+                B,
+                As,
+                Bs,
+                list(self.weight_group_shape),
+                out_dtype,
+            )
+        else:
+            return ops.cutlass_scaled_mm(
+                A,
+                B.T,
+                out_dtype=out_dtype,
+                scale_a=As,
+                scale_b=Bs.T,
+            )

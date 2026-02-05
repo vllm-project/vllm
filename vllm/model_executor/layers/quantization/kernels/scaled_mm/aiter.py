@@ -6,8 +6,15 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+)
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
@@ -107,3 +114,96 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # b to be [N, K]
         # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
         return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
+
+
+class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        return (
+            rocm_aiter_ops.is_linear_enabled(),
+            "Only supported on ROCm platform \
+                with aiter package installed.",
+        )
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        act_quant_desc = config.activation_quant_key.scale
+        if (
+            act_quant_desc.group_shape != GroupShape(1, 12)
+            and not act_quant_desc.static
+        ):
+            return (
+                False,
+                "Supports only dynamic per token group activation \
+                quantization with group_shape=(1,12).",
+            )
+
+    @classmethod
+    def ordered_fallback_kernels(cls):
+        # TODO This import is to avoid circular import
+        # this import can be global
+        # after all scaled MM kernels inherit from base
+        from .triton import TritonFp8BlockScaledMMKernel
+
+        return [TritonFp8BlockScaledMMKernel]
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        params = self._get_layer_params(layer)
+        weight = params.weight
+        weight_scale_inv = params.weight_scale_inv
+        input_scale = params.input_scale
+        scale_up = params.input_scale_ub
+
+        n, k = weight.shape
+
+        # View input as 2D matrix for fp8 methods
+        input_2d = x.view(-1, x.shape[-1])
+        output_shape = [*x.shape[:-1], weight.shape[0]]
+        output_dtype = x.dtype
+
+        use_triton = (
+            not current_platform.is_fp8_fnuz()
+            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        )
+
+        q_input, input_scale = self.input_quant_op(
+            input_2d, input_scale, scale_up, use_triton=use_triton
+        )
+
+        output = self.apply_block_scaled_mm(
+            A=q_input,
+            B=weight,
+            out_dtype=output_dtype,
+            As=input_scale,
+            Bs=weight_scale_inv,
+        )
+
+        if bias is not None:
+            output = output + bias
+        return output.to(dtype=output_dtype).view(*output_shape)
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        use_triton = kwargs.get("use_triton", False)
+
+        if use_triton:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
+        else:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
+
+        return gemm_a8w8_blockscale_op(
+            A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+        )

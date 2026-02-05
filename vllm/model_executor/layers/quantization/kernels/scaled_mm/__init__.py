@@ -8,12 +8,20 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.BlockScaledMMLinearKernel import (  # noqa: E501
+    Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
+    CudaFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
 )
@@ -37,6 +45,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -71,6 +80,22 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+    ],
+}
+
+
+# in priority/performance order (when available)
+_POSSIBLE_FP8_BLOCK_KERNELS: dict[
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
+] = {
+    PlatformEnum.CUDA: [
+        CudaFp8BlockScaledMMKernel,
+        CutlassFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.ROCM: [
+        AiterFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
     ],
 }
 
@@ -167,7 +192,7 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[_KernelT] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
@@ -176,9 +201,18 @@ def init_fp8_linear_kernel(
         out_dtype=out_dtype,
     )
 
-    kernel_type = choose_scaled_mm_linear_kernel(
-        scaled_mm_linear_kernel_config, _POSSIBLE_FP8_KERNELS, force_kernel=force_kernel
-    )
+    if activation_quant_key.scale.group_shape.is_per_group():
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=scaled_mm_linear_kernel_config,
+            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            force_kernel=force_kernel,
+        )
+    else:
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=scaled_mm_linear_kernel_config,
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
+            force_kernel=force_kernel,
+        )
 
     if module_name:
         logger.info_once(
