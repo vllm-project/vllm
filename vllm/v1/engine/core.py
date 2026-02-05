@@ -11,6 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
+from multiprocessing.connection import Connection
 from typing import Any, TypeVar, cast
 
 import msgspec
@@ -687,7 +688,7 @@ class ShutdownPipeHandler:
     Relays DRAIN messages and detects parent death (pipe EOF).
     """
 
-    def __init__(self, shutdown_pipe, input_queue: queue.Queue):
+    def __init__(self, shutdown_pipe: Connection, input_queue: queue.Queue):
         self._shutdown_pipe = shutdown_pipe
         self._input_queue = input_queue
         self._thread: threading.Thread | None = None
@@ -695,6 +696,10 @@ class ShutdownPipeHandler:
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def join(self, timeout: float | None = None):
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def _run(self):
         try:
@@ -964,31 +969,31 @@ class EngineCoreProc(EngineCore):
         *args,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
-        shutdown_pipe=None,
+        shutdown_pipe: Connection | None = None,
         **kwargs,
     ):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
         shutdown_requested = False
+        shutdown_handler: ShutdownPipeHandler | None = None
+        engine_core: EngineCoreProc | None = None
 
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
+        def signal_handler(*_):
+            nonlocal shutdown_requested, engine_core
             if not shutdown_requested:
                 shutdown_requested = True
-                raise SystemExit()
+                if engine_core is not None:
+                    engine_core.input_queue.put_nowait(
+                        (EngineCoreRequestType.SHUTDOWN, None)
+                    )
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-
-        shutdown_handler: ShutdownPipeHandler | None = None
-        engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1044,9 +1049,6 @@ class EngineCoreProc(EngineCore):
 
             engine_core.run_busy_loop()
 
-        except SystemExit:
-            # raised by SHUTDOWN request; normal shutdown path
-            pass
         except Exception as e:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
@@ -1055,6 +1057,8 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            if shutdown_handler is not None:
+                shutdown_handler.join(timeout=5.0)
             if engine_core is not None:
                 engine_core.shutdown()
 
@@ -1257,6 +1261,14 @@ class EngineCoreProc(EngineCore):
                     type_frame, *data_frames = input_socket.recv_multipart(copy=False)
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
+                    # These are reserved for shutdown pipe only.
+                    assert request_type != EngineCoreRequestType.DRAIN, (
+                        "DRAIN should only be sent via shutdown pipe"
+                    )
+                    assert request_type != EngineCoreRequestType.SHUTDOWN, (
+                        "SHUTDOWN should only be sent via shutdown pipe"
+                    )
+
                     # Deserialize the request data.
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
@@ -1266,8 +1278,6 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
-                    elif request_type == EngineCoreRequestType.DRAIN:
-                        request = None
                     else:
                         request = generic_decoder.decode(data_frames)
 

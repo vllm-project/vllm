@@ -216,6 +216,7 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinels used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # NOTE: DRAIN and SHUTDOWN are sent via the shutdown pipe, NOT over ZeroMQ.
     # Drain requests first, then exit.
     DRAIN = b"\x05"
     # Immediate shutdown (e.g. parent process died).
