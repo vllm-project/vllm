@@ -12,7 +12,7 @@ tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
-  "ENABLE_HMA_FLAG=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it" # HMA case
+  "ENABLE_HMA_FLAG=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it" # SW model
 )
 dp_ep_configs=(
 "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1)
@@ -25,6 +25,14 @@ if [[ -n "${DP_EP:-}" ]]; then
   echo "DP_EP is set, using dp_ep_configs"
 else
   configs=("${tp_configs[@]}")
+fi
+
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  # Append ENABLE_HMA_FLAG=1 to each config in the selected array
+  echo "ENABLE_HMA_FLAG is set, appending ENABLE_HMA_FLAG=1 to each config"
+  for i in "${!configs[@]}"; do
+    configs[$i]="ENABLE_HMA_FLAG=1 ${configs[$i]}"
+  done
 fi
 
 run_tests() {
