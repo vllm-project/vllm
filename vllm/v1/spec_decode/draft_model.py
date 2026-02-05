@@ -134,7 +134,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 is_rejected_token_mask=is_rejected_tok,
                 block_size=self._get_metadata_builder(gid).kv_cache_spec.block_size,
                 max_model_len=self.max_model_len,
-                block_table_tensor=cm.block_table_tensor,
             )
             new_cm = cm.replace(slot_mapping=slot_mapping)
             new_cm = extend_all_queries_by_1(new_cm, arange=self.arange)
@@ -213,9 +212,8 @@ def compute_new_slot_mapping(
     is_rejected_token_mask: torch.Tensor,
     block_size: int,
     max_model_len: int,
-    block_table_tensor: torch.Tensor,
 ):
-    batch_size, n_blocks_per_req = block_table_tensor.shape
+    batch_size, n_blocks_per_req = cad.block_table_tensor.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
     req_indices = torch.repeat_interleave(
         req_indices, cad.naive_query_lens() + 1, output_size=len(new_positions)
@@ -226,7 +224,7 @@ def compute_new_slot_mapping(
     block_table_indices = (
         req_indices * n_blocks_per_req + clamped_positions // block_size
     )
-    block_nums = block_table_tensor.view(-1)[block_table_indices]
+    block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
     block_offsets = clamped_positions % block_size
     new_slot_mapping = block_nums * block_size + block_offsets
     # Mask out the position ids that exceed the max model length.
