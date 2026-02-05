@@ -477,6 +477,7 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    audio_overlap_chunk_second: int = ModelConfig.audio_overlap_chunk_second
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -721,6 +722,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
+        )
+        model_group.add_argument(
+            "--audio-overlap-chunk-second", **model_kwargs["audio_overlap_chunk_second"]
         )
 
         # Model loading arguments
@@ -1295,6 +1299,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            audio_overlap_chunk_second=self.audio_overlap_chunk_second,
         )
 
     def validate_tensorizer_args(self):

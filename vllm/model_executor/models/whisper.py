@@ -844,6 +844,7 @@ class WhisperForConditionalGeneration(
         return SpeechToTextConfig(
             max_audio_clip_s=processor.feature_extractor.chunk_length,
             sample_rate=processor.feature_extractor.sampling_rate,
+            overlap_chunk_second=model_config.audio_overlap_chunk_second,
         )
 
     @classmethod

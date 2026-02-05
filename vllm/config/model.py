@@ -297,6 +297,9 @@ class ModelConfig:
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
+    audio_overlap_chunk_second: int = 1
+    """Number of seconds of overlap between consecutive audio chunks
+    when processing long audio files."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
