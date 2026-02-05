@@ -399,7 +399,10 @@ class NemotronParseImageProcessor:
         self.target_width = None
 
     def _ensure_transforms_initialized(self):
-        """Lazily initialize transforms on first use to avoid importing cv2 during processor creation."""
+        """
+        Lazily initialize transforms on first use to avoid
+        importing cv2 during processor creation.
+        """
         if self.transform is not None:
             return  # Already initialized
 
