@@ -259,18 +259,7 @@ class BlockPool:
             # align mode. We skip null blocks here.
             if blk.is_null:
                 continue
-            if blk.block_hash is not None:
-                # Block already cached (from prefix cache hit).
-                # Verify it has the correct hash for this position.
-                expected_hash = make_block_hash_with_group_id(
-                    new_block_hashes[i], kv_cache_group_id
-                )
-                assert blk.block_hash == expected_hash, (
-                    "Cached block has wrong hash: "
-                    f"{blk.block_hash!r} != {expected_hash!r}. "
-                    "This indicates the wrong block was assigned from prefix cache."
-                )
-                continue
+            assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
             # Update and added the full block to the cache.
@@ -405,23 +394,18 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
-        for block in blocks_list:
-            block.ref_cnt -= 1
-
         # Separate blocks into fresh (no hash) and cached (has hash).
         # Fresh blocks go to front of queue (used first during allocation),
         # cached blocks go to back (preserved longer for prefix cache hits).
-        # Partition in a single pass to avoid creating intermediate list.
         fresh_blocks = []
         cached_blocks = []
-        for b in blocks_list:
-            if b.ref_cnt == 0 and not b.is_null:
-                if b.block_hash is None:
-                    fresh_blocks.append(b)
+        for block in ordered_blocks:
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None:
+                    fresh_blocks.append(block)
                 else:
-                    cached_blocks.append(b)
+                    cached_blocks.append(block)
 
         if fresh_blocks:
             self.free_block_queue.prepend_n(fresh_blocks)
