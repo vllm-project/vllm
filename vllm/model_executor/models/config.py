@@ -586,6 +586,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         model_config.hf_config.is_causal = False
+        model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {

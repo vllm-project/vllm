@@ -17,7 +17,10 @@ MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        hf_overrides={"architectures": ["VoyageQwen3BidirectionalEmbedModel"]},
+        hf_overrides={
+            "architectures": ["VoyageQwen3BidirectionalEmbedModel"],
+            "num_labels": 2048,
+        },
         mteb_score=0.7054,
         # === MTEB Results ===
         # STS12: 0.6613
