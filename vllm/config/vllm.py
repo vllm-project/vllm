@@ -42,6 +42,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -254,6 +255,9 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+
+    weight_transfer_config: WeightTransferConfig | None = None
+    """The configurations for weight transfer during RL training."""
 
     def compute_hash(self) -> str:
         """

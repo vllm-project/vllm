@@ -14,6 +14,10 @@ import torch
 import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import PromptType, StreamingInput
@@ -1011,3 +1015,44 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
+
+    async def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest
+    ) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+        from vllm.distributed.weight_transfer.base import (
+            WeightTransferInitRequest,
+        )
+
+        if isinstance(request, WeightTransferInitRequest):
+            init_info_dict = request.init_info
+        else:
+            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+
+        await self.collective_rpc(
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+        )
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """
+        Batched weight update for RL training.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+
+        if isinstance(request, WeightTransferUpdateRequest):
+            update_info_dict = request.update_info
+        else:
+            raise TypeError(
+                f"Expected WeightTransferUpdateRequest, got {type(request)}"
+            )
+
+        await self.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )
