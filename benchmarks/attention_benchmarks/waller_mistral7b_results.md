@@ -1,6 +1,7 @@
 # Waller Operator Scaling Benchmark - Mistral-7B on H100
 
 ## Environment
+
 - **GPU:** NVIDIA H100 80GB HBM3
 - **Model:** mistralai/Mistral-7B-v0.1
 - **Backend:** Waller Operator (APA V1)
