@@ -289,16 +289,21 @@ class SpecDecodeBaseProposer:
     def propose(
         self,
         # [num_tokens]
-        target_token_ids: torch.Tensor,
+        target_token_ids: torch.Tensor | None,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
-        target_positions: torch.Tensor,
+        target_positions: torch.Tensor | None,
         # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
+        target_hidden_states: torch.Tensor | None,
         # [batch_size]
-        next_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor | None,
         last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        sampled_token_ids: torch.Tensor | list[list[int]] | None = None,
+        spec_decode_metadata: SpecDecodeMetadata | None = None,
+        num_scheduled_tokens: dict[str, int] | None = None,
+        hidden_states: torch.Tensor | None = None,
+        aux_hidden_states: list[torch.Tensor] | None = None,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
@@ -306,6 +311,32 @@ class SpecDecodeBaseProposer:
         | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+
+        if target_token_ids is None:
+            assert sampled_token_ids is not None
+            assert num_scheduled_tokens is not None
+            assert hidden_states is not None
+            (
+                target_token_ids,
+                target_positions,
+                target_hidden_states,
+                next_token_ids,
+                last_token_indices,
+                common_attn_metadata,
+                num_rejected_tokens_gpu,
+            ) = self.prepare_inputs(
+                sampled_token_ids=sampled_token_ids,
+                common_attn_metadata=common_attn_metadata,
+                spec_decode_metadata=spec_decode_metadata,
+                num_scheduled_tokens=num_scheduled_tokens,
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+            )
+
+        assert target_token_ids is not None
+        assert target_positions is not None
+        assert target_hidden_states is not None
+        assert next_token_ids is not None
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -801,6 +832,25 @@ class SpecDecodeBaseProposer:
             num_rejected_tokens_gpu,
         )
 
+    def _select_target_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        token_indices: torch.Tensor | None,
+        total_num_tokens: int,
+    ) -> torch.Tensor:
+        assert self.runner is not None
+        if self.runner.use_aux_hidden_state_outputs:
+            assert aux_hidden_states is not None
+            if token_indices is None:  # non-padded case
+                return torch.cat(
+                    [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
+                )
+            return torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+        if token_indices is None:
+            return hidden_states[:total_num_tokens]
+        return hidden_states[token_indices]
+
     def propose_tree(
         self,
         batch_size: int,
@@ -974,7 +1024,7 @@ class SpecDecodeBaseProposer:
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
 
-    def prepare_inputs(
+    def prepare_inputs_unpadded(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: list[list[int]],
@@ -1075,6 +1125,120 @@ class SpecDecodeBaseProposer:
         )
 
         return spec_common_attn_metadata, token_indices
+
+    def prepare_inputs(
+        self,
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        common_attn_metadata: CommonAttentionMetadata,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        num_scheduled_tokens: dict[str, int],
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        CommonAttentionMetadata,
+        torch.Tensor | None,
+    ]:
+        """
+        This function prepares the inputs for EAGLE speculative decoding.
+        It handles both padded and unpadded drafter batches based on the
+        configuration. It returns the target token ids, target positions,
+        target hidden states, next token ids, last token indices (if any),
+        updated common attention metadata, and the number of rejected tokens
+        on GPU (if any).
+        """
+        assert self.runner is not None
+
+        if self.speculative_config.disable_padded_drafter_batch:
+            assert isinstance(sampled_token_ids, list), (
+                "sampled_token_ids should be a python list when "
+                "padded-batch is disabled."
+            )
+            next_token_ids = self.prepare_next_token_ids_cpu(
+                sampled_token_ids,
+                self.runner.requests,
+                self.runner.input_batch,
+                num_scheduled_tokens,
+            )
+        else:
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor when "
+                "padded-batch is enabled."
+            )
+            next_token_ids, valid_sampled_tokens_count = (
+                self.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.runner.requests,
+                    self.runner.input_batch,
+                    self.runner.discard_request_mask.gpu,
+                )
+            )
+            self.runner._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        token_indices: torch.Tensor | None = None
+        num_rejected_tokens_gpu = None
+        last_token_indices = None
+        if spec_decode_metadata is None:
+            total_num_tokens = common_attn_metadata.num_actual_tokens
+            target_token_ids = self.runner.input_ids.gpu[:total_num_tokens]
+            target_positions = self.runner._get_positions(total_num_tokens)
+            target_hidden_states = self._select_target_hidden_states(
+                hidden_states,
+                aux_hidden_states,
+                token_indices,
+                total_num_tokens,
+            )
+        else:
+            if self.speculative_config.disable_padded_drafter_batch:
+                common_attn_metadata, token_indices = self.prepare_inputs_unpadded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    spec_decode_metadata.num_draft_tokens,
+                )
+                target_token_ids = self.runner.input_ids.gpu[token_indices]
+                target_positions = self.runner._get_positions(token_indices)
+                target_hidden_states = self._select_target_hidden_states(
+                    hidden_states,
+                    aux_hidden_states,
+                    token_indices,
+                    token_indices.numel(),
+                )
+            else:
+                (
+                    common_attn_metadata,
+                    last_token_indices,
+                    num_rejected_tokens_gpu,
+                ) = self.prepare_inputs_padded(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    valid_sampled_tokens_count,
+                )
+                total_num_tokens = common_attn_metadata.num_actual_tokens
+                target_token_ids = self.runner.input_ids.gpu[:total_num_tokens]
+                target_positions = self.runner._get_positions(total_num_tokens)
+                target_hidden_states = self._select_target_hidden_states(
+                    hidden_states,
+                    aux_hidden_states,
+                    token_indices,
+                    total_num_tokens,
+                )
+
+        return (
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            next_token_ids,
+            last_token_indices,
+            common_attn_metadata,
+            num_rejected_tokens_gpu,
+        )
 
     def get_model_name(self, model: nn.Module) -> str:
         if hasattr(model, "module"):  # multi-GPU

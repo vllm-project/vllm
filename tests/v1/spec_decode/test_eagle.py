@@ -41,6 +41,7 @@ def _create_proposer(
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     speculative_token_tree: list[tuple[int, ...]] | None = None,
+    disable_padded_drafter_batch: bool = False,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
 
@@ -59,6 +60,7 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
+        disable_padded_drafter_batch=disable_padded_drafter_batch,
     )
 
     vllm_config = VllmConfig(
@@ -76,6 +78,34 @@ def _create_proposer(
     )
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
+
+
+class TestBuffer:
+    def __init__(self, tensor: torch.Tensor):
+        self.gpu = tensor
+
+
+class TestRunner:
+    def __init__(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        requests: dict[str, CachedRequestState],
+        input_batch: InputBatch,
+        discard_request_mask: torch.Tensor,
+    ) -> None:
+        self.requests = requests
+        self.input_batch = input_batch
+        self.discard_request_mask = TestBuffer(discard_request_mask)
+        self.input_ids = TestBuffer(input_ids)
+        self.use_aux_hidden_state_outputs = False
+        self._copy_valid_sampled_token_count = mock.MagicMock()
+        self._positions = positions
+
+    def _get_positions(self, indices: int | torch.Tensor) -> torch.Tensor:
+        if isinstance(indices, int):
+            return self._positions[:indices]
+        return self._positions[indices]
 
 
 def test_prepare_next_token_ids():
@@ -167,7 +197,7 @@ def test_prepare_next_token_ids():
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
 
 
-def test_prepare_inputs():
+def test_prepare_inputs_unpadded():
     """
     cu_target_query_lens: [0, a, a + b, a + b + c]
     num_rejected_tokens: [n1, n2, n3]
@@ -248,7 +278,7 @@ def test_prepare_inputs():
     )
     proposer = _create_proposer("eagle", 1)
 
-    updated_metadata, token_indices = proposer.prepare_inputs(
+    updated_metadata, token_indices = proposer.prepare_inputs_unpadded(
         common_attn_metadata, sampled_token_ids, num_draft_tokens
     )
 
@@ -319,6 +349,265 @@ def test_prepare_inputs_padded():
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
+
+
+def test_prepare_inputs_unpadded_consolidated():
+    """
+    cu_target_query_lens: [0, a, a + b, a + b + c]
+    num_rejected_tokens: [n1, n2, n3]
+    num_tokens_per_req: [a - n1, b - n2, c - n3]
+    cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
+    token_indices: [0, 1, ..., a - n1 - 1,
+                    a, a + 1, ..., a + b - n2 - 1,
+                    a + b, a + b + 1, ..., a + b + c - n3 - 1]
+    """
+    device = torch.device(current_platform.device_type)
+
+    # q1 = 4, q2 = 7, q3 = 5
+    # n1 = 1, n2 = 3, n3 = 2
+
+    batch_spec = BatchSpec(
+        seq_lens=[4, 7, 5],
+        query_lens=[4, 7, 5],
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
+
+    # If there are `k` sampled tokens, then `k-1` tokens are draft tokens
+    # from the previous iteration, and the last token is the bonus token sampled
+    # from the base model.
+    num_draft_tokens = [3, 6, 4]  # one less than query_lens
+    # num rejected tokens is [1, 3, 2]
+    ACCEPT_TOKEN = 0
+    BONUS_TOKEN = 1
+    REJECT_TOKEN = -1
+    sampled_token_ids = [
+        [ACCEPT_TOKEN, ACCEPT_TOKEN, REJECT_TOKEN, BONUS_TOKEN],
+        [
+            ACCEPT_TOKEN,
+            ACCEPT_TOKEN,
+            ACCEPT_TOKEN,
+            REJECT_TOKEN,
+            REJECT_TOKEN,
+            REJECT_TOKEN,
+            BONUS_TOKEN,
+        ],
+        [ACCEPT_TOKEN, ACCEPT_TOKEN, REJECT_TOKEN, REJECT_TOKEN, BONUS_TOKEN],
+    ]
+    sampled_token_ids = [[i for i in seq if i != -1] for seq in sampled_token_ids]
+
+    # Expected calculations:
+    # query_len_per_req = [4, 7, 5]
+    # num_tokens_per_req = [3, 4, 3]  (after subtracting rejected tokens)
+    # Expected cumulative counts: [0, 3, 7, 10]
+    expected_cu_num_tokens = torch.tensor(
+        [0, 3, 7, 10], dtype=torch.int32, device=device
+    )
+
+    # Expected token indices (mapped from original positions):
+    # First request: indices 0, 1, 2      (keeping first 3 from positions 0-3)
+    # Second request: indices 4, 5, 6, 7  (keeping first 4 from positions 4-10)
+    # Third request: indices 11, 12, 13   (keeping first 3 from positions 11-15)
+    expected_token_indices = torch.tensor(
+        [
+            0,
+            1,
+            2,  # First request: 3 tokens (4-1)
+            4,
+            5,
+            6,
+            7,  # Second request: 4 tokens (7-3)
+            11,
+            12,
+            13,  # Third request: 3 tokens (5-2)
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    proposer = _create_proposer("eagle", 1, disable_padded_drafter_batch=True)
+
+    req_ids = [f"req_{i + 1}" for i in range(batch_spec.batch_size)]
+    input_batch = mock.MagicMock(spec=InputBatch)
+    input_batch.req_ids = req_ids
+    input_batch.num_reqs = batch_spec.batch_size
+    input_batch.vocab_size = 100
+
+    requests = {}
+    for req_id in req_ids:
+        req = mock.MagicMock(spec=CachedRequestState)
+        req.get_token_id.return_value = int(req_id.split("_")[1]) * 10
+        req.num_computed_tokens = 0
+        requests[req_id] = req
+
+    total_tokens = common_attn_metadata.num_actual_tokens
+    input_ids = torch.arange(total_tokens, dtype=torch.int32, device=device)
+    positions = torch.arange(total_tokens, dtype=torch.int64, device=device)
+    proposer.runner = TestRunner(
+        input_ids=input_ids,
+        positions=positions,
+        requests=requests,
+        input_batch=input_batch,
+        discard_request_mask=torch.zeros(
+            input_batch.num_reqs, dtype=torch.bool, device=device
+        ),
+    )
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids=[
+            [0] * num_draft_tokens[0],
+            [0] * num_draft_tokens[1],
+            [0] * num_draft_tokens[2],
+        ],
+        device=device,
+    )
+    hidden_states = torch.arange(
+        total_tokens * 4, dtype=torch.float32, device=device
+    ).view(total_tokens, 4)
+
+    (
+        target_token_ids,
+        target_positions,
+        target_hidden_states,
+        next_token_ids,
+        last_token_indices,
+        updated_metadata,
+        num_rejected_tokens_gpu,
+    ) = proposer.prepare_inputs(
+        sampled_token_ids=sampled_token_ids,
+        common_attn_metadata=common_attn_metadata,
+        spec_decode_metadata=spec_decode_metadata,
+        num_scheduled_tokens={req_id: 0 for req_id in req_ids},
+        hidden_states=hidden_states,
+        aux_hidden_states=None,
+    )
+
+    assert num_rejected_tokens_gpu is None
+    assert last_token_indices is None
+    assert torch.equal(updated_metadata.query_start_loc, expected_cu_num_tokens)
+    assert target_token_ids.shape[0] == expected_cu_num_tokens[-1].item()
+    assert torch.equal(target_token_ids, input_ids[expected_token_indices])
+    assert torch.equal(target_positions, positions[expected_token_indices])
+    assert torch.equal(target_hidden_states, hidden_states[expected_token_indices])
+    assert torch.equal(
+        next_token_ids,
+        torch.tensor([1, 1, 1], dtype=torch.int32, device=device),
+    )  # all bonus tokens are 1
+
+
+def test_prepare_inputs_padded_consolidated():
+    """
+    Test for prepare_inputs when using padded drafter batches.
+    Input scenario is 3 requests with num_speculative_tokens == 2 and:
+    - Request 1: query_len = 3, rejected = 1
+    - Request 2: query_len = 3, rejected = 0
+    - Request 3: query_len = 3, rejected = 2
+
+    Expected outputs:
+    next_token_ids: [2, 5, 30]
+    token_indices_to_sample: [2, 3, 0]
+    Reason: After accounting for rejections, these are the valid token positions
+            from the original indices to sample from.
+    """
+    device = torch.device(current_platform.device_type)
+
+    num_speculative_tokens = 2
+    batch_spec = BatchSpec(
+        seq_lens=[3, 3, 3],
+        query_lens=[3, 3, 3],
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids=[[0] * num_speculative_tokens] * 3,
+        device=device,
+    )
+
+    sampled_token_ids_tensor = torch.tensor(
+        [
+            [1, 2, -1],  # 2 valid tokens
+            [3, 4, 5],  # 3 valid tokens
+            [-1, -1, -1],  # 0 valid tokens
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    discard_request_mask = torch.tensor(
+        [False, False, False], dtype=torch.bool, device=device
+    )
+
+    req_ids = [f"req_{i + 1}" for i in range(batch_spec.batch_size)]
+    input_batch = mock.MagicMock(spec=InputBatch)
+    input_batch.req_ids = req_ids
+    input_batch.num_reqs = batch_spec.batch_size
+    input_batch.vocab_size = 100
+
+    requests = {}
+    for req_id in req_ids:
+        req = mock.MagicMock(spec=CachedRequestState)
+        req.get_token_id.return_value = int(req_id.split("_")[1]) * 10
+        req.num_computed_tokens = 0
+        requests[req_id] = req
+
+    total_tokens = common_attn_metadata.num_actual_tokens
+    input_ids = torch.arange(total_tokens, dtype=torch.int32, device=device)
+    positions = torch.arange(total_tokens, dtype=torch.int64, device=device)
+
+    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer.runner = TestRunner(
+        input_ids=input_ids,
+        positions=positions,
+        requests=requests,
+        input_batch=input_batch,
+        discard_request_mask=discard_request_mask,
+    )
+
+    hidden_states = torch.arange(
+        total_tokens * 4, dtype=torch.float32, device=device
+    ).view(total_tokens, 4)
+
+    (
+        target_token_ids,
+        target_positions,
+        target_hidden_states,
+        next_token_ids,
+        token_indices_to_sample,
+        updated_metadata,
+        num_rejected_tokens_gpu,
+    ) = proposer.prepare_inputs(
+        sampled_token_ids=sampled_token_ids_tensor,
+        common_attn_metadata=common_attn_metadata,
+        spec_decode_metadata=spec_decode_metadata,
+        num_scheduled_tokens={req_id: 0 for req_id in req_ids},
+        hidden_states=hidden_states,
+        aux_hidden_states=None,
+    )
+
+    assert torch.equal(
+        next_token_ids,
+        torch.tensor([2, 5, 30], dtype=torch.int32, device=device),
+    )
+    expected_metadata, expected_token_indices, expected_rejected = (
+        proposer.prepare_inputs_padded(
+            common_attn_metadata,
+            spec_decode_metadata,
+            next_token_ids.new_tensor([2, 3, 0]),
+        )
+    )
+    proposer.runner._copy_valid_sampled_token_count.assert_called_once()
+    assert torch.equal(
+        updated_metadata.query_start_loc, expected_metadata.query_start_loc
+    )
+    assert torch.equal(token_indices_to_sample, expected_token_indices)
+    assert torch.equal(num_rejected_tokens_gpu, expected_rejected)
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
