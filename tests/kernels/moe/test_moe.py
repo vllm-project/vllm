@@ -18,7 +18,11 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.moe.utils import fused_moe, make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    fused_moe,
+    make_dummy_moe_config,
+    modular_triton_fused_moe,
+)
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -35,9 +39,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,

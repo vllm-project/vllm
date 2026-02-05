@@ -114,10 +114,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
-    def allow_inplace(self) -> bool:
-        return False
-
-    @property
     def method_name(self) -> str:
         return self.__class__.__name__
 

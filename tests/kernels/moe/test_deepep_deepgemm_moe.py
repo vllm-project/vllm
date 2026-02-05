@@ -194,8 +194,11 @@ def make_ll_modular_kernel(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    return FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_ht_modular_kernel(
@@ -224,8 +227,11 @@ def make_ht_modular_kernel(
         moe_config=make_dummy_moe_config(),
         quant_config=quant_config,
     )
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    return FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_modular_kernel(
@@ -318,7 +324,6 @@ def deepep_deepgemm_moe_impl(
             w2=w2,
             topk_weights=test_tensors.topk_weights,
             topk_ids=test_tensors.topk,
-            inplace=False,
             activation="silu",
             global_num_experts=num_experts,
             expert_map=build_expert_map(),

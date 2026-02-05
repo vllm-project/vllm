@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    disable_inplace,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -560,6 +563,8 @@ class FusedMoE(CustomOp):
             activation=activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            # TODO: in_dtype == out_dtype?
+            disable_inplace=disable_inplace() or self.shared_experts is not None,
         )
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -650,7 +655,11 @@ class FusedMoE(CustomOp):
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
             self.quant_method = FusedMoEModularMethod.make(
-                self, self.quant_method, prepare_finalize, self.shared_experts
+                self,
+                self.quant_method,
+                prepare_finalize,
+                self.shared_experts,
+                inplace=not self.moe_config.disable_inplace,
             )
 
     @property

@@ -785,4 +785,5 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             w2_zeros=layer.w2_qzeros,
             workspace=layer.workspace,
             input_dtype=self.input_dtype,
+            inplace=not self.moe.disable_inplace,
         )

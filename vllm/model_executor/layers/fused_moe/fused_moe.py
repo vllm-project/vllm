@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -1511,7 +1508,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace and not disable_inplace():
+    if inplace:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
@@ -1533,6 +1530,8 @@ def fused_experts(
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    assert not inplace or not disable_inplace()
 
     return dispatch_fused_experts_func(inplace)(
         hidden_states=hidden_states,
@@ -1593,7 +1592,7 @@ def fused_experts_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
+    inplace: bool,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
@@ -1712,10 +1711,7 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    if inplace and not disable_inplace():
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
         # TODO: On platforms for which `current_platform.supports_mx()` is True
@@ -2291,15 +2287,3 @@ class TritonWNA16Experts(TritonExperts):
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
-
-
-def modular_triton_fused_moe(
-    moe_config: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-    shared_experts: torch.nn.Module | None = None,
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(moe_config, quant_config),
-        shared_experts,
-    )
