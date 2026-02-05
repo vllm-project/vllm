@@ -128,7 +128,7 @@ class SimilarFrameDetector:
         self, photometric_losses: torch.Tensor, k: int
     ) -> list[int]:
         """Select top-k largest loss indices as split points."""
-        if k - 1 <= 0:
+        if k <= 1:
             return []
         top_indices = torch.topk(photometric_losses, k - 1).indices.tolist()
         return sorted(top_indices)
