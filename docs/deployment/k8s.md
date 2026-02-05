@@ -389,16 +389,18 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
 ## Drain Shutdown
 
-For production deployments, vLLM supports drain shutdown to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+For production deployments, vLLM supports a draining shutdown mode to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+
+**Note:** A second SIGTERM will skip the drain timeout, causing immediate exit. Useful if testing via a tty (like Ctrl+C).
 
 ### How It Works
 
 When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
 
 1. The server stops accepting new requests (returns `503 Service Unavailable`)
-2. The frontend process sends a drain notification to the engine
-3. In-flight requests continue processing until completion or timeout
-4. The `/live` and `/metrics` endpoints remain accessible during drain
+1. The frontend process sends a drain notification to the engine
+1. In-flight requests continue processing until completion or timeout
+1. The `/live` and `/metrics` endpoints remain accessible during drain
 
 ### Configuration
 

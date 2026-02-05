@@ -583,7 +583,7 @@ class EngineArgs:
     tokens_only: bool = False
 
     weight_transfer_config: WeightTransferConfig | None = None
-    """Configuration for weight transfer during RL training.
+    """Configuration for weight transfer during RL training. 
     Accepts a JSON string or dict with backend-specific options.
     Example: '{"backend": "nccl"}'"""
 
