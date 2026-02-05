@@ -6,6 +6,7 @@ import torch
 
 import vllm.config
 from tests.compile.backend import TestBackend
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.matcher_utils import ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -22,7 +23,10 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
@@ -33,27 +37,29 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         self,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: int,
+        head_size: int,
         is_neox: bool,
         vllm_config: VllmConfig,
         dtype: torch.dtype,
+        device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
     ):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.q_size = num_heads * head_dim
-        self.kv_size = num_kv_heads * head_dim
-        self.rotary_dim = head_dim
+        self.head_size = head_size
+        self.q_size = num_heads * head_size
+        self.kv_size = num_kv_heads * head_size
         self.is_neox = is_neox
-        self.vllm_config = vllm_config
+        self.vllm_config: VllmConfig = vllm_config
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.dtype = dtype
+        self.device = device
         self.layer_name = prefix
 
         self.rotary_emb = RotaryEmbedding(
-            self.head_dim,
-            rotary_dim=self.rotary_dim,
+            head_size,
+            rotary_dim=head_size,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
@@ -65,10 +71,10 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         # Register layer metadata for the fusion pass via Attention.
         self.attn = Attention(
-            num_heads=self.num_heads,
-            head_size=self.head_dim,
-            scale=1.0 / self.head_dim**0.5,
-            num_kv_heads=self.num_kv_heads,
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=1.0 / head_size**0.5,
+            num_kv_heads=num_kv_heads,
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,
@@ -77,6 +83,86 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         assert not self.attn_backend.forward_includes_kv_cache_update, (
             f"Attention backend {self.attn_backend} does not support fuse_rope_kvcache."
         )
+        self.attn._k_scale = self.attn._k_scale.to(device)
+        self.attn._v_scale = self.attn._v_scale.to(device)
+
+        self.block_size = 16
+
+        # Initialize attn MetadataBuilder
+        self.builder = self.attn.attn_backend.get_builder_cls()(
+            kv_cache_spec=AttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=head_size,
+                dtype=self.kv_cache_dtype,
+            ),
+            layer_names=[self.attn.layer_name],
+            vllm_config=self.vllm_config,
+            device=device,
+        )
+
+    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
+        """Initialize attention metadata."""
+
+        # Create common attn metadata
+        batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, self.block_size, self.device, arange_block_indices=True
+        )
+
+        max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
+        num_blocks = batch_size * max_blocks
+        backend = self.attn.backend
+
+        # Create dummy KV cache for the selected backend
+        if backend == AttentionBackendEnum.ROCM_ATTN:
+            # k/v as 1st dimention
+            # HND: [num_blocks, num_kv_heads, block_size, head_size]
+            kv_cache = torch.zeros(
+                2,
+                num_blocks,
+                self.num_kv_heads,
+                self.block_size,
+                self.head_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            )
+        elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            # k/v as 1st dimention
+            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache = torch.zeros(
+                2,
+                num_blocks,
+                self.block_size,
+                self.num_kv_heads,
+                self.head_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            )
+        elif backend == AttentionBackendEnum.TRITON_ATTN:
+            # k/v as 2nd dimention
+            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache = torch.zeros(
+                num_blocks,
+                2,
+                self.num_kv_heads,
+                self.block_size,
+                self.head_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            )
+        elif backend == AttentionBackendEnum.ROCM_AITER_FA:
+            raise NotImplementedError
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
+        self.attn.kv_cache = [kv_cache]
+
+        # Build attn metadata
+        self.attn_metadata = self.builder.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
+
+        return self.attn_metadata
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, positions: torch.Tensor
@@ -175,6 +261,7 @@ def test_rope_kvcache_fusion(
             is_neox=is_neox,
             vllm_config=vllm_config,
             dtype=dtype,
+            device=torch.device("cuda"),
         )
 
         T = 5

@@ -529,6 +529,7 @@ class RopeReshapeKVCachePattern:
         num_heads: int,
         num_kv_heads: int,
         is_neox: bool,
+        flash_layout: bool,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         self.head_dim = head_dim
@@ -537,6 +538,7 @@ class RopeReshapeKVCachePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.is_neox = is_neox
+        self.flash_layout = flash_layout
         self.layer_name = prefix
 
         self.rope_matcher = MatcherRotaryEmbedding(
@@ -596,6 +598,7 @@ class RopeReshapeKVCachePattern:
                 positions,
                 cos_sin_cache,
                 self.is_neox,
+                self.flash_layout,
                 self.layer_name,
             )
             return dummy, q, k, v
@@ -632,10 +635,10 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         # List of tuples of (head_dim, num_heads, num_kv_heads)
         PATTERNS = [
             (64, 64, 8),  # gpt-oss 20b, 120b
-            # (128, 64, 8),  # llama 3.3 70B
-            # (128, 128, 8),  # llama 3.1 405B
-            # (128, 32, 8),  # mixtral 8x7b
-            # (128, 48, 8),  # mixtral 8x22b
+            (128, 64, 8),  # llama 3.3 70B
+            (128, 128, 8),  # llama 3.1 405B
+            (128, 32, 8),  # mixtral 8x7b
+            (128, 48, 8),  # mixtral 8x22b
             # Qwen also supports qk_norm_rope fusion; figure out which one to use
             # (128, 64, 4),  # qwen 235b-a22b
             # (128, 32, 4),  # qwen 30b-a3b
@@ -643,13 +646,15 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
 
         # Register patterns for common model configurations
         for head_dim, num_heads, num_kv_heads in PATTERNS:
-            for is_neox in [True]:  # [True, False]:
-                RopeReshapeKVCachePattern(
-                    head_dim=head_dim,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    is_neox=is_neox,
-                ).register(self.patterns)
+            for is_neox in [True, False]:
+                for flash_layout in [True, False]:
+                    RopeReshapeKVCachePattern(
+                        head_dim=head_dim,
+                        num_heads=num_heads,
+                        num_kv_heads=num_kv_heads,
+                        is_neox=is_neox,
+                        flash_layout=flash_layout,
+                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

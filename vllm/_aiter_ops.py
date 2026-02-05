@@ -841,6 +841,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    flash_layout: bool,
     layer_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -880,7 +881,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
         attn_layer._k_scale,
         attn_layer._v_scale,
         is_neox,
-        flash_layout=True,
+        flash_layout=flash_layout,
         apply_scale=is_fp8_kv_cache,
         q_out=query,
         k_out=key,
@@ -901,6 +902,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    flash_layout: bool,
     layer_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q_out = torch.empty_like(query)
