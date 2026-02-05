@@ -478,6 +478,43 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Kimi-Audio (ASR)
+def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
+    """Kimi-Audio ASR example.
+
+    This model uses vLLM's Transcriptions support under the hood; offline usage
+    is similar to other audio-language models in this file (pass audio via
+    `multi_modal_data`).
+
+    Note: Kimi-Audio native preprocessing may require the upstream Kimi-Audio
+    repo (kimia_infer) to be available.
+    """
+    assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
+
+    # Prefer a local snapshot if present; otherwise download from HF.
+    local_path = "/data1/moonshotai/Kimi-Audio-7B-Instruct"
+    if os.path.isdir(local_path):
+        model_path = local_path
+    else:
+        model_path = snapshot_download("moonshotai/Kimi-Audio-7B-Instruct")
+
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=2048,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    # Prompt text is optional; if empty, the model uses its default instruction.
+    prompt = question or ""
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "musicflamingo": run_musicflamingo,
@@ -494,6 +531,7 @@ model_example_map = {
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
+    "kimi_audio_asr": run_kimi_audio_asr,
 }
 
 
