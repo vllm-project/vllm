@@ -1028,7 +1028,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
         if not all(nb == 1 for nb in num_batches_by_modality.values()):
             raise RuntimeError(
-                f"Some modalities cannot be merged into a single batch. "
+                f"Some modalities cannot be merged into a single batch "
                 f"({num_batches_by_modality=})"
             )
 
