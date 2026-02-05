@@ -173,9 +173,9 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         q, k = self.rotary_emb(positions, q, k)
 
         # Instead of a full forward pass, match only the KV cache update op here
-        q = q.view(-1, self.num_heads, self.head_dim)
-        k = k.view(-1, self.num_kv_heads, self.head_dim)
-        v = v.view(-1, self.num_kv_heads, self.head_dim)
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size)
         kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
             k, v, self.layer_name
         )
@@ -198,7 +198,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 @pytest.mark.parametrize("is_neox", [True])
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_dim", [64])
+@pytest.mark.parametrize("head_size", [64])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.skipif(
@@ -209,7 +209,7 @@ def test_rope_kvcache_fusion(
     is_neox: bool,
     enable_rope_custom_op: bool,
     dtype: torch.dtype,
-    head_dim: int,
+    head_size: int,
     num_heads: int,
     num_kv_heads: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -256,8 +256,8 @@ def test_rope_kvcache_fusion(
 
         model = QKRoPEKVCacheTestModel(
             num_heads=num_heads,
-            head_dim=head_dim,
             num_kv_heads=num_kv_heads,
+            head_size=head_size,
             is_neox=is_neox,
             vllm_config=vllm_config,
             dtype=dtype,
@@ -266,9 +266,9 @@ def test_rope_kvcache_fusion(
 
         T = 5
 
-        q = torch.randn(T, num_heads * head_dim)
-        k = torch.randn(T, num_kv_heads * head_dim)
-        v = torch.randn(T, num_kv_heads * head_dim)
+        q = torch.randn(T, num_heads * head_size)
+        k = torch.randn(T, num_kv_heads * head_size)
+        v = torch.randn(T, num_kv_heads * head_size)
         pos = torch.arange(T, dtype=torch.long)
 
         q_unfused = q.clone()
