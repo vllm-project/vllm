@@ -96,7 +96,7 @@ class SarvamMLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config,  # SarvamMLAConfig or compatible
+        config,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -177,7 +177,6 @@ class SarvamMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # RoPE (use the same get_rope as before)
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
             # rotary_dim=self.qk_rope_head_dim,
@@ -186,7 +185,6 @@ class SarvamMLAAttention(nn.Module):
             is_neox_style=False,
         )
 
-        # DeepSeek yarn mscale adjustment (same logic you had)
         if config.rope_parameters.get("rope_type", None) == "deepseek_yarn":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
@@ -198,13 +196,11 @@ class SarvamMLAAttention(nn.Module):
             kv_b_proj=self.kv_b_proj,
             rotary_emb=self.rotary_emb,
             o_proj=self.o_proj,
-            # We don't use fused_qkv_a_proj in this implementation.
             fused_qkv_a_proj=None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
-            # No sparse MLA / indexer in SarvamMLA
             indexer=None,
             indexer_rotary_emb=None,
             is_sparse=False,
@@ -536,7 +532,6 @@ class SarvamMLAModel(nn.Module):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Same pattern as Bailing / DeepSeek: map gate/up/down into fused MoE.
         return SharedFusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -552,7 +547,6 @@ class SarvamMLAModel(nn.Module):
         """Load weights with stacked gate+up and MoE expert remapping."""
         weights = _normalized_weights(weights)
         stacked_params_mapping = [
-            # (fused_param_name, orig_weight_suffix, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
