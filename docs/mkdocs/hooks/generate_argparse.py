@@ -59,7 +59,7 @@ class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
     def __init__(self, *args, **kwargs):
-        name = kwargs.pop("name", None)
+        name = kwargs.get("name")
         super().__init__(*args, **kwargs)
         self.__spec__ = ModuleSpec(name, None)
 
