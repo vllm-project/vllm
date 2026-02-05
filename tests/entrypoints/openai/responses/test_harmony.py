@@ -6,7 +6,6 @@ import time
 
 import pytest
 import pytest_asyncio
-import requests
 from openai import BadRequestError, NotFoundError, OpenAI
 from openai_harmony import (
     Message,
@@ -513,11 +512,9 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
 
 
 def get_weather(latitude, longitude):
-    response = requests.get(
-        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa
-    )
-    data = response.json()
-    return data["current"]["temperature_2m"]
+    # NOTE: Keep this function fully deterministic for CI stability.
+    # The tests validate tool-calling wiring, not the external weather API.
+    return 7.3
 
 
 def get_place_to_travel():
