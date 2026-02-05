@@ -138,8 +138,8 @@ class AsyncLLM(EngineClient):
             tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
-        # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_async_mp_client(
+        # EngineCoreClient (gets EngineCoreRequests and gives EngineCoreOutputs)
+        self.engine_core_client = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
@@ -148,12 +148,15 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
         )
 
+        # Backward compatibility alias.
+        self.engine_core = self.engine_core_client
+
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
-                engine_idxs=self.engine_core.engine_ranks_managed,
+                engine_idxs=self.engine_core_client.engine_ranks_managed,
                 custom_stat_loggers=custom_stat_loggers,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
@@ -259,8 +262,8 @@ class AsyncLLM(EngineClient):
 
         shutdown_prometheus()
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
 
         if input_processor := getattr(self, "input_processor", None):
             input_processor.close()
@@ -270,7 +273,7 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        return await self.engine_core_client.get_supported_tasks_async()
 
     async def add_request(
         self,
@@ -407,7 +410,7 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        await self.engine_core_client.add_request_async(request)
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -629,7 +632,7 @@ class AsyncLLM(EngineClient):
 
         # Ensure that the task doesn't have a circular ref back to the AsyncLLM
         # object, or else it won't be garbage collected and cleaned up properly.
-        engine_core = self.engine_core
+        engine_core_client = self.engine_core_client
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
@@ -640,7 +643,7 @@ class AsyncLLM(EngineClient):
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
-                    outputs = await engine_core.get_output_async()
+                    outputs = await engine_core_client.get_output_async()
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
@@ -667,7 +670,7 @@ class AsyncLLM(EngineClient):
 
                         # 3) Abort any reqs that finished due to stop strings.
                         if processed_outputs.reqs_to_abort:
-                            await engine_core.abort_requests_async(
+                            await engine_core_client.abort_requests_async(
                                 processed_outputs.reqs_to_abort
                             )
 
@@ -698,7 +701,7 @@ class AsyncLLM(EngineClient):
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
         all_request_ids = self.output_processor.abort_requests(request_ids, internal)
-        await self.engine_core.abort_requests_async(all_request_ids)
+        await self.engine_core_client.abort_requests_async(all_request_ids)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
@@ -861,25 +864,25 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self) -> None:
-        coros = [self.engine_core.profile_async(True)]
+        coros = [self.engine_core_client.profile_async(True)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
         await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
-        coros = [self.engine_core.profile_async(False)]
+        coros = [self.engine_core_client.profile_async(False)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.stop))
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
-        await self.engine_core.reset_mm_cache_async()
+        await self.engine_core_client.reset_mm_cache_async()
 
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return await self.engine_core.reset_prefix_cache_async(
+        return await self.engine_core_client.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
 
@@ -888,35 +891,35 @@ class AsyncLLM(EngineClient):
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
-        await self.engine_core.sleep_async(level)
+        await self.engine_core_client.sleep_async(level)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        await self.engine_core.wake_up_async(tags)
+        await self.engine_core_client.wake_up_async(tags)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
     async def is_sleeping(self) -> bool:
-        return await self.engine_core.is_sleeping_async()
+        return await self.engine_core_client.is_sleeping_async()
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        return await self.engine_core.add_lora_async(lora_request)
+        return await self.engine_core_client.add_lora_async(lora_request)
 
     async def remove_lora(self, lora_id: int) -> bool:
         """Remove an already loaded LoRA adapter."""
-        return await self.engine_core.remove_lora_async(lora_id)
+        return await self.engine_core_client.remove_lora_async(lora_id)
 
     async def list_loras(self) -> set[int]:
         """List all registered adapters."""
-        return await self.engine_core.list_loras_async()
+        return await self.engine_core_client.list_loras_async()
 
     async def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
-        return await self.engine_core.pin_lora_async(lora_id)
+        return await self.engine_core_client.pin_lora_async(lora_id)
 
     async def collective_rpc(
         self,
@@ -928,7 +931,7 @@ class AsyncLLM(EngineClient):
         """
         Perform a collective RPC call to the given path.
         """
-        return await self.engine_core.collective_rpc_async(
+        return await self.engine_core_client.collective_rpc_async(
             method, timeout, args, kwargs
         )
 
@@ -936,7 +939,7 @@ class AsyncLLM(EngineClient):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
-            if not self.engine_core.dp_engines_running():
+            if not self.engine_core_client.dp_engines_running():
                 logger.info("Engines are idle, requests have been drained")
                 return
 
@@ -975,7 +978,7 @@ class AsyncLLM(EngineClient):
             "Requests have been drained, proceeding with scale to %s engines",
             new_data_parallel_size,
         )
-        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+        await self.engine_core_client.scale_elastic_ep(new_data_parallel_size)
         self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
 
         # recreate stat loggers
@@ -1001,7 +1004,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.resources.engine_dead or not self.is_running
+        return self.engine_core_client.resources.engine_dead or not self.is_running
 
     @property
     def dead_error(self) -> BaseException:

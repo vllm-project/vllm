@@ -103,14 +103,16 @@ class LLMEngine:
             tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
-        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient.make_client(
+        # EngineCoreClient (gets EngineCoreRequests and gives EngineCoreOutputs)
+        self.engine_core_client = EngineCoreClient.make_client(
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
+        # Backward compatibility alias.
+        self.engine_core = self.engine_core_client
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
@@ -124,7 +126,7 @@ class LLMEngine:
 
         if not multiprocess_mode:
             # for v0 compatibility
-            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+            self.model_executor = self.engine_core_client.engine_core.model_executor  # type: ignore
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the
@@ -185,7 +187,7 @@ class LLMEngine:
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
         if self.dp_group is None:
-            return has_unfinished or self.engine_core.dp_engines_running()
+            return has_unfinished or self.engine_core_client.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
@@ -201,13 +203,13 @@ class LLMEngine:
         return outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.engine_core.get_supported_tasks()
+        return self.engine_core_client.get_supported_tasks()
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         request_ids = self.output_processor.abort_requests(request_ids, internal)
-        self.engine_core.abort_requests(request_ids)
+        self.engine_core_client.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -259,7 +261,7 @@ class LLMEngine:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
-            self.engine_core.add_request(request)
+            self.engine_core_client.add_request(request)
             return
 
         # Fan out child requests (for n>1).
@@ -275,17 +277,17 @@ class LLMEngine:
                 child_request, prompt_text, parent_req, idx
             )
             # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
+            self.engine_core_client.add_request(child_request)
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
-            self.engine_core.execute_dummy_batch()
+            self.engine_core_client.execute_dummy_batch()
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
-            outputs = self.engine_core.get_output()
+            outputs = self.engine_core_client.get_output()
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
@@ -299,7 +301,7 @@ class LLMEngine:
 
         # 3) Abort any reqs that finished due to stop strings.
         with record_function_or_nullcontext("llm_engine step: abort_requests"):
-            self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+            self.engine_core_client.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
@@ -314,19 +316,19 @@ class LLMEngine:
         return processed_outputs.request_outputs
 
     def start_profile(self):
-        self.engine_core.profile(True)
+        self.engine_core_client.profile(True)
 
     def stop_profile(self):
-        self.engine_core.profile(False)
+        self.engine_core_client.profile(False)
 
     def reset_mm_cache(self):
         self.input_processor.clear_mm_cache()
-        self.engine_core.reset_mm_cache()
+        self.engine_core_client.reset_mm_cache()
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return self.engine_core.reset_prefix_cache(
+        return self.engine_core_client.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
 
@@ -339,19 +341,19 @@ class LLMEngine:
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1):
-        self.engine_core.sleep(level)
+        self.engine_core_client.sleep(level)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
     def wake_up(self, tags: list[str] | None = None):
-        self.engine_core.wake_up(tags)
+        self.engine_core_client.wake_up(tags)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
-        return self.engine_core.is_sleeping()
+        return self.engine_core_client.is_sleeping()
 
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
@@ -384,19 +386,19 @@ class LLMEngine:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        return self.engine_core.add_lora(lora_request)
+        return self.engine_core_client.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         """Remove an already loaded LoRA adapter."""
-        return self.engine_core.remove_lora(lora_id)
+        return self.engine_core_client.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
         """List all registered adapters."""
-        return self.engine_core.list_loras()
+        return self.engine_core_client.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
-        return self.engine_core.pin_lora(lora_id)
+        return self.engine_core_client.pin_lora(lora_id)
 
     def collective_rpc(
         self,
@@ -405,7 +407,7 @@ class LLMEngine:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+        return self.engine_core_client.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
