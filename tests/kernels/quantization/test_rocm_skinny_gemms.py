@@ -147,6 +147,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     assert torch.allclose(out, ref_out, rtol=0.01)
 
 
+@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -154,19 +155,23 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("padded_b", [False, True])
-def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed, bias_mode, padded_a, padded_b):
+def test_rocm_wvsplitk_kernel(
+    xnorm, n, k, m, dtype, seed, bias_mode, padded_a, padded_b
+):
     torch.manual_seed(seed)
     cu_count = get_cu_count()
 
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.randn(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.randn(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
+    xavier = (
+        math.sqrt(2 / k) if xnorm else 1
+    )  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
 
     BIAS = None
     if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
     elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
     if padded_a:
         A = pad_weights_fp8(A)
@@ -176,7 +181,10 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed, bias_mode, padded_a, padded_
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    assert torch.allclose(out, ref_out, rtol=0.02, atol=0.01)
+    if xnorm:
+        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-8)
+    else:
+        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
