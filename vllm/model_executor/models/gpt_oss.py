@@ -709,15 +709,37 @@ class GptOssModel(nn.Module):
                             ]
 
                 param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                expert_data = param.data[expert_id]
+                dim1 = sliced_weight.shape[0]
+                dim2 = sliced_weight.shape[1]
+                expert_data.data[:dim1, :dim2].copy_(sliced_weight)
 
-                weight_loader(
-                    param,
-                    sliced_weight,
-                    weight_name=fused_name,
-                    shard_id="w13" if is_w13 else "w2",
-                    expert_id=expert_id,
-                )
+                # default_weight_loader(param, sliced_weight, weight_name=fused_name)
+
+                # if is_w13:
+                #     weight_loader(
+                #         param,
+                #         sliced_weight[..., :sliced_weight.shape[1] // 2],
+                #         weight_name=fused_name,
+                #         shard_id="w1",
+                #         expert_id=expert_id,
+                #     )
+
+                #     weight_loader(
+                #         param,
+                #         sliced_weight[..., sliced_weight.shape[1] // 2:],
+                #         weight_name=fused_name,
+                #         shard_id="w3",
+                #         expert_id=expert_id,
+                #     )
+                # else:
+                #     weight_loader(
+                #         param,
+                #         sliced_weight,
+                #         weight_name=fused_name,
+                #         shard_id="w2",
+                #         expert_id=expert_id,
+                #     )
 
                 loaded_params.add(fused_name)
                 continue
@@ -841,16 +863,9 @@ class GptOssModel(nn.Module):
 
                 assert fused_name is not None
                 param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-
-                weight_loader(
-                    param,
-                    sliced_weight,
-                    weight_name=fused_name,
-                    shard_id="w13" if is_w13_bias else "w2",
-                    expert_id=expert_id,
-                )
-
+                expert_data = param.data[expert_id]
+                dim1 = loaded_weight.shape[0]
+                expert_data.data[:dim1].copy_(loaded_weight)
                 loaded_params.add(fused_name)
                 continue
 

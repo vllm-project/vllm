@@ -1117,13 +1117,23 @@ class FusedMoE(CustomOp):
         loaded_weight: torch.Tensor,
         weight_name: str,
         shard_id: str,
-        expert_id: int | None = None,
+        expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
+        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+            # (FIXME) for gpt-oss all experts are combined
+            if "bias" in weight_name:
+                dim1 = loaded_weight.shape[1]
+                param.data[:, :dim1].copy_(loaded_weight)
+            else:
+                dim1 = loaded_weight.shape[1]
+                dim2 = loaded_weight.shape[2]
+                param.data[:, :dim1, :dim2].copy_(loaded_weight)
+            return True if return_success else None
+
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
-        if global_expert_id is not None:
-            expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
             getattr(self.quant_method, "use_global_sf", False)
@@ -1157,41 +1167,41 @@ class FusedMoE(CustomOp):
                 f"shard_id must be ['w1','w2','w3','w13'] but got {shard_id}."
             )
 
-        # Special handling for mxfp4/quark pre-sliced weights AND all biases
-        if (
-            self.quant_config is not None
-            and self.model_type == "gpt_oss"
-            and any(
-                self.quant_config.get_name() == quant_name
-                for quant_name in ["mxfp4", "quark"]
-            )
-            and (
-                shard_id == "w13"
-                or ".w13_" in weight_name
-                or ".w2_" in weight_name
-                or expert_id is None
-                or "bias" in weight_name
-            )
-        ):
-            # Copy with dimension-based slicing to handle potential size mismatches
-            # from MXFP4 block alignment
-            if expert_id is None:
-                dim1 = loaded_weight.shape[1]
-                if "bias" in weight_name:
-                    param.data[:, :dim1].copy_(loaded_weight)
-                else:
-                    dim2 = loaded_weight.shape[2]
-                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            else:
-                expert_data = param.data[expert_id]
-                dim1 = loaded_weight.shape[0]
-                if "bias" in weight_name:
-                    expert_data.data[:dim1].copy_(loaded_weight)
-                else:
-                    dim2 = loaded_weight.shape[1]
-                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+        # # Special handling for mxfp4/quark pre-sliced weights AND all biases
+        # if (
+        #     self.quant_config is not None
+        #     and self.model_type == "gpt_oss"
+        #     and any(
+        #         self.quant_config.get_name() == quant_name
+        #         for quant_name in ["mxfp4", "quark"]
+        #     )
+        #     and (
+        #         shard_id == "w13"
+        #         or ".w13_" in weight_name
+        #         or ".w2_" in weight_name
+        #         or expert_id is None
+        #         or "bias" in weight_name
+        #     )
+        # ):
+        #     # Copy with dimension-based slicing to handle potential size mismatches
+        #     # from MXFP4 block alignment
+        #     if expert_id is None:
+        #         dim1 = loaded_weight.shape[1]
+        #         if "bias" in weight_name:
+        #             param.data[:, :dim1].copy_(loaded_weight)
+        #         else:
+        #             dim2 = loaded_weight.shape[2]
+        #             param.data[:, :dim1, :dim2].copy_(loaded_weight)
+        #     else:
+        #         expert_data = param.data[expert_id]
+        #         dim1 = loaded_weight.shape[0]
+        #         if "bias" in weight_name:
+        #             expert_data.data[:dim1].copy_(loaded_weight)
+        #         else:
+        #             dim2 = loaded_weight.shape[1]
+        #             expert_data.data[:dim1, :dim2].copy_(loaded_weight)
 
-            return True if return_success else None
+        #     return True if return_success else None
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
@@ -1332,7 +1342,8 @@ class FusedMoE(CustomOp):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=self.tp_rank,
+                    # tp_rank=self.tp_rank,
+                    tp_rank=0,
                 )
             return True if return_success else None
 
