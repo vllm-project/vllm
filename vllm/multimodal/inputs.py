@@ -3,10 +3,10 @@
 
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from itertools import accumulate, groupby
+from itertools import accumulate
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -998,69 +998,6 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
                     raise RuntimeError(f"Found empty mm_items[{modality}][{i}]")
 
         return self  # type: ignore[return-value]
-
-    def iter_batches(
-        self,
-        modality: str,
-        *,
-        device: torch.types.Device = None,
-        pin_memory: bool = False,
-    ) -> Generator[tuple[int, BatchedTensorInputs]]:
-        """
-        Yield `(num_items, kwargs)`, where `kwargs` is a dictionary of
-        keyword arguments to pass to the model for the given modality, and
-        `num_items` is the corresponding number of `MultiModalKwargsItem`s.
-        """
-        items = self.require_data()[modality]
-
-        # We cannot safely call `reduce_data` across requests in the following cases:
-        # - When requests have different fields (e.g. mixed image and embedding inputs)
-        # - When requests have different values in `MultiModalSharedField`
-        from .hasher import MultiModalHasher
-
-        hasher = MultiModalHasher()
-
-        group_ids = [
-            hasher.hash_kwargs(
-                **{
-                    k: (
-                        type(e.field).__qualname__,
-                        (
-                            e.data
-                            if isinstance(e.field, MultiModalSharedField)
-                            else None
-                        ),
-                    )
-                    for k, e in item.items()
-                }
-            )
-            for item in items
-        ]
-        group_sizes = [sum(1 for _ in group) for _, group in groupby(group_ids)]
-
-        start_idx = 0
-        for group_size in group_sizes:
-            group_items = items[start_idx : start_idx + group_size]
-
-            group_elems = defaultdict[str, list[MultiModalFieldElem]](list)
-            for group_item in group_items:
-                for key, elem in group_item.items():
-                    group_elems[key].append(elem)
-
-            group_data = {
-                key: elems[0].field.reduce_data(
-                    elems,
-                    device=device,
-                    pin_memory=pin_memory,
-                )
-                for key, elems in group_elems.items()
-            }
-
-            yield group_size, group_data
-
-            start_idx += group_size
-
-        assert start_idx == len(items)
 
 
 MultiModalKwargsOptionalItems: TypeAlias = (

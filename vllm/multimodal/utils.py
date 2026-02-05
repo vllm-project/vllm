@@ -3,7 +3,8 @@
 
 import mimetypes
 import warnings
-from collections.abc import Generator
+from collections import defaultdict
+from collections.abc import Generator, Sequence
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
@@ -13,11 +14,13 @@ from PIL import Image
 
 from vllm.utils.import_utils import LazyLoader
 
+from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalKwargsItems,
     MultiModalPlaceholderDict,
+    MultiModalSharedField,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
 
@@ -146,6 +149,72 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
+def _get_group_hash(elem: MultiModalFieldElem):
+    if not isinstance(elem.field, MultiModalSharedField):
+        return None
+
+    return MultiModalHasher.hash_kwargs(data=elem.data)
+
+
+def _batch_mm_items(
+    items: Sequence[MultiModalKwargsItem],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+):
+    elems = defaultdict[str, list[MultiModalFieldElem]](list)
+    for item in items:
+        for key, elem in item.items():
+            elems[key].append(elem)
+
+    return {
+        key: elems[0].field.reduce_data(
+            elems,
+            device=device,
+            pin_memory=pin_memory,
+        )
+        for key, elems in elems.items()
+    }
+
+
+def group_and_batch_mm_items(
+    items: Sequence[MultiModalKwargsItem],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+) -> Generator[tuple[int, BatchedTensorInputs]]:
+    """
+    Yield `(num_items, kwargs)`, where `kwargs` is a dictionary of
+    keyword arguments to pass to the model for the given modality, and
+    `num_items` is the corresponding number of `MultiModalKwargsItem`s.
+    """
+    # We cannot safely call `reduce_data` across requests in the following cases:
+    # - When requests have different fields (e.g. mixed image and embedding inputs)
+    # - When requests have different values in `MultiModalSharedField`
+    group_ids = [
+        tuple(
+            (key, _get_group_hash(elem))
+            for key, elem in sorted(item.items(), key=lambda kv: kv[0])
+        )
+        for item in items
+    ]
+    group_sizes = [sum(1 for _ in group) for _, group in groupby(group_ids)]
+
+    start_idx = 0
+    for group_size in group_sizes:
+        group_data = _batch_mm_items(
+            items[start_idx : start_idx + group_size],
+            device=device,
+            pin_memory=pin_memory,
+        )
+
+        yield group_size, group_data
+
+        start_idx += group_size
+
+    assert start_idx == len(items)
+
+
 def group_mm_kwargs_by_modality(
     mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     *,
@@ -165,10 +234,9 @@ def group_mm_kwargs_by_modality(
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
-        mm_kwargs_items = MultiModalKwargsItems({modality: items_lst})
 
-        for num_items, mm_kwargs_batch in mm_kwargs_items.iter_batches(
-            modality,
+        for num_items, mm_kwargs_batch in group_and_batch_mm_items(
+            items_lst,
             device=device,
             pin_memory=pin_memory,
         ):

@@ -147,7 +147,7 @@ class MultiModalHasher:
         hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
         hasher = hasher_factory()
 
-        for k, v in kwargs.items():
+        for k, v in sorted(kwargs.items(), key=lambda kv: kv[0]):
             for bytes_ in cls.iter_item_to_bytes(k, v):
                 hasher.update(bytes_)
 

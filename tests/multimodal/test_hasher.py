@@ -16,6 +16,14 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
 
 
+def test_hash_key_order_invariant():
+    x = torch.zeros((5, 10))
+    y = torch.ones((5, 10))
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(x=x, y=y) == hasher.hash_kwargs(y=y, x=x)
+
+
 # NOTE: Images that are the same visually are allowed to have the same hash
 @pytest.mark.parametrize("mode_pair", [("1", "L"), ("RGBA", "CMYK")])
 def test_hash_collision_image_mode(mode_pair):
