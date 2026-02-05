@@ -185,7 +185,7 @@ class Scheduler(SchedulerInterface):
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience
-        # Example: https://github.com/neuralmagic/bart-plugin
+        # Example: https://github.com/vllm-project/bart-plugin
         self.max_num_encoder_input_tokens = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
@@ -203,6 +203,12 @@ class Scheduler(SchedulerInterface):
             if mm_budget
             else 0
         )
+
+        if self.is_encoder_decoder:
+            assert mm_budget and len(mm_budget.mm_max_toks_per_item) == 1, (
+                "Encoder-decoder models are expected to implement the "
+                "multimodal interface with at most one modality."
+            )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
