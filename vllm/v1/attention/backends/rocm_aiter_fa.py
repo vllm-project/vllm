@@ -1185,6 +1185,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         device=output.device,
                     )
 
+                    # import so that aiter register the op to the namespace of
+                    # torch.ops.aiter
+                    import aiter  # noqa: F401
+
                     torch.ops.aiter.paged_attention_v1(
                         output[:num_decode_tokens],
                         workspace_buffer,

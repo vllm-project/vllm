@@ -1005,7 +1005,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._SHUFFLE_KV_CACHE_ENABLED
+        return cls._SHUFFLE_KV_CACHE_ENABLED
 
     @classmethod
     @if_aiter_supported
