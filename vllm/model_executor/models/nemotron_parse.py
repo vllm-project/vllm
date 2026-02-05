@@ -392,11 +392,17 @@ class NemotronParseImageProcessor:
         self.norm_mean = torch.Tensor(OPENAI_CLIP_MEAN).reshape(1, 3, 1, 1)
         self.norm_std = torch.Tensor(OPENAI_CLIP_STD).reshape(1, 3, 1, 1)
 
-        # Create transforms
-        self._create_transforms()
+        # Defer transform creation until first use to avoid importing cv2 at init time
+        self.transform = None
+        self.torch_transform = None
+        self.target_height = None
+        self.target_width = None
 
-    def _create_transforms(self):
-        """Create transform objects."""
+    def _ensure_transforms_initialized(self):
+        """Lazily initialize transforms on first use to avoid importing cv2 during processor creation."""
+        if self.transform is not None:
+            return  # Already initialized
+
         try:
             import albumentations as A
         except ImportError as err:
@@ -404,6 +410,16 @@ class NemotronParseImageProcessor:
                 "The package `albumentations` is required to use "
                 "NemotronParse model. Please install it with `pip install "
                 "albumentations`."
+            ) from err
+
+        try:
+            import cv2
+        except ImportError as err:
+            raise ImportError(
+                "The package `opencv-python` (cv2) is required to use "
+                "NemotronParse model. Please install it with `pip install "
+                "opencv-python`. Note that OpenCV may also require system-level "
+                "dependencies such as libxcb.so.1 on Linux systems."
             ) from err
 
         # Ensure final_size is a tuple of integers
@@ -414,8 +430,6 @@ class NemotronParseImageProcessor:
             )
         else:
             self.target_height = self.target_width = int(self.final_size)
-
-        import cv2
 
         self.transform = A.Compose(
             [
@@ -438,6 +452,16 @@ class NemotronParseImageProcessor:
     def _resize_with_aspect_ratio(self, image: np.ndarray) -> np.ndarray:
         """Resize image maintaining aspect ratio (exact replica of original
         LongestMaxSizeHW)."""
+        try:
+            import cv2
+        except ImportError as err:
+            raise ImportError(
+                "The package `opencv-python` (cv2) is required to use "
+                "NemotronParse model. Please install it with `pip install "
+                "opencv-python`. Note that OpenCV may also require system-level "
+                "dependencies such as libxcb.so.1 on Linux systems."
+            ) from err
+
         height, width = image.shape[:2]
         max_size_height = self.target_height
         max_size_width = self.target_width
@@ -458,8 +482,6 @@ class NemotronParseImageProcessor:
             new_height = int(new_width / aspect_ratio)
 
         # Use cv2.INTER_LINEAR like the original
-        import cv2
-
         return cv2.resize(
             image, (new_width, new_height), interpolation=cv2.INTER_LINEAR
         )
@@ -505,6 +527,9 @@ class NemotronParseImageProcessor:
         Args:
             images: Input image(s)
         """
+        # Ensure transforms are initialized (this is where cv2 will be imported)
+        self._ensure_transforms_initialized()
+
         # Ensure images is a list
         if not isinstance(images, list):
             images = [images]
