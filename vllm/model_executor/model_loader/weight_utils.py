@@ -143,6 +143,7 @@ def atomic_writer(
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
+
 def _natural_sort_key(filepath: str) -> list:
     """Natural sort key for filenames with numeric components, such as
     model-00001-of-00005.safetensors -> ['model-', 1, '-of-', 5, '.safetensors']"""
