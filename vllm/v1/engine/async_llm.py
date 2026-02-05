@@ -990,6 +990,18 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.engine_core.reconfigure(max_num_seqs, max_num_batched_tokens)
+
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return await self.engine_core.reconfigure_async(
+            max_num_seqs, max_num_batched_tokens
+        )
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.

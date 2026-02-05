@@ -191,3 +191,13 @@ class EngineClient(ABC):
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError
+
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        raise NotImplementedError
+
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ):
+        raise NotImplementedError

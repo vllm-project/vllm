@@ -1109,6 +1109,10 @@ class VllmConfig:
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
 
+        # for online reconfigure
+        self.org_max_num_seqs = self.scheduler_config.max_num_seqs
+        self.org_max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism

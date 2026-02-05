@@ -2166,3 +2166,7 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def reconfigure(self, max_num_seqs: int, max_num_batched_tokens: int) -> None:
+        self.max_num_running_reqs = max_num_seqs
+        self.max_num_scheduled_tokens = max_num_batched_tokens
