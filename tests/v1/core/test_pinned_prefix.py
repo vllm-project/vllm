@@ -5,7 +5,7 @@
 import pytest  # noqa: F401
 
 from vllm.sampling_params import SamplingParams
-from vllm.utils import sha256_cbor
+from vllm.utils.hashing import sha256_cbor
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -45,6 +45,7 @@ def _make_manager(
     return KVCacheManager(
         cfg,
         max_model_len=1024,
+        hash_block_size=block_size,
         enable_caching=True,
         pinned_prefix_cap_ratio=cap_ratio,
         enable_pinned_prefix=enable_pin,
@@ -93,6 +94,7 @@ def test_multi_group_prefix_pinning_respects_global_cap():
     kv = KVCacheManager(
         cfg,
         max_model_len=1024,
+        hash_block_size=block_size,
         enable_caching=True,
         pinned_prefix_cap_ratio=0.2,
         enable_pinned_prefix=True,
@@ -172,7 +174,7 @@ def test_concurrent_prefix_sharing_and_pinned_eviction_protection():
     assert computed_r2.blocks[0] == pinned_prefix
 
     # Simulate scheduler touching for r2.
-    kv.block_pool.touch(computed_r2.blocks)
+    kv.block_pool.touch(computed_r2.blocks[0])
     for blk in pinned_prefix:
         assert blk.ref_cnt >= 2
 
@@ -288,7 +290,9 @@ class TestPinnedPrefixCaching:
     def test_block_pool_pin_blocks(self):
         """Test that blocks can be pinned to prevent eviction."""
 
-        block_pool = BlockPool(num_gpu_blocks=10, enable_caching=True)
+        block_pool = BlockPool(
+            num_gpu_blocks=10, enable_caching=True, hash_block_size=4
+        )
 
         # Get some blocks
         blocks = block_pool.get_new_blocks(3)
@@ -304,7 +308,9 @@ class TestPinnedPrefixCaching:
     def test_block_pool_unpin_blocks(self):
         """Test that pinned blocks can be unpinned."""
 
-        block_pool = BlockPool(num_gpu_blocks=10, enable_caching=True)
+        block_pool = BlockPool(
+            num_gpu_blocks=10, enable_caching=True, hash_block_size=4
+        )
 
         # Get and pin some blocks
         blocks = block_pool.get_new_blocks(3)
@@ -320,7 +326,9 @@ class TestPinnedPrefixCaching:
     def test_pinned_blocks_protected_from_eviction(self):
         """Test that pinned blocks are protected from eviction."""
 
-        block_pool = BlockPool(num_gpu_blocks=10, enable_caching=True)
+        block_pool = BlockPool(
+            num_gpu_blocks=10, enable_caching=True, hash_block_size=4
+        )
 
         # Get some blocks and make them cached
         blocks = block_pool.get_new_blocks(3)
@@ -369,7 +377,7 @@ class TestPinnedPrefixCaching:
 
     def test_cache_blocks_with_multiple_full_blocks_pinned(self):
         """Test calculating multiple full blocks for pinning."""
-        from vllm.utils import sha256_cbor
+        from vllm.utils.hashing import sha256_cbor
         from vllm.v1.core.kv_cache_utils import init_none_hash
 
         # Initialize the hash function
@@ -391,7 +399,7 @@ class TestPinnedPrefixCaching:
 
     def test_cache_blocks_without_pin_prefix(self):
         """Test that pin_prefix defaults to False when not specified."""
-        from vllm.utils import sha256_cbor
+        from vllm.utils.hashing import sha256_cbor
         from vllm.v1.core.kv_cache_utils import init_none_hash
 
         # Initialize the hash function
