@@ -46,8 +46,8 @@ backends:
   - flashmla        # Hopper only
 
 device: "cuda:0"
-repeats: 5
-warmup_iters: 3
+repeats: 100
+warmup_iters: 10
 profile_memory: true
 
 # Backend-specific tuning

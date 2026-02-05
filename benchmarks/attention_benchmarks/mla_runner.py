@@ -124,16 +124,12 @@ def create_minimal_vllm_config(
             seed=0,
             max_model_len=32768,
             quantization=None,
-            quantization_param_path=None,
             enforce_eager=False,
-            max_context_len_to_capture=None,
-            max_seq_len_to_capture=8192,
             max_logprobs=20,
             disable_sliding_window=False,
             skip_tokenizer_init=True,
             served_model_name=None,
             limit_mm_per_prompt=None,
-            use_async_output_proc=True,
             config_format="auto",
         )
     finally:
