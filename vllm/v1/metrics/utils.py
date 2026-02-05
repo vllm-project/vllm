@@ -8,7 +8,7 @@ from prometheus_client import Counter, Gauge, Histogram
 PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
-def make_per_engine(
+def create_metric_per_engine(
     metric: PromMetric,
     per_engine_labelvalues: dict[int, list[object]],
 ) -> dict[int, PromMetric]:
