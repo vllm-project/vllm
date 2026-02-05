@@ -231,7 +231,6 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
-    VLLM_MAX_CHARS_PER_TOKEN: int = 32
 
 
 def get_default_cache_root():
@@ -1585,11 +1584,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
-    # Upper bound for characters per token used by the early-fail prompt length
-    # guard before tokenization.
-    "VLLM_MAX_CHARS_PER_TOKEN": lambda: int(
-        os.getenv("VLLM_MAX_CHARS_PER_TOKEN", "32")
-    ),
 }
 
 

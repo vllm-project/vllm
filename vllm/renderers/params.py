@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-import vllm.envs as envs
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -247,8 +246,8 @@ class TokenizeParams:
         if max_input_tokens is None:
             return text
 
-        if self.truncate_prompt_tokens is None:
-            max_input_chars = max_input_tokens * envs.VLLM_MAX_CHARS_PER_TOKEN
+        if self.truncate_prompt_tokens is None and tokenizer is not None:
+            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
 
             if len(text) > max_input_chars:
                 # To save resources, fail the request outright without even

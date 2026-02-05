@@ -38,6 +38,7 @@ class MockModelConfig:
 @dataclass
 class DummyTokenizer:
     truncation_side: str = "left"
+    max_chars_per_token: int = 1
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
@@ -57,7 +58,12 @@ class DummyTokenizer:
         return list(range(in_length))
 
 
-def _build_renderer(model_config: MockModelConfig, truncation_side: str = "left"):
+def _build_renderer(
+    model_config: MockModelConfig,
+    *,
+    truncation_side: str = "left",
+    max_chars_per_token: int = 1,
+):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     renderer = HfRenderer(
@@ -66,7 +72,10 @@ def _build_renderer(model_config: MockModelConfig, truncation_side: str = "left"
     )
 
     if not model_config.skip_tokenizer_init:
-        renderer._tokenizer = DummyTokenizer(truncation_side=truncation_side)
+        renderer._tokenizer = DummyTokenizer(
+            truncation_side=truncation_side,
+            max_chars_per_token=max_chars_per_token,
+        )
 
     return renderer
 
@@ -252,10 +261,8 @@ class TestRenderPrompt:
         # Should keep the first 5 tokens: [100, 101, 102, 103, 104]
         assert results[0]["prompt_token_ids"] == [100, 101, 102, 103, 104]
 
-    def test_text_max_length_exceeded_obvious(self, monkeypatch):
-        monkeypatch.setenv("VLLM_MAX_CHARS_PER_TOKEN", 1)
-
-        renderer = _build_renderer(MockModelConfig())
+    def test_text_max_length_exceeded_obvious(self):
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
 
         # Exceeds max_total_tokens and max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
@@ -273,10 +280,8 @@ class TestRenderPrompt:
         # Should not even attempt tokenization
         assert renderer._tokenizer._captured_encode_kwargs == {}
 
-    def test_text_max_length_exceeded_nonobvious(self, monkeypatch):
-        monkeypatch.setenv("VLLM_MAX_CHARS_PER_TOKEN", 2)
-
-        renderer = _build_renderer(MockModelConfig())
+    def test_text_max_length_exceeded_nonobvious(self):
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=2)
 
         # Exceeds max_total_tokens but not max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
@@ -307,7 +312,7 @@ class TestRenderPrompt:
         ):
             renderer.tokenize_prompts(
                 prompts,
-                TokenizeParams(max_total_tokens=100),
+                TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=None),
             )
 
     def test_no_tokenizer_for_text(self):
