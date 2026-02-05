@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.v1.spec_decode.eagle_mixin import EagleMixin
 
 from .utils import (
     AutoWeightsLoader,
@@ -161,7 +162,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class EagleLlamaForCausalLM(LlamaForCausalLM):
+class EagleLlamaForCausalLM(EagleMixin, LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
