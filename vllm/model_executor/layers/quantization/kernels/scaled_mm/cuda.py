@@ -108,7 +108,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if self.deepgemm_kernel is not None and should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, True
         ):
-            return self.deepgemm_kernel.apply_weights(layer, bias)
+            return self.deepgemm_kernel.apply_weights(layer, x, bias)
 
         assert self.default_fallback_kernel is not None
         return self.default_fallback_kernel.apply_weights(layer, x, bias)
