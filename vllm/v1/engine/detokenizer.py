@@ -116,18 +116,15 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 1) Detokenize the new token ids incrementally.
         # accumulate pieces and join once.
-        base_len = len(self.output_text)
-        new_chars_len = 0
-        stop_check_offset = base_len
+        stop_check_offset = len(self.output_text)
         pieces: list[str] = []
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             piece = self.decode_next(new_token_id)
             pieces.append(piece)
-            new_chars_len += len(piece)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
-                stop_check_offset = base_len + new_chars_len
+                stop_check_offset += len(piece)
 
         if pieces:
             self.output_text += "".join(pieces)
