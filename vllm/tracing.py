@@ -12,6 +12,13 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 NORMAL_TRACE = 1
 TOKEN_LEVEL_TRACE = 2
 
+# Token ID hiding switch
+# When set to 1/true, token level profiling trace will not include new_token_ids
+HIDE_TOKEN_IDS = os.environ.get("VLLM_TRACE_HIDE_TOKEN_IDS", "").lower() in (
+    "1",
+    "true",
+)
+
 logger = init_logger(__name__)
 
 _is_otel_imported = False
