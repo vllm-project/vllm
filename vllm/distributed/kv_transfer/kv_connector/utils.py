@@ -324,6 +324,7 @@ class TpKVTopology:
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
         )
+        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         self._is_kv_layout_blocks_first = (
@@ -337,6 +338,7 @@ class TpKVTopology:
             )
 
         if self._cross_layers_blocks:
+            logger.debug("Using cross-layer KV cache")
             # prepend layers dimension
             _MOCK_NUM_LAYERS = 80
             kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
