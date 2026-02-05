@@ -543,7 +543,7 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 
 
 def test_reload_weights_before_load_model(model_runner):
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         model_runner.reload_weights()
 
 

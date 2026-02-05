@@ -6,12 +6,6 @@ import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL,
-    GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES,
-    GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES,
-)
 from vllm.model_executor.layers.quantization.utils.allspark_utils import (
     ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
     ALLSPARK_SUPPORTED_QUANT_TYPES,
@@ -33,9 +27,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace,
     awq_marlin_quantize,
     marlin_quantize,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
-    marlin_24_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack,
@@ -78,14 +69,7 @@ def bench_run(
     if size_k % group_size != 0:
         return
 
-    marlin_24_supported = (
-        quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
-        and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES
-    )
-    repack_supported = (
-        quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
-        and group_size in MARLIN_SUPPORTED_GROUP_SIZES
-    )
+    repack_supported = group_size in MARLIN_SUPPORTED_GROUP_SIZES
     allspark_supported = (
         quant_type in ALLSPARK_SUPPORTED_QUANT_TYPES
         and group_size == -1
@@ -125,14 +109,6 @@ def bench_run(
             marlin_g_idx,
             marlin_sort_indices,
         )
-
-    def gen_marlin_24_params():
-        marlin_24_w_ref = marlin_24_q_w_comp = marlin_24_meta = marlin_24_s = None
-        if marlin_24_supported:
-            (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
-                marlin_24_quantize(b, quant_type, group_size)
-            )
-        return (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s)
 
     def gen_repack_params():
         q_w_gptq = None
@@ -188,9 +164,6 @@ def bench_run(
         marlin_g_idx,
         marlin_sort_indices,
     ) = gen_marlin_params()
-    marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s = (
-        gen_marlin_24_params()
-    )
     q_w_gptq, repack_sort_indices = gen_repack_params()
     qw_reorder, s_reorder, zp_reorder, sm_count, sm_version, CUBLAS_M_THRESHOLD = (
         gen_allspark_params()
@@ -199,9 +172,6 @@ def bench_run(
     # Prepare
     marlin_workspace = MarlinWorkspace(
         size_n, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL
-    )
-    marlin_24_workspace = MarlinWorkspace(
-        size_n, GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL
     )
 
     globals = {
@@ -222,12 +192,6 @@ def bench_run(
         "marlin_sort_indices": marlin_sort_indices,
         "marlin_workspace": marlin_workspace,
         "is_k_full": is_k_full,
-        # Marlin_24 params
-        "marlin_24_w_ref": marlin_24_w_ref,
-        "marlin_24_q_w_comp": marlin_24_q_w_comp,
-        "marlin_24_meta": marlin_24_meta,
-        "marlin_24_s": marlin_24_s,
-        "marlin_24_workspace": marlin_24_workspace,
         # GPTQ params
         "q_w_gptq": q_w_gptq,
         "repack_sort_indices": repack_sort_indices,
@@ -240,7 +204,6 @@ def bench_run(
         "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD,
         # Kernels
         "marlin_gemm": ops.marlin_gemm,
-        "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
         "gptq_marlin_repack": ops.gptq_marlin_repack,
         "allspark_w8a16_gemm": ops.allspark_w8a16_gemm,
     }
@@ -280,17 +243,6 @@ def bench_run(
             description="marlin_gemm_fp32",
         ).blocked_autorange(min_run_time=min_run_time)
     )
-
-    if marlin_24_supported:
-        results.append(
-            benchmark.Timer(
-                stmt="output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, quant_type, size_m, size_n, size_k)",  # noqa: E501
-                globals=globals,
-                label=label,
-                sub_label=sub_label,
-                description="gptq_marlin_24_gemm",
-            ).blocked_autorange(min_run_time=min_run_time)
-        )
 
     if repack_supported:
         results.append(

@@ -98,7 +98,7 @@ class FullAttentionSpec(AttentionSpec):
     In this case, we use FullAttentionSpec and record the sliding window size.
     """
 
-    head_size_v: int | None = None
+    head_size_v: int = None  # type: ignore[assignment]
 
     sliding_window: int | None = None
     """

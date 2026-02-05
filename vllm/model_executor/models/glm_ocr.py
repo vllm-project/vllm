@@ -137,6 +137,7 @@ class GlmOcrVisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
@@ -249,7 +250,7 @@ class GlmOcrPatchMerger(Glm4vPatchMerger):
 class GlmOcrVisionTransformer(Glm4vVisionTransformer):
     def __init__(
         self,
-        vision_config: GlmOcrVisionConfig,
+        vision_config: "GlmOcrVisionConfig",
         norm_eps: float = 1e-5,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

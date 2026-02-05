@@ -759,6 +759,7 @@ class IsaacProcessor:
                 # Regular text message
                 processed_messages.append(message)
 
+        kwargs["return_dict"] = False
         return self.tokenizer.apply_chat_template(
             processed_messages,
             tokenize=tokenize,

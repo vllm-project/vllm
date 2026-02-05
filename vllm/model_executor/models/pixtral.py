@@ -70,7 +70,7 @@ from .interfaces import (
     SupportsPP,
 )
 from .module_mapping import MultiModelKeys
-from .utils import init_vllm_registered_model, maybe_prefix
+from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
@@ -91,6 +91,10 @@ except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
+
+
+def _is_layer_none_or_staged(layer: nn.Module) -> bool:
+    return layer is None or isinstance(layer, StageMissingLayer)
 
 
 class PixtralImagePixelInputs(TensorSchema):
@@ -299,9 +303,11 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
         return ProcessorInputs(
             prompt=dummy_tokens,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 
@@ -542,7 +548,7 @@ class PixtralForConditionalGeneration(
             # Single pass over weights
             for name, w in weights:
                 if is_vision_encoder_weights((name, w)):
-                    if self.vision_encoder is None:
+                    if _is_layer_none_or_staged(self.vision_encoder):
                         continue
                     # Load vision encoder weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -551,7 +557,7 @@ class PixtralForConditionalGeneration(
                         with torch.no_grad():
                             default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
-                    if self.patch_merger is None:
+                    if _is_layer_none_or_staged(self.patch_merger):
                         continue
                     # Load vision patch merger weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -559,7 +565,7 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_pre_mm_projector_norm((name, w)):
-                    if self.pre_mm_projector_norm is None:
+                    if _is_layer_none_or_staged(self.pre_mm_projector_norm):
                         continue
                     # Load vision pre_mm_projector_norm weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -567,7 +573,7 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
-                    if self.vision_language_adapter is None:
+                    if _is_layer_none_or_staged(self.vision_language_adapter):
                         continue
                     # Load vision-language adapter weights directly
                     trimmed_name = ".".join(name.split(".")[1:])

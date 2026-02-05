@@ -739,7 +739,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         ```
 
     However, this is not entirely correct. After `FuyuImageProcessor.preprocess_with_tokenizer_info` is called,
-    a BOS token (`<s>`) is also added to the promopt:
+    a BOS token (`<s>`) is also added to the prompt:
 
     ??? code
 

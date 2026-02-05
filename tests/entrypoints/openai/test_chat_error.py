@@ -15,7 +15,8 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.tokenizers import get_tokenizer
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -35,6 +36,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
+    model = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -57,6 +59,15 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer(
+        model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -71,18 +82,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         chat_template_content_format="auto",
     )
 
-    async def _fake_process_inputs(
-        request_id,
-        engine_prompt,
-        sampling_params,
-        *,
-        lora_request,
-        trace_headers,
-        priority,
-        data_parallel_rank,
-    ):
-        return dict(engine_prompt), {}
-
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_prompts
         return (
@@ -90,7 +89,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
     serving_chat._preprocess_chat = AsyncMock(side_effect=_fake_preprocess_chat)
     return serving_chat
 
@@ -99,11 +97,11 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 async def test_chat_error_non_stream():
     """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -153,11 +151,11 @@ async def test_chat_error_non_stream():
 async def test_chat_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
 

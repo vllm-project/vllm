@@ -5,64 +5,9 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.inputs import zip_enc_dec_prompts
-from vllm.inputs.parse import parse_raw_prompts
 from vllm.inputs.preprocess import InputPreprocessor
 
 pytestmark = pytest.mark.cpu_test
-
-STRING_INPUTS = [
-    "",
-    "foo",
-    "foo bar",
-    "foo baz bar",
-    "foo bar qux baz",
-]
-
-TOKEN_INPUTS = [
-    [-1],
-    [1],
-    [1, 2],
-    [1, 3, 4],
-    [1, 2, 4, 3],
-]
-
-INPUTS_SLICES = [
-    slice(None, None, -1),
-    slice(None, None, 2),
-    slice(None, None, -2),
-]
-
-
-# Test that a nested mixed-type list of lists raises a TypeError.
-@pytest.mark.parametrize("invalid_input", [[[1, 2], ["foo", "bar"]]])
-def test_invalid_input_raise_type_error(invalid_input):
-    with pytest.raises(TypeError):
-        parse_raw_prompts(invalid_input)
-
-
-def test_parse_raw_single_batch_empty():
-    with pytest.raises(ValueError, match="at least one prompt"):
-        parse_raw_prompts([])
-
-    with pytest.raises(ValueError, match="at least one prompt"):
-        parse_raw_prompts([[]])
-
-
-@pytest.mark.parametrize("string_input", STRING_INPUTS)
-def test_parse_raw_single_batch_string_consistent(string_input: str):
-    assert parse_raw_prompts(string_input) == parse_raw_prompts([string_input])
-
-
-@pytest.mark.parametrize("token_input", TOKEN_INPUTS)
-def test_parse_raw_single_batch_token_consistent(token_input: list[int]):
-    assert parse_raw_prompts(token_input) == parse_raw_prompts([token_input])
-
-
-@pytest.mark.parametrize("inputs_slice", INPUTS_SLICES)
-def test_parse_raw_single_batch_string_slice(inputs_slice: slice):
-    assert parse_raw_prompts(STRING_INPUTS)[inputs_slice] == parse_raw_prompts(
-        STRING_INPUTS[inputs_slice]
-    )
 
 
 @pytest.mark.parametrize(

@@ -70,6 +70,34 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# MusicFlamingo
+def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "nvidia/music-flamingo-2601-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    # MusicFlamingo uses <sound> token for audio
+    audio_placeholder = "<sound>" * audio_count
+
+    prompt = (
+        "<|im_start|>system\n"
+        "You are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_placeholder}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     model_name = "google/gemma-3n-E2B-it"
@@ -330,6 +358,25 @@ def run_qwen2_5_omni(question: str, audio_count: int):
     )
 
 
+def run_qwen3_asr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "Qwen/Qwen3-Asr-1.7B"
+
+    audio_in_prompt = "<|audio_start|><|audio_pad|><|audio_end|>\n" * audio_count
+    prompt = f"<|im_start|>user\n{audio_in_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Ultravox 0.5-1B
 def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -433,6 +480,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
+    "musicflamingo": run_musicflamingo,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
     "funaudiochat": run_funaudiochat,
@@ -442,6 +490,7 @@ model_example_map = {
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "qwen3_asr": run_qwen3_asr,
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
