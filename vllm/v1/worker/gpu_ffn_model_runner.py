@@ -54,7 +54,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=6000 * 27 + 4000 * 27 * 2, warmup=1, active=30, repeat=1
+                wait=1000, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 "./profiler_logs/ffn"
@@ -176,7 +176,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
                 recv_metadata.recv_handle_list = None 
                 print(f"jcz deepseekv2 3 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
-                # self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
                 print(f"jcz deepseekv2 4 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
         logger.info(f"jcz ffn_forward end")
         self._execute_model_count += 1
@@ -191,6 +191,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
     ):
         """Execute FFN computation for a single request"""
         is_ubatch = False
+        self.profiler.step()
         if dp_metadata_list is not None and len(dp_metadata_list) > 1:
             is_ubatch = True
         try:
