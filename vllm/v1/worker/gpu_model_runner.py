@@ -119,6 +119,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.core.kv_cache_utils import get_slot_mappings_by_layer
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -3247,7 +3248,9 @@ class GPUModelRunner(
         Returns:
             A tuple of:
             - slot_mappings_by_gid: dict[int, torch.Tensor] for attention metadata
-            - slot_mappings_by_layer: dict[str, torch.Tensor] or list for ForwardContext
+            - slot_mappings_by_layer: dict[str, torch.Tensor] or list for
+              ForwardContext
+            Or None if KV cache config is not available.
         """
         if not (
             hasattr(self, "kv_cache_config")
@@ -3281,22 +3284,9 @@ class GPUModelRunner(
             gid: _get_slot_mapping(gid)
             for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         }
-
-        slot_mappings_by_layer: dict[str, torch.Tensor] = {}
-        for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
-            slot_mapping = slot_mappings_by_gid[gid]
-            for layer_name in kv_cache_group.layer_names:
-                slot_mappings_by_layer[layer_name] = slot_mapping
-
-        if ubatch_slices is not None:
-            result: list[dict[str, torch.Tensor]] = []
-            for ubatch in ubatch_slices:
-                sliced_mappings: dict[str, torch.Tensor] = {}
-                for layer_name, slot_mapping in slot_mappings_by_layer.items():
-                    sliced_mappings[layer_name] = slot_mapping[ubatch.token_slice]
-                result.append(sliced_mappings)
-            return slot_mappings_by_gid, result
-
+        slot_mappings_by_layer = get_slot_mappings_by_layer(
+            self.kv_cache_config, slot_mappings_by_gid, ubatch_slices
+        )
         return slot_mappings_by_gid, slot_mappings_by_layer
 
     @torch.inference_mode()

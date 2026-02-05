@@ -41,6 +41,7 @@ from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.core.kv_cache_utils import kv_cache_group_id_by_layer
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -52,7 +53,6 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.utils import layer_names_to_kv_cache_group_id
 
 logger = init_logger(__name__)
 
@@ -238,7 +238,7 @@ class SpecDecodeBaseProposer:
 
     @cached_property
     def layer_names_to_kv_cache_gid(self) -> dict[str, int]:
-        return layer_names_to_kv_cache_group_id(self.runner.attn_groups)
+        return kv_cache_group_id_by_layer(self.runner.kv_cache_config)
 
     def pick_first_layer_common_attn_metadata(
         self, cm_by_gid: CommonAttnMetadataByGid
