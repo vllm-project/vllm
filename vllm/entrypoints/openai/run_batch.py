@@ -263,9 +263,7 @@ def make_arg_parser(parser: FlexibleArgumentParser):
     )
 
     parser.add_argument(
-        "--enable-metrics",
-        action="store_true",
-        help="Enable Prometheus metrics",
+        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
     )
     parser.add_argument(
         "--url",
@@ -339,57 +337,11 @@ class BatchProgressTracker:
 
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(path_or_url) as resp,
-        ):
+        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
             return f.read()
-
-
-async def download_bytes_from_url(url: str) -> bytes:
-    """
-    Download data from a URL or decode from a data URL.
-
-    Args:
-        url: Either an HTTP/HTTPS URL or a data URL (data:...;base64,...)
-
-    Returns:
-        Data as bytes
-    """
-    parsed = urlparse(url)
-
-    # Handle data URLs (base64 encoded)
-    if parsed.scheme == "data":
-        # Format: data:...;base64,<base64_data>
-        if "," in url:
-            header, data = url.split(",", 1)
-            if "base64" in header:
-                return base64.b64decode(data)
-            else:
-                raise ValueError(f"Unsupported data URL encoding: {header}")
-        else:
-            raise ValueError(f"Invalid data URL format: {url}")
-
-    # Handle HTTP/HTTPS URLs
-    elif parsed.scheme in ("http", "https"):
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(url) as resp,
-        ):
-            if resp.status != 200:
-                raise Exception(
-                    f"Failed to download data from URL: {url}. Status: {resp.status}"
-                )
-            return await resp.read()
-
-    else:
-        raise ValueError(
-            f"Unsupported URL scheme: {parsed.scheme}. "
-            "Supported schemes: http, https, data"
-        )
 
 
 async def write_local_file(
@@ -461,9 +413,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
 
 
 async def write_file(
-    path_or_url: str,
-    batch_outputs: list[BatchRequestOutput],
-    output_tmp_dir: str,
+    path_or_url: str, batch_outputs: list[BatchRequestOutput], output_tmp_dir: str
 ) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
@@ -501,6 +451,49 @@ async def write_file(
     else:
         logger.info("Writing outputs to local file %s", path_or_url)
         await write_local_file(path_or_url, batch_outputs)
+
+
+async def download_bytes_from_url(url: str) -> bytes:
+    """
+    Download data from a URL or decode from a data URL.
+
+    Args:
+        url: Either an HTTP/HTTPS URL or a data URL (data:...;base64,...)
+
+    Returns:
+        Data as bytes
+    """
+    parsed = urlparse(url)
+
+    # Handle data URLs (base64 encoded)
+    if parsed.scheme == "data":
+        # Format: data:...;base64,<base64_data>
+        if "," in url:
+            header, data = url.split(",", 1)
+            if "base64" in header:
+                return base64.b64decode(data)
+            else:
+                raise ValueError(f"Unsupported data URL encoding: {header}")
+        else:
+            raise ValueError(f"Invalid data URL format: {url}")
+
+    # Handle HTTP/HTTPS URLs
+    elif parsed.scheme in ("http", "https"):
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url) as resp,
+        ):
+            if resp.status != 200:
+                raise Exception(
+                    f"Failed to download data from URL: {url}. Status: {resp.status}"
+                )
+            return await resp.read()
+
+    else:
+        raise ValueError(
+            f"Unsupported URL scheme: {parsed.scheme}. "
+            "Supported schemes: http, https, data"
+        )
 
 
 def make_error_request_output(
@@ -571,6 +564,43 @@ async def run_request(
     return batch_output
 
 
+def handle_endpoint_request(
+    request: BatchRequestInput,
+    tracker: BatchProgressTracker,
+    url_matcher: Callable[[str], bool],
+    handler_getter: Callable[[], Callable | None],
+    wrapper_fn: Callable[[Callable], Callable] | None = None,
+) -> Awaitable[BatchRequestOutput] | None:
+    """
+    Generic handler for endpoint requests that eliminates code duplication.
+
+    Args:
+        request: The batch request input
+        tracker: Progress tracker for the batch
+        url_matcher: Function that takes a URL and returns True if it matches
+        handler_getter: Function that returns the handler function or None
+        wrapper_fn: Optional function to wrap the handler (e.g., for transcriptions)
+
+    Returns:
+        Awaitable[BatchRequestOutput] if the request was handled,
+        None if URL didn't match
+    """
+    if not url_matcher(request.url):
+        return None
+
+    handler_fn = handler_getter()
+    if handler_fn is None:
+        error_msg = f"Model does not support endpoint: {request.url}"
+        return make_async_error_request_output(request, error_msg=error_msg)
+
+    # Apply wrapper if provided (e.g., for transcriptions/translations)
+    if wrapper_fn is not None:
+        handler_fn = wrapper_fn(handler_fn)
+
+    tracker.submitted()
+    return run_request(handler_fn, request, tracker)
+
+
 def make_transcription_wrapper(is_translation: bool):
     """
     Factory function to create a wrapper for transcription/translation handlers.
@@ -635,54 +665,6 @@ def make_transcription_wrapper(is_translation: bool):
         return transcription_wrapper
 
     return wrapper
-
-
-def handle_endpoint_request(
-    request: BatchRequestInput,
-    tracker: BatchProgressTracker,
-    url_matcher: Callable[[str], bool],
-    handler_getter: Callable[[], Callable | None],
-    wrapper_fn: Callable[[Callable], Callable] | None = None,
-) -> Awaitable[BatchRequestOutput] | None:
-    """
-    Generic handler for endpoint requests that eliminates code duplication.
-
-    Args:
-        request: The batch request input
-        tracker: Progress tracker for the batch
-        url_matcher: Function that takes a URL and returns True if it matches
-        handler_getter: Function that returns the handler function or None
-        wrapper_fn: Optional function to wrap the handler (e.g., for transcriptions)
-
-    Returns:
-        Awaitable[BatchRequestOutput] if the request was handled,
-        None if URL didn't match
-    """
-    if not url_matcher(request.url):
-        return None
-
-    handler_fn = handler_getter()
-    if handler_fn is None:
-        error_msg = f"Model does not support endpoint: {request.url}"
-        return make_async_error_request_output(request, error_msg=error_msg)
-
-    # Apply wrapper if provided (e.g., for transcriptions/translations)
-    if wrapper_fn is not None:
-        handler_fn = wrapper_fn(handler_fn)
-
-    tracker.submitted()
-    return run_request(handler_fn, request, tracker)
-
-
-def validate_run_batch_args(args):
-    valid_reasoning_parsers = ReasoningParserManager.list_registered()
-    if (
-        reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parsers:
-        raise KeyError(
-            f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
-        )
 
 
 def build_endpoint_registry(
@@ -842,6 +824,17 @@ def build_endpoint_registry(
     }
 
     return endpoint_registry
+
+
+def validate_run_batch_args(args):
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parsers:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+        )
 
 
 async def run_batch(
