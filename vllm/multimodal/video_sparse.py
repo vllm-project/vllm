@@ -80,9 +80,10 @@ class SimilarFrameDetector:
         assert imgs1.shape == imgs2.shape
         assert imgs1.device == imgs2.device
         assert imgs1.dim() == 4, "Input must be 4D tensor (B, C, H, W)"
+        assert imgs1.shape[1] == 1, "Input must be grayscale (1 channel)"
 
-        gray1 = tvF.rgb_to_grayscale(imgs1, num_output_channels=1).to(torch.float32)
-        gray2 = tvF.rgb_to_grayscale(imgs2, num_output_channels=1).to(torch.float32)
+        gray1 = imgs1.to(torch.float32)
+        gray2 = imgs2.to(torch.float32)
 
         ssim_values = structural_similarity_index_measure(
             preds=gray1,
@@ -102,6 +103,7 @@ class SimilarFrameDetector:
         assert frames1.shape == frames2.shape
         assert frames1.device == frames2.device
         assert frames1.dim() == 4, "Input must be 4D tensor (B, C, H, W)"
+        assert frames1.shape[1] == 1, "Input must be grayscale (1 channel)"
 
         ssim_values = self._calculate_ssim(frames1, frames2)
 
@@ -119,8 +121,10 @@ class SimilarFrameDetector:
         if frame_number < 2:
             return torch.tensor([], device=frames.device)
 
-        prev_frames = frames[:-1]
-        next_frames = frames[1:]
+        frames_gray = tvF.rgb_to_grayscale(frames, num_output_channels=1).to(torch.float32)
+
+        prev_frames = frames_gray[:-1]
+        next_frames = frames_gray[1:]
 
         return self._calculate_photometric_loss(prev_frames, next_frames)
 
