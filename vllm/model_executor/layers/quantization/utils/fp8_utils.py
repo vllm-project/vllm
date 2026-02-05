@@ -1319,7 +1319,10 @@ def requant_weight_ue8m0_inplace(
 
 
 def deepgemm_post_process_fp8_weight_block(
-    wq: torch.Tensor, ws: torch.Tensor, quant_block_shape: tuple[int], use_e8m0: bool
+    wq: torch.Tensor,
+    ws: torch.Tensor,
+    quant_block_shape: tuple[int, ...],
+    use_e8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert wq.dtype == torch.float8_e4m3fn, (
         "Expected quantized tensor dtype "

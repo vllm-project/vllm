@@ -7,6 +7,7 @@ from typing import TypeVar
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.base import MMLinearLayerConfig
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
@@ -42,7 +43,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
@@ -100,7 +100,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
 }
 
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
-_KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
+_KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def is_supported_and_can_implement_kernel(

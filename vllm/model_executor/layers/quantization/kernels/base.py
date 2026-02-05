@@ -399,6 +399,7 @@ class DynamicMMLinearKernel(
             compute_capability
         )
         if is_base_supported and is_fallback_supported:
+            return True, None
 
         # Both unsupported: include both reasons
         if not is_base_supported and not is_fallback_supported:
