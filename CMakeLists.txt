@@ -1127,5 +1127,37 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/qutlass.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
-    include(cmake/external_projects/vllm_flash_attn.cmake)
+    include(ExternalProject)
+
+    ExternalProject_Add(vllm_flash_attn_external
+        PREFIX ${CMAKE_BINARY_DIR}/vllm-flash-attn
+        GIT_REPOSITORY https://github.com/vllm-project/vllm-flash-attn.git
+        GIT_TAG 7d346be62004163f0b59f965761b122cc40bd0a3  # Pinned to specific commit on vllm-flash-attn main for build reproducibility
+        SOURCE_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn-src
+        BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn-build
+        INSTALL_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn-install
+
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+            -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}
+            -DPython_EXECUTABLE=${Python_EXECUTABLE}
+            -DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}
+            -DTORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}   # important if set
+            -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+
+        BUILD_BYPRODUCTS
+            <INSTALL_DIR>/lib/libflash_attn.so
+
+        STEP_TARGETS build install
+    )
+
+    # Create an imported target so vLLM can link against the built flash-attn lib
+    add_library(vllm_flash_attn SHARED IMPORTED GLOBAL)
+    set_target_properties(vllm_flash_attn PROPERTIES
+        IMPORTED_LOCATION ${CMAKE_BINARY_DIR}/vllm-flash-attn-install/lib/libflash_attn.so
+        INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_BINARY_DIR}/vllm-flash-attn-install/include
+    )
+
+    target_link_libraries(_C PRIVATE vllm_flash_attn)
 endif ()
