@@ -152,8 +152,8 @@ Priority is **1 = highest** (tried first).
 | **Sink** | Attention sink support (for StreamingLLM) |
 | **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
-| **DCP** | Decode Context Parallelism support (`can_return_lse_for_decode`) |
-| **PCP** | Prefill Context Parallelism support (`supports_pcp`) |
+| **DCP** | Decode Context Parallelism support (`--decode-context-parallel-size`) |
+| **PCP** | Prefill Context Parallelism support (`--prefill-context-parallel-size`) |
 | **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
 | **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
 
