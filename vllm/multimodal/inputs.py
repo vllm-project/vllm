@@ -22,7 +22,6 @@ import numpy as np
 from PIL.Image import Image
 from typing_extensions import TypeVar
 
-from vllm.inputs.data import _InputOptions
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
@@ -33,7 +32,11 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+
+    from vllm.inputs.data import _InputOptions
 else:
+    _InputOptions = dict
+
     torch = LazyLoader("torch", globals(), "torch")
 
 _T = TypeVar("_T")
