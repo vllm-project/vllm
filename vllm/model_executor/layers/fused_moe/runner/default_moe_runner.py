@@ -293,13 +293,13 @@ class DefaultMoERunner(MoERunner):
     def _reduce_output(
         self,
         states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        trunc_size: int,
+        trunc_sizes: list[int],
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        def trunc(x: torch.Tensor) -> torch.Tensor:
-            return x[..., :trunc_size]
+        def trunc(idx: int, x: torch.Tensor) -> torch.Tensor:
+            return x[..., : trunc_sizes[idx]]
 
-        def reduce_and_trunc(x: torch.Tensor) -> torch.Tensor:
-            return trunc(self.maybe_all_reduce_tensor_model_parallel(x))
+        def reduce_and_trunc(idx: int, x: torch.Tensor) -> torch.Tensor:
+            return trunc(idx, self.maybe_all_reduce_tensor_model_parallel(x))
 
         if (
             not self.moe_config.is_sequence_parallel
@@ -312,9 +312,11 @@ class DefaultMoERunner(MoERunner):
             func = trunc
 
         if isinstance(states, tuple):
-            return tuple([func(s) for s in states])
+            assert len(trunc_sizes) == len(states)
+            return tuple([func(i, s) for i, s in enumerate(states)])
         else:
-            return func(states)
+            assert len(trunc_sizes) == 1
+            return func(0, states)
 
     def forward(
         self,
@@ -324,7 +326,7 @@ class DefaultMoERunner(MoERunner):
         # For latent MoE: save ORIGINAL hidden_states before transform
         # (shared_experts need original dimension, routed experts use transformed)
         original_hidden_states = hidden_states
-        # original_hidden_dim = hidden_states.shape[-1]  # TODO XXXXXXXXXX
+        original_hidden_dim = hidden_states.shape[-1]
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
         if self.routed_input_transform is not None:
@@ -347,7 +349,13 @@ class DefaultMoERunner(MoERunner):
         fused_output = self.moe_forward(
             hidden_states, router_logits, original_hidden_states
         )
-        return self._reduce_output(fused_output, transformed_hidden_dim)
+
+        if isinstance(fused_output, tuple):
+            orig_hidden_dims = [original_hidden_dim, transformed_hidden_dim]
+        else:
+            orig_hidden_dims = [transformed_hidden_dim]
+
+        return self._reduce_output(fused_output, orig_hidden_dims)
 
     def forward_impl_chunked(
         self,
