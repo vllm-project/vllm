@@ -174,6 +174,16 @@ class MyConfig(PretrainedConfig):
     - The `list` in the first element of the `tuple` contains the names of the input arguments
     - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
+### Plugins
+
+Some model architectures are supported via vLLM plugins. These plugins extend vLLM's capabilities through the [plugin system](../design/plugin_system.md).
+
+| Architecture | Models | Plugin Repository |
+|--------------|--------|-------------------|
+| `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+
+For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
+
 ## Loading a Model
 
 ### Hugging Face Hub
