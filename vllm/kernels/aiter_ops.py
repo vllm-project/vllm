@@ -34,7 +34,7 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
-rms_no_var_16bit_only = lambda x, w, e, v: v is None and x.dtype in (
+rms_no_var_16bit_only = lambda x, w, e, v=None: v is None and x.dtype in (
     torch.float16,
     torch.bfloat16,
 )
