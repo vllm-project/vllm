@@ -317,13 +317,13 @@ The minimum is `2 + N` physical cores (1 for the API server, 1 for the engine co
 
 When using data parallelism or multiple API servers, the CPU requirements increase:
 
-```
+```console
 Minimum physical cores = A + DP + N + (1 if DP > 1 else 0)
 ```
 
 where `A` is the API server count (defaults to `DP`), `DP` is the data parallel size, and `N` is the total number of GPUs. For example, with `DP=4, TP=2` on 8 GPUs:
 
-```
+```console
 4 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = 17 processes
 ```
 
