@@ -219,19 +219,8 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        # Use token_embed task for late interaction models
-        from vllm import PoolingParams
-
-        pooling_params = PoolingParams(
-            task="token_embed",
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            use_activation=request.use_activation,
-        )
-
-        try:
-            pooling_params.verify("token_embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params()
+        pooling_params.task = "token_embed"  # Overwrite the task
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
