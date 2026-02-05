@@ -261,21 +261,21 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_head.next_free_block
         )
 
-        # 用明确类型的列表，而不是 [None] * n
+      
         ret: List[KVCacheBlock] = []
 
         for _ in range(n):
-            # 逻辑上这里不应该为 None，同时让 mypy 确认类型
+            
             assert curr_block is not None
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
 
-        # 更新头指针
+       
         self.fake_free_list_head.next_free_block = curr_block
         if curr_block is not None:
             curr_block.prev_free_block = self.fake_free_list_head
 
-        # 批量清理指针（只更新第一个和最后一个块）
+      
         ret[0].prev_free_block = None
         ret[-1].next_free_block = None
 
