@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from contextlib import nullcontext
 
 import torch
@@ -481,9 +482,9 @@ class DefaultMoERunner(MoERunner):
             )
 
         if self.shared_experts is not None:
-            og_hiddem_dims = [og_hidden_dim, transformed_hidden_dim]
+            og_hidden_dims = [og_hidden_dim, transformed_hidden_dim]
         else:
-            og_hiddem_dims = [transformed_hidden_dim]
+            og_hidden_dims = [transformed_hidden_dim]
 
         return hidden_states, og_hidden_dims
 
@@ -493,6 +494,7 @@ class DefaultMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         extra_tensor: torch.Tensor | None,
         router_logits: torch.Tensor,
+        shared_input: torch.Tensor | None,
         run_shared_experts_before: bool = True,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         shared_output: torch.Tensor | None = None
@@ -508,6 +510,7 @@ class DefaultMoERunner(MoERunner):
             # disable inplace?
             hidden_states_clone = self._maybe_setup_shared_experts_stream(
                 hidden_states,
+                shared_input,
             )
 
         # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
@@ -525,9 +528,6 @@ class DefaultMoERunner(MoERunner):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
-
-            if self.capture is not None:
-                self.capture(topk_ids)
 
             result = self.quant_method.apply(
                 layer=layer,
@@ -635,9 +635,7 @@ class DefaultMoERunner(MoERunner):
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
-        return self.moe_config.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
+        return self.moe_config.dp_size > 1 and self.quant_method.moe_mk is None
 
     def _maybe_dispatch(
         self,
@@ -652,6 +650,9 @@ class DefaultMoERunner(MoERunner):
                 and self.moe_config.use_ep
                 and getattr(self.quant_method, "do_post_quant_allgather", False)
             )
+
+            extra_tensors: list[torch.Tensor] | None = None
+
             if post_quant_allgather:
                 hidden_states_to_dispatch, extra_tensors = (
                     self.quant_method.prepare_dp_allgather_tensor(
@@ -660,7 +661,6 @@ class DefaultMoERunner(MoERunner):
                 )
             else:
                 hidden_states_to_dispatch = hidden_states
-                extra_tensors = None
 
             result = get_ep_group().dispatch_router_logits(
                 hidden_states_to_dispatch,
@@ -671,7 +671,7 @@ class DefaultMoERunner(MoERunner):
 
             if len(result) == 3:
                 hidden_states, router_logits, extra_tensors = result
-                assert len(extra_tensors) == 1
+                assert isinstance(extra_tensors, list) and len(extra_tensors) == 1
                 extra_tensor = extra_tensors[0]
             else:
                 hidden_states, router_logits = result
@@ -776,6 +776,7 @@ class DefaultMoERunner(MoERunner):
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         final_shared_hidden_states, final_fused_hidden_states = (
             self._allocate_dp_chunking_outputs(hidden_states, router_logits)
@@ -827,6 +828,7 @@ class DefaultMoERunner(MoERunner):
                     hidden_states=hidden_states_chunk,
                     extra_tensor=None,
                     router_logits=router_logits_chunk,
+                    shared_input=shared_input,
                 )
 
                 # Store outputs
@@ -890,6 +892,7 @@ class DefaultMoERunner(MoERunner):
             hidden_states=hidden_states,
             extra_tensor=extra_tensor,
             router_logits=router_logits,
+            shared_input=shared_input,
             run_shared_experts_before=run_shared_experts_before,
         )
 
