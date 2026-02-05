@@ -6,12 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 
 
 # --8<-- [start:rel_pos_attention]
-@CustomOp.register("rel_pos_attention")
-class RelPosAttention(CustomOp):
+@PluggableLayer.register("rel_pos_attention")
+class RelPosAttention(PluggableLayer):
     """Multi-head Attention block with relative position embeddings."""
 
     # --8<-- [end:rel_pos_attention]
@@ -134,7 +134,7 @@ class RelPosAttention(CustomOp):
 
         return rel_h, rel_w
 
-    def forward_native(
+    def forward(
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
@@ -182,9 +182,3 @@ class RelPosAttention(CustomOp):
         x = self.proj(x)
 
         return x
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.forward_native(x)
