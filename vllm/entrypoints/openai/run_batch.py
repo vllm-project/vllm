@@ -525,75 +525,54 @@ async def make_async_error_request_output(
 
 
 async def create_transcription_wrapper(
-    batch_request_body: BatchTranscriptionRequest,
+    batch_request_body: BatchTranscriptionRequest | BatchTranslationRequest,
     handler_fn: Callable,
-) -> TranscriptionResponse | TranscriptionResponseVerbose | ErrorResponse:
+    is_translation: bool,
+) -> (
+    TranscriptionResponse
+    | TranscriptionResponseVerbose
+    | TranslationResponse
+    | TranslationResponseVerbose
+    | ErrorResponse
+):
     """
-    Wrapper function to convert BatchTranscriptionRequest to TranscriptionRequest
-    and call the transcription handler.
+    Wrapper function to convert BatchTranscriptionRequest or BatchTranslationRequest
+    to TranscriptionRequest or TranslationRequest and call the appropriate handler.
+
+    Args:
+        batch_request_body: BatchTranscriptionRequest or BatchTranslationRequest
+        handler_fn: The handler function to call
+        is_translation: If True, process as translation; otherwise process
+        as transcription
     """
     try:
         # Download data from URL
         audio_data = await download_bytes_from_url(batch_request_body.file_url)
 
-        # Convert BatchTranscriptionRequest to TranscriptionRequest
-        # We need to create a TranscriptionRequest with a mock file.
+        # Create a mock file from the downloaded audio data
         mock_file = UploadFile(
             file=BytesIO(audio_data),
             filename="audio.bin",
         )
 
-        # Create TranscriptionRequest from BatchTranscriptionRequest
+        # Convert batch request to regular request
         # by copying all fields except file_url and setting file to mock_file
-        transcription_request_dict = batch_request_body.model_dump(exclude={"file_url"})
-        transcription_request_dict["file"] = mock_file
-        transcription_request = TranscriptionRequest.model_validate(
-            transcription_request_dict
-        )
+        request_dict = batch_request_body.model_dump(exclude={"file_url"})
+        request_dict["file"] = mock_file
 
-        return await handler_fn(audio_data, transcription_request, None)
+        if is_translation:
+            # Create TranslationRequest from BatchTranslationRequest
+            translation_request = TranslationRequest.model_validate(request_dict)
+            return await handler_fn(audio_data, translation_request, None)
+        else:
+            # Create TranscriptionRequest from BatchTranscriptionRequest
+            transcription_request = TranscriptionRequest.model_validate(request_dict)
+            return await handler_fn(audio_data, transcription_request, None)
     except Exception as e:
+        operation = "translation" if is_translation else "transcription"
         return ErrorResponse(
             error=ErrorInfo(
-                message=f"Failed to process transcription: {str(e)}",
-                type="BadRequestError",
-                code=HTTPStatus.BAD_REQUEST.value,
-            )
-        )
-
-
-async def create_translation_wrapper(
-    batch_request_body: BatchTranslationRequest,
-    handler_fn: Callable,
-) -> TranslationResponse | TranslationResponseVerbose | ErrorResponse:
-    """
-    Wrapper function to convert BatchTranslationRequest to TranslationRequest
-    and call the translation handler.
-    """
-    try:
-        # Download data from URL
-        audio_data = await download_bytes_from_url(batch_request_body.file_url)
-
-        # Convert BatchTranslationRequest to TranslationRequest
-        # We need to create a TranslationRequest with a mock file.
-        mock_file = UploadFile(
-            file=BytesIO(audio_data),
-            filename="audio.bin",
-        )
-
-        # Create TranslationRequest from BatchTranslationRequest
-        # by copying all fields except file_url and setting file to mock_file
-        translation_request_dict = batch_request_body.model_dump(exclude={"file_url"})
-        translation_request_dict["file"] = mock_file
-        translation_request = TranslationRequest.model_validate(
-            translation_request_dict
-        )
-
-        return await handler_fn(audio_data, translation_request, None)
-    except Exception as e:
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=f"Failed to process translation: {str(e)}",
+                message=f"Failed to process {operation}: {str(e)}",
                 type="BadRequestError",
                 code=HTTPStatus.BAD_REQUEST.value,
             )
@@ -858,7 +837,7 @@ async def run_batch(
                 handler_fn: Callable = transcription_handler_fn,
             ) -> TranscriptionResponse | TranscriptionResponseVerbose | ErrorResponse:
                 return await create_transcription_wrapper(
-                    batch_request_body, handler_fn
+                    batch_request_body, handler_fn, is_translation=False
                 )
 
             response_futures.append(
@@ -884,7 +863,9 @@ async def run_batch(
                 batch_request_body: BatchTranslationRequest,
                 handler_fn: Callable = translation_handler_fn,
             ) -> TranslationResponse | TranslationResponseVerbose | ErrorResponse:
-                return await create_translation_wrapper(batch_request_body, handler_fn)
+                return await create_transcription_wrapper(
+                    batch_request_body, handler_fn, is_translation=True
+                )
 
             response_futures.append(run_request(translation_wrapper, request, tracker))
             tracker.submitted()
