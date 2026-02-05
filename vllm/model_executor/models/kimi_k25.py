@@ -320,7 +320,7 @@ class KimiK25ForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # For legacy NVFP4 checpoint compatibility:
+            # For legacy NVFP4 checkpoint compatibility:
             # see https://github.com/vllm-project/vllm/pull/33346#issuecomment-3851475033
             "language_model.layers.": "language_model.model.layers.",
             # mm projector
