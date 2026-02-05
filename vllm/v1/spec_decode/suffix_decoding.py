@@ -15,6 +15,7 @@ class SuffixDecodingProposer:
 
     def __init__(self, vllm_config: VllmConfig):
         config = vllm_config.speculative_config
+        assert config is not None, "Speculative config must be set"
         self.num_speculative_tokens = config.num_speculative_tokens
         self.max_tree_depth = config.suffix_decoding_max_tree_depth
         self.max_spec_factor = config.suffix_decoding_max_spec_factor

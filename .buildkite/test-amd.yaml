@@ -542,7 +542,7 @@ steps:
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - vllm/lora
@@ -604,9 +604,11 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
-    # Limit to no custom ops to reduce running time
-    # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
+    # # Limit to no custom ops to reduce running time
+    # # Wrap with quotes to escape yaml and avoid starting -k string with a -
+    # - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
+    # Old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293
+    # in favor of new tests in fusions_e2e. We avoid replicating the new jobs in this file as it's deprecated.
 
 - label: Cudagraph test
   timeout_in_minutes: 20
@@ -636,12 +638,13 @@ steps:
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -650,7 +653,7 @@ steps:
 - label: Kernels Quantization Test %N # 64min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/
@@ -663,7 +666,7 @@ steps:
 - label: Kernels MoE Test %N # 40min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -741,7 +744,7 @@ steps:
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
@@ -752,7 +755,7 @@ steps:
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -826,7 +829,7 @@ steps:
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -887,7 +890,7 @@ steps:
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -908,7 +911,7 @@ steps:
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -1180,7 +1183,6 @@ steps:
   - tests/compile/test_fusion_attn.py
   - tests/compile/test_silu_mul_quant_fusion.py
   - tests/compile/distributed/test_fusion_all_reduce.py
-  - tests/compile/distributed/test_fusions_e2e.py
   - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
@@ -1188,32 +1190,15 @@ steps:
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_gpus=2 is not set
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
-    # Wrap with quotes to escape yaml
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+
+    # # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
+    # # Wrap with quotes to escape yaml
+    # - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+    # Old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293
+    # in favor of new tests in fusions_e2e. We avoid replicating the new jobs in this file as it's deprecated.
+
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
-
-- label: Blackwell Fusion E2E Tests # 30 min
-  timeout_in_minutes: 40
-  working_dir: "/vllm-workspace/"
-  gpu: b200
-  optional: true
-  num_gpus: 2
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/distributed/test_fusions_e2e.py
-  commands:
-    - nvidia-smi
-    # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
 
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
@@ -1277,7 +1262,7 @@ steps:
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdmultinode]
   agent_pool: mi325_4
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -1291,15 +1276,15 @@ steps:
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
   commands:
-  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)  | grep 'Same node test passed'   | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
 
 - label: Distributed Tests (2 GPUs) # 68min
@@ -1508,6 +1493,9 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
+  # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
+  # TODO: Remove when the bug is fixed in a future ROCm release
+  - export TORCH_NCCL_BLOCKING_WAIT=1
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
@@ -1562,7 +1550,10 @@ steps:
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     #- pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
-    - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    # - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    # Old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293
+    # in favor of new tests in fusions_e2e. We avoid replicating the new jobs in this file as it's deprecated.
+
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - HIP_VISIBLE_DEVICES=0,1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization

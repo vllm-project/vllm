@@ -11,7 +11,7 @@ from transformers import Blip2VisionConfig, BlipVisionConfig
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -123,7 +123,10 @@ class BlipAttention(nn.Module):
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_partition, self.head_dim, self.scale
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
