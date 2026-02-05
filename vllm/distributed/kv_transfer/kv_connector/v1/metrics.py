@@ -147,7 +147,7 @@ class KVConnectorPromMetrics:
         raise NotImplementedError
 
 
-class KVConnectorPrometheus:
+class KVConnectorProm:
     """
     Support for registering per-connector Prometheus metrics, and
     recording transfer statistics to those metrics. Uses

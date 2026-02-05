@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorPrometheus
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.perf import PerfMetricsProm
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
@@ -168,9 +168,9 @@ class RaySpecDecodingProm(SpecDecodingProm):
     _counter_cls = RayCounterWrapper
 
 
-class RayKVConnectorPrometheus(KVConnectorPrometheus):
+class RayKVConnectorProm(KVConnectorProm):
     """
-    RayKVConnectorPrometheus is used by RayMetrics to log Ray
+    RayKVConnectorProm is used by RayMetrics to log Ray
     metrics. Provides the same metrics as KV connectors but
     uses Ray's util.metrics library.
     """
@@ -197,7 +197,7 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _counter_cls = RayCounterWrapper
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
-    _kv_connector_cls = RayKVConnectorPrometheus
+    _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
 
     @staticmethod
