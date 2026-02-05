@@ -1768,7 +1768,8 @@ class NixlConnectorWorker:
                 )  # noqa: E501
 
         # TP workers that handhshake with same remote have same #blocks.
-        assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
+        if nixl_agent_meta.num_blocks < self.dst_num_blocks[remote_engine_id]:
+            self.dst_num_blocks[remote_engine_id] = nixl_agent_meta.num_blocks
         # Same number of regions/~layers.
         assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
 
