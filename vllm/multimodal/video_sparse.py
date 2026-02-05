@@ -75,7 +75,7 @@ class SimilarFrameDetector:
         )
         return downsampled
 
-    def _calculate_ssim(self, imgs1: torch.Tensor, imgs2: torch.Tensor) -> torch.Tensor:
+    def _calculate_ssim(self, gray1: torch.Tensor, gray2: torch.Tensor) -> torch.Tensor:
         """Calculate SSIM for batch of frames."""
         ssim_values = structural_similarity_index_measure(
             preds=gray1,
@@ -113,7 +113,9 @@ class SimilarFrameDetector:
         if frame_number < 2:
             return torch.tensor([], device=frames.device)
 
-        frames_gray = tvF.rgb_to_grayscale(frames, num_output_channels=1).to(torch.float32)
+        frames_gray = tvF.rgb_to_grayscale(frames, num_output_channels=1).to(
+            torch.float32
+        )
 
         prev_frames = frames_gray[:-1]
         next_frames = frames_gray[1:]
