@@ -484,13 +484,15 @@ class Step3VLProcessor:
                 if patch_newline_mask is not None:
                     patch_newline_mask_lst.extend(patch_newline_mask)
 
+            pixel_values = torch.cat(pixel_values_lst)
+            patch_size = self.patch_size
             image_inputs = {
-                "pixel_values": torch.cat(pixel_values_lst),
+                "pixel_values": pixel_values,
                 "num_patches": num_patches,
                 "patch_pixel_values": (
                     torch.cat(patch_pixel_values_lst)
                     if patch_pixel_values_lst
-                    else torch.empty((0, 3, self.patch_size, self.patch_size))
+                    else pixel_values.new_empty((0, 3, patch_size, patch_size))
                 ),
                 "patch_newline_mask": torch.tensor(patch_newline_mask_lst),
             }
