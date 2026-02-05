@@ -139,7 +139,7 @@ def chunk_gated_delta_rule(
             q=q,
             k=k,
             v=v,
-            g=fi_g,
+            g=torch.exp(fi_g),
             beta=fi_beta,
             initial_state=fi_state,
             output_final_state=output_final_state,
