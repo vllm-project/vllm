@@ -1087,7 +1087,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
+# @support_torch_compile
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
 
@@ -1148,12 +1148,12 @@ class DeepseekV2Model(nn.Module):
         afd_metadata: AFDMetadata,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for layer_idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             afd_connector = afd_metadata.afd_connector
 
-            # if layer.layer_idx > 0:
-            #     # Pass current hidden_states as ref_tensor to preserve dynamic shapes
-            #     hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
+            if layer_idx > 0:
+                # Pass current hidden_states as ref_tensor to preserve dynamic shapes
+                hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1170,7 +1170,7 @@ class DeepseekV2Model(nn.Module):
 
             hidden_states = apply_dbo_yield(hidden_states)
 
-        # hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
+        hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
 
         return hidden_states, residual
 

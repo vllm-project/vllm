@@ -736,7 +736,7 @@ class GPUModelRunner(
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=6000 + 4000, warmup=1, active=30, repeat=1
+                wait=1000, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True,
