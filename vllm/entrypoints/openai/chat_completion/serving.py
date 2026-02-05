@@ -71,7 +71,7 @@ from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser import ParserManager
+from vllm.parser import Parser, ParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -137,12 +137,21 @@ class OpenAIServingChat(OpenAIServing):
         )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
+        # TODO: remove instances of this?
         self.tool_parser = ParserManager.get_tool_parser(
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+
+        # Unified parser for non-streaming tool call parsing
+        self.parser: type[Parser] | None = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
+        )
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -1525,15 +1534,20 @@ class OpenAIServingChat(OpenAIServing):
                 content = output.text
 
             auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            tool_calls, content = self._parse_tool_calls_from_content(
-                request=request,
-                tokenizer=tokenizer,
-                content=content,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_parser_cls=self.tool_parser,
-            )
+            # Parse tool calls using the unified parser
+            if self.parser is not None:
+                if tokenizer is None:
+                    raise ValueError(
+                        "Tokenizer not available when `skip_tokenizer_init=True`"
+                    )
+                parser_instance = self.parser(tokenizer)
+                tool_calls, content = parser_instance.parse_tool_calls(
+                    request=request,
+                    content=content,
+                    enable_auto_tools=self.enable_auto_tools,
+                )
+            else:
+                tool_calls, content = None, content
             tool_call_class = (
                 MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
             )
