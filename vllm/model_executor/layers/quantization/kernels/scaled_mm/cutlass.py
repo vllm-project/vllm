@@ -12,8 +12,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    FP8W8A8LinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
@@ -142,7 +142,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
 
-class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CutlassFP8ScaledMMLinearKernel(FP8W8A8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

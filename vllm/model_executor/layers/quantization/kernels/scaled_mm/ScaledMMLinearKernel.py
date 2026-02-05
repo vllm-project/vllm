@@ -9,9 +9,13 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_weight_tensor_strategy,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 
@@ -97,13 +101,6 @@ class FP8ScaledMMLinearKernel(
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        act_scale_descriptor = c.activation_quant_key.scale
-        self.quant_fp8 = QuantFP8(
-            static=act_scale_descriptor.static,
-            group_shape=act_scale_descriptor.group_shape,
-            num_token_padding=self.get_output_padding(),
-        )
-        self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -117,6 +114,57 @@ class FP8ScaledMMLinearKernel(
             getattr(layer, x_s, None),
             getattr(layer, x_s_ub, None),
         )
+
+    @abstractmethod
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def get_output_padding(self) -> int | None:
+        return None
+
+
+class FP8W8A8LinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        act_scale_descriptor = c.activation_quant_key.scale
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+        )
+        self.fp8_dtype = current_platform.fp8_dtype()
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_q, w_s, i_s, _ = self._get_layer_params(layer)
+
+        weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
+            w_q,
+            w_s,
+            layer.logical_widths,
+            i_s,
+        )
+        if self.config.activation_quant_key.scale.static:
+            assert input_scale is not None
+            input_scale = input_scale.max()
+
+        weight = weight.t()
+        # Update layer with new values.
+
+        w_q_name, w_s_name, i_s_name, _, _ = self.layer_param_names
+
+        replace_parameter(layer, w_q_name, weight.data)
+        replace_parameter(layer, w_s_name, weight_scale.data)
+        if input_scale is not None:
+            replace_parameter(layer, i_s_name, input_scale)
+        else:
+            layer.input_scale = None
 
     def apply_weights(
         self,
@@ -169,8 +217,28 @@ class FP8ScaledMMLinearKernel(
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_output_padding(self) -> int | None:
-        return None
+
+class FP8W8A16LinearKernel(FP8ScaledMMLinearKernel):
+    """
+    FP8W8A16LinearKernel provides a kernel implementation for scenarios where
+    GPUs lack native FP8 hardware support.
+    """
+
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        raise NotImplementedError
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
 
 
 class Int8ScaledMMLinearKernel(

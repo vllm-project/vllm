@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.marlin import (
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
@@ -135,7 +138,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
         and module.quant_method.block_quant
-        and not module.quant_method.use_marlin
+        and not isinstance(module.quant_method.kernel, MarlinFP8ScaledMMLinearKernel)
     ):
         return False
 

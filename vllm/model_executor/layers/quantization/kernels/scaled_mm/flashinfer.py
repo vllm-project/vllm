@@ -8,12 +8,12 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 
 from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    FP8W8A8LinearKernel,
 )
 
 
-class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class FlashInferFP8ScaledMMLinearKernel(FP8W8A8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
