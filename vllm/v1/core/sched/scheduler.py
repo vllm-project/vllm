@@ -32,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.budget import MultiModalBudget
-from vllm.utils.math_utils import round_down
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -266,14 +265,6 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
-    def _mamba_compute_cache_pos(self, num_tokens_to_cache: int) -> int:
-        block_size = self.cache_config.block_size
-        last_cache_position = num_tokens_to_cache - num_tokens_to_cache % block_size
-        # eagle prune
-        if self.use_eagle:
-            last_cache_position = max(last_cache_position - block_size, 0)
-        return last_cache_position
-
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -302,26 +293,15 @@ class Scheduler(SchedulerInterface):
             # Additionally, when Eagle mode is enabled, FullAttn prunes the last
             # matching block. To prevent this from causing a Mamba cache miss, the
             # last chunk must be not smaller than `block_size`.
-            num_tokens_to_cache = request.num_tokens
-            if request.num_output_tokens > 0:  # resumed requests
-                # Perform separate block-aligned splits for prompt and output tokens
-                # in resumed requests to maximize cache hits.
-                last_prompt_cache_position = self._mamba_compute_cache_pos(
-                    request.num_prompt_tokens
-                )
-                if num_computed_tokens < last_prompt_cache_position:
-                    num_new_tokens = min(
-                        num_new_tokens, request.num_prompt_tokens - num_computed_tokens
-                    )
-                    num_tokens_to_cache = request.num_prompt_tokens
-
-            last_cache_position = self._mamba_compute_cache_pos(num_tokens_to_cache)
+            block_size = self.cache_config.block_size
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
+            # eagle prune
+            if self.use_eagle:
+                last_cache_position = max(last_cache_position - block_size, 0)
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
             if num_computed_tokens_after_sched < last_cache_position:
                 # align to block_size
-                num_new_tokens = round_down(
-                    num_new_tokens, self.cache_config.block_size
-                )
+                num_new_tokens = num_new_tokens // block_size * block_size
             elif (
                 num_computed_tokens
                 < last_cache_position
