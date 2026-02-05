@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.model_arch import (
@@ -97,8 +96,7 @@ AttnTypeStr = Literal[
 ]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -107,8 +105,8 @@ class ModelConfig:
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object 
-    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    """Original model weights path. Used when the model is pulled from object
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -326,7 +324,6 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
-            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
@@ -877,7 +874,6 @@ class ModelConfig:
             overrides = [
                 "gptq_marlin",
                 "awq_marlin",
-                "ipex",
                 "inc",
                 "moe_wna16",
                 "modelopt",
@@ -1414,6 +1410,11 @@ class ModelConfig:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"
         )
+
+    @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
