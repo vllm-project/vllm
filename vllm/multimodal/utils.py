@@ -3,7 +3,8 @@
 
 import mimetypes
 import warnings
-from collections.abc import Generator
+from collections import defaultdict
+from collections.abc import Generator, Sequence
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
@@ -11,14 +12,15 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
 
+from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalKwargsItems,
     MultiModalPlaceholderDict,
+    MultiModalSharedField,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
 
@@ -26,8 +28,6 @@ if TYPE_CHECKING:
     import torch.types
 else:
     torch = LazyLoader("torch", globals(), "torch")
-
-logger = init_logger(__name__)
 
 
 def __getattr__(name: str):
@@ -74,7 +74,7 @@ def encode_image_base64(
     image: Image.Image,
     *,
     image_mode: str = "RGB",
-    format: str | None = None,
+    format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
@@ -149,32 +149,119 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
+def _get_group_hash(elem: MultiModalFieldElem):
+    if not isinstance(elem.field, MultiModalSharedField):
+        return None
+
+    return MultiModalHasher.hash_kwargs(data=elem.data)
+
+
+def _batch_mm_items(
+    items: Sequence[MultiModalKwargsItem],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+):
+    elems = defaultdict[str, list[MultiModalFieldElem]](list)
+    for item in items:
+        for key, elem in item.items():
+            elems[key].append(elem)
+
+    return {
+        key: elems[0].field.reduce_data(
+            elems,
+            device=device,
+            pin_memory=pin_memory,
+        )
+        for key, elems in elems.items()
+    }
+
+
+def group_and_batch_mm_items(
+    items: Sequence[MultiModalKwargsItem],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+) -> Generator[tuple[int, BatchedTensorInputs]]:
+    """
+    Group consecutive items (possibly from different requests) into batches.
+
+    Items must be split across groups if any of the following occurs,
+    as the batch would otherwise be invalid:
+    - They have different fields (e.g. mixed image and embedding inputs).
+    - They have different values in `MultiModalSharedField`.
+
+    Args:
+        items: List of `MultiModalKwargsItem`.
+        device: The device to place the grouped tensors on.
+        pin_memory: Whether to pin memory for faster host-to-device transfer.
+
+    Yields:
+        A tuple `(num_items, grouped_kwargs)`, where:
+        - `kwargs` is a dictionary of keyword arguments to pass to the model;
+        - `num_items` is the corresponding number of items.
+    """
+    group_ids = [
+        tuple(
+            (key, _get_group_hash(elem))
+            for key, elem in sorted(item.items(), key=lambda kv: kv[0])
+        )
+        for item in items
+    ]
+    group_sizes = [sum(1 for _ in group) for _, group in groupby(group_ids)]
+
+    start_idx = 0
+    for group_size in group_sizes:
+        group_data = _batch_mm_items(
+            items[start_idx : start_idx + group_size],
+            device=device,
+            pin_memory=pin_memory,
+        )
+
+        yield group_size, group_data
+
+        start_idx += group_size
+
+    assert start_idx == len(items)
+
+
 def group_mm_kwargs_by_modality(
     mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
-    modality together into the same `MultiModalKwargs` instance.
+    """
+    Group consecutive items (possibly from different requests) into batches.
+
+    Items must be split across groups if any of the following occurs,
+    as the batch would otherwise be invalid:
+    - They have different fields (e.g. mixed image and embedding inputs).
+    - They have different values in `MultiModalSharedField`.
+
+    To simplify the implementation of `embed_multimodal`, we add another
+    restriction that the items in a batch must belong to the same modality.
 
     Args:
-        mm_kwargs: List of `MultiModalKwargsItem`.
+        mm_kwargs: List of `(modality, item)`.
         device: The device to place the grouped tensors on.
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
-        A tuple `(modality, num_items, grouped_kwargs)`.
+        A tuple `(modality, num_items, grouped_kwargs)`, where:
+        - `modality` is the modality of the batch;
+        - `kwargs` is a dictionary of keyword arguments to pass to the model;
+        - `num_items` is the corresponding number of items.
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
-        mm_kwargs_items = MultiModalKwargsItems({modality: items_lst})
-        mm_kwargs_data = mm_kwargs_items.get_data(
+
+        for num_items, mm_kwargs_batch in group_and_batch_mm_items(
+            items_lst,
             device=device,
             pin_memory=pin_memory,
-        )
-
-        yield modality, len(items_lst), mm_kwargs_data
+        ):
+            yield modality, num_items, mm_kwargs_batch
 
 
 def fetch_audio(
