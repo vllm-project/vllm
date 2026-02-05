@@ -8,6 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.base import (
+    MMLinearKernel,
     MMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
@@ -44,7 +45,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
@@ -101,7 +101,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
+_KernelT = TypeVar("_KernelT", bound=MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
@@ -209,31 +209,22 @@ def init_fp8_linear_kernel(
             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
             force_kernel=force_kernel,
         )
-        if module_name:
-            logger.info_once(
-                "Selected %s for %s",
-                kernel_type.__name__,
-                module_name,
-                scope="global",
-            )
-        # Fp8BlockScaledMMLinearKernel doesn't take layer_param_names
-        return kernel_type(scaled_mm_linear_kernel_config)
     else:
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
             force_kernel=force_kernel,
         )
-        if module_name:
-            logger.info_once(
-                "Selected %s for %s",
-                kernel_type.__name__,
-                module_name,
-                scope="global",
-            )
-        # FP8ScaledMMLinearKernel requires layer_param_names
-        layer_param_names = ["weight", "weight_scale", "input_scale", "input_scale_ub"]
-        return kernel_type(scaled_mm_linear_kernel_config, layer_param_names)
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
+
+    return kernel_type(scaled_mm_linear_kernel_config)
 
 
 def init_int8_linear_kernel(
@@ -262,11 +253,4 @@ def init_int8_linear_kernel(
 
     return kernel_type(
         config,
-        layer_param_names=[
-            "weight",
-            "weight_scale",
-            "input_scale",
-            "input_zero_point",
-            "azp_adj",
-        ],
     )
