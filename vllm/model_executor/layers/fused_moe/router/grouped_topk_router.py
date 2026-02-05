@@ -57,7 +57,7 @@ def fi_fused_topk_deepseek(
         topk_values,
         topk_indices,
     )
-    return topk_values.to(torch.float32), topk_indices
+    return topk_values, topk_indices
 
 
 def fused_grouped_topk(
@@ -76,6 +76,7 @@ def fused_grouped_topk(
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
         if renormalize:
+            # TODO: not sure when to use this kernel
             topk_values, topk_indices = fi_fused_topk_deepseek(
                 gating_output,
                 e_score_correction_bias,
