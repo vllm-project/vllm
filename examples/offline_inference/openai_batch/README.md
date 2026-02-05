@@ -20,7 +20,7 @@ We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` e
 
 * The examples in this document use `meta-llama/Meta-Llama-3-8B-Instruct`.
     * Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
-    * Install the token on your machine (Run `hf login`).
+    * Install the token on your machine (Run `hf auth login`).
     * Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
 
 ## Example 1: Running with a local file
