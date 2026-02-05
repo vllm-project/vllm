@@ -682,15 +682,16 @@ class BaseProcessingInfo:
 
         if validate:
             mm_config = self.ctx.model_config.get_multimodal_config()
-            if not mm_config.enable_mm_embeds:
-                for modality, items in mm_items.items():
-                    if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    if not mm_config.enable_mm_embeds:
                         raise ValueError(
                             f"You must set `--enable-mm-embeds` to input "
                             f"`{modality}_embeds`"
                         )
-
-            for modality, items in mm_items.items():
+                    if mm_config.get_limit_per_prompt(modality) == 0:
+                        continue
                 self.validate_num_items(modality, len(items))
 
         return mm_items

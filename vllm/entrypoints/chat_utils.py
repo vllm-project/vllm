@@ -530,10 +530,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         mm_config = self.model_config.multimodal_config
         if mm_config.enable_mm_embeds and mm_config.get_limit_per_prompt(input_modality) == 0:
-            # Additional check with info logging for this specific case in BaseMultiModalProcessor
+            # Skip validation: embeddings bypass limit when enable_mm_embeds=True
             pass
         else:
-            self.mm_processor.validate_num_items(input_modality, num_items)
+            self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
