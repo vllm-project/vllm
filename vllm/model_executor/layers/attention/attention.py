@@ -424,15 +424,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
                 kv_cache_dummy_dep = None
-                # key and value may be None in the case of cross attention. They are
-                # calculated once based on the output from the encoder and then cached
-                # in KV cache.
                 # Skip this if sharing KV cache with an earlier attention layer.
                 if (
                     not self.attn_backend.forward_includes_kv_cache_update
                     and self.kv_sharing_target_layer_name is None
-                    and key is not None
-                    and value is not None
                 ):
                     kv_cache_dummy_dep = unified_kv_cache_update(
                         key, value, self.layer_name

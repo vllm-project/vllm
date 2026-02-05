@@ -136,6 +136,8 @@ def create_cross_attention_backend(
             if (
                 not underlying_attn_backend.forward_includes_kv_cache_update
                 and attn_metadata is not None
+                and key is not None
+                and value is not None
             ):
                 self.do_kv_cache_update(
                     layer, key, value, kv_cache, attn_metadata.slot_mapping
