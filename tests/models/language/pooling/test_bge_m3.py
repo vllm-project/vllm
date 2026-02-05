@@ -136,6 +136,14 @@ async def test_bge_m3_api_server_sparse_embedding(client: openai.AsyncOpenAI):
     )
 
 
+@pytest.mark.asyncio
+async def test_bge_m3_api_server_sparse_embedding_corner_case(client: openai.AsyncOpenAI):
+    embeddings = await sparse_embeddings(client, ["Hi"])
+    assert len(embeddings) == 1
+    assert 2673 in embeddings[0]
+    assert embeddings[0][2673] == pytest.approx(0.26710861921310425, rel=0.01)
+
+
 # https://github.com/FlagOpen/FlagEmbedding/blob/6fd176266f2382878bcc69cd656cff425d52f49b/FlagEmbedding/inference/embedder/encoder_only/m3.py#L163
 def colbert_score(q_reps: torch.Tensor, p_reps: torch.Tensor) -> torch.Tensor:
     token_scores = torch.einsum("in,jn->ij", q_reps, p_reps)
