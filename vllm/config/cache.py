@@ -54,6 +54,11 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
+    gpu_memory_warning_threshold: float = Field(default=0.9, gt=0, le=1)
+    """The threshold for GPU memory usage warning. If the memory usage exceeds
+    this threshold, a warning will be logged."""
+    enable_gpu_memory_warning: bool = False
+    """Whether to enable GPU memory warning."""
     swap_space: float = Field(default=4, ge=0)
     """Size of the CPU swap space per GPU (in GiB)."""
     cache_dtype: CacheDType = "auto"
@@ -183,6 +188,8 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "gpu_memory_warning_threshold",
+            "enable_gpu_memory_warning",
             "swap_space",
             "is_attention_free",
             "num_gpu_blocks_override",

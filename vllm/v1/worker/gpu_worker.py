@@ -42,6 +42,7 @@ from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.gpu_memory_monitor import GPUMemoryMonitor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -81,6 +82,11 @@ class Worker(WorkerBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
+        )
+
+        self.gpu_memory_monitor = GPUMemoryMonitor(
+            threshold=self.cache_config.gpu_memory_warning_threshold,
+            enabled=self.cache_config.enable_gpu_memory_warning,
         )
 
         # configure float32 matmul precision according to vLLM env.
@@ -600,6 +606,7 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.gpu_memory_monitor.check_and_warn()
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

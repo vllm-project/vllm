@@ -434,6 +434,8 @@ class EngineArgs:
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_warning_threshold: float = CacheConfig.gpu_memory_warning_threshold
+    enable_gpu_memory_warning: bool = CacheConfig.enable_gpu_memory_warning
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
@@ -917,6 +919,14 @@ class EngineArgs:
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
             "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+        )
+        cache_group.add_argument(
+            "--gpu-memory-warning-threshold",
+            **cache_kwargs["gpu_memory_warning_threshold"],
+        )
+        cache_group.add_argument(
+            "--enable-gpu-memory-warning",
+            **cache_kwargs["enable_gpu_memory_warning"],
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -1431,6 +1441,8 @@ class EngineArgs:
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            gpu_memory_warning_threshold=self.gpu_memory_warning_threshold,
+            enable_gpu_memory_warning=self.enable_gpu_memory_warning,
         )
 
         ray_runtime_env = None
