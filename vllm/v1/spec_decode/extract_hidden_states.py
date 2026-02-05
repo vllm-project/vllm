@@ -11,7 +11,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
@@ -55,6 +57,7 @@ class ExtractHiddenStatesProposer:
             dtype=self.dtype,
             device=device,
         )
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
         # Initialize buffers and attributes needed for slot mapping
         self.indexer_layer_names: list[str] = []
@@ -107,25 +110,34 @@ class ExtractHiddenStatesProposer:
         # Copy hidden states to buffer
         self.hidden_states[:num_tokens] = stacked_hidden_states
 
-        # Build attention metadata for drafting
         if self.attn_metadata_builder is None:
-            self.attn_metadata_builder = self._get_attention_metadata_builder()
+            attn_metadata_builder = self._get_attention_metadata_builder()
+        else:
+            attn_metadata_builder = self.attn_metadata_builder
 
-        attn_metadata = self.attn_metadata_builder.build_for_drafting(
+        attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
 
-        # Build per-layer attention metadata
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens
+        )
+        num_input_tokens = batch_desc.num_tokens
 
         # Call model with proper forward context
         with (
             set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
-                num_tokens=num_tokens,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=None,  # todo(fynn): handle
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=self._get_slot_mapping(
                     num_tokens, common_attn_metadata.slot_mapping
                 ),
@@ -270,16 +282,10 @@ class ExtractHiddenStatesProposer:
             get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
         )
 
-        # Instantiate ExtractHiddenStatesModel directly
-        # This model only needs to know KV cache shapes from the target model config
-        from vllm.model_executor.models.extract_hidden_states import (
-            ExtractHiddenStatesModel,
+        draft_model_config = self.vllm_config.speculative_config.draft_model_config
+        self.model = get_model(
+            vllm_config=self.vllm_config, model_config=draft_model_config
         )
-
-        self.drafter = ExtractHiddenStatesModel(
-            vllm_config=self.vllm_config, prefix="drafter"
-        )
-        self.model = self.drafter
 
         # Identify draft model's attention layers (difference from target)
         draft_attn_layer_names = (
