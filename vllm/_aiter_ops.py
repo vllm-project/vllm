@@ -858,39 +858,52 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
-    layer_slot_mapping = slot_mapping.get(layer_name)
-    cos, sin = cos_sin_cache.chunk(2, dim=-1)
-    is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
-    key_cache, value_cache = kv_cache.unbind(0)
-    if is_fp8_kv_cache:
-        key_cache_og_dtype = key_cache.dtype
-        value_cache_og_dtype = value_cache.dtype
-        key_cache = key_cache.view(self.fp8_dtype)
-        value_cache = value_cache.view(self.fp8_dtype)
-    # TODO (Rohan138): Allow flash_layour False for ROCM_ATTN backend
-    flash_layout = True
-    query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
-        query,
-        key,
-        value,
-        key_cache,
-        value_cache,
-        layer_slot_mapping,
-        positions,
-        cos,
-        sin,
-        attn_layer._k_scale,
-        attn_layer._v_scale,
-        is_neox,
-        flash_layout=flash_layout,
-        apply_scale=is_fp8_kv_cache,
-        q_out=query,
-        k_out=key,
-        output_zeros=False,
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
-    if is_fp8_kv_cache:
-        key_cache = key_cache.view(key_cache_og_dtype)
-        value_cache = value_cache.view(value_cache_og_dtype)
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        key_cache, value_cache = kv_cache.unbind(0)
+        if is_fp8_kv_cache:
+            key_cache_og_dtype = key_cache.dtype
+            value_cache_og_dtype = value_cache.dtype
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+        # TODO (Rohan138): Allow flash_layout False for ROCM_ATTN backend
+        flash_layout = True
+        query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
+            cos,
+            sin,
+            attn_layer._k_scale,
+            attn_layer._v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=is_fp8_kv_cache,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
+        )
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(key_cache_og_dtype)
+            value_cache = value_cache.view(value_cache_og_dtype)
+    # TODO (Rohan138): do I need an else here? To do RoPE during the dummy forward
+    # when the slot_mappings haven't been initialized yet?
+    # I assume not, because this will return the original qkv anyway,
+    # and this is all inside a custom op so Inductor shouldn't
+    # know what we're doing to the tensors inside the custom op
+    # especially since the RoPE would be inplace as well
 
     dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
     return query, key, value, dummy
