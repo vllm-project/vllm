@@ -157,6 +157,8 @@ def detokenize_incrementally(
         )
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
+        # This is required to guard against out-of-vocab prompt token ids
+        # (for example when using dummy weights)
         _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     else:
         new_tokens = [""]
