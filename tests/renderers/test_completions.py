@@ -87,7 +87,7 @@ class TestValidatePrompt:
             renderer.render_completions([])
 
     def test_invalid_type(self, renderer):
-        with pytest.raises(TypeError, match="string or an array of tokens"):
+        with pytest.raises(TypeError, match="should be a list of integers"):
             renderer.render_completions([[1, 2], ["foo", "bar"]])
 
     @pytest.mark.parametrize("string_input", STRING_INPUTS)
