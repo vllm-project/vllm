@@ -57,7 +57,7 @@ steps:
       pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
       pytest -x -v -s tests/quantization/test_cpu_wna16.py"
       
-- label: CPU-TP/DP/PP Tests
+- label: CPU-Distributed Tests
   depends_on: []
   soft_fail: true
   device: intel_cpu
