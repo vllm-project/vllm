@@ -131,7 +131,7 @@ class KVConnectorPromMetrics:
         Record the supplied transfer statistics to Prometheus metrics. These
         statistics are engine-specific, and should be recorded to a metric
         with the appropriate 'engine' label. These metric instances can be
-        created using the make_per_engine() helper method.
+        created using the create_metric_per_engine() helper method.
         """
         raise NotImplementedError
 
