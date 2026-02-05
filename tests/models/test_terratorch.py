@@ -5,8 +5,10 @@ import pytest
 import torch
 
 from tests.conftest import VllmRunner
+from tests.utils import create_new_process_for_each_test
 
 
+@create_new_process_for_each_test()  # Memory is not cleaned up properly otherwise
 @pytest.mark.parametrize(
     "model",
     [

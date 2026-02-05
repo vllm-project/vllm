@@ -1040,6 +1040,31 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
         return out_data
 
+    def get_batches(
+        self,
+        *,
+        device: torch.types.Device = None,
+        pin_memory: bool = False,
+    ) -> list[BatchedTensorInputs]:
+        """Construct batches of keyword arguments to pass to the model."""
+        from .utils import group_and_batch_mm_items
+
+        items_by_modality = self.require_data()
+        batches_by_modality = {
+            modality: [
+                data
+                for _, data in group_and_batch_mm_items(
+                    items,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+            ]
+            for modality, items in items_by_modality.items()
+            if len(items) > 0
+        }
+
+        return [batch for batches in batches_by_modality.values() for batch in batches]
+
 
 MultiModalKwargsOptionalItems: TypeAlias = (
     MultiModalKwargsItems[MultiModalKwargsItem]

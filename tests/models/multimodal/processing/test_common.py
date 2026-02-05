@@ -467,11 +467,14 @@ def _assert_inputs_equal(
 
     assert a_rest == b_rest, msg
 
-    a_data = a["mm_kwargs"].get_data()
-    b_data = b["mm_kwargs"].get_data()
+    a_batches = a["mm_kwargs"].get_batches()
+    b_batches = b["mm_kwargs"].get_batches()
 
-    for key in ignore_mm_keys:
-        a_data.pop(key, None)
-        b_data.pop(key, None)
+    assert len(a_batches) == len(b_batches), msg
 
-    assert batched_tensors_equal(a_data, b_data), msg
+    for i, (a_data, b_data) in enumerate(zip(a_batches, b_batches)):
+        for key in ignore_mm_keys:
+            a_data.pop(key, None)
+            b_data.pop(key, None)
+
+        assert batched_tensors_equal(a_data, b_data), msg + f" ({i=})"
