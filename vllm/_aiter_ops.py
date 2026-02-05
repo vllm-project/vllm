@@ -850,51 +850,37 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
     layer_slot_mapping = slot_mapping.get(layer_name)
-    if layer_slot_mapping is not None:
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            cos, sin = cos_sin_cache.chunk(2, dim=-1)
-            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
-            key_cache, value_cache = kv_cache.unbind(0)
-            if is_fp8_kv_cache:
-                key_cache_og_dtype = key_cache.dtype
-                value_cache_og_dtype = value_cache.dtype
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-            query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
-                query,
-                key,
-                value,
-                key_cache,
-                value_cache,
-                layer_slot_mapping,
-                positions,
-                cos,
-                sin,
-                attn_layer._k_scale,
-                attn_layer._v_scale,
-                is_neox,
-                flash_layout=True,
-                apply_scale=is_fp8_kv_cache,
-                q_out=query,
-                k_out=key,
-                output_zeros=False,
-            )
-            if is_fp8_kv_cache:
-                key_cache = key_cache.view(key_cache_og_dtype)
-                value_cache = value_cache.view(value_cache_og_dtype)
-        else:
-            query, key = self.rotary_emb(positions, query, key)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+    key_cache, value_cache = kv_cache.unbind(0)
+    if is_fp8_kv_cache:
+        key_cache_og_dtype = key_cache.dtype
+        value_cache_og_dtype = value_cache.dtype
+        key_cache = key_cache.view(self.fp8_dtype)
+        value_cache = value_cache.view(self.fp8_dtype)
+    query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
+        query,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        layer_slot_mapping,
+        positions,
+        cos,
+        sin,
+        attn_layer._k_scale,
+        attn_layer._v_scale,
+        is_neox,
+        flash_layout=True,
+        apply_scale=is_fp8_kv_cache,
+        q_out=query,
+        k_out=key,
+        output_zeros=False,
+    )
+    if is_fp8_kv_cache:
+        key_cache = key_cache.view(key_cache_og_dtype)
+        value_cache = value_cache.view(value_cache_og_dtype)
 
     dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
     return query, key, value, dummy
