@@ -17,6 +17,8 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.inputs import PromptType
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -224,6 +226,10 @@ def get_device_indices(
     return value
 
 
+def get_prompt_text(prompt: PromptType) -> str | None:
+    return get_prompt_components(prompt)[0]
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -304,6 +310,13 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                dp_vllm_config.kv_transfer_config.engine_id = (
+                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
+                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
@@ -787,10 +800,7 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    local_engines_only = (
-        parallel_config.data_parallel_hybrid_lb
-        or parallel_config.data_parallel_external_lb
-    )
+    local_engines_only = parallel_config.local_engines_only
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see

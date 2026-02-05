@@ -6,7 +6,6 @@ from typing import Any, Literal, cast
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 from vllm import version
 from vllm.config.utils import config
@@ -16,7 +15,6 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 
 
 @config
-@dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 
@@ -71,9 +69,6 @@ class ObservabilityConfig:
     """Enable collection of timing statistics for multimodal processor operations.
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
     argument."""
-
-    enable_mfu_metrics: bool = False
-    """Enable Model FLOPs Utilization (MFU) metrics."""
 
     enable_logging_iteration_details: bool = False
     """Enable detailed logging of iteration details.

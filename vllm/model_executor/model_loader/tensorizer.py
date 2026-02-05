@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
@@ -323,7 +323,7 @@ class TensorizerConfig(MutableMapping):
                 " is unstable and may lead to errors."
             )
 
-    def open_stream(self, tensorizer_args: Optional["TensorizerArgs"] = None):
+    def open_stream(self, tensorizer_args: "TensorizerArgs | None" = None):
         if tensorizer_args is None:
             tensorizer_args = self._construct_tensorizer_args()
 
@@ -764,7 +764,10 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     elif tensor_path.endswith(".bin"):
         tensors = torch.load(tensor_path, weights_only=True)
     else:
-        raise ValueError("Unsupported file: %s", tensor_path)
+        raise ValueError(
+            f"Unsupported adapter model file: {tensor_path}. "
+            f"Must be a .safetensors or .bin file."
+        )
 
     with open(config_path) as f:
         config = json.load(f)

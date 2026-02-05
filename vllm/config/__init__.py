@@ -37,6 +37,7 @@ from vllm.config.utils import (
     config,
     get_attr_docs,
     is_init_field,
+    replace,
     update_config,
 )
 from vllm.config.vllm import (
@@ -104,6 +105,7 @@ __all__ = [
     "config",
     "get_attr_docs",
     "is_init_field",
+    "replace",
     "update_config",
     # From vllm.config.vllm
     "VllmConfig",
