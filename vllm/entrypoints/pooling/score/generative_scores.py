@@ -56,9 +56,6 @@ class GenerativeScoreRequest(OpenAIBaseModel):
             the label_token_ids (True) or return true model probabilities over
             the full vocab for those ids (False).
         item_first: If True, prepend items to query. Otherwise append items to query.
-        temperature: Temperature for logits. Default 0.0 for scoring (greedy).
-        top_k: Top-k filtering. Default 0 (disabled) for scoring.
-        top_p: Top-p filtering. Default 1.0 (disabled) for scoring.
         add_special_tokens: Whether to add special tokens when tokenizing.
     """
 
@@ -86,18 +83,6 @@ class GenerativeScoreRequest(OpenAIBaseModel):
     item_first: bool = Field(
         default=False,
         description="If True, prepend items to query. Otherwise append items to query.",
-    )
-    temperature: float | None = Field(
-        default=0.0,
-        description="Temperature for logits. Default 0.0 for scoring.",
-    )
-    top_k: int | None = Field(
-        default=0,
-        description="Top-k filtering. Default 0 (disabled) for scoring.",
-    )
-    top_p: float | None = Field(
-        default=1.0,
-        description="Top-p filtering. Default 1.0 (disabled) for scoring.",
     )
     add_special_tokens: bool = Field(
         default=True,
@@ -260,13 +245,13 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         # Create sampling params for scoring
         # We use max_tokens=1 with logprob_token_ids to efficiently get
         # logprobs for only the specified label tokens (not full vocab)
+        # Note: temperature/top_k/top_p don't affect logprobs - they only
+        # affect the sampling distribution. Logprobs are computed from raw
+        # logits via log_softmax before any sampling transformations.
         sampling_params = SamplingParams(
             max_tokens=1,
-            temperature=request.temperature if request.temperature else 0.0,
-            top_k=request.top_k if request.top_k is not None else 0,
-            top_p=request.top_p if request.top_p is not None else 1.0,
-            logprobs=len(request.label_token_ids),  # Request enough logprobs
-            logprob_token_ids=request.label_token_ids,  # Efficient: only these tokens
+            logprobs=len(request.label_token_ids),
+            logprob_token_ids=request.label_token_ids,
             n=1,
         )
 
