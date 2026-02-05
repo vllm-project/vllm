@@ -649,7 +649,7 @@ class LLM:
             max_tokens=1,
             temperature=temperature,
             skip_clone=True,  # Internal beam search, safe to skip clone
-            detokenize=False,
+            detokenize=False,   # The returned text never gets used
         )
         instances: list[BeamSearchInstance] = []
 
