@@ -542,11 +542,11 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends \
         cuda-nvcc-${CUDA_VERSION_DASH} \
-        cuda-cudart-${CUDA_VERSION_DASH} \
-        cuda-nvrtc-${CUDA_VERSION_DASH} \
+        cuda-cudart-dev-${CUDA_VERSION_DASH} \
+        cuda-nvrtc-dev-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-${CUDA_VERSION_DASH} \
+        libcublas-dev-${CUDA_VERSION_DASH} \
         # Fixes nccl_allocator requiring nccl.h at runtime
         # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
         libnccl-dev && \
