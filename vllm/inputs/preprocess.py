@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from typing_extensions import assert_never
 
