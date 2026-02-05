@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
 import tempfile
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Any, TypeAlias
+from urllib.parse import urlparse
 
 import aiohttp
 import torch
+from fastapi import UploadFile
 from prometheus_client import start_http_server
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from tqdm import tqdm
 
@@ -25,12 +28,28 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
     ErrorResponse,
     OpenAIBaseModel,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
+from vllm.entrypoints.openai.translations.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranscriptionResponseVerbose,
+    TranslationRequest,
+    TranslationResponse,
+    TranslationResponseVerbose,
+)
+from vllm.entrypoints.openai.translations.serving import (
+    OpenAIServingTranscription,
+    OpenAIServingTranslation,
+)
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingRequest,
+    EmbeddingResponse,
+)
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
@@ -48,8 +67,73 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 
+class BatchTranscriptionRequest(TranscriptionRequest):
+    """
+    Batch transcription request that uses file_url instead of file.
+
+    This class extends TranscriptionRequest but replaces the file field
+    with file_url to support batch processing from audio files written in JSON format.
+    """
+
+    file_url: str = Field(
+        ...,
+        description=(
+            "Either a URL of the audio or a data URL with base64 encoded audio data. "
+        ),
+    )
+
+    # Override file to be optional and unused for batch processing
+    file: UploadFile | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_no_file(cls, data: Any):
+        """Ensure file field is not provided in batch requests."""
+        if isinstance(data, dict) and "file" in data:
+            raise ValueError(
+                "The 'file' field is not supported in batch requests. "
+                "Use 'file_url' instead."
+            )
+        return data
+
+
+class BatchTranslationRequest(TranslationRequest):
+    """
+    Batch translation request that uses file_url instead of file.
+
+    This class extends TranslationRequest but replaces the file field
+    with file_url to support batch processing from audio files written in JSON format.
+    """
+
+    file_url: str = Field(
+        ...,
+        description=(
+            "Either a URL of the audio or a data URL with base64 encoded audio data. "
+        ),
+    )
+
+    # Override file to be optional and unused for batch processing
+    file: UploadFile | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_no_file(cls, data: Any):
+        """Ensure file field is not provided in batch requests."""
+        if isinstance(data, dict) and "file" in data:
+            raise ValueError(
+                "The 'file' field is not supported in batch requests. "
+                "Use 'file_url' instead."
+            )
+        return data
+
+
 BatchRequestInputBody: TypeAlias = (
-    ChatCompletionRequest | EmbeddingRequest | ScoreRequest | RerankRequest
+    ChatCompletionRequest
+    | EmbeddingRequest
+    | ScoreRequest
+    | RerankRequest
+    | BatchTranscriptionRequest
+    | BatchTranslationRequest
 )
 
 
@@ -88,6 +172,10 @@ class BatchRequestInput(OpenAIBaseModel):
             return TypeAdapter(ScoreRequest).validate_python(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
+        if url == "/v1/audio/transcriptions":
+            return BatchTranscriptionRequest.model_validate(value)
+        if url == "/v1/audio/translations":
+            return BatchTranslationRequest.model_validate(value)
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
@@ -104,6 +192,10 @@ class BatchResponseData(OpenAIBaseModel):
         | EmbeddingResponse
         | ScoreResponse
         | RerankResponse
+        | TranscriptionResponse
+        | TranscriptionResponseVerbose
+        | TranslationResponse
+        | TranslationResponseVerbose
         | None
     ) = None
 
@@ -171,7 +263,9 @@ def make_arg_parser(parser: FlexibleArgumentParser):
     )
 
     parser.add_argument(
-        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
+        "--enable-metrics",
+        action="store_true",
+        help="Enable Prometheus metrics",
     )
     parser.add_argument(
         "--url",
@@ -245,11 +339,57 @@ class BatchProgressTracker:
 
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(path_or_url) as resp,
+        ):
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
             return f.read()
+
+
+async def download_bytes_from_url(url: str) -> bytes:
+    """
+    Download data from a URL or decode from a data URL.
+
+    Args:
+        url: Either an HTTP/HTTPS URL or a data URL (data:...;base64,...)
+
+    Returns:
+        Data as bytes
+    """
+    parsed = urlparse(url)
+
+    # Handle data URLs (base64 encoded)
+    if parsed.scheme == "data":
+        # Format: data:...;base64,<base64_data>
+        if "," in url:
+            header, data = url.split(",", 1)
+            if "base64" in header:
+                return base64.b64decode(data)
+            else:
+                raise ValueError(f"Unsupported data URL encoding: {header}")
+        else:
+            raise ValueError(f"Invalid data URL format: {url}")
+
+    # Handle HTTP/HTTPS URLs
+    elif parsed.scheme in ("http", "https"):
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url) as resp,
+        ):
+            if resp.status != 200:
+                raise Exception(
+                    f"Failed to download data from URL: {url}. Status: {resp.status}"
+                )
+            return await resp.read()
+
+    else:
+        raise ValueError(
+            f"Unsupported URL scheme: {parsed.scheme}. "
+            "Supported schemes: http, https, data"
+        )
 
 
 async def write_local_file(
@@ -321,7 +461,9 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
 
 
 async def write_file(
-    path_or_url: str, batch_outputs: list[BatchRequestOutput], output_tmp_dir: str
+    path_or_url: str,
+    batch_outputs: list[BatchRequestOutput],
+    output_tmp_dir: str,
 ) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
@@ -382,6 +524,82 @@ async def make_async_error_request_output(
     return make_error_request_output(request, error_msg)
 
 
+async def create_transcription_wrapper(
+    batch_request_body: BatchTranscriptionRequest,
+    handler_fn: Callable,
+) -> TranscriptionResponse | TranscriptionResponseVerbose | ErrorResponse:
+    """
+    Wrapper function to convert BatchTranscriptionRequest to TranscriptionRequest
+    and call the transcription handler.
+    """
+    try:
+        # Download data from URL
+        audio_data = await download_bytes_from_url(batch_request_body.file_url)
+
+        # Convert BatchTranscriptionRequest to TranscriptionRequest
+        # We need to create a TranscriptionRequest with a mock file.
+        mock_file = UploadFile(
+            file=BytesIO(audio_data),
+            filename="audio.bin",
+        )
+
+        # Create TranscriptionRequest from BatchTranscriptionRequest
+        # by copying all fields except file_url and setting file to mock_file
+        transcription_request_dict = batch_request_body.model_dump(exclude={"file_url"})
+        transcription_request_dict["file"] = mock_file
+        transcription_request = TranscriptionRequest.model_validate(
+            transcription_request_dict
+        )
+
+        return await handler_fn(audio_data, transcription_request, None)
+    except Exception as e:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"Failed to process transcription: {str(e)}",
+                type="BadRequestError",
+                code=HTTPStatus.BAD_REQUEST.value,
+            )
+        )
+
+
+async def create_translation_wrapper(
+    batch_request_body: BatchTranslationRequest,
+    handler_fn: Callable,
+) -> TranslationResponse | TranslationResponseVerbose | ErrorResponse:
+    """
+    Wrapper function to convert BatchTranslationRequest to TranslationRequest
+    and call the translation handler.
+    """
+    try:
+        # Download data from URL
+        audio_data = await download_bytes_from_url(batch_request_body.file_url)
+
+        # Convert BatchTranslationRequest to TranslationRequest
+        # We need to create a TranslationRequest with a mock file.
+        mock_file = UploadFile(
+            file=BytesIO(audio_data),
+            filename="audio.bin",
+        )
+
+        # Create TranslationRequest from BatchTranslationRequest
+        # by copying all fields except file_url and setting file to mock_file
+        translation_request_dict = batch_request_body.model_dump(exclude={"file_url"})
+        translation_request_dict["file"] = mock_file
+        translation_request = TranslationRequest.model_validate(
+            translation_request_dict
+        )
+
+        return await handler_fn(audio_data, translation_request, None)
+    except Exception as e:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"Failed to process translation: {str(e)}",
+                type="BadRequestError",
+                code=HTTPStatus.BAD_REQUEST.value,
+            )
+        )
+
+
 async def run_request(
     serving_engine_func: Callable,
     request: BatchRequestInput,
@@ -391,7 +609,16 @@ async def run_request(
 
     if isinstance(
         response,
-        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse, RerankResponse),
+        (
+            ChatCompletionResponse,
+            EmbeddingResponse,
+            ScoreResponse,
+            RerankResponse,
+            TranscriptionResponse,
+            TranscriptionResponseVerbose,
+            TranslationResponse,
+            TranslationResponseVerbose,
+        ),
     ):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
@@ -507,6 +734,28 @@ async def run_batch(
         else None
     )
 
+    openai_serving_transcription = (
+        OpenAIServingTranscription(
+            engine_client,
+            openai_serving_models,
+            request_logger=request_logger,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+
+    openai_serving_translation = (
+        OpenAIServingTranslation(
+            engine_client,
+            openai_serving_models,
+            request_logger=request_logger,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
@@ -589,15 +838,65 @@ async def run_batch(
 
             response_futures.append(run_request(rerank_handler_fn, request, tracker))
             tracker.submitted()
+        elif request.url == "/v1/audio/transcriptions":
+            transcription_handler_fn = (
+                openai_serving_transcription.create_transcription
+                if openai_serving_transcription is not None
+                else None
+            )
+            if transcription_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Transcriptions API",
+                    )
+                )
+                continue
+
+            async def transcription_wrapper(
+                batch_request_body: BatchTranscriptionRequest,
+                handler_fn: Callable = transcription_handler_fn,
+            ) -> TranscriptionResponse | TranscriptionResponseVerbose | ErrorResponse:
+                return await create_transcription_wrapper(
+                    batch_request_body, handler_fn
+                )
+
+            response_futures.append(
+                run_request(transcription_wrapper, request, tracker)
+            )
+            tracker.submitted()
+        elif request.url == "/v1/audio/translations":
+            translation_handler_fn = (
+                openai_serving_translation.create_translation
+                if openai_serving_translation is not None
+                else None
+            )
+            if translation_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Translations API",
+                    )
+                )
+                continue
+
+            async def translation_wrapper(
+                batch_request_body: BatchTranslationRequest,
+                handler_fn: Callable = translation_handler_fn,
+            ) -> TranslationResponse | TranslationResponseVerbose | ErrorResponse:
+                return await create_translation_wrapper(batch_request_body, handler_fn)
+
+            response_futures.append(run_request(translation_wrapper, request, tracker))
+            tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
                     error_msg=f"URL {request.url} was used. "
                     "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
-                    " /score, /rerank ."
-                    "See vllm/entrypoints/openai/api_server.py for supported "
-                    "score/rerank versions.",
+                    " /v1/audio/transcriptions, /v1/audio/translations, /score, "
+                    " /rerank. See vllm/entrypoints/openai/api_server.py "
+                    "for supported score/rerank versions.",
                 )
             )
 
