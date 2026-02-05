@@ -4,6 +4,7 @@ import itertools
 from dataclasses import dataclass
 from typing import Any
 
+from vllm.tracing import HIDE_TOKEN_IDS
 from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput
 from vllm.v1.outputs import IterStats
 
@@ -49,15 +50,22 @@ class ObservableContext:
             )
         )
 
+        # Build attributes dict
+        # If VLLM_TRACE_HIDE_TOKEN_IDS is enabled, don't include new_token_ids
+        token_attrs: dict[str, Any] = {
+            "iter_waiting_size": iter_stats.iter_waiting_size,
+            "iter_total_tokens_count": iter_stats.iter_total_tokens_count,
+        }
+
+        if not HIDE_TOKEN_IDS:
+            token_attrs["new_token_ids"] = new_token_ids
+
+        # Record token generation completion time
         self.token_related_events.append(
             Event(
                 timestamp=iter_stats.token_output_time,
                 name="token_generated",
-                attributes={
-                    "new_token_ids": new_token_ids,
-                    "iter_waiting_size": iter_stats.iter_waiting_size,
-                    "iter_total_tokens_count": iter_stats.iter_total_tokens_count,
-                },
+                attributes=token_attrs,
             )
         )
 
