@@ -632,8 +632,6 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         )
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
-
-        # Register patterns for common model configurations
         for _, layer in attn_layers.items():
             for is_neox in [True, False]:
                 RopeReshapeKVCachePattern(
