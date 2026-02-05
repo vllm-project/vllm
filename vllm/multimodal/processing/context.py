@@ -691,7 +691,7 @@ class BaseProcessingInfo:
                             f"`{modality}_embeds`"
                         )
                     if mm_config.get_limit_per_prompt(modality) == 0:
-                        logger.info(
+                        logger.debug(
                             "Skipping count validation for modality "
                             "'%s' (embeddings with limit=0)",
                             modality,
