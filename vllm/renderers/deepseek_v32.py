@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
+from ..tokenizers.hf import HfTokenizer
 from .params import ChatParams
 from .protocol import BaseRenderer
 
@@ -47,10 +48,10 @@ class DeepseekV32Renderer(BaseRenderer):
         self._tokenizer = tokenizer
 
     @property
-    def tokenizer(self) -> DeepseekV32Tokenizer | None:
+    def tokenizer(self) -> HfTokenizer | None:
         return self._tokenizer
 
-    def get_tokenizer(self) -> DeepseekV32Tokenizer:
+    def get_tokenizer(self) -> HfTokenizer:
         tokenizer = self.tokenizer
         if tokenizer is None:
             raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
