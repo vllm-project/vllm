@@ -9,91 +9,6 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.platforms import current_platform
-
-if current_platform.is_cuda_alike():
-
-    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-    def eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Map the logical expert ids to physical expert ids
-        and record the expert load metrics.
-
-        This will select a pseudo-random replica for each logical expert.
-        Only used for EPLB.
-
-        Args:
-            topk_ids: The logical expert ids.
-            expert_load_view: The expert load view.
-            logical_to_physical_map: The logical to physical map.
-            logical_replica_count: The logical replica count.
-
-        Returns:
-            The physical expert ids.
-        """
-
-        # 1. Convert the logical expert ids to physical expert ids
-        # Directly select a random replica for each logical expert
-
-        # In case `indices_type` is not `torch.long` or `torch.int`,
-        # e.g. `torch.uint32` as required by dispatch/combine kernels
-        topk_ids_long = topk_ids.long()
-        # Use (token position) modulo (replica count)
-        # to deterministically choose a replica
-        replica_count = logical_replica_count[topk_ids_long]
-        # Flatten-position based index, reshaped back to `topk_ids` shape
-        pos_indices = torch.arange(
-            topk_ids.numel(), device=topk_ids.device, dtype=torch.long
-        ).reshape_as(topk_ids)
-        # Compute pseudo-random indices by modulo
-        replica_indices = (pos_indices % replica_count).unsqueeze(-1)
-        physical_ids = (
-            logical_to_physical_map[topk_ids_long]
-            .gather(-1, replica_indices)
-            .squeeze(-1)
-        )
-
-        topk_ids = physical_ids
-
-        # 2. Record expert load metrics.
-
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalize` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
-
-        # `expert_load_view`: (num_physical_experts,)
-
-        # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-        topk_ids_flatten = topk_ids.flatten()
-        expert_load_view.scatter_add_(
-            dim=0,
-            index=topk_ids_flatten.long(),
-            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-        )
-        return topk_ids
-else:
-
-    def eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> torch.Tensor:
-        # CPU fallback: no EPLB so just return as is
-        return topk_ids
 
 
 class BaseRouter(FusedMoERouter):
@@ -152,20 +67,6 @@ class BaseRouter(FusedMoERouter):
         return (
             self.indices_type_getter() if self.indices_type_getter is not None else None
         )
-
-    def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
-        """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self.enable_eplb:
-            assert self.eplb_state.expert_load_view is not None
-            assert self.eplb_state.logical_to_physical_map is not None
-            assert self.eplb_state.logical_replica_count is not None
-            return eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=self.eplb_state.expert_load_view,
-                logical_to_physical_map=self.eplb_state.logical_to_physical_map,
-                logical_replica_count=self.eplb_state.logical_replica_count,
-            )
-        return topk_ids
 
     def _convert_indices_dtype(
         self, topk_ids: torch.Tensor, indices_type: torch.dtype | None
@@ -240,10 +141,7 @@ class BaseRouter(FusedMoERouter):
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
 
-        # Step 4: Apply EPLB mapping
-        topk_ids = self._apply_eplb_mapping(topk_ids)
-
-        # Step 5: Convert indices dtype
+        # Step 4: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
 
         return topk_weights, topk_ids
