@@ -192,7 +192,7 @@ def group_and_batch_mm_items(
     - They have different values in `MultiModalSharedField`.
 
     Args:
-        mm_kwargs: List of `MultiModalKwargsItem`.
+        items: List of `MultiModalKwargsItem`.
         device: The device to place the grouped tensors on.
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
@@ -243,7 +243,7 @@ def group_mm_kwargs_by_modality(
     restriction that the items in a batch must belong to the same modality.
 
     Args:
-        mm_kwargs: List of `MultiModalKwargsItem`.
+        mm_kwargs: List of `(modality, item)`.
         device: The device to place the grouped tensors on.
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
