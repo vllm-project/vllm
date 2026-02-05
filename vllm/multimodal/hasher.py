@@ -84,6 +84,9 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("image", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
+            if obj.numel() == 1:
+                return cls.serialize_item(obj.item())
+
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
             tensor_shape = tensor_obj.shape
@@ -104,6 +107,9 @@ class MultiModalHasher:
                 )
             return cls.iter_item_to_bytes("tensor", tensor_obj.numpy())
         if isinstance(obj, np.ndarray):
+            if obj.size == 1:
+                return cls.serialize_item(obj.item())
+
             # If the array is non-contiguous, we need to copy it first
             arr_data = (
                 obj.view(np.uint8).data if obj.flags.c_contiguous else obj.tobytes()
