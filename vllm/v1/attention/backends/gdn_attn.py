@@ -513,8 +513,6 @@ class GDNAttentionMetadataBuilder(
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            # TODO: check if we are doing extra unnecessary work here if
-            # APC is enabled. We might get away with just the state_indices_tensor
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
