@@ -563,11 +563,11 @@ async def create_transcription_wrapper(
         if is_translation:
             # Create TranslationRequest from BatchTranslationRequest
             translation_request = TranslationRequest.model_validate(request_dict)
-            return await handler_fn(audio_data, translation_request, None)
+            return await handler_fn(audio_data, translation_request)
         else:
             # Create TranscriptionRequest from BatchTranscriptionRequest
             transcription_request = TranscriptionRequest.model_validate(request_dict)
-            return await handler_fn(audio_data, transcription_request, None)
+            return await handler_fn(audio_data, transcription_request)
     except Exception as e:
         operation = "translation" if is_translation else "transcription"
         return ErrorResponse(
