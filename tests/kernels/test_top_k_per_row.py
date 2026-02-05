@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 # Test parameters
 NUM_ROWS = [1, 32, 2050]
@@ -134,6 +135,7 @@ def test_top_k_per_row(
     """
     Test top_k_per_row.
     """
+    set_random_seed(0)
     torch.set_default_device("cuda:0")
 
     # Create test data
@@ -188,7 +190,11 @@ def _run_top_k_per_row_decode_test(
     # Create test data
     num_rows = batch_size * next_n
     seq_lens = torch.randint(
-        vocab_size, (batch_size,), dtype=torch.int32, device="cuda"
+        low=next_n,
+        high=vocab_size,
+        size=(batch_size,),
+        dtype=torch.int32,
+        device="cuda",
     )
     row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
     row_indices = torch.arange(num_rows, device="cuda") // next_n
@@ -246,6 +252,7 @@ def test_top_k_per_row_decode(
     """
     Test top_k_per_row with seq_lens tensor.
     """
+    set_random_seed(0)
     vocab_size = 20000
     _run_top_k_per_row_decode_test(
         top_k, batch_size, next_n, vocab_size, clean_logits, data_generation
@@ -259,6 +266,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     """
     Test top_k_per_row_decode with large vocabulary size.
     """
+    set_random_seed(0)
     top_k = 2048
     batch_size = 2
     next_n = 2
