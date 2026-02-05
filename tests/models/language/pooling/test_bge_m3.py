@@ -137,7 +137,9 @@ async def test_bge_m3_api_server_sparse_embedding(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_bge_m3_api_server_sparse_embedding_corner_case(client: openai.AsyncOpenAI):
+async def test_bge_m3_api_server_sparse_embedding_corner_case(
+    client: openai.AsyncOpenAI,
+):
     embeddings = await sparse_embeddings(client, ["Hi"])
     assert len(embeddings) == 1
     assert 2673 in embeddings[0]
