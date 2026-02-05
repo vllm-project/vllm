@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
@@ -39,4 +40,3 @@ def test_mamba_get_block_table_tensor_all_none_maps_null_block_to_pad():
 
     out_none = mamba_get_block_table_tensor(block_table, seq_lens, spec, "none")
     assert out_none.tolist() == [[PAD_SLOT_ID, 2], [3, PAD_SLOT_ID]]
-
