@@ -130,14 +130,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
-        m_fused_moe_fn = FusedMoEModularKernel(
-            prepare_finalize,
-            self.base_layer.quant_method.select_gemm_impl(
-                prepare_finalize, self.base_layer
-            ),
-            self.base_layer.shared_experts,
-        )
+        if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
+            # Use the existing modular kernel from the quant method
+            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+        else:
+            # Create a new modular kernel via select_gemm_impl
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            m_fused_moe_fn = FusedMoEModularKernel(
+                prepare_finalize,
+                self.base_layer.quant_method.select_gemm_impl(
+                    prepare_finalize, self.base_layer
+                ),
+                self.base_layer.shared_experts,
+            )
+
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
