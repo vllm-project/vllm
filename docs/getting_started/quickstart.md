@@ -57,7 +57,7 @@ This guide will help you quickly get started with vLLM to perform:
         It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
     !!! note    
-        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vlm-dev`. This is being deprecated by using vLLM's docker release pipeline.
+        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
 
 === "Google TPU"
 
