@@ -748,12 +748,16 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-
         if not mode == "keep" and self._client_count > 1:
             raise NotImplementedError(
                 "pause_generation is not supported with --api-server-count > 1"
                 " when mode is not 'keep'"
             )
+
+        if mode == "keep":
+            # Freeze requests in the scheduler - they will resume on
+            # resume_generation().
+            await self.engine_core.pause_scheduler_async()
 
         async with self._pause_cond:
             if self._paused:
@@ -767,10 +771,8 @@ class AsyncLLM(EngineClient):
             elif mode == "wait":
                 if self.output_processor.has_unfinished_requests():
                     await self.output_processor.wait_for_requests_to_drain()
-            else:  # mode == "keep"
-                # Freeze requests in the scheduler - they will resume on
-                # resume_generation().
-                await self.engine_core.pause_scheduler_async()
+            else:
+                raise ValueError(f"Invalid mode: {mode}")
 
             # Clear cache
             if clear_cache:
