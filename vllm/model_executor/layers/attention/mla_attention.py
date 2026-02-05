@@ -293,7 +293,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
-        q_pad_num_heads: int | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -308,7 +307,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-        self.q_pad_num_heads = q_pad_num_heads
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -375,10 +373,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
-            q_pad_num_heads=q_pad_num_heads,
             **extra_impl_args,
         )
-
+        self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -533,7 +530,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 scale=self._k_scale,
             )
 
-        if fp8_attention:
+        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
@@ -617,7 +614,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention:
+            if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -1888,6 +1885,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
 
+        self.supports_quant_query_input = True
+
+        # Use flashinfer's optimized concat_mla_k kernel when available.
+        # The kernel is optimized for DeepSeek V3 dimensions:
+        # num_heads=128, nope_dim=128, rope_dim=64
+        self._use_flashinfer_concat_mla_k = (
+            has_flashinfer()
+            and (self.num_heads == 128)
+            and (self.qk_nope_head_dim == 128)
+            and (self.qk_rope_head_dim == 64)
+        )
+
         if use_trtllm_ragged_deepseek_prefill():
             logger.info_once(
                 "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
@@ -2195,9 +2204,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             dtype=k_nope.dtype,
             device=k_nope.device,
         )
-        # Direct copies with efficient broadcasting
-        k[..., : k_nope.shape[-1]] = k_nope
-        k[..., k_nope.shape[-1] :] = k_pe
+
+        if self._use_flashinfer_concat_mla_k:
+            torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
+        else:
+            # Fallback: Direct copies with efficient broadcasting
+            k[..., : k_nope.shape[-1]] = k_nope
+            k[..., k_nope.shape[-1] :] = k_pe
         return k
 
     def _compute_prefill_context(
