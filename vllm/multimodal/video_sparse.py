@@ -77,9 +77,6 @@ class SimilarFrameDetector:
 
     def _calculate_ssim(self, imgs1: torch.Tensor, imgs2: torch.Tensor) -> torch.Tensor:
         """Calculate SSIM for batch of frames."""
-        gray1 = imgs1.to(torch.float32)
-        gray2 = imgs2.to(torch.float32)
-
         ssim_values = structural_similarity_index_measure(
             preds=gray1,
             target=gray2,
