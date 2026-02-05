@@ -251,26 +251,19 @@ class ParallelConfig:
     needs to be divisible by dcp_size."""
 
     dcp_kv_cache_interleave_size: int = 1
-    """
-    Interleave size of kv_cache storage while using DCP.
-    dcp_kv_cache_interleave_size has been replaced by cp_kv_cache_interleave_size,
-    and will be deprecated when PCP is fully supported.
-
-    """
-    cp_kv_cache_interleave_size: int = 1
-    """Interleave size of kv_cache storage while using DCP or PCP.
-    For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `total_cp_world_size = pcp_world_size * dcp_world_size`.
-    store interleave_size tokens on total_cp_rank i,
-    then store next interleave_size tokens on total_cp_rank i+1.
+    """Interleave size of KV cache storage while using DCP.
+    Store interleave_size tokens on dcp_rank i, then store next
+    interleave_size tokens on dcp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
-        total_cp_rank `i % total_cp_world_size`.
+        dcp_rank `i % dcp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
         first populated to the preceding ranks. Tokens are then stored
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
-    Block_size should be greater than or equal to cp_kv_cache_interleave_size.
-    Block_size should be divisible by cp_kv_cache_interleave_size.
+    Block_size should be >= dcp_kv_cache_interleave_size and divisible by it.
     """
+
+    cp_kv_cache_interleave_size: int = 1
+    """DEPRECATED: Use dcp_kv_cache_interleave_size instead."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
@@ -344,16 +337,29 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
-            raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
-            )
+        # DCP reuses TP GPUs and splits one TP group into tp_size//dcp_size
+        # DCP groups. When PCP is also enabled, DCP groups span across PCP
+        # halves so a single all-to-all handles decode communication.
+        tp = self.tensor_parallel_size
+        dcp = self.decode_context_parallel_size
+        pcp = self.prefill_context_parallel_size
+        if pcp > 1 and dcp > 1:
+            # With PCP: dcp must divide evenly across PCP halves
+            if dcp % pcp != 0:
+                raise ValueError(
+                    f"dcp_size={dcp} must be divisible by pcp_size={pcp} "
+                    "when both are enabled."
+                )
+            dcp_per_pcp = dcp // pcp
+            if tp % dcp_per_pcp != 0:
+                raise ValueError(
+                    f"tp_size={tp} must be divisible by dcp_per_pcp={dcp_per_pcp} "
+                    f"(dcp_size={dcp} / pcp_size={pcp})."
+                )
+        elif dcp > 1:
+            # Without PCP: tp must be divisible by dcp
+            if tp % dcp != 0:
+                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
 
         return self
 

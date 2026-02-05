@@ -129,11 +129,9 @@ class EngineCore:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 vllm_config.scheduler_config.enable_chunked_prefill = False
 
-        scheduler_block_size = (
-            vllm_config.cache_config.block_size
-            * vllm_config.parallel_config.decode_context_parallel_size
-            * vllm_config.parallel_config.prefill_context_parallel_size
-        )
+        # Only DCP shards KV cache. PCP gathers K/V after prefill.
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        scheduler_block_size = vllm_config.cache_config.block_size * dcp_size
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,

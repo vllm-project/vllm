@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -161,6 +162,7 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
+    PCPManager,
     check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
@@ -372,7 +374,9 @@ class GPUModelRunner(
         # Always set to false after the first forward pass
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
+        self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
+        self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -531,7 +535,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -560,9 +564,19 @@ class GPUModelRunner(
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
         self._encoder_timing_lock = threading.Lock()
 
+        if self.pcp_world_size > 1:
+            # NOTE For PCP, we will pad the tokens of each request
+            # to a multiple of 2 * pcp_size that is possible greater
+            # than the max_num_batched_tokens.
+            max_padded_num_tokens = (
+                self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size
+            )
+        else:
+            max_padded_num_tokens = self.max_num_tokens
+
         # Persistent buffers for CUDA graphs.
-        self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
-        self.positions = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+        self.input_ids = self._make_buffer(max_padded_num_tokens, dtype=torch.int32)
+        self.positions = self._make_buffer(max_padded_num_tokens, dtype=torch.int64)
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -576,9 +590,12 @@ class GPUModelRunner(
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
         self.inputs_embeds = self._make_buffer(
-            self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
+            max_padded_num_tokens,
+            self.inputs_embeds_size,
+            dtype=self.dtype,
+            numpy=False,
         )
-        self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+        self.is_token_ids = self._make_buffer(max_padded_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
@@ -594,10 +611,21 @@ class GPUModelRunner(
             # Double buffer to avoid race condition: previous iteration's async
             # copy may still be reading from CPU while current iteration writes.
             self.is_mm_embed_buffers = [
-                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
-                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
+                self._make_buffer(max_padded_num_tokens, dtype=torch.bool),
+                self._make_buffer(max_padded_num_tokens, dtype=torch.bool),
             ]
             self.is_mm_embed_idx = 0
+
+        # Manager for Prefill Context Parallelism
+        if self.pcp_world_size > 1:
+            self.pcp_manager = PCPManager(
+                self.pcp_world_size,
+                self.pcp_rank,
+                self.max_num_reqs,
+                max_padded_num_tokens,
+                self.device,
+                self.pin_memory,
+            )
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -612,7 +640,7 @@ class GPUModelRunner(
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, self.max_num_tokens + 1), dtype=torch.int64
+                (3, max_padded_num_tokens + 1), dtype=torch.int64
             )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
@@ -628,7 +656,7 @@ class GPUModelRunner(
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(
-            max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens),
+            max(self.max_num_reqs + 1, self.max_model_len, max_padded_num_tokens),
             dtype=np.int64,
         )
 
@@ -642,7 +670,7 @@ class GPUModelRunner(
         self.kv_sharing_fast_prefill_logits_indices = None
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
-                self.max_num_tokens, dtype=torch.int32, device=self.device
+                max_padded_num_tokens, dtype=torch.int32, device=self.device
             )
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
@@ -1454,14 +1482,15 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,  # num_tokens for model forward
     ]:
         """
         :return: tuple[
-            logits_indices, spec_decode_metadata,
+            logits_indices, spec_decode_metadata, num_tokens
         ]
         """
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
+        total_num_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -1478,12 +1507,33 @@ class GPUModelRunner(
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
         # Get positions.
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
+        positions_np = self.positions.np[:total_num_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
             out=positions_np,
         )
+
+        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(total_num_tokens)
+
+        logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+            self.device, non_blocking=True
+        )
+
+        # For PCP: partition to local tokens for this rank
+        if self.pcp_world_size > 1:
+            total_num_tokens, positions_np, req_indices = (
+                self.pcp_manager.partition_inputs(
+                    positions_np,
+                    req_indices,
+                    num_scheduled_tokens,
+                    self.arange_np,
+                    self.reorder_batch_threshold,
+                )
+            )
+            # Use local cumsum for query_start_loc
+            cu_num_tokens = np.cumsum(self.pcp_manager.local_num_scheduled)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1511,7 +1561,7 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu_tensor.flatten(),
             0,
             token_indices_tensor,
-            out=self.input_ids.cpu[:total_num_scheduled_tokens],
+            out=self.input_ids.cpu[:total_num_tokens],
         )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
@@ -1519,7 +1569,7 @@ class GPUModelRunner(
                 is_token_ids,
                 0,
                 token_indices_tensor,
-                out=self.is_token_ids.cpu[:total_num_scheduled_tokens],
+                out=self.is_token_ids.cpu[:total_num_tokens],
             )
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
@@ -1560,9 +1610,6 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1570,7 +1617,6 @@ class GPUModelRunner(
         # like FlashAttention requires that
         self.query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
-        query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -1592,25 +1638,25 @@ class GPUModelRunner(
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
-            total_num_scheduled_tokens,
+            total_num_tokens,
             cu_num_tokens,
         )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
+            self.mrope_positions.gpu[:, :total_num_tokens].copy_(
+                self.mrope_positions.cpu[:, :total_num_tokens],
                 non_blocking=True,
             )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
+            self.xdrope_positions.gpu[:, :total_num_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_tokens],
                 non_blocking=True,
             )
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(total_num_scheduled_tokens)
+            self.positions.copy_to_gpu(total_num_tokens)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1619,10 +1665,10 @@ class GPUModelRunner(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
+            assert self.pcp_world_size == 1, "PCP not support spec decode now"
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
@@ -1664,6 +1710,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            total_num_tokens,
         )
 
     def _build_attention_metadata(
@@ -1716,6 +1763,7 @@ class GPUModelRunner(
         def _get_block_table(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
+
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
@@ -1759,7 +1807,7 @@ class GPUModelRunner(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.cp_kv_cache_interleave_size,
+                self.parallel_config.dcp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.cpu[num_reqs:].fill_(0)
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
@@ -1768,6 +1816,13 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
+
+        if self.pcp_world_size > 1:
+            cm_base.pcp_allgather_restore_idx = (
+                self.pcp_manager.pcp_allgather_restore_idx.gpu[
+                    : num_tokens * self.pcp_world_size
+                ]
+            )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -3280,6 +3335,9 @@ class GPUModelRunner(
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
             slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
 
+            if self.pcp_world_size > 1:
+                slot_mapping = self.pcp_manager.pad_slot_mapping(slot_mapping)
+
             return slot_mapping
 
         slot_mappings_by_gid = {
@@ -3373,13 +3431,19 @@ class GPUModelRunner(
             req_ids = self.input_batch.req_ids
             tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-            max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, local_total_num_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
+
+            # For PCP, use local counts; otherwise use global
+            if self.pcp_world_size > 1:
+                max_num_scheduled_tokens = int(
+                    self.pcp_manager.local_num_scheduled.max()
+                )
+            else:
+                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)
@@ -3548,6 +3612,11 @@ class GPUModelRunner(
                 hidden_states = model_output
                 aux_hidden_states = None
 
+            if self.pcp_world_size > 1:
+                hidden_states = self.pcp_manager.restore_hidden_states(
+                    hidden_states,
+                    local_total_num_tokens,
+                )
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -5151,7 +5220,7 @@ class GPUModelRunner(
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            self.max_num_tokens // self.pcp_world_size, is_profile=True
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

@@ -1112,9 +1112,6 @@ def get_dcp_group() -> GroupCoordinator:
     return _DCP
 
 
-# kept for backward compatibility
-get_context_model_parallel_group = get_dcp_group
-
 _PP: GroupCoordinator | None = None
 
 
@@ -1377,11 +1374,20 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
+    pcp = prefill_context_model_parallel_size
+    dcp = decode_context_model_parallel_size or 1
+    tp = tensor_model_parallel_size
+    if pcp > 1 and dcp > 1:
+        # DCP groups span PCP halves so one all-to-all handles both.
+        # E.g. tp=6, dcp=6, pcp=2: groups are [0,1,2,6,7,8], [3,4,5,9,10,11]
+        dcp_per_pcp = dcp // pcp
+        # all_ranks: (num_pp, pcp, tp) -> (num_pp, pcp, num_dcp_groups, dcp_per_pcp)
+        r = all_ranks.reshape(-1, pcp, tp // dcp_per_pcp, dcp_per_pcp)
+        # transpose to (num_pp, num_dcp_groups, pcp, dcp_per_pcp)
+        # then reshape to (num_pp * num_dcp_groups, dcp)
+        group_ranks = r.transpose(1, 2).reshape(-1, dcp).unbind(0)
+    else:
+        group_ranks = all_ranks.reshape(-1, dcp).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
@@ -1393,6 +1399,8 @@ def initialize_model_parallel(
 
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
+    # PCP groups are essentially TP-sized groups across PCP dimension.
+    # For tp=6, pcp=2: PCP groups are [0,1,2,3,4,5] and [6,7,8,9,10,11]
     group_ranks = (
         all_ranks.transpose(3, 4)
         .reshape(-1, prefill_context_model_parallel_size)

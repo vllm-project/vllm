@@ -23,7 +23,7 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
         kernel_block_size: int,
-        cp_kv_cache_interleave_size: int,
+        dcp_kv_cache_interleave_size: int,
     ):
         """
         Args:
@@ -95,7 +95,7 @@ class BlockTable:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+        self.dcp_kv_cache_interleave_size = dcp_kv_cache_interleave_size
 
     def append_row(
         self,
@@ -139,16 +139,19 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        if total_cp_world_size > 1:
+        # Only DCP shards the KV cache. With PCP, tokens are split during
+        # prefill but K/V are gathered (pcp_kv_allgather_and_restore) so
+        # each rank inserts the FULL sequence into its cache.
+        cp_world_size = self.dcp_world_size
+        cp_rank = self.dcp_rank
+        if cp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * total_cp_world_size
+            virtual_block_size = self.block_size * cp_world_size
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
                 + positions // virtual_block_size
@@ -160,16 +163,16 @@ class BlockTable:
             virtual_block_offsets = positions % virtual_block_size
             mask = (
                 virtual_block_offsets
-                // self.cp_kv_cache_interleave_size
-                % total_cp_world_size
-                == total_cp_rank
+                // self.dcp_kv_cache_interleave_size
+                % cp_world_size
+                == cp_rank
             )
             # Calculate local block_offsets
             block_offsets = (
                 virtual_block_offsets
-                // (total_cp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
-                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+                // (cp_world_size * self.dcp_kv_cache_interleave_size)
+                * self.dcp_kv_cache_interleave_size
+                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
             )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
@@ -263,7 +266,7 @@ class MultiGroupBlockTable:
         block_sizes: list[int],
         kernel_block_sizes: list[int],
         max_num_blocks: list[int] | None = None,
-        cp_kv_cache_interleave_size: int = 1,
+        dcp_kv_cache_interleave_size: int = 1,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
@@ -296,7 +299,7 @@ class MultiGroupBlockTable:
                 pin_memory,
                 device,
                 kernel_block_size,
-                cp_kv_cache_interleave_size,
+                dcp_kv_cache_interleave_size,
             )
             for block_size, kernel_block_size, max_num_blocks_per_req in zip(
                 block_sizes, kernel_block_sizes, max_num_blocks

@@ -111,14 +111,14 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        interleave_size = vllm_config.parallel_config.dcp_kv_cache_interleave_size
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             FlashAttnMLAMetadata,
-            supports_dcp_with_varlen=(interleave_size == 1),
+            supports_cp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = get_flash_attn_version() == 3
@@ -241,6 +241,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_pcp: bool = True
 
     def __init__(
         self,
@@ -321,6 +322,10 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         # to prevent invalid grid configuration during graph capture.
         max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
 
+        assert self.pcp_world_size is not None
+        assert self.dcp_world_size is not None
+        assert self.pcp_rank is not None
+        assert self.dcp_rank is not None
         attn_out = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
@@ -337,6 +342,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
+            # DCP groups span PCP, so dcp is the total CP
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
@@ -344,7 +350,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
         if self.need_to_return_lse_for_decode:
             o, lse = attn_out
-            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
+            # FA returns LSE in shape [ H, B ] but CP wants [ B, H ]
             return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
         else:
             o = attn_out

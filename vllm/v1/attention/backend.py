@@ -326,6 +326,9 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    """Indices to restore the original order of KV in prefill context parallelism"""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -614,7 +617,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl(or ops) supports MTP
-    # when cp_kv_cache_interleave_size > 1
+    # when dcp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False
 
     # some attention backends might not always want to return lse
@@ -661,8 +664,10 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        # Only DCP shards KV cache. PCP gathers K/V after prefill,
+        # so DCP is the effective total CP for KV sharding purposes.
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode

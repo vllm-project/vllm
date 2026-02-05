@@ -875,30 +875,27 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # If DCP, ensure the block size is right.
+        # If DCP, ensure the block size is compatible with interleave size.
         if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
+            # Migrate from deprecated cp_kv_cache_interleave_size
+            if self.parallel_config.cp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.dcp_kv_cache_interleave_size
+                != self.parallel_config.cp_kv_cache_interleave_size
             ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
+                self.parallel_config.dcp_kv_cache_interleave_size = (
+                    self.parallel_config.cp_kv_cache_interleave_size
                 )
                 logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
+                    "cp_kv_cache_interleave_size is deprecated. "
+                    "Use dcp_kv_cache_interleave_size instead."
                 )
+            interleave = self.parallel_config.dcp_kv_cache_interleave_size
             assert (
-                self.parallel_config.cp_kv_cache_interleave_size
-                <= self.cache_config.block_size
-                and self.cache_config.block_size
-                % self.parallel_config.cp_kv_cache_interleave_size
-                == 0
+                interleave <= self.cache_config.block_size
+                and self.cache_config.block_size % interleave == 0
             ), (
-                f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by cp_kv_cache_interleave_size "
-                f"({self.parallel_config.cp_kv_cache_interleave_size})."
+                f"block_size ({self.cache_config.block_size}) must be >= and "
+                f"divisible by dcp_kv_cache_interleave_size ({interleave})."
             )
 
         # Do this after all the updates to compilation_config.mode
