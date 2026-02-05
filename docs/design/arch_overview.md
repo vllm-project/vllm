@@ -86,7 +86,7 @@ vLLM V1 uses a multi-process architecture to separate concerns and maximize thro
 
 The API server process handles HTTP requests (e.g., the OpenAI-compatible API), performs input processing (tokenization, multi-modal data loading), and streams results back to clients. It communicates with the engine core process(es) via ZMQ sockets.
 
-By default, there is **1 API server process**. This can be scaled out with the `--api-server-count` flag when the API server becomes a bottleneck (e.g., for multi-modal workloads or large data parallel deployments). Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
+By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
 
 The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
 
@@ -120,7 +120,7 @@ For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel si
 
 | Process Type | Count | Notes |
 |---|---|---|
-| API Server | `A` (default 1) | Handles HTTP requests and input processing |
+| API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
 | Engine Core | `DP` (default 1) | Scheduler and KV cache management |
 | GPU Worker | `N` (= `DP x TP`) | One per GPU, executes model forward passes |
 | DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
@@ -130,9 +130,17 @@ For example, a typical single-node deployment with 4 GPUs (`vllm serve -tp=4`) h
 
 - 1 API server + 1 engine core + 4 GPU workers = **6 processes**
 
+<figure markdown="1">
+![V1 Process Architecture - TP=4](../assets/design/arch_overview/v1_process_architecture_tp4.png)
+</figure>
+
 A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 
-- 1 API server + 4 engine cores + 8 GPU workers + 1 DP coordinator = **14 processes**
+- 4 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = **17 processes**
+
+<figure markdown="1">
+![V1 Process Architecture - TP=2, DP=4](../assets/design/arch_overview/v1_process_architecture_tp2_dp4.png)
+</figure>
 
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
