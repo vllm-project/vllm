@@ -383,13 +383,30 @@ class RequestState:
 
         # Prepare text and token_ids, based on delta mode
         text = self.detokenizer.get_next_output_text(finished, delta)
-        if not delta:
+
+        if finish_reason:
+            self.detokenizer.visible_token_index = 0
+
+        if delta:
+            if self.detokenizer.delta_token_count > 0:
+                start = (
+                    self.detokenizer.visible_token_index
+                    - self.detokenizer.delta_token_count
+                )
+                end = self.detokenizer.visible_token_index
+                token_ids = self.detokenizer.output_token_ids[start:end]
+            else:
+                token_ids = []
+        else:
             token_ids = self.detokenizer.output_token_ids
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
-            logprobs = logprobs[-len(token_ids) :]
+            if self.detokenizer.delta_token_count > 0:
+                logprobs = logprobs[start:end]
+            else:
+                logprobs = []
 
         return CompletionOutput(
             index=self.request_index,
