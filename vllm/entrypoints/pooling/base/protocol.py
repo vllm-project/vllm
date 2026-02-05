@@ -6,18 +6,14 @@ from typing import Annotated, Any
 
 from pydantic import Field, model_validator
 
-from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.logger import init_logger
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
-
-logger = init_logger(__name__)
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -185,21 +181,6 @@ class EmbedRequestMixin(EncodingRequestMixin):
     )
     # --8<-- [end:embed-extra-params]
 
-    def to_pooling_params(self):
-        if self.normalize is not None:
-            logger.warning_once(
-                "`normalize` is deprecated and will be removed in v0.17. "
-                "Please pass `use_activation` instead."
-            )
-            self.use_activation = self.normalize
-
-        return PoolingParams(
-            task="embed",
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
-
 
 class ClassifyRequestMixin(OpenAIBaseModel):
     # --8<-- [start:classify-extra-params]
@@ -209,10 +190,3 @@ class ClassifyRequestMixin(OpenAIBaseModel):
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            task="classify",
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
