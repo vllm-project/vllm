@@ -34,7 +34,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
