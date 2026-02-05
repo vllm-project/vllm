@@ -253,7 +253,7 @@ class FreeKVCacheBlockQueue:
         Returns:
             A list of n free blocks.
         """
-        if self.num_free_blocks == 0:
+        if n == 0:
             return []
         assert self.num_free_blocks >= n
         self.num_free_blocks -= n
