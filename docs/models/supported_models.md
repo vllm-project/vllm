@@ -174,6 +174,16 @@ class MyConfig(PretrainedConfig):
     - The `list` in the first element of the `tuple` contains the names of the input arguments
     - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
+### Plugins
+
+Some model architectures are supported via vLLM plugins. These plugins extend vLLM's capabilities through the [plugin system](../design/plugin_system.md).
+
+| Architecture | Models | Plugin Repository |
+|--------------|--------|-------------------|
+| `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+
+For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
+
 ## Loading a Model
 
 ### Hugging Face Hub
@@ -782,6 +792,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-speech-3.3-2b`, `ibm-granite/granite-speech-3.3-8b`, etc. | ✅︎ | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | | ✅︎ |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
 
