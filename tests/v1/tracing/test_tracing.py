@@ -3,6 +3,7 @@
 # ruff: noqa
 # type: ignore
 import pytest
+import time
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from vllm import LLM, SamplingParams
@@ -12,7 +13,7 @@ from vllm.tracing import SpanAttributes
 from tests.tracing.conftest import (  # noqa: F401
     FAKE_TRACE_SERVER_ADDRESS,
     FakeTraceService,
-    decode_attributes,
+    trace_service,
 )
 
 
@@ -39,29 +40,25 @@ def test_traces(
         outputs = llm.generate(prompts, sampling_params=sampling_params)
         print(f"test_traces outputs is : {outputs}")
 
-        timeout = 10
-        if not trace_service.evt.wait(timeout):
-            raise TimeoutError(
-                f"The fake trace service didn't receive a trace within "
-                f"the {timeout} seconds timeout"
-            )
+        # Wait for the "llm_request" span to be exported.
+        # The BatchSpanProcessor batches spans and exports them periodically,
+        # so we need to wait specifically for the llm_request span to appear.
+        timeout = 15
+        deadline = time.time() + timeout
+        llm_request_spans = []
+        while time.time() < deadline:
+            all_spans = trace_service.get_all_spans()
+            llm_request_spans = [s for s in all_spans if s["name"] == "llm_request"]
+            if llm_request_spans:
+                break
+            time.sleep(0.5)
 
-        request = trace_service.request
-        assert len(request.resource_spans) == 1, (
-            f"Expected 1 resource span, but got {len(request.resource_spans)}"
-        )
-        assert len(request.resource_spans[0].scope_spans) == 1, (
-            f"Expected 1 scope span, "
-            f"but got {len(request.resource_spans[0].scope_spans)}"
-        )
-        assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
-            f"Expected 1 span, "
-            f"but got {len(request.resource_spans[0].scope_spans[0].spans)}"
+        assert len(llm_request_spans) == 1, (
+            f"Expected exactly 1 'llm_request' span, but got {len(llm_request_spans)}. "
+            f"All span names: {[s['name'] for s in all_spans]}"
         )
 
-        attributes = decode_attributes(
-            request.resource_spans[0].scope_spans[0].spans[0].attributes
-        )
+        attributes = llm_request_spans[0]["attributes"]
         # assert attributes.get(SpanAttributes.GEN_AI_RESPONSE_MODEL) == model
         assert attributes.get(SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
         assert (

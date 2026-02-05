@@ -57,11 +57,11 @@ def is_otel_available() -> bool:
     return _IS_OTEL_AVAILABLE
 
 
-def init_tracer(
+def init_otel_tracer(
     instrumenting_module_name: str,
     otlp_traces_endpoint: str,
     extra_attributes: dict[str, str] | None = None,
-) -> Tracer | None:
+) -> Tracer:
     """Initializes the OpenTelemetry tracer provider."""
     if not _IS_OTEL_AVAILABLE:
         raise ValueError(
@@ -102,17 +102,14 @@ def get_span_exporter(endpoint):
     return exporter
 
 
-def init_otel_worker(
+def init_otel_worker_tracer(
     instrumenting_module_name: str,
     process_kind: str,
     process_name: str,
-) -> Any | None:
+) -> Tracer:
     """
     Backend-specific initialization for OpenTelemetry in a worker process.
     """
-    if not _IS_OTEL_AVAILABLE:
-        return None
-
     # Initialize the tracer if an OTLP endpoint is configured.
     # The endpoint is propagated via environment variable from the main process.
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
@@ -124,7 +121,7 @@ def init_otel_worker(
         "vllm.process_name": process_name,
     }
 
-    return init_tracer(instrumenting_module_name, otlp_endpoint, extra_attrs)
+    return init_otel_tracer(instrumenting_module_name, otlp_endpoint, extra_attrs)
 
 
 def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
@@ -187,19 +184,27 @@ def manual_instrument_otel(
     span_name: str,
     start_time: int,
     end_time: int | None = None,
-    attributes: dict[str, str] | None = None,
+    attributes: dict[str, Any] | None = None,
+    context: Context | None = None,
+    kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
 ):
     """Manually create and end a span with explicit timestamps."""
     if not _IS_OTEL_AVAILABLE:
         return
 
     tracer = trace.get_tracer(__name__)
-    ctx = _get_smart_context()
-    span = tracer.start_span(
-        span_name,
-        context=ctx,
-        start_time=start_time,
-    )
+    # Use provided context, or fall back to smart context detection
+    ctx = context if context is not None else _get_smart_context()
+
+    span_kwargs: dict[str, Any] = {
+        "name": span_name,
+        "context": ctx,
+        "start_time": start_time,
+    }
+    if kind is not None:
+        span_kwargs["kind"] = kind
+
+    span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
     if end_time is not None:

@@ -33,11 +33,8 @@ from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
-from vllm.tracing import instrument, instrument_manual, is_tracing_available
+from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
-
-if is_tracing_available():
-    pass
 
 from .compiler_interface import (
     CompilerInterface,

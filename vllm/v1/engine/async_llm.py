@@ -108,7 +108,7 @@ class AsyncLLM(EngineClient):
         self.observability_config = vllm_config.observability_config
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", tracing_endpoint)
+            init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_requests = log_requests
 
@@ -137,7 +137,7 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
         if tracing_endpoint is not None:
-            self.output_processor.tracer = tracer
+            self.output_processor.tracing_enabled = True
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(

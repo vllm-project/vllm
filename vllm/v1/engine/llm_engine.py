@@ -100,8 +100,8 @@ class LLMEngine:
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
+            init_tracer("vllm.llm_engine", endpoint)
+            self.output_processor.tracing_enabled = True
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
