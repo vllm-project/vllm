@@ -1362,7 +1362,7 @@ class Qwen3VLForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
-        self._model_config = vllm_config.model_config
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.video_pruning_rate = multimodal_config.video_pruning_rate
@@ -1691,7 +1691,6 @@ class Qwen3VLForConditionalGeneration(
         input_embeds for the LLM.
         """
         device = video_embeddings.device
-        tokenizer = cached_tokenizer_from_config(self._model_config)
 
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized
@@ -1699,7 +1698,7 @@ class Qwen3VLForConditionalGeneration(
         # num_tokens_per_frame values.
         video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
             tokens_per_frame=num_tokens_per_frame,
-            tokenizer=tokenizer,
+            tokenizer=self._tokenizer,
             timestamps=timestamps,
             vision_start_token_id=self.config.vision_start_token_id,
             vision_end_token_id=self.config.vision_end_token_id,
@@ -1768,7 +1767,6 @@ class Qwen3VLForConditionalGeneration(
         is_video_embed,
         retention_mask,
     ):
-        tokenizer = cached_tokenizer_from_config(self._model_config)
         embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
 
         # Expand positions to match the full sequence length
@@ -1787,7 +1785,7 @@ class Qwen3VLForConditionalGeneration(
         num_frames = len(num_tokens_per_frame)
         unpruned_token_ids = Qwen3VLMultiModalProcessor.get_video_repl(
             tokens_per_frame=[(h // merge_size) * (w // merge_size)] * num_frames,
-            tokenizer=tokenizer,
+            tokenizer=self._tokenizer,
             timestamps=timestamps,
             vision_start_token_id=self.config.vision_start_token_id,
             vision_end_token_id=self.config.vision_end_token_id,

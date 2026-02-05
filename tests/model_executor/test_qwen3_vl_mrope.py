@@ -83,7 +83,7 @@ def make_video_embedding(
 
 
 @pytest.mark.parametrize("spatial_merge_size", [1, 2])
-@pytest.mark.parametrize("thw", [[3, 8, 7], [128, 10, 12]])
+@pytest.mark.parametrize("grid_thw", [[3, 8, 7], [128, 10, 12]])
 @pytest.mark.parametrize("num_prefix_tokens", [1, 11])
 @pytest.mark.parametrize("num_suffix_tokens", [0, 7])
 @pytest.mark.parametrize("video_pruning_rate", [0, 0.25, 0.75])
@@ -91,7 +91,7 @@ def make_video_embedding(
 def test_match_qwen3vl_mrope_evs_on(
     spatial_merge_size: int,
     num_prefix_tokens: int,
-    thw: tuple[int, int, int],
+    grid_thw: tuple[int, int, int],
     num_suffix_tokens: int,
     video_pruning_rate: float,
     interleave_text_tokens: tuple[int, int],
@@ -99,7 +99,7 @@ def test_match_qwen3vl_mrope_evs_on(
     hf_config = DummyConfig()
     hf_config.vision_config.spatial_merge_size = spatial_merge_size
 
-    t, h, w = thw
+    t, h, w = grid_thw
     population = list(range(1, 100))
     prefix_tokens = random.choices(population, k=num_prefix_tokens)
     suffix_tokens = random.choices(population, k=num_suffix_tokens)
@@ -130,7 +130,7 @@ def test_match_qwen3vl_mrope_evs_on(
         data=MultiModalKwargsItem(
             {
                 "video_grid_thw": MultiModalFieldElem(
-                    data=torch.tensor(thw),
+                    data=torch.tensor(grid_thw),
                     field=None,  # HACK.
                 ),
             }
@@ -150,7 +150,7 @@ def test_match_qwen3vl_mrope_evs_on(
         data=MultiModalKwargsItem(
             {
                 "video_grid_thw": MultiModalFieldElem(
-                    data=torch.tensor(thw),
+                    data=torch.tensor(grid_thw),
                     field=None,  # HACK.
                 ),
             }
@@ -210,7 +210,7 @@ def test_match_qwen3vl_mrope_evs_on(
     ]
 
     # Paranoia check that computed_mrope is wrong.
-    assert torch.equal(computed_mrope, expected_mrope_masked) is False
+    assert not torch.equal(computed_mrope, expected_mrope_masked)
 
     _, actual_mrope, _ = Qwen3VLForConditionalGeneration._recompute_mrope_positions(
         input_ids=input_tokens_pruned,
