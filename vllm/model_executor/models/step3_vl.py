@@ -494,7 +494,9 @@ class Step3VLProcessor:
                     if patch_pixel_values_lst
                     else pixel_values.new_empty((0, 3, patch_size, patch_size))
                 ),
-                "patch_newline_mask": torch.tensor(patch_newline_mask_lst),
+                "patch_newline_mask": torch.tensor(
+                    patch_newline_mask_lst, dtype=torch.bool
+                ),
             }
 
             text = [
