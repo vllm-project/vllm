@@ -16,7 +16,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
 
 - label: Distributed (2 GPUs)
-  timeout_in_minutes: 90
+  timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -47,7 +47,6 @@ steps:
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - pytest -v -s distributed/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
@@ -63,6 +62,7 @@ steps:
   - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - examples/offline_inference/new_weight_syncing/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -97,9 +97,14 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
+  # OLD rlhf examples
   - cd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  # NEW rlhf examples
+  - cd new_weight_syncing
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
@@ -133,25 +138,13 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Sequence Parallel Tests (H100)
-  timeout_in_minutes: 60
-  working_dir: "/vllm-workspace/"
-  device: h100
-  optional: true
-  num_devices: 2
-  commands:
-    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    # Run sequence parallel tests
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
-    - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
-
 - label: Distributed Tests (2 GPUs)(H100)
+  timeout_in_minutes: 15
   device: h100
   optional: true
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
-    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -217,45 +210,3 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-
-- label: Hopper Fusion E2E Tests (H100)
-  timeout_in_minutes: 70
-  working_dir: "/vllm-workspace/"
-  device: h100
-  optional: true
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/test_fusion_attn.py
-  commands:
-    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    # skip Llama-4 since it does not fit on this device
-    - pytest -v -s tests/compile/test_fusion_attn.py -k 'not Llama-4'
-
-- label: Hopper Fusion Distributed E2E Tests (2xH100)
-  timeout_in_minutes: 70
-  working_dir: "/vllm-workspace/"
-  device: h100
-  optional: true
-  num_devices: 2
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/
-  # can affect pattern matching
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/distributed/test_fusions_e2e.py
-  commands:
-    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
-    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py

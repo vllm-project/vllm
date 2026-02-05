@@ -69,6 +69,8 @@ class RayDistributedExecutor(Executor):
         "VLLM_HOST_PORT",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
     }
 
     # These non-vLLM env vars are copied from the driver to workers
@@ -146,6 +148,14 @@ class RayDistributedExecutor(Executor):
 
         return ray_remote_kwargs
 
+    def _update_noset_device_env_vars(self, ray_remote_kwargs):
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        env_vars = runtime_env.setdefault("env_vars", {})
+        env_vars.update(
+            {env_var: "1" for env_var in current_platform.ray_noset_device_env_vars}
+        )
+        return ray_remote_kwargs
+
     # child class could overwrite this to return actual env vars.
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
@@ -168,6 +178,11 @@ class RayDistributedExecutor(Executor):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs
             )
+
+        # The way ray actors are setup in vllm is that the visible devices are
+        # not set by actors, they are left unset by ray. Internally we index
+        # the right gpu with local_rank. This is similar to how mp mode works.
+        self._update_noset_device_env_vars(ray_remote_kwargs)
 
         # Create the workers.
         bundle_indices: list[int]
@@ -303,6 +318,15 @@ class RayDistributedExecutor(Executor):
             )
 
         # Set environment variables for the driver and workers.
+        # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
+        # This is needed because:
+        # 1. Ray's compiled DAG needs to find the allocated GPU in
+        #    CUDA_VISIBLE_DEVICES.
+        # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
+        #    all GPUs for P2P checks and communication setup. Though if it was
+        #    just this reason, we could have also just kept the visible devices
+        #    unset.
+        # Each worker will use local_rank to index into the visible devices.
         all_args_to_update_environment_variables = [
             {
                 current_platform.device_control_env_var: ",".join(

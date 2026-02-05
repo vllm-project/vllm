@@ -72,15 +72,7 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return deepcopy(self)
 
-    def verify(
-        self, task: PoolingTask, model_config: "ModelConfig | None" = None
-    ) -> None:
-        if self.task is None:
-            self.task = task
-        elif self.task != task:
-            msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
-            raise ValueError(msg)
-
+    def verify(self, model_config: "ModelConfig") -> None:
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
@@ -167,7 +159,7 @@ class PoolingParams(
                 if mds is not None:
                     if self.dimensions not in mds:
                         raise ValueError(
-                            f'Model "{model_config.served_model_name}" '
+                            f"Model {model_config.served_model_name!r} "
                             f"only supports {str(mds)} matryoshka dimensions, "
                             f"use other output dimensions will "
                             f"lead to poor results."
@@ -179,7 +171,7 @@ class PoolingParams(
             if self.use_activation is None:
                 self.use_activation = True
         else:
-            raise ValueError(f"Unknown pooling task: {self.task}")
+            raise ValueError(f"Unknown pooling task: {self.task!r}")
 
     def _verify_valid_parameters(self):
         assert self.task is not None, "task must be set"
@@ -194,7 +186,7 @@ class PoolingParams(
 
         if invalid_parameters:
             raise ValueError(
-                f"Task {self.task} only supports {valid_parameters} "
+                f"Task {self.task!r} only supports {valid_parameters} "
                 f"parameters, does not support "
                 f"{invalid_parameters} parameters"
             )
