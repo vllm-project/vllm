@@ -148,17 +148,23 @@ class TransferSummary:
 
 class RequestRunner:
     def __init__(
-        self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int
+        self,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+        async_scheduling: bool = True,
     ):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
+        self.async_scheduling: bool = async_scheduling
 
         self.req_id: int = -1
 
         vllm_config = create_vllm_config(
             block_size=gpu_block_size, max_num_batched_tokens=1000
         )
+        vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
@@ -311,6 +317,8 @@ class RequestRunner:
 
         tokens_iter = iter(decoded_tokens)
         token_id = next(tokens_iter, None)
+        prev_scheduler_output = None
+        prev_model_runner_output = None
         while True:
             assert self.scheduler.requests
 
@@ -352,10 +360,19 @@ class RequestRunner:
             if self.scheduler.running:
                 token_id = next(tokens_iter, None)
 
-            self.scheduler.update_from_output(scheduler_output, model_runner_output)
+            if self.async_scheduling:
+                # in async scheduling we update the output of the previous step
+                if prev_model_runner_output is not None:
+                    self.scheduler.update_from_output(
+                        prev_scheduler_output, prev_model_runner_output
+                    )
+                prev_scheduler_output = scheduler_output
+                prev_model_runner_output = model_runner_output
+            else:
+                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
             if (
-                prev_token_id is EOS_TOKEN_ID
+                prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
                 and self.scheduler.requests
             ):
@@ -363,6 +380,11 @@ class RequestRunner:
                 continue
 
             if token_id is None:
+                if self.async_scheduling:
+                    # sample last token
+                    self.scheduler.update_from_output(
+                        prev_scheduler_output, prev_model_runner_output
+                    )
                 break
 
         self._parse_transfers()
@@ -443,11 +465,14 @@ class RequestRunner:
 def request_runner():
     runners = []
 
-    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks):
+    def runner_factory(
+        offloaded_block_size, gpu_block_size, num_gpu_blocks, async_scheduling
+    ):
         runner = RequestRunner(
             offloaded_block_size=offloaded_block_size,
             gpu_block_size=gpu_block_size,
             num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
         )
         runners.append(runner)
         return runner
@@ -464,7 +489,8 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
     )
 
 
-def test_offloading_connector(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloading_connector(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -474,6 +500,7 @@ def test_offloading_connector(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # 3 blocks, store just the middle block (skip first and last)
@@ -496,26 +523,28 @@ def test_offloading_connector(request_runner):
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
-    # 1 more block, now set block_hashes_to_store = []
+    # 1 more block (+ token for async scheduling)
+    # now set block_hashes_to_store = []
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output([])
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
 
-    # 1 more block, now check touch was called with all 6 blocks
+    # 1 more block (+ token for kicking off offloading)
+    # now check touch was called with all 6 blocks
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output(block_hashes)
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size + 1),
+        expected_stored_gpu_block_indexes=(15, 16, 17),
+    )
     runner.manager.touch.assert_called()
     block_hashes1 = list(runner.manager.touch.call_args.args[0])
     assert len(block_hashes1) == 6
 
     # terminate request
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored_gpu_block_indexes=(15, 16, 17),
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
@@ -606,7 +635,8 @@ def test_offloading_connector(request_runner):
     assert event.medium == "B"
 
 
-def test_request_preemption(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_request_preemption(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -615,6 +645,7 @@ def test_request_preemption(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
@@ -672,7 +703,8 @@ def test_request_preemption(request_runner):
     )
 
 
-def test_concurrent_lookups_of_the_same_prefix(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -681,6 +713,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # store 1 blocks
