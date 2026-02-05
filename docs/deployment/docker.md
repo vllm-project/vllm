@@ -29,6 +29,11 @@ podman run --device nvidia.com/gpu=all \
 
 You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
 
+!!! warning
+    Make sure to use the `--model` flag to specify the model in your command.
+
+    Passing the model as a positional argument (without the flag) will cause vLLM to silently fall back to a default model instead, which may not be what you intend.
+
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
     container to access the host's shared memory. vLLM uses PyTorch, which uses shared
