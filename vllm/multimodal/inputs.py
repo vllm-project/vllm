@@ -1083,6 +1083,10 @@ class MultiModalEncDecInputs(MultiModalInputs):
     Represents the outputs of
     [`EncDecMultiModalProcessor`][vllm.multimodal.processing.EncDecMultiModalProcessor]
     ready to be passed to vLLM internals.
+
+    Note: Even text-only encoder-decoder models are currently implemented
+    as multi-modal models for convenience.
+    (Example: https://github.com/neuralmagic/bart-plugin)
     """
 
     encoder_prompt_token_ids: list[int]
