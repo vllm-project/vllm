@@ -1561,7 +1561,7 @@ def fused_experts(
     )
 
 
-def _get_input_quant_dtype(
+def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     ocp_mx_scheme: str | None,
@@ -1663,7 +1663,7 @@ def fused_experts_impl(
 
     # Note: for use_int8_w8a16 or use_int4_w4a16, the activations are
     # quantized prior to calling fused_experts.
-    input_quant_dtype = _get_input_quant_dtype(
+    quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         ocp_mx_scheme=ocp_mx_scheme,
@@ -1770,11 +1770,10 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
-
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
             A=curr_hidden_states,
             A_scale=a1_scale,
-            quant_dtype=input_quant_dtype,
+            quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
@@ -1842,7 +1841,7 @@ def fused_experts_impl(
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
             A_scale=a2_scale,
-            quant_dtype=input_quant_dtype,
+            quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
