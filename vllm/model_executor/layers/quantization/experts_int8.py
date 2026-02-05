@@ -212,7 +212,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=True,
+            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
