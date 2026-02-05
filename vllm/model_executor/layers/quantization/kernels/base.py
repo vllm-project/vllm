@@ -398,7 +398,7 @@ class DynamicMMLinearKernel(
         is_fallback_supported, reason_2 = cls.fallback_type.is_supported(
             compute_capability
         )
-        if is_fallback_supported and is_fallback_supported:
+        if is_base_supported and is_fallback_supported:
             return True, None
 
         # Both unsupported: include both reasons
@@ -424,19 +424,19 @@ class DynamicMMLinearKernel(
 
     @classmethod
     def can_implement(cls, config: _ConfigT) -> tuple[bool, str | None]:
-        can_implmenet_base, reason_1 = cls.base_type.can_implement(config)
-        can_implmenet_fallback, reason_2 = cls.fallback_type.can_implement(config)
-        if can_implmenet_base and can_implmenet_fallback:
+        can_implement_base, reason_1 = cls.base_type.can_implement(config)
+        can_implement_fallback, reason_2 = cls.fallback_type.can_implement(config)
+        if can_implement_base and can_implement_fallback:
             return True, None
 
-        if not can_implmenet_base and not can_implmenet_fallback:
+        if not can_implement_base and not can_implement_fallback:
             return (
                 False,
                 f"base is not supported due to {reason_1}; "
                 f"fallback is not supported due to {reason_2}",
             )
 
-        if not can_implmenet_base:
+        if not can_implement_base:
             return False, f"base is not supported due to {reason_1}"
 
         return False, f"fallback is not supported due to {reason_2}"

@@ -7,9 +7,7 @@ from typing import TypeVar
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kernels.base import (
-    MMLinearLayerConfig,
-)
+from vllm.model_executor.layers.quantization.kernels.base import MMLinearLayerConfig
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
