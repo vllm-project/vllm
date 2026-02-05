@@ -59,8 +59,10 @@ class PrithviMAE:
             input_data = input_data[0]
 
         mm_data = {
-            "pixel_values": input_data,
-            "location_coords": location_coords,
+            "image": {
+                "pixel_values": input_data,
+                "location_coords": location_coords,
+            }
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}

@@ -2,8 +2,8 @@
 # for more info about CODEOWNERS file
 
 # This lists cover the "core" components of vLLM that require careful review
-/vllm/attention @LucasWilkinson
 /vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @njhill @22quinn
+/vllm/model_executor/layers/attention @LucasWilkinson
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
@@ -16,7 +16,7 @@
 /vllm/entrypoints @aarnphm @chaunceyjiang
 /vllm/tool_parsers @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
-/vllm/distributed/kv_transfer @NickLucche @ApostaC
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
@@ -30,12 +30,14 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345
-/vllm/v1/offloading @ApostaC
+/vllm/v1/kv_offload @ApostaC @orozery
+/vllm/v1/worker/gpu/kv_connector.py @orozery
+/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery
 
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon
@@ -54,13 +56,13 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
 /tests/v1/kv_connector/nixl_integration @NickLucche
-/tests/v1/kv_connector @ApostaC
-/tests/v1/offloading @ApostaC
+/tests/v1/kv_connector @ApostaC @orozery
+/tests/v1/kv_offload @ApostaC @orozery
 /tests/v1/determinism @yewentao256 
 
 # Transformers modeling backend

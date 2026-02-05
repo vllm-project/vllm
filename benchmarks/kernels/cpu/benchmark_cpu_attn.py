@@ -14,7 +14,7 @@ from vllm._custom_ops import (
 )
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
 
 
@@ -58,7 +58,7 @@ def main(
     seed: int = 0,
     iters: int = 20,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]

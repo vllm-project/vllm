@@ -19,7 +19,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -54,7 +54,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import run_dp_sharded_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Step3VLImagePixelInputs(TensorSchema):
@@ -142,8 +142,11 @@ class Step3VisionProcessor:
 
 
 class ImagePatcher:
+    def __init__(self, enable_patch: bool = True) -> None:
+        self.enable_patch = enable_patch
+
     def determine_window_size(self, long: int, short: int) -> int:
-        if long <= 728:
+        if long < 728:
             return short if long / short > 1.5 else 0
         return min(short, 504) if long / short > 4 else 504
 
@@ -241,7 +244,7 @@ class ImagePatcher:
         window_size = self.determine_window_size(
             max(img_height, img_width), min(img_height, img_width)
         )
-        if window_size == 0:
+        if window_size == 0 or not self.enable_patch:
             return 0, 0
         else:
             img_width, img_height = self.get_image_size_for_crop(
@@ -277,7 +280,7 @@ class ImagePatcher:
             max(new_img_height, new_img_width), min(new_img_height, new_img_width)
         )
 
-        if window_size == 0:
+        if window_size == 0 or not self.enable_patch:
             return img, [], None
         else:
             new_img_width, new_img_height = self.get_image_size_for_crop(
@@ -327,7 +330,6 @@ class Step3VLProcessor:
 
         self.config = config
         self.tokenizer = tokenizer
-
         self.image_size = 728
         self.patch_size = 504
         self.image_preprocessor = Step3VisionProcessor(
@@ -340,7 +342,10 @@ class Step3VLProcessor:
         self.image_feature_placeholder = self.image_token * self.num_image_feature_size
         self.patch_feature_placeholder = self.image_token * self.num_patch_feature_size
 
-        self.patcher = ImagePatcher()
+        # Respect vision config switch to enable/disable patch extraction.
+        # For video understanding, it's preferable to disable patch.
+        enable_patch = getattr(self.config.vision_config, "enable_patch", True)
+        self.patcher = ImagePatcher(enable_patch=enable_patch)
 
     @property
     def image_token_id(self) -> int:
@@ -719,7 +724,6 @@ class Step3VisionAttention(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -729,6 +733,7 @@ class Step3VisionAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
+        use_data_parallel = is_vit_use_data_parallel()
         tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -754,7 +759,12 @@ class Step3VisionAttention(nn.Module):
         )
 
         # Use unified MMEncoderAttention with automatic backend selection
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -781,11 +791,11 @@ class Step3VisionMLP(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -816,23 +826,19 @@ class Step3VisionEncoderLayer(nn.Module):
         config: Step3VisionEncoderConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
         self.embed_dim = config.hidden_size
         self.self_attn = Step3VisionAttention(
             config,
             quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=self.use_data_parallel,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Step3VisionMLP(
             config,
             quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=self.use_data_parallel,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
@@ -851,18 +857,15 @@ class Step3VisionEncoder(nn.Module):
         config: Step3VisionEncoderConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
-        self.use_data_parallel = use_data_parallel
         self.layers = nn.ModuleList(
             [
                 Step3VisionEncoderLayer(
                     config,
                     quant_config,
                     prefix=f"{prefix}.layers.{i}",
-                    use_data_parallel=self.use_data_parallel,
                 )
                 for i in range(config.num_hidden_layers)
             ]
@@ -884,18 +887,16 @@ class Step3VisionTransformer(nn.Module):
         config: Step3VisionEncoderConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
         self.image_size = config.image_size
         self.embeddings = Step3VisionEmbeddings(config)
         self.transformer = Step3VisionEncoder(
             config,
             quant_config,
             prefix=f"{prefix}.transformer",
-            use_data_parallel=self.use_data_parallel,
         )
 
     def forward(
@@ -947,7 +948,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                 config.vision_config,
                 None,
                 prefix=maybe_prefix(prefix, "vision_model"),
-                use_data_parallel=self.use_data_parallel,
             )
             self.vit_downsampler = Conv2dLayer(
                 config.vision_config.hidden_size,
@@ -1096,7 +1096,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -13,8 +13,6 @@ from collections.abc import Sequence
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic.dataclasses import dataclass
-
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
@@ -69,7 +67,6 @@ class LoRAParserAction(argparse.Action):
 
 
 @config
-@dataclass
 class FrontendArgs:
     """Arguments for the OpenAI-compatible frontend server."""
 
@@ -85,6 +82,12 @@ class FrontendArgs:
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_access_log_for_endpoints: str | None = None
+    """Comma-separated list of endpoint paths to exclude from uvicorn access
+    logs. This is useful to reduce log noise from high-frequency endpoints
+    like health checks. Example: "/health,/metrics,/ping".
+    When set, access logs for requests to these paths will be suppressed
+    while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
@@ -243,6 +246,11 @@ class FrontendArgs:
         if "nargs" in frontend_kwargs["middleware"]:
             del frontend_kwargs["middleware"]["nargs"]
         frontend_kwargs["middleware"]["default"] = []
+
+        # Special case: disable_access_log_for_endpoints is a single
+        # comma-separated string, not a list
+        if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
+            del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.list_registered())

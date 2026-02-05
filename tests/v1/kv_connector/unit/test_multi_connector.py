@@ -151,7 +151,8 @@ def test_multi_example_connector_consistency():
         kv_transfer_config=kv_transfer_config,
     )
     # Run generation - this should trigger saving KV cache
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    # Use a single prompt to avoid race conditions depending on the order of scheduling
+    _ = llm.generate(PROMPTS[0], SAMPLING_PARAMS)
 
     # --- Verification ---
 
@@ -221,7 +222,7 @@ def test_multi_example_connector_consistency():
 
     # Run generation again - this should trigger loading from the first
     # connector.
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    _ = llm.generate(PROMPTS[1], SAMPLING_PARAMS)
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
@@ -247,7 +248,7 @@ def test_multi_example_connector_consistency():
 
     # Run generation again - this should trigger loading from the first
     # connector.
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    _ = llm.generate(PROMPTS[0], SAMPLING_PARAMS)
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will

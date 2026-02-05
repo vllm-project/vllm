@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -68,7 +68,7 @@ class Request:
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        lora_request: Optional["LoRARequest"] = None,
+        lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -146,6 +146,9 @@ class Request:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+
+        # True if this request is scheduled as a non-final prefill chunk.
+        self.is_prefill_chunk = False
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

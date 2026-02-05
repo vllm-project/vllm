@@ -646,7 +646,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         """
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
-            + "chunked local attention groups"
+            "chunked local attention groups"
         )
         assert use_eagle is False, (
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."

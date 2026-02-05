@@ -36,6 +36,35 @@ export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1
 !!! tip
     When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
 
+#### Selecting a NIXL transport backend (plugin)
+
+NixlConnector can use different NIXL transport backends (plugins). By default, NixlConnector uses UCX as the transport backend.
+
+To select a different backend, set `kv_connector_extra_config.backends` in `--kv-transfer-config`.
+
+### Example: using LIBFABRIC backend
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
+  }'
+```
+
+You can also pass JSON keys individually using dotted arguments, and you can append list elements using `+`:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config.kv_connector NixlConnector \
+  --kv-transfer-config.kv_role kv_both \
+  --kv-transfer-config.kv_connector_extra_config.backends+ LIBFABRIC
+```
+
+!!! note
+    Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
@@ -182,15 +211,6 @@ Support use case: Prefill with 'HND' and decode with 'NHD' with experimental con
 
 ```bash
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
-```
-
-### Cross layers blocks
-
-By default, this feature is disabled. On attention backends that support this feature, each logical block is contiguous in physical memory. This reduces the number of buffers that need to be transferred.
-To enable this feature:
-
-```bash
---kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
 ## Example Scripts/Code

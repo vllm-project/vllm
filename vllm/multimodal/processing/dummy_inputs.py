@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
 from vllm.logger import init_logger
 
 from ..inputs import MultiModalDataDict
+from ..parse import MultiModalDataItems
 from .context import BaseProcessingInfo
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -33,7 +34,7 @@ class ProcessorInputs:
     """
 
     prompt: str | list[int]
-    mm_data: MultiModalDataDict
+    mm_items: MultiModalDataItems
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
@@ -93,15 +94,14 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             mm_options: Configurable options per modality (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-
-        # Use the unified function for both legacy and configurable cases
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
 
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(
             prompt=dummy_text,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 

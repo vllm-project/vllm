@@ -4,10 +4,9 @@ from typing import Any
 
 import torch
 
-from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.speculative import SpeculativeConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -56,7 +55,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             )
 
     def _raise_if_padded_drafter_batch_disabled(self):
-        if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+        if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
                 "Speculative Decoding with draft models only supports "
                 "padded drafter batch. Please don't pass --disable-padded-drafter-batch"
@@ -64,7 +63,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             )
 
     def _raise_if_vocab_size_mismatch(self):
-        self.vllm_config.speculative_config.verify_equal_vocab_size_if_draft_model()
+        self.speculative_config.verify_equal_vocab_size_if_draft_model()
 
     def _raise_if_draft_tp_mismatch(self):
         # Note(Tomas Ruiz) If we run the target model with TP > 1 and
@@ -73,7 +72,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # (because TP=1), then the torch compile cache is overwritten and corrupted.
         # We need a mechanism like this: https://github.com/vllm-project/vllm/pull/5414
         # To prevent this error, we assert that both TP sizes must be the same.
-        spec_cfg: SpeculativeConfig = self.vllm_config.speculative_config
+        spec_cfg = self.speculative_config
         tgt_tp = spec_cfg.target_parallel_config.tensor_parallel_size
         draft_tp = spec_cfg.draft_parallel_config.tensor_parallel_size
         if draft_tp != tgt_tp:
@@ -190,12 +189,16 @@ def create_vllm_config_for_draft_model(
     The vllm_config is useful when loading the draft model with get_model().
     """
     old = target_model_vllm_config
-    new_parallel_config = old.speculative_config.draft_parallel_config.replace(
-        rank=old.parallel_config.rank
+    assert old.speculative_config is not None, "speculative_config is not set"
+    old_spec_config = old.speculative_config
+    new_parallel_config = replace(
+        old_spec_config.draft_parallel_config,
+        rank=old.parallel_config.rank,
     )
-    new: VllmConfig = old.replace(
+    new: VllmConfig = replace(
+        old,
         quant_config=None,  # quant_config is recomputed in __init__()
-        model_config=old.speculative_config.draft_model_config,
+        model_config=old_spec_config.draft_model_config,
         parallel_config=new_parallel_config,
     )
     return new

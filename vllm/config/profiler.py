@@ -5,10 +5,8 @@ import os
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -33,7 +31,6 @@ def _is_uri_path(path: str) -> bool:
 
 
 @config
-@dataclass
 class ProfilerConfig:
     """Dataclass which contains profiler config for the engine."""
 
@@ -102,88 +99,8 @@ class ProfilerConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def _get_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
-        """Get field from env var if set, with deprecation warning."""
-
-        if envs.is_set(env_var_name):
-            value = getattr(envs, env_var_name)
-            logger.warning_once(
-                "Using %s environment variable is deprecated and will be removed in "
-                "v0.15.0 or v1.0.0, whichever is soonest. Please use "
-                "--profiler-config.%s command line argument or "
-                "ProfilerConfig(%s=...) config field instead.",
-                env_var_name,
-                field_name,
-                field_name,
-            )
-            return value
-        return None
-
-    def _set_from_env_if_set(
-        self,
-        field_name: str,
-        env_var_name: str,
-        to_bool: bool = True,
-        to_int: bool = False,
-    ) -> None:
-        """Set field from env var if set, with deprecation warning."""
-        value = self._get_from_env_if_set(field_name, env_var_name)
-        if value is not None:
-            if to_bool:
-                value = value == "1"
-            if to_int:
-                value = int(value)
-            setattr(self, field_name, value)
-
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
-        maybe_use_cuda_profiler = self._get_from_env_if_set(
-            "profiler", "VLLM_TORCH_CUDA_PROFILE"
-        )
-        if maybe_use_cuda_profiler is not None:
-            self.profiler = "cuda" if maybe_use_cuda_profiler == "1" else None
-        else:
-            self._set_from_env_if_set(
-                "torch_profiler_dir", "VLLM_TORCH_PROFILER_DIR", to_bool=False
-            )
-            if self.torch_profiler_dir:
-                self.profiler = "torch"
-                self._set_from_env_if_set(
-                    "torch_profiler_record_shapes",
-                    "VLLM_TORCH_PROFILER_RECORD_SHAPES",
-                )
-                self._set_from_env_if_set(
-                    "torch_profiler_with_memory",
-                    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY",
-                )
-                self._set_from_env_if_set(
-                    "torch_profiler_with_stack",
-                    "VLLM_TORCH_PROFILER_WITH_STACK",
-                )
-                self._set_from_env_if_set(
-                    "torch_profiler_with_flops",
-                    "VLLM_TORCH_PROFILER_WITH_FLOPS",
-                )
-                self._set_from_env_if_set(
-                    "ignore_frontend",
-                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM",
-                )
-                self._set_from_env_if_set(
-                    "torch_profiler_use_gzip",
-                    "VLLM_TORCH_PROFILER_USE_GZIP",
-                )
-                self._set_from_env_if_set(
-                    "torch_profiler_dump_cuda_time_total",
-                    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL",
-                )
-
-        self._set_from_env_if_set(
-            "delay_iterations", "VLLM_PROFILER_DELAY_ITERS", to_bool=False, to_int=True
-        )
-        self._set_from_env_if_set(
-            "max_iterations", "VLLM_PROFILER_MAX_ITERS", to_bool=False, to_int=True
-        )
-
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
         if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
             logger.warning_once(
