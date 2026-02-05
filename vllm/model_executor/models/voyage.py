@@ -11,10 +11,11 @@ import torch.nn as nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3 import Qwen3Model
+from vllm.model_executor.models.utils import WeightsMapper
 
 WeightItem = tuple[str, torch.Tensor]
 
-_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
+_LAYER_RE = re.compile(r"^layers\.(\d+)\.(.+)$")
 
 
 class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
@@ -32,9 +33,12 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
       - self_attn.qkv_proj (fused)
       - No "model." prefix
 
-    We remap/fuse weights and load directly (bypassing parent's stacked_params_mapping
-    which would cause double-transformation like qkv_proj -> qkqkv_proj).
+    We remap/fuse weights using generator pipeline and load directly
+    (bypassing parent's stacked_params_mapping which would cause
+    double-transformation like qkv_proj -> qkqkv_proj).
     """
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -50,68 +54,72 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
         out = super().forward(*args, **kwargs)
         return self.linear(out)
 
-    def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
-        """Remap, fuse, and load weights directly
-        (bypass parent's stacked_params_mapping)."""
-        out_w: dict[str, torch.Tensor] = {}
+    def _fuse_qkv_proj(self, weights: Iterable[WeightItem]) -> Iterable[WeightItem]:
+        """Fuse q_proj, k_proj, v_proj into qkv_proj."""
         qkv_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
-        mlp_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
+        qkv_suffixes = {
+            "self_attn.q_proj.weight": "q",
+            "self_attn.k_proj.weight": "k",
+            "self_attn.v_proj.weight": "v",
+        }
 
         for name, tensor in weights:
             m = _LAYER_RE.match(name)
-            if not m:
-                # Non-layer weights: strip "model." prefix if present
-                new_name = name[len("model.") :] if name.startswith("model.") else name
-                out_w[new_name] = tensor
-                continue
+            if m and m.group(2) in qkv_suffixes:
+                layer_idx = int(m.group(1))
+                qkv_buf[layer_idx][qkv_suffixes[m.group(2)]] = tensor
+            else:
+                yield name, tensor
 
-            layer_idx = int(m.group(1))
-            suffix = m.group(2)
+        # Yield fused QKV weights
+        for layer_idx in sorted(qkv_buf.keys()):
+            parts = qkv_buf[layer_idx]
+            if all(p in parts for p in ("q", "k", "v")):
+                fused = torch.cat([parts["q"], parts["k"], parts["v"]], dim=0)
+                yield f"layers.{layer_idx}.self_attn.qkv_proj.weight", fused
+            elif parts:
+                missing = [p for p in ("q", "k", "v") if p not in parts]
+                raise ValueError(f"Layer {layer_idx} missing QKV parts: {missing}")
 
-            # Accumulate Q/K/V for fusion
-            if suffix == "self_attn.q_proj.weight":
-                qkv_buf[layer_idx]["q"] = tensor
-                continue
-            if suffix == "self_attn.k_proj.weight":
-                qkv_buf[layer_idx]["k"] = tensor
-                continue
-            if suffix == "self_attn.v_proj.weight":
-                qkv_buf[layer_idx]["v"] = tensor
-                continue
+    def _fuse_gate_up_proj(self, weights: Iterable[WeightItem]) -> Iterable[WeightItem]:
+        """Fuse gate_proj and up_proj into gate_up_proj."""
+        mlp_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
+        mlp_suffixes = {
+            "mlp.gate_proj.weight": "gate",
+            "mlp.up_proj.weight": "up",
+        }
 
-            # Accumulate gate/up for fusion
-            if suffix == "mlp.gate_proj.weight":
-                mlp_buf[layer_idx]["gate"] = tensor
-                continue
-            if suffix == "mlp.up_proj.weight":
-                mlp_buf[layer_idx]["up"] = tensor
-                continue
+        for name, tensor in weights:
+            m = _LAYER_RE.match(name)
+            if m and m.group(2) in mlp_suffixes:
+                layer_idx = int(m.group(1))
+                mlp_buf[layer_idx][mlp_suffixes[m.group(2)]] = tensor
+            else:
+                yield name, tensor
 
-            # Other layer weights: output with stripped prefix
-            out_w[f"layers.{layer_idx}.{suffix}"] = tensor
+        # Yield fused gate_up weights
+        for layer_idx in sorted(mlp_buf.keys()):
+            parts = mlp_buf[layer_idx]
+            if all(p in parts for p in ("gate", "up")):
+                fused = torch.cat([parts["gate"], parts["up"]], dim=0)
+                yield f"layers.{layer_idx}.mlp.gate_up_proj.weight", fused
+            elif parts:
+                missing = [p for p in ("gate", "up") if p not in parts]
+                raise ValueError(f"Layer {layer_idx} missing MLP parts: {missing}")
 
-        def _fuse_parts(buffer, parts_to_fuse, out_name_template, part_type):
-            for layer_idx, parts in buffer.items():
-                if all(p in parts for p in parts_to_fuse):
-                    fused = torch.cat([parts[p] for p in parts_to_fuse], dim=0)
-                    out_w[out_name_template.format(layer_idx)] = fused
-                elif parts:
-                    missing = sorted([p for p in parts_to_fuse if p not in parts])
-                    raise ValueError(
-                        f"Layer {layer_idx} is missing {part_type} parts: {missing}"
-                    )
-
-        _fuse_parts(
-            qkv_buf, ("q", "k", "v"), "layers.{}.self_attn.qkv_proj.weight", "QKV"
-        )
-        _fuse_parts(mlp_buf, ("gate", "up"), "layers.{}.mlp.gate_up_proj.weight", "MLP")
+    def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
+        """Remap, fuse, and load weights using generator pipeline."""
+        # Chain weight transformations
+        weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = self._fuse_qkv_proj(weights)
+        weights = self._fuse_gate_up_proj(weights)
 
         # Load weights directly into model parameters
-        # bypass parent's stacked_params_mapping
+        # (bypass parent's stacked_params_mapping)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        for name, loaded_weight in out_w.items():
+        for name, loaded_weight in weights:
             if name not in params_dict:
                 continue
             param = params_dict[name]
