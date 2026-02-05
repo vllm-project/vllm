@@ -16,8 +16,7 @@ from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import PromptType
-from vllm.inputs.data import StreamingInput
+from vllm.inputs import PromptType, StreamingInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -270,7 +269,11 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = await self.engine_core.get_supported_tasks_async()
+
+        return self._supported_tasks
 
     async def add_request(
         self,
@@ -356,6 +359,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text = get_prompt_text(prompt)
 
@@ -461,6 +465,7 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
+                    # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
