@@ -90,7 +90,7 @@ class SimilarFrameDetector:
             kernel_size=11,
             data_range=255,
             gaussian_kernel=True,
-            reduction="none"
+            reduction="none",
         )
 
         return ssim_values.float()
