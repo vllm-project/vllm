@@ -579,6 +579,150 @@ def check_method_overrides(node: ast.ClassDef, method_name: str) -> bool:
     return method_returns_true(method)
 
 
+def _find_bool_class_var(class_node: ast.ClassDef, var_name: str) -> bool | None:
+    """Find a bool class variable in a class definition. Returns None if not found."""
+    for item in class_node.body:
+        # Check for annotated assignment: attr: bool = True/False
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == var_name
+            and isinstance(item.value, ast.Constant)
+            and isinstance(item.value.value, bool)
+        ):
+            return item.value.value
+        # Check for plain assignment: attr = True/False
+        if isinstance(item, ast.Assign):
+            for target in item.targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == var_name
+                    and isinstance(item.value, ast.Constant)
+                    and isinstance(item.value.value, bool)
+                ):
+                    return item.value.value
+    return None
+
+
+def _get_parent_class_name(class_node: ast.ClassDef) -> str | None:
+    """Get the first parent class name (simple name only).
+
+    Handles both simple inheritance (class Foo(Bar)) and generic
+    inheritance (class Foo(Bar[T])).
+    """
+    if not class_node.bases:
+        return None
+    base = class_node.bases[0]
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name):
+        return base.value.id
+    return None
+
+
+def _resolve_import_to_file(
+    tree: ast.AST, class_name: str, source_file: Path | None = None
+) -> Path | None:
+    """Try to resolve a class name to its source file via imports in the AST.
+
+    Handles both absolute imports (from vllm.foo import Bar) and relative
+    imports (from .foo import Bar) when source_file is provided.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        for alias in node.names:
+            actual_name = alias.asname or alias.name
+            if actual_name != class_name:
+                continue
+            if not node.module:
+                continue
+
+            if node.level and node.level > 0 and source_file:
+                # Relative import: resolve from the source file's directory
+                base_dir = source_file.parent
+                for _ in range(node.level - 1):
+                    base_dir = base_dir.parent
+                module_path = node.module.replace(".", "/")
+                py_file = base_dir / f"{module_path}.py"
+            else:
+                # Absolute import
+                module_path = node.module.replace(".", "/")
+                py_file = REPO_ROOT / f"{module_path}.py"
+
+            if py_file.exists():
+                return py_file
+    return None
+
+
+def _get_impl_class_name(class_node: ast.ClassDef) -> str | None:
+    """Get the impl class name from get_impl_cls() method's return statement."""
+    method = find_method(class_node, "get_impl_cls")
+    if method is None:
+        return None
+    for stmt in ast.walk(method):
+        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Name):
+            return stmt.value.id
+    return None
+
+
+def parse_impl_bool_attr(
+    tree: ast.AST,
+    class_name: str,
+    attr_name: str,
+    default: bool = False,
+    source_file: Path | None = None,
+    _visited: set[str] | None = None,
+) -> bool:
+    """Parse a boolean class attribute from an impl class, following inheritance.
+
+    Walks up the inheritance chain within the same file and across files
+    (by resolving imports) to find the attribute value.
+    """
+    if _visited is None:
+        _visited = set()
+    if class_name in _visited:
+        return default
+    _visited.add(class_name)
+
+    class_node = find_class_in_ast(tree, class_name)
+    if class_node is None:
+        return default
+
+    # Check directly on this class
+    value = _find_bool_class_var(class_node, attr_name)
+    if value is not None:
+        return value
+
+    # Check parent class
+    parent_name = _get_parent_class_name(class_node)
+    if parent_name:
+        # Try parent in same file first
+        parent_node = find_class_in_ast(tree, parent_name)
+        if parent_node is not None:
+            return parse_impl_bool_attr(
+                tree, parent_name, attr_name, default, source_file, _visited
+            )
+
+        # Try resolving cross-file import
+        parent_file = _resolve_import_to_file(tree, parent_name, source_file)
+        if parent_file:
+            try:
+                parent_tree = ast.parse(parent_file.read_text())
+                return parse_impl_bool_attr(
+                    parent_tree,
+                    parent_name,
+                    attr_name,
+                    default,
+                    parent_file,
+                    _visited,
+                )
+            except Exception:
+                pass
+
+    return default
+
+
 def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None:
     """Analyze a backend class and extract feature information."""
     file_path = get_file_from_class_path(class_path)
@@ -612,6 +756,18 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
     is_non_cuda = backend_name.startswith(("CPU_", "ROCM_"))
     compute_cap = "N/A" if is_non_cuda else parse_compute_capability(class_node)
 
+    # Parse impl class features (DCP/PCP support)
+    impl_class_name = _get_impl_class_name(class_node)
+    supports_dcp = False
+    supports_pcp = False
+    if impl_class_name:
+        supports_dcp = parse_impl_bool_attr(
+            tree, impl_class_name, "can_return_lse_for_decode", False, file_path
+        )
+        supports_pcp = parse_impl_bool_attr(
+            tree, impl_class_name, "supports_pcp", False, file_path
+        )
+
     return {
         "name": backend_name,
         "dtypes": parse_supported_dtypes(class_node),
@@ -624,6 +780,8 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         "supports_sink": check_method_overrides(class_node, "supports_sink"),
         "is_sparse": check_method_overrides(class_node, "is_sparse"),
         "supports_mm_prefix": check_method_overrides(class_node, "supports_mm_prefix"),
+        "supports_dcp": supports_dcp,
+        "supports_pcp": supports_pcp,
     }
 
 
@@ -659,29 +817,35 @@ def generate_markdown_table(
     if is_mla_table:
         header = (
             "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
-            "| Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
+            "| Sink | Sparse | MM Prefix | DCP | PCP "
+            "| Attention Types | Compute Cap. |"
         )
         separator = (
             "|---------|--------|-----------|-------------|------------"
-            "|------|--------|-----------|-----------------|--------------|"
+            "|------|--------|-----------|-----|-----"
+            "|-----------------|--------------|"
         )
     elif has_versions:
         header = (
             "| Backend | Version | Dtypes | KV Dtypes | Block Sizes "
-            "| Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |"
+            "| Head Sizes | Sink | MM Prefix | DCP | PCP "
+            "| Attention Types | Compute Cap. |"
         )
         separator = (
             "|---------|---------|--------|-----------|-------------"
-            "|------------|------|-----------|-----------------|--------------|"
+            "|------------|------|-----------|-----|-----"
+            "|-----------------|--------------|"
         )
     else:
         header = (
             "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
-            "| Sink | MM Prefix | Attention Types | Compute Cap. |"
+            "| Sink | MM Prefix | DCP | PCP "
+            "| Attention Types | Compute Cap. |"
         )
         separator = (
             "|---------|--------|-----------|-------------|------------"
-            "|------|-----------|-----------------|--------------|"
+            "|------|-----------|-----|-----"
+            "|-----------------|--------------|"
         )
     lines = [f"## {title}", "", header, separator]
 
@@ -691,7 +855,9 @@ def generate_markdown_table(
 
     for info in sorted(backends, key=sort_key):
         if is_mla_table:
-            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = (
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |"
+            ).format(
                 info["name"],
                 info["dtypes"],
                 add_literal_quotes(info["kv_cache_dtypes"]),
@@ -700,11 +866,15 @@ def generate_markdown_table(
                 bool_to_emoji(info["supports_sink"]),
                 bool_to_emoji(info["is_sparse"]),
                 bool_to_emoji(info["supports_mm_prefix"]),
+                bool_to_emoji(info["supports_dcp"]),
+                bool_to_emoji(info["supports_pcp"]),
                 info["attn_types"],
                 info["compute_capability"],
             )
         elif has_versions:
-            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = (
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |"
+            ).format(
                 info["name"],
                 info.get("version", ""),
                 info["dtypes"],
@@ -713,11 +883,13 @@ def generate_markdown_table(
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
                 bool_to_emoji(info["supports_mm_prefix"]),
+                bool_to_emoji(info["supports_dcp"]),
+                bool_to_emoji(info["supports_pcp"]),
                 info["attn_types"],
                 info["compute_capability"],
             )
         else:
-            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = ("| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |").format(
                 info["name"],
                 info["dtypes"],
                 add_literal_quotes(info["kv_cache_dtypes"]),
@@ -725,6 +897,8 @@ def generate_markdown_table(
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
                 bool_to_emoji(info["supports_mm_prefix"]),
+                bool_to_emoji(info["supports_dcp"]),
+                bool_to_emoji(info["supports_pcp"]),
                 info["attn_types"],
                 info["compute_capability"],
             )
@@ -1002,11 +1176,13 @@ def generate_mla_section(
     # Generate decode backends table
     header = (
         "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
-        "| Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
+        "| Sink | Sparse | MM Prefix | DCP | PCP "
+        "| Attention Types | Compute Cap. |"
     )
     separator = (
         "|---------|--------|-----------|-------------|------------"
-        "|------|--------|-----------|-----------------|--------------|"
+        "|------|--------|-----------|-----|-----"
+        "|-----------------|--------------|"
     )
     lines.extend([header, separator])
 
@@ -1014,7 +1190,9 @@ def generate_mla_section(
         return (x.get("_sort_key", x["name"]), x.get("_sort_order", 0))
 
     for info in sorted(decode_backends, key=sort_key):
-        row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        row = (
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |"
+        ).format(
             info["name"],
             info["dtypes"],
             add_literal_quotes(info["kv_cache_dtypes"]),
@@ -1023,6 +1201,8 @@ def generate_mla_section(
             bool_to_emoji(info["supports_sink"]),
             bool_to_emoji(info["is_sparse"]),
             bool_to_emoji(info["supports_mm_prefix"]),
+            bool_to_emoji(info["supports_dcp"]),
+            bool_to_emoji(info["supports_pcp"]),
             info["attn_types"],
             info["compute_capability"],
         )
@@ -1045,6 +1225,8 @@ def generate_legend() -> str:
 | **Sink** | Attention sink support (for StreamingLLM) |
 | **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
+| **DCP** | Decode Context Parallelism support (`can_return_lse_for_decode`) |
+| **PCP** | Prefill Context Parallelism support (`supports_pcp`) |
 | **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
 | **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
 
