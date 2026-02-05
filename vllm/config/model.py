@@ -1412,6 +1412,11 @@ class ModelConfig:
         )
 
     @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
+
+    @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
 

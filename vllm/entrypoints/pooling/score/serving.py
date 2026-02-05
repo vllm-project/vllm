@@ -31,6 +31,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
+    compute_maxsim_score,
     get_score_prompt,
     validate_score_input,
 )
@@ -68,9 +69,12 @@ class ServingScores(OpenAIServing):
         self.is_cross_encoder = self.model_config.is_cross_encoder
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.architecture = self.model_config.architecture
+        self.is_late_interaction = self.model_config.is_late_interaction
 
         if self.is_cross_encoder:
             self._score_func = self._cross_encoding_score
+        elif self.is_late_interaction:
+            self._score_func = self._late_interaction_score
         else:
             self._score_func = self._embedding_score
 
@@ -171,6 +175,142 @@ class ServingScores(OpenAIServing):
         )
 
         return final_res_batch
+
+    async def _late_interaction_score(
+        self,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
+        request: RerankRequest | ScoreRequest,
+        request_id: str,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+    ) -> list[PoolingRequestOutput] | ErrorResponse:
+        """
+        Late interaction scoring (ColBERT MaxSim).
+
+        Encodes queries and documents into per-token embeddings, then computes
+        MaxSim: sum over query tokens of max similarity to any document token.
+        """
+        input_texts: list[str] = []
+        for text in data_1 + data_2:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Late interaction scores currently do not support multimodal input."
+                )
+            input_texts.append(text)
+
+        model_config = self.model_config
+        tokenizer = self.renderer.get_tokenizer()
+
+        encode_async = make_async(
+            tokenizer.encode,
+            executor=self._tokenizer_executor,
+        )
+
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
+        tokenized_prompts = await asyncio.gather(
+            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
+        )
+
+        engine_prompts: list[TokensPrompt] = []
+        for tok_result, input_text in zip(tokenized_prompts, input_texts):
+            text_token_prompt = self._validate_input(request, tok_result, input_text)
+
+            engine_prompts.append(
+                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+            )
+
+        # Schedule the request and get the result generator.
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+
+        # Use token_embed task for late interaction models
+        from vllm import PoolingParams
+
+        pooling_params = PoolingParams(
+            task="token_embed",
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            use_activation=request.use_activation,
+        )
+
+        try:
+            pooling_params.verify("token_embed", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        for i, engine_prompt in enumerate(engine_prompts):
+            request_id_item = f"{request_id}-{i}"
+
+            self._log_inputs(
+                request_id_item,
+                input_texts[i],
+                params=pooling_params,
+                lora_request=lora_request,
+            )
+
+            generators.append(
+                self.engine_client.encode(
+                    engine_prompt,
+                    pooling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                )
+            )
+
+        result_generator = merge_async_iterators(*generators)
+
+        # Collect token embeddings
+        embeddings: list[PoolingRequestOutput | None] = [None] * len(engine_prompts)
+
+        async for i, res in result_generator:
+            embeddings[i] = res
+
+        # Split into query and document embeddings
+        emb_data_1: list[PoolingRequestOutput] = []
+        emb_data_2: list[PoolingRequestOutput] = []
+
+        for i in range(0, len(data_1)):
+            assert (emb := embeddings[i]) is not None
+            emb_data_1.append(emb)
+
+        for i in range(len(data_1), len(embeddings)):
+            assert (emb := embeddings[i]) is not None
+            emb_data_2.append(emb)
+
+        # Expand queries if 1:N scoring
+        if len(emb_data_1) == 1:
+            emb_data_1 = emb_data_1 * len(emb_data_2)
+
+        # Compute MaxSim scores
+        from vllm.outputs import PoolingOutput
+
+        scores: list[PoolingRequestOutput] = []
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
+            padding = [pad_token_id]
+
+        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            # emb_1.outputs.data: [query_len, dim]
+            # emb_2.outputs.data: [doc_len, dim]
+            q_emb = emb_1.outputs.data
+            d_emb = emb_2.outputs.data
+
+            maxsim_score = compute_maxsim_score(q_emb, d_emb)
+
+            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+
+            scores.append(
+                PoolingRequestOutput(
+                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
+                    outputs=PoolingOutput(data=maxsim_score),
+                    prompt_token_ids=tokens,
+                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    finished=True,
+                )
+            )
+
+        return scores
 
     async def _cross_encoding_score(
         self,
