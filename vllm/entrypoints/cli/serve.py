@@ -208,7 +208,12 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            engine_manager.monitor_engine_process(
+                engine_down_callback=engine_manager.notify_engine_down
+            )
+        else:
+            engine_manager.join_first()
     finally:
         logger.info("Shutting down.")
         engine_manager.close()
