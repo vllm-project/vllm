@@ -4,6 +4,7 @@ from collections.abc import Callable
 from functools import partial
 
 import torch
+from flashinfer.dsv3_ops import fused_topk_deepseek
 
 from vllm import _custom_ops as ops
 from vllm import envs as envs
@@ -26,6 +27,39 @@ from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
 
+def fi_fused_topk_deepseek(
+    gating_output,
+    e_score_correction_bias,
+    num_expert_group,
+    topk_group,
+    topk,
+    routed_scaling_factor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_values = torch.empty(
+        gating_output.size(0),
+        topk,
+        device=gating_output.device,
+        dtype=gating_output.dtype,
+    )
+    topk_indices = torch.empty(
+        gating_output.size(0),
+        topk,
+        device=gating_output.device,
+        dtype=torch.int32,
+    )
+    fused_topk_deepseek(
+        gating_output,
+        e_score_correction_bias,
+        num_expert_group,
+        topk_group,
+        topk,
+        routed_scaling_factor,
+        topk_values,
+        topk_indices,
+    )
+    return topk_values.to(torch.float32), topk_indices
+
+
 def fused_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -41,16 +75,26 @@ def fused_grouped_topk(
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
-        topk_values, topk_indices = ops.grouped_topk(
-            gating_output,  # raw logits
-            num_expert_group,
-            topk_group,
-            topk,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            1,  # scoring_func=1 for sigmoid
-        )
+        if renormalize:
+            topk_values, topk_indices = fi_fused_topk_deepseek(
+                gating_output,
+                e_score_correction_bias,
+                num_expert_group,
+                topk_group,
+                topk,
+                routed_scaling_factor,
+            )
+        else:
+            topk_values, topk_indices = ops.grouped_topk(
+                gating_output,  # raw logits
+                num_expert_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+                e_score_correction_bias,
+                1,  # scoring_func=1 for sigmoid
+            )
     elif scoring_func == "softmax":
         # Apply softmax in Python, then use fused kernel
         # TODO: Add support for softmax in kernel
