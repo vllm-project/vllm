@@ -14,7 +14,7 @@ from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
-    KVConnectorPrometheus,
+    KVConnectorProm,
 )
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
@@ -391,7 +391,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _counter_cls = Counter
     _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
-    _kv_connector_cls = KVConnectorPrometheus
+    _kv_connector_cls = KVConnectorProm
     _perf_metrics_cls = PerfMetricsProm
 
     def __init__(
