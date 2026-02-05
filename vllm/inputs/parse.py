@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict
-
-from typing_extensions import TypeIs
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict
 
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .data import (
     EmbedsPrompt,
-    ExplicitEncoderDecoderPrompt,
     ProcessorInputs,
     PromptType,
     SingletonInputs,
@@ -21,68 +18,144 @@ if TYPE_CHECKING:
     import torch
 
 
-class ParsedStrPrompt(TypedDict):
-    type: Literal["str"]
-    content: str
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
+from vllm.utils.collection_utils import is_list_of
+
+DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
+"""
+A [`DecoderOnlyPrompt`][vllm.inputs.data.DecoderOnlyPrompt]
+that has been normalized to a dictionary.
+"""
 
 
-class ParsedTextPrompt(TypedDict):
-    type: Literal["text"]
-    content: TextPrompt
+EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
+"""
+A [`EncoderPrompt`][vllm.inputs.data.EncoderPrompt]
+that has been normalized to a dictionary.
+"""
 
 
-class ParsedTokensPrompt(TypedDict):
-    type: Literal["tokens"]
-    content: TokensPrompt
+DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
+"""
+A [`DecoderPrompt`][vllm.inputs.data.DecoderPrompt]
+that has been normalized to a dictionary.
+"""
 
 
-class ParsedEmbedsPrompt(TypedDict):
-    type: Literal["embeds"]
-    content: EmbedsPrompt
+class EncoderDecoderDictPrompt(TypedDict):
+    """
+    A [`EncoderDecoderPrompt`][vllm.inputs.data.EncoderDecoderPrompt]
+    that has been normalized to a dictionary.
+    """
+
+    encoder_prompt: EncoderDictPrompt
+
+    decoder_prompt: DecoderDictPrompt | None
 
 
-ParsedSingletonPrompt: TypeAlias = (
-    ParsedStrPrompt | ParsedTextPrompt | ParsedTokensPrompt | ParsedEmbedsPrompt
+SingletonDictPrompt: TypeAlias = (
+    DecoderOnlyDictPrompt | EncoderDictPrompt | DecoderDictPrompt
 )
+"""
+A [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt]
+that has been normalized to a dictionary.
+"""
 
 
-def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
+DictPromptType: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
+"""
+A [`PromptType`][vllm.inputs.data.PromptType]
+that has been normalized to a dictionary.
+"""
+
+
+def parse_dec_only_prompt(prompt: PromptType | DictPromptType) -> DecoderOnlyDictPrompt:
+    """
+    Parse a prompt for a decoder-only model and normalize it to a dictionary.
+    """
     if isinstance(prompt, str):
-        return ParsedStrPrompt(type="str", content=prompt)
-    elif isinstance(prompt, dict):
-        # Type ignores are because mypy does not correctly infer the TypedDicts
-        # Pyright does succeed.
+        return TextPrompt(prompt=prompt)
+
+    if isinstance(prompt, list):
+        if not is_list_of(prompt, int):
+            raise TypeError("Token prompt should be a list of integers")
+
+        return TokensPrompt(prompt_token_ids=prompt)
+
+    if isinstance(prompt, dict):
+        if "encoder_prompt" in prompt:
+            raise TypeError("Cannot pass encoder-decoder prompt to decoder-only models")
+
+        return prompt
+
+    raise TypeError("Prompt should be a string, list of tokens, or dictionary")
+
+
+def _parse_enc_prompt(prompt: SingletonPrompt) -> EncoderDictPrompt:
+    if isinstance(prompt, str):
+        return TextPrompt(prompt=prompt)
+
+    if isinstance(prompt, list):
+        if not is_list_of(prompt, int):
+            raise TypeError("Token prompt should be a list of integers")
+
+        return TokensPrompt(prompt_token_ids=prompt)
+
+    if isinstance(prompt, dict):
         if "prompt_embeds" in prompt:
-            return ParsedEmbedsPrompt(type="embeds", content=prompt)  # type: ignore[typeddict-item]
-        elif "prompt_token_ids" in prompt:
-            return ParsedTokensPrompt(type="tokens", content=prompt)  # type: ignore[typeddict-item]
-        elif "prompt" in prompt:
-            return ParsedTextPrompt(type="text", content=prompt)
-    raise TypeError(
-        "inputs must be a string, TextPrompt, TokensPrompt, or EmbedsPrompt"
-    )
+            raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
+
+        return prompt
+
+    raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def is_explicit_encoder_decoder_prompt(
-    prompt: PromptType,
-) -> TypeIs[ExplicitEncoderDecoderPrompt]:
-    return isinstance(prompt, dict) and "encoder_prompt" in prompt
-
-
-def split_enc_dec_prompt(
-    prompt: PromptType,
-) -> tuple[SingletonPrompt, SingletonPrompt | None]:
+def _parse_dec_prompt(prompt: SingletonPrompt) -> DecoderDictPrompt:
     if isinstance(prompt, str):
-        return prompt, None
+        return TextPrompt(prompt=prompt)
 
-    if "encoder_prompt" in prompt and "decoder_prompt" in prompt:
-        # NOTE: This passes pyright but not mypy
-        return (
-            prompt["encoder_prompt"],  # type: ignore[typeddict-item]
-            prompt["decoder_prompt"],  # type: ignore[typeddict-item]
-        )
+    if isinstance(prompt, list):
+        if not is_list_of(prompt, int):
+            raise TypeError("Token prompt should be a list of integers")
 
-    return prompt, None
+        return TokensPrompt(prompt_token_ids=prompt)
+
+    if isinstance(prompt, dict):
+        if "prompt_embeds" in prompt:
+            raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
+
+        if (
+            "multi_modal_data" in prompt
+            or "mm_processor_kwargs" in prompt
+            or "multi_modal_uuids" in prompt
+        ):
+            raise TypeError("Cannot pass multi-modal inputs to decoder prompt")
+
+        return prompt
+
+    raise TypeError("Prompt should be a string, list of tokens, or dictionary")
+
+
+def parse_enc_dec_prompt(
+    prompt: PromptType | DictPromptType,
+) -> EncoderDecoderDictPrompt:
+    """
+    Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
+    """
+    if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+        enc_prompt: SingletonPrompt = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
+        dec_prompt: SingletonPrompt | None = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
+    else:
+        enc_prompt = prompt
+        dec_prompt = None
+
+    return EncoderDecoderDictPrompt(
+        encoder_prompt=_parse_enc_prompt(enc_prompt),
+        decoder_prompt=None if dec_prompt is None else _parse_dec_prompt(dec_prompt),
+    )
 
 
 def split_enc_dec_inputs(
@@ -104,9 +177,12 @@ class PromptComponents(NamedTuple):
     embeds: "torch.Tensor | None" = None
 
 
-def get_prompt_components(prompt: PromptType) -> PromptComponents:
+def get_prompt_components(prompt: PromptType | DictPromptType) -> PromptComponents:
+    # TODO: Remove the non-dict cases once we finish updating all APIs to use Renderer
     if isinstance(prompt, str):
         return PromptComponents(text=prompt)
+    if isinstance(prompt, list):
+        return PromptComponents(token_ids=prompt)
 
     if encoder_prompt := prompt.get("encoder_prompt"):
         return get_prompt_components(encoder_prompt)  # type: ignore[arg-type]

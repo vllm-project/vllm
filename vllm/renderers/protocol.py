@@ -2,9 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, overload
 
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs.data import (
+    EmbedsPrompt,
+    PromptType,
+    SingletonPrompt,
+    TextPrompt,
+    TokensPrompt,
+)
+from vllm.inputs.parse import (
+    DictPromptType,
+    SingletonDictPrompt,
+    parse_dec_only_prompt,
+    parse_enc_dec_prompt,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
@@ -57,47 +70,72 @@ class BaseRenderer(ABC):
         return self._async_tokenizer
 
     # Step 1: Convert raw inputs to prompts
+    @overload
+    def prompt_to_seq(
+        self,
+        prompt_or_prompts: SingletonPrompt | Sequence[SingletonPrompt],
+    ) -> Sequence[SingletonPrompt]: ...
+
+    @overload
+    def prompt_to_seq(
+        self,
+        prompt_or_prompts: PromptType | Sequence[PromptType],
+    ) -> Sequence[PromptType]: ...
+
+    @overload
+    def prompt_to_seq(
+        self,
+        prompt_or_prompts: bytes | Sequence[bytes],
+    ) -> Sequence[bytes]: ...
+
+    def prompt_to_seq(
+        self,
+        prompt_or_prompts: PromptType | bytes | Sequence[PromptType | bytes],
+    ) -> Sequence[PromptType | bytes]:
+        if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
+            len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
+        ):
+            return [prompt_or_prompts]  # type: ignore[list-item]
+
+        return prompt_or_prompts  # type: ignore[return-value]
+
+    @overload
     def render_completion(
         self,
-        prompt_raw: str | list[int] | bytes,
-    ) -> TextPrompt | TokensPrompt | EmbedsPrompt:
-        error_msg = "Each prompt must be a string or an array of tokens"
+        prompt: SingletonPrompt | bytes,
+    ) -> SingletonDictPrompt: ...
 
-        if isinstance(prompt_raw, str):
-            return TextPrompt(prompt=prompt_raw)
+    @overload
+    def render_completion(
+        self,
+        prompt: PromptType,
+    ) -> DictPromptType: ...
 
-        if isinstance(prompt_raw, list):
-            if not is_list_of(prompt_raw, int):
-                raise TypeError(error_msg)
+    def render_completion(
+        self,
+        prompt: PromptType | bytes,
+    ) -> DictPromptType:
+        if isinstance(prompt, bytes):
+            embeds = safe_load_prompt_embeds(self.config, prompt)
+            prompt = EmbedsPrompt(prompt_embeds=embeds)
 
-            return TokensPrompt(prompt_token_ids=prompt_raw)
+        if self.config.is_encoder_decoder:
+            return parse_enc_dec_prompt(prompt)
 
-        if isinstance(prompt_raw, bytes):
-            embeds = safe_load_prompt_embeds(self.config, prompt_raw)
-            return EmbedsPrompt(prompt_embeds=embeds)
-
-        raise TypeError(error_msg)
+        return parse_dec_only_prompt(prompt)
 
     def render_completions(
         self,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
         prompt_embeds: bytes | list[bytes] | None = None,
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
-        prompts_raw = list[str | list[int] | bytes]()
+    ) -> list[SingletonDictPrompt]:
+        prompts_raw = list[SingletonPrompt | bytes]()
 
         if prompt_embeds is not None:  # embeds take higher priority
-            if isinstance(prompt_embeds, bytes):
-                prompts_raw.append(prompt_embeds)
-            else:
-                prompts_raw.extend(prompt_embeds)
+            prompts_raw.extend(self.prompt_to_seq(prompt_embeds))
 
         if prompt_input is not None:
-            if isinstance(prompt_input, str) or (
-                len(prompt_input) > 0 and is_list_of(prompt_input, int)
-            ):
-                prompts_raw.append(prompt_input)  # type: ignore[arg-type]
-            else:
-                prompts_raw.extend(prompt_input)  # type: ignore[arg-type]
+            prompts_raw.extend(self.prompt_to_seq(prompt_input))
 
         if len(prompts_raw) == 0:
             raise ValueError("You must pass at least one prompt")
@@ -108,22 +146,34 @@ class BaseRenderer(ABC):
         self,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
         prompt_embeds: bytes | list[bytes] | None = None,
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> list[SingletonDictPrompt]:
         return self.render_completions(prompt_input, prompt_embeds)
+
+    def conversation_to_seq(
+        self,
+        conversation_or_conversations: Sequence["ChatCompletionMessageParam"]
+        | Sequence[list["ChatCompletionMessageParam"]],
+    ) -> Sequence[list["ChatCompletionMessageParam"]]:
+        if len(conversation_or_conversations) > 0 and is_list_of(
+            conversation_or_conversations, dict
+        ):
+            return [conversation_or_conversations]  # type: ignore[list-item]
+
+        return conversation_or_conversations  # type: ignore[return-value]
 
     @abstractmethod
     def render_messages(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list["ConversationMessage"], SingletonDictPrompt]:
         raise NotImplementedError
 
     async def render_messages_async(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list["ConversationMessage"], SingletonDictPrompt]:
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
@@ -141,7 +191,7 @@ class BaseRenderer(ABC):
                 **params.get_encode_kwargs(),
             )
 
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)  # type: ignore[typeddict-unknown-key]
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -174,7 +224,7 @@ class BaseRenderer(ABC):
                 **params.get_encode_kwargs(),
             )
 
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)  # type: ignore[typeddict-unknown-key]
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:

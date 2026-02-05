@@ -4,7 +4,7 @@
 import itertools
 import warnings
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 import torch.nn as nn
@@ -49,16 +49,18 @@ from vllm.entrypoints.pooling.score.utils import (
     validate_score_input,
 )
 from vllm.entrypoints.utils import log_non_default_args
-from vllm.inputs import (
+from vllm.inputs.data import (
     DataPrompt,
-    EmbedsPrompt,
-    ExplicitEncoderDecoderPrompt,
     PromptType,
     SingletonPrompt,
     TextPrompt,
     TokensPrompt,
 )
-from vllm.inputs.parse import get_prompt_components, is_explicit_encoder_decoder_prompt
+from vllm.inputs.parse import (
+    DecoderOnlyDictPrompt,
+    DictPromptType,
+    get_prompt_components,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -88,9 +90,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
-
-EnginePrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
-EngineEncDecPrompt: TypeAlias = ExplicitEncoderDecoderPrompt[EnginePrompt, EnginePrompt]
 
 
 class LLM:
@@ -424,11 +423,15 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
+        prompts_seq = self.llm_engine.renderer.prompt_to_seq(prompts)
+
         self._validate_and_add_requests(
-            prompts=prompts,
+            prompts=prompts_seq,
             params=sampling_params,
             use_tqdm=use_tqdm,
-            lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
+            lora_request=self._get_modality_specific_lora_reqs(
+                prompts_seq, lora_request
+            ),
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
@@ -438,7 +441,7 @@ class LLM:
 
     def _get_modality_specific_lora_reqs(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: Sequence[PromptType],
         lora_request: list[LoRARequest] | LoRARequest | None,
     ):
         # Grab the lora config off the vllm config on the engine,
@@ -453,9 +456,6 @@ class LLM:
             or (lora_config and lora_config.default_mm_loras is None)
         ):
             return lora_request
-
-        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
-            prompts = [prompts]
 
         optional_loras = (
             [lora_request] * len(prompts)
@@ -474,7 +474,7 @@ class LLM:
 
     def _resolve_single_prompt_mm_lora(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPromptType,
         lora_request: LoRARequest | None,
         default_mm_loras: dict[str, str] | None,
     ):
@@ -785,61 +785,11 @@ class LLM:
             add_special_tokens=not model_config.is_encoder_decoder,
         ).with_kwargs(tokenization_kwargs)
 
-    def _normalize_prompts(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-    ) -> list[EnginePrompt | EngineEncDecPrompt]:
-        if isinstance(prompts, str):
-            prompts = TextPrompt(prompt=prompts)
-
-        return prompts if isinstance(prompts, Sequence) else [prompts]  # type: ignore[return-value]
-
-    def _preprocess_cmpl_singleton(
-        self,
-        prompt: SingletonPrompt,
-        tok_params: TokenizeParams,
-        *,
-        tokenize: bool,
-    ) -> EnginePrompt:
-        renderer = self.llm_engine.renderer
-
-        if not isinstance(prompt, dict):
-            prompt = renderer.render_completion(prompt)
-
-        return renderer.tokenize_prompt(prompt, tok_params) if tokenize else prompt
-
-    def _preprocess_cmpl_enc_dec(
-        self,
-        prompt: ExplicitEncoderDecoderPrompt,
-        tok_params: TokenizeParams,
-    ) -> EngineEncDecPrompt:
-        enc_prompt = prompt["encoder_prompt"]
-        dec_prompt = prompt["decoder_prompt"]
-
-        return EngineEncDecPrompt(
-            encoder_prompt=self._preprocess_cmpl_singleton(
-                enc_prompt,
-                tok_params,
-                # TODO: Move multi-modal processor into tokenization
-                tokenize=not self.model_config.is_multimodal_model,
-            ),
-            decoder_prompt=(
-                None
-                if dec_prompt is None
-                else self._preprocess_cmpl_singleton(
-                    dec_prompt,
-                    tok_params,
-                    # TODO: Move multi-modal processor into tokenization
-                    tokenize=not self.model_config.is_multimodal_model,
-                )
-            ),
-        )
-
     def _preprocess_completion(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[EnginePrompt | EngineEncDecPrompt]:
+    ) -> list[DictPromptType]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -850,31 +800,27 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
+        renderer = self.llm_engine.renderer
+        model_config = self.model_config
+
+        # Some MM and encoder-decoder models have non-default `add_special_tokens`
+        # TODO: Move multi-modal processor into tokenization
+        is_mm_or_enc_dec = (
+            model_config.is_multimodal_model or model_config.is_encoder_decoder
+        )
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[EnginePrompt | EngineEncDecPrompt]()
-        for prompt in self._normalize_prompts(prompts):
-            if is_explicit_encoder_decoder_prompt(prompt):
-                engine_prompts.append(self._preprocess_cmpl_enc_dec(prompt, tok_params))
-            else:
-                # Some MM models have non-default `add_special_tokens`
-                # TODO: Move multi-modal processor into tokenization
-                engine_prompts.append(
-                    self._preprocess_cmpl_singleton(
-                        prompt,
-                        tok_params,
-                        tokenize=not self.model_config.is_multimodal_model,
-                    )
-                )
+        engine_prompts = list[DictPromptType]()
+        for prompt in prompts:
+            in_prompt = renderer.render_completion(prompt)
+
+            engine_prompts.append(
+                renderer.tokenize_prompt(in_prompt, tok_params)
+                if not is_mm_or_enc_dec and "encoder_prompt" not in in_prompt
+                else in_prompt
+            )
 
         return engine_prompts
-
-    def _normalize_conversations(
-        self,
-        conversations: list[ChatCompletionMessageParam]
-        | list[list[ChatCompletionMessageParam]],
-    ) -> list[list[ChatCompletionMessageParam]]:
-        return conversations if is_list_of(conversations, list) else [conversations]  # type: ignore[list-item,return-value]
 
     def _get_chat_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
         model_config = self.model_config
@@ -888,8 +834,7 @@ class LLM:
 
     def _preprocess_chat(
         self,
-        conversations: list[ChatCompletionMessageParam]
-        | list[list[ChatCompletionMessageParam]],
+        conversations: Sequence[list[ChatCompletionMessageParam]],
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         chat_template_kwargs: dict[str, Any] | None = None,
@@ -898,7 +843,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[EnginePrompt]:
+    ) -> list[DecoderOnlyDictPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -926,8 +871,8 @@ class LLM:
         )
         tok_params = self._get_chat_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[EnginePrompt]()
-        for conversation in self._normalize_conversations(conversations):
+        engine_prompts = list[DecoderOnlyDictPrompt]()
+        for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
                 in_prompt["mm_processor_kwargs"] = mm_processor_kwargs
@@ -939,7 +884,7 @@ class LLM:
     def chat(
         self,
         messages: list[ChatCompletionMessageParam]
-        | list[list[ChatCompletionMessageParam]],
+        | Sequence[list[ChatCompletionMessageParam]],
         sampling_params: SamplingParams | list[SamplingParams] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: LoRARequest | None = None,
@@ -963,7 +908,7 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A list of conversations or a single conversation.
+            messages: A sequence of conversations or a single conversation.
 
                 - Each conversation is represented as a list of messages.
                 - Each message is a dictionary with 'role' and 'content' keys.
@@ -1002,8 +947,10 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
+        renderer = self.llm_engine.renderer
+
         prompts = self._preprocess_chat(
-            messages,
+            renderer.conversation_to_seq(messages),
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=chat_template_kwargs,
@@ -1099,6 +1046,8 @@ class LLM:
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
+        renderer = self.llm_engine.renderer
+
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
             io_processor_prompt = True
@@ -1143,7 +1092,7 @@ class LLM:
                 raise ValueError(msg)
 
         self._validate_and_add_requests(
-            prompts=prompts,
+            prompts=renderer.prompt_to_seq(prompts),
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -1708,7 +1657,7 @@ class LLM:
 
     def _validate_and_add_requests(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: Sequence[PromptType],
         params: SamplingParams
         | Sequence[SamplingParams]
         | PoolingParams
@@ -1719,8 +1668,7 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: list[int] | None = None,
     ) -> None:
-        in_prompts = self._normalize_prompts(prompts)
-        num_requests = len(in_prompts)
+        num_requests = len(prompts)
 
         if isinstance(params, Sequence):
             if len(params) != num_requests:
@@ -1759,9 +1707,9 @@ class LLM:
             # `self._preprocess_completion` handle prompt normalization
             engine_prompts = [
                 engine_prompt
-                for in_prompt, param in zip(in_prompts, engine_params)
+                for prompt, param in zip(prompts, engine_params)
                 for engine_prompt in self._preprocess_completion(
-                    [in_prompt],
+                    [prompt],
                     tokenization_kwargs=merge_kwargs(
                         tokenization_kwargs,
                         dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
@@ -1770,7 +1718,7 @@ class LLM:
             ]
         else:
             engine_prompts = self._preprocess_completion(
-                in_prompts,
+                prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
@@ -1804,7 +1752,7 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPromptType,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
