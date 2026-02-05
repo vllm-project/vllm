@@ -64,6 +64,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
     Mxfp8Backend,
@@ -1690,9 +1691,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
     Uses FlashInfer's mm_mxfp8 with swizzled scales.
     """
 
-    # Minimum dimension size required by FlashInfer/CUTLASS MXFP8 GEMM
-    _MXFP8_MIN_DIM = 128
-
     def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
         self.quant_config = quant_config
 
@@ -1702,7 +1700,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend: Mxfp8Backend = Mxfp8Backend.FLASHINFER_CUTLASS
+        backend: Mxfp8Backend = Mxfp8Backend.TORCH
         self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
         logger.info_once("Using %s backend for MXFP8 GEMM", backend.value)
 
@@ -1735,20 +1733,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f"MXFP8 requires input dimension (K={input_size_per_partition}) to be "
             f"divisible by block size ({self.quant_config.group_size}). "
             f"This model is not compatible with MXFP8 quantization."
-        )
-
-        # K (in_features) must be >= 128 for mm_mxfp8
-        assert input_size_per_partition >= self._MXFP8_MIN_DIM, (
-            f"MXFP8 requires input dimension (K={input_size_per_partition}) >= "
-            f"{self._MXFP8_MIN_DIM}. FlashInfer mm_mxfp8 does not support smaller "
-            f"dimensions. This model is not compatible with MXFP8 quantization."
-        )
-
-        # N (out_features) must be >= 128 for mm_mxfp8
-        assert output_size_per_partition >= self._MXFP8_MIN_DIM, (
-            f"MXFP8 requires output dimension (N={output_size_per_partition}) >= "
-            f"{self._MXFP8_MIN_DIM}. FlashInfer mm_mxfp8 does not support smaller "
-            f"dimensions. This model is not compatible with MXFP8 quantization."
         )
 
         # Weight tensor: FP8 E4M3 format
@@ -1787,11 +1771,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Process loaded weights for FlashInfer MXFP8 GEMM."""
-        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-            MXFP8_BLOCK_SIZE,
-        )
-
         # Check weight is a 2D tensor
         assert layer.weight.ndim == 2, (
             f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
@@ -1815,16 +1794,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f"{K % MXFP8_BLOCK_SIZE}. The checkpoint may be corrupted."
         )
 
-        # Validate minimum dimensions for mm_mxfp8
-        assert K >= self._MXFP8_MIN_DIM, (
-            f"MXFP8 weight input dimension (K={K}) must be >= {self._MXFP8_MIN_DIM} "
-            f"for FlashInfer mm_mxfp8. This model layer is too small for MXFP8."
-        )
-        assert N >= self._MXFP8_MIN_DIM, (
-            f"MXFP8 weight output dimension (N={N}) must be >= {self._MXFP8_MIN_DIM} "
-            f"for FlashInfer mm_mxfp8. This model layer is too small for MXFP8."
-        )
-
         scale_k = K // MXFP8_BLOCK_SIZE
 
         weight_scale = layer.weight_scale.data
@@ -1836,45 +1805,29 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f"quantized with MXFP8."
         )
 
-        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-            swizzle_mxfp8_scale,
+        # Validate weight_scale is 2D [N, K/32]
+        assert weight_scale.ndim == 2, (
+            f"MXFP8 weight_scale must be 2D [N, K/32], "
+            f"got {weight_scale.ndim}D with shape {tuple(weight_scale.shape)}."
         )
-
-        if weight_scale.ndim == 1:
-            weight_scale_swizzled = weight_scale.contiguous()
-        else:
-            assert weight_scale.ndim == 2, (
-                f"MXFP8 weight_scale must be 2D [N, K/32] or 1D swizzled, "
-                f"got {weight_scale.ndim}D with shape {tuple(weight_scale.shape)}."
-            )
-            assert weight_scale.shape[0] >= N, (
-                f"MXFP8 weight_scale rows ({weight_scale.shape[0]}) must be >= "
-                f"weight rows (N={N})"
-            )
-            assert weight_scale.shape[1] >= scale_k, (
-                f"MXFP8 weight_scale cols ({weight_scale.shape[1]}) must be >= "
-                f"expected scale cols (K/32={scale_k})"
-            )
-            weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
-            weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+        assert weight_scale.shape[0] >= N, (
+            f"MXFP8 weight_scale rows ({weight_scale.shape[0]}) must be >= "
+            f"weight rows (N={N})"
+        )
+        assert weight_scale.shape[1] >= scale_k, (
+            f"MXFP8 weight_scale cols ({weight_scale.shape[1]}) must be >= "
+            f"expected scale cols (K/32={scale_k})"
+        )
+        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
 
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
+            weight_scale_2d.contiguous(), requires_grad=False
         )
 
-        # Store dimensions for runtime use
+        # Store dimensions for validation in apply()
         layer.mxfp8_out_features = N
         layer.mxfp8_in_features = K
-
-        logger.debug(
-            "MXFP8 weights processed: weight shape=%s, "
-            "weight_scale shape=%s, N=%d, K=%d",
-            tuple(layer.weight.shape),
-            tuple(layer.weight_scale.shape),
-            N,
-            K,
-        )
 
     def apply(
         self,
@@ -1918,9 +1871,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             weight_scale=layer.weight_scale,
             out_dtype=out_dtype,
             bias=bias,
-            out_features=layer.mxfp8_out_features,
-            in_features=layer.mxfp8_in_features,
-            weight_scale_2d=None,
         )
 
 
