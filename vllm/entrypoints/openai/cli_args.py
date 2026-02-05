@@ -339,6 +339,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             raise ValueError(
                 "--shutdown-mode=drain is not supported with --api-server-count > 1"
             )
+        if getattr(args, "data_parallel_size", 1) > 1:
+            raise ValueError(
+                "--shutdown-mode=drain is not supported with --data-parallel-size > 1"
+            )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
