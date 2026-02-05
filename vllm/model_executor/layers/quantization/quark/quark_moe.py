@@ -454,6 +454,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
+                inplace=not self.moe.disable_inplace,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
@@ -464,7 +465,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
+                inplace=not self.moe.disable_inplace,
                 activation=layer.activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
@@ -970,10 +971,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 block_shape=None,
             )
 
-    @property
-    def allow_inplace(self) -> bool:
-        return True
-
     def apply(
         self,
         layer: FusedMoE,
@@ -1015,7 +1012,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
+                inplace=not self.moe.disable_inplace,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
