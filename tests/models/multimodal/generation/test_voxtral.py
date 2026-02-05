@@ -42,9 +42,7 @@ def server(request, audio_assets: AudioTestAssets):
         "VLLM_DISABLE_REDUCED_PRECISION_REDUCTION": "1",
     }
 
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict=env_dict
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
