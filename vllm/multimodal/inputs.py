@@ -35,9 +35,9 @@ if TYPE_CHECKING:
 
     from vllm.inputs.data import _InputOptions
 else:
-    _InputOptions = dict
-
     torch = LazyLoader("torch", globals(), "torch")
+
+    _InputOptions = dict
 
 _T = TypeVar("_T")
 
