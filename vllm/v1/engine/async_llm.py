@@ -771,8 +771,6 @@ class AsyncLLM(EngineClient):
             elif mode == "wait":
                 if self.output_processor.has_unfinished_requests():
                     await self.output_processor.wait_for_requests_to_drain()
-            else:
-                raise ValueError(f"Invalid mode: {mode}")
 
             # Clear cache
             if clear_cache:
