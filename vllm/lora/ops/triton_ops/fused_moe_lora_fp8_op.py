@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-from typing import List  # noqa: UP035
-
 import torch
 
 from vllm.distributed import (
@@ -13,107 +10,14 @@ from vllm.distributed import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl
-
-
-@triton.jit
-def _get_lora_id(
-    lora_ids,
-    token_lora_mapping_ptr,
-    lora_idx,
-    pid_m,
-    top_k_num,
-    naive_block_assignment: tl.constexpr,
-):
-    """Returns lora_id"""
-    if naive_block_assignment:
-        token_idx = pid_m // top_k_num
-        return tl.load(token_lora_mapping_ptr + token_idx)
-    else:
-        return tl.load(lora_ids + lora_idx)
-
-
-@triton.jit
-def _get_expert_id(
-    expert_ids_ptr,
-    lora_id,
-    pid_m,
-    stride_el,
-    max_loras,
-    naive_block_assignment: tl.constexpr,
-):
-    """Returns expert_id"""
-    if naive_block_assignment:
-        return tl.load(expert_ids_ptr + pid_m)
-    else:
-        ind = lora_id * stride_el + pid_m
-        return tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
-
-
-@triton.jit
-def _get_token_offs(
-    sorted_token_ids_ptr,
-    lora_id,
-    pid_m,
-    offs,
-    stride_tl,
-    max_loras,
-    num_valid_tokens,
-    naive_block_assignment: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-):
-    """Returns token offsets"""
-    if naive_block_assignment:
-        return tl.where(offs == 0, pid_m, num_valid_tokens)
-    else:
-        offs_token_id = pid_m * BLOCK_SIZE_M + offs
-        token_ind = stride_tl * lora_id + offs_token_id
-        return tl.load(
-            sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
-        )
-
-
-_LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
-
-
-def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_LORA_PTR_DICT` collects the required information during `profile_run`,
-    After this, it remains constant and subsequent usage is through LUT.
-    Refer to:
-    https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
-    """
-    key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
-
-    if (ptr_tensor := _LORA_PTR_DICT.get(key)) is not None:
-        return ptr_tensor
-
-    tensor_ptrs = []
-    for lora_weight in lora_weights:
-        tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
-
-    _LORA_PTR_DICT[key] = ptr_tensor
-    return _LORA_PTR_DICT.get(key)
-
-
-def _adjust_kernel_inputs(
-    num_active_loras: int,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-):
-    """
-    helper function to adjust kernel inputs when sorted_token_ids is None
-    """
-    if sorted_token_ids is None:
-        stride_tl = 0
-        stride_el = 0
-        grid_lora_dim = 1
-    else:
-        stride_tl = sorted_token_ids.stride(0)
-        stride_el = expert_ids.stride(0)
-        grid_lora_dim = num_active_loras
-    return grid_lora_dim, stride_tl, stride_el
+from .utils import (
+    _adjust_kernel_inputs,
+    _get_expert_id,
+    _get_lora_id,
+    _get_ptr,
+    _get_token_offs,
+    supports_pdl,
+)
 
 
 @triton.jit(
@@ -373,15 +277,15 @@ def _fused_moe_lora_shrink_fp8(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
-    lora_a_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    block_shape: list[int] | None = None,
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
         assert lora_a_scale_stacked is not None, (
@@ -539,16 +443,16 @@ def _fused_moe_lora_expand_fp8(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
-    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    block_shape: list[int] | None = None,
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
         assert lora_b_scale_stacked is not None, (
@@ -716,18 +620,18 @@ def _fused_moe_lora_fp8(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
-    lora_a_scale_stacked: list[torch.Tensor],
-    lora_b_scale_stacked: list[torch.Tensor],
-    shrink_act_scale: torch.Tensor | None = None,
-    expand_act_scale: torch.Tensor | None = None,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
+    shrink_act_scale: torch.Tensor | None = None,
+    expand_act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    block_shape: list[int] | None = None,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert topk_weights.dim() == qcurr_hidden_states.dim() == 2
@@ -802,10 +706,10 @@ def _fused_moe_lora_fp8(
         shrink_num_stages,
         shrink_split_k,
         num_active_loras,
-        lora_a_scale_stacked,
-        mul_routed_weight=mul_routed_weight,
+        mul_routed_weight,
         use_gdc=use_gdc,
         act_scale=shrink_act_scale,
+        lora_a_scale_stacked=lora_a_scale_stacked,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -857,11 +761,11 @@ def _fused_moe_lora_fp8(
         expand_num_stages,
         expand_split_k,
         num_active_loras,
-        lora_b_scale_stacked,
-        mul_routed_weight=mul_routed_weight,
-        offset=offset,
+        mul_routed_weight,
+        offset,
         use_gdc=use_gdc,
         act_scale=expand_act_scale,
+        lora_b_scale_stacked=lora_b_scale_stacked,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -870,7 +774,7 @@ def _fused_moe_lora_fp8(
     )
 
 
-def _fused_moe_lora_fp8_fake(
+def _fused_moe_lora_fake_fp8(
     output: torch.Tensor,
     qcurr_hidden_states: torch.Tensor,
     lora_a_stacked: list[torch.Tensor],
@@ -899,23 +803,23 @@ def _fused_moe_lora_fp8_fake(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
-    lora_a_scale_stacked: list[torch.Tensor],
-    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
     shrink_act_scale: torch.Tensor | None = None,
     expand_act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    block_shape: list[int] | None = None,
 ) -> None:
     return
 
 
-def _fused_moe_lora_shrink_fp8_fake(
+def _fused_moe_lora_shrink_fake_fp8(
     a_intermediate_cache1: torch.Tensor,
     qcurr_hidden_states: torch.Tensor,
     lora_a_stacked: list[torch.Tensor],
@@ -943,22 +847,23 @@ def _fused_moe_lora_shrink_fp8_fake(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
-    lora_a_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    block_shape: list[int] | None = None,
 ) -> None:
     return
 
 
-def _fused_moe_lora_expand_fp8_fake(
+def _fused_moe_lora_expand_fake_fp8(
     output: torch.Tensor,
     a_intermediate_cache1: torch.Tensor,
+    b_intermediate_cache1: torch.Tensor,
     lora_b_stacked: list[torch.Tensor],
     topk_weights: torch.Tensor,
     sorted_token_ids: torch.Tensor | None,
@@ -986,16 +891,16 @@ def _fused_moe_lora_expand_fp8_fake(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
-    act_scale: torch.Tensor,
-    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     offset: int = 0,
+    use_gdc: bool = False,
+    act_scale: torch.Tensor | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: List[int] | None = None,  # noqa: UP006, UP007
-    use_gdc: bool = False,
+    block_shape: list[int] | None = None,
 ) -> None:
     return
 
@@ -1005,21 +910,21 @@ try:
         op_name="fused_moe_lora_fp8",
         op_func=_fused_moe_lora_fp8,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_fp8_fake,
+        fake_impl=_fused_moe_lora_fake_fp8,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_shrink_fp8",
         op_func=_fused_moe_lora_shrink_fp8,
         mutates_args=["a_intermediate_cache1"],
-        fake_impl=_fused_moe_lora_shrink_fp8_fake,
+        fake_impl=_fused_moe_lora_shrink_fake_fp8,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_expand_fp8",
         op_func=_fused_moe_lora_expand_fp8,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_expand_fp8_fake,
+        fake_impl=_fused_moe_lora_expand_fake_fp8,
     )
 
     fused_moe_lora_fp8 = torch.ops.vllm.fused_moe_lora_fp8
