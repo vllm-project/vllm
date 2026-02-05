@@ -74,6 +74,22 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from torch._inductor.utils import fresh_cache
 
 
+def use_aiter_if_available():
+    from vllm.platforms import current_platform
+    from importlib.util import find_spec
+
+    # NOTE: it's not possible to use vllm._aiter_ops.is_aiter_found
+    # because the aiter ops will get loaded and all tests that want
+    # to use aiter will fail because no aiter ops will be loaded.
+    if current_platform.is_rocm() and find_spec("aiter") is not None:
+        os.environ["VLLM_ROCM_USE_AITER"] = "1"
+
+
+use_aiter_if_available()
+
+
+# This environment variable must be set so ops will be registered.
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     from transformers.generation.utils import GenerateOutput
