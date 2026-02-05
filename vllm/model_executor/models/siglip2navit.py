@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -30,8 +31,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
 from .vision import is_vit_use_data_parallel, should_torch_compile_mm_vit
-
-from vllm.compilation.decorators import support_torch_compile
 
 
 class VisionRotaryEmbedding(nn.Module):

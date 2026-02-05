@@ -12,6 +12,7 @@ from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
@@ -35,7 +36,6 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
