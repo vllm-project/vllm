@@ -14,4 +14,5 @@ __all__ = [
     "RMSNormGated",
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
+    "fused_sigmoid_gating_delta_rule_update",
 ]
