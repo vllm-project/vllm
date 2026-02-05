@@ -905,6 +905,30 @@ def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     )
 
 
+def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
+    """
+    Given an arbitrary model,
+     - if the model itself is a MixtureOfExperts, return the model directly.
+     - if the model is a multi-modal model, and its `language_model` is a
+       MixtureOfExperts, return the `language_model`.
+     - if neither, return None.
+
+    :param model: Model being served.
+    :type model: object
+    :return: Return MixtureOfExperts instance contained within the model.
+    :rtype: MixtureOfExperts | None
+    """
+
+    if is_mixture_of_experts(model):
+        return model
+
+    if isinstance(model, SupportsMultiModal):
+        mm_language_model = model.get_language_model()
+        return mm_language_model if is_mixture_of_experts(mm_language_model) else None
+
+    return None
+
+
 @runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
