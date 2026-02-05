@@ -469,6 +469,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
+        # Store video metadata extracted during resolve_items()
+        self.video_metadata: list[dict[str, Any]] = []
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
@@ -860,8 +862,12 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
         video = self._connector.fetch_video(video_url=video_url) if video_url else None
-
-        placeholder = self._tracker.add("video", (video, uuid))
+        if isinstance(video, tuple) and len(video) >= 2 and isinstance(video[1], dict):
+            video_metadata = video[1]
+            self._tracker.video_metadata.append(video_metadata)
+            placeholder = self._tracker.add("video", (video[0], uuid))
+        else:
+            placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
 
@@ -1516,6 +1522,7 @@ def parse_chat_messages(
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
+    list[dict[str, Any]],
 ]:
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config)
@@ -1538,7 +1545,7 @@ def parse_chat_messages(
 
     mm_data, mm_uuids = mm_tracker.resolve_items()
 
-    return conversation, mm_data, mm_uuids
+    return conversation, mm_data, mm_uuids, mm_tracker.video_metadata
 
 
 async def parse_chat_messages_async(
@@ -1549,6 +1556,7 @@ async def parse_chat_messages_async(
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
+    list[dict[str, Any]],
 ]:
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config)
@@ -1571,7 +1579,7 @@ async def parse_chat_messages_async(
 
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 
-    return conversation, mm_data, mm_uuids
+    return conversation, mm_data, mm_uuids, mm_tracker.video_metadata
 
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):

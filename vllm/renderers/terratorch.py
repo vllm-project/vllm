@@ -48,7 +48,7 @@ class TerratorchRenderer(BaseRenderer):
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
-        conversation, mm_data, mm_uuids = parse_chat_messages(
+        conversation, mm_data, mm_uuids, video_metadata = parse_chat_messages(
             messages,
             model_config,
             content_format="string",
@@ -59,6 +59,8 @@ class TerratorchRenderer(BaseRenderer):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if video_metadata:
+            prompt["video_metadata"] = video_metadata
 
         return conversation, prompt
 
@@ -69,7 +71,7 @@ class TerratorchRenderer(BaseRenderer):
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids, video_metadata = await parse_chat_messages_async(
             messages,
             model_config,
             content_format="string",
@@ -80,5 +82,7 @@ class TerratorchRenderer(BaseRenderer):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if video_metadata:
+            prompt["video_metadata"] = video_metadata
 
         return conversation, prompt

@@ -111,6 +111,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    multimodal_metadata: dict[str, Any] | None = Field(
+        default=None, description="Multimodal metadata (e.g., video frame counts)."
+    )
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):

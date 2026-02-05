@@ -97,7 +97,7 @@ class MistralRenderer(BaseRenderer):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
-        conversation, mm_data, mm_uuids = parse_chat_messages(
+        conversation, mm_data, mm_uuids, video_metadata = parse_chat_messages(
             messages,
             self.config,
             content_format="string",
@@ -114,6 +114,8 @@ class MistralRenderer(BaseRenderer):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if video_metadata:
+            prompt["video_metadata"] = video_metadata
 
         return conversation, prompt
 
@@ -123,7 +125,7 @@ class MistralRenderer(BaseRenderer):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids, video_metadata = await parse_chat_messages_async(
             messages,
             self.config,
             content_format="string",
@@ -140,5 +142,7 @@ class MistralRenderer(BaseRenderer):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if video_metadata:
+            prompt["video_metadata"] = video_metadata
 
         return conversation, prompt

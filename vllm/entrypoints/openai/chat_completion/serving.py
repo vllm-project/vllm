@@ -363,6 +363,12 @@ class OpenAIServingChat(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        # Extract video metadata from engine prompts if present
+        if engine_prompts and isinstance(engine_prompts, list) and len(engine_prompts) > 0:
+            video_metadata = engine_prompts[0].get("video_metadata")
+            if video_metadata:
+                request_metadata.multimodal_metadata = {"videos": video_metadata}
+
         try:
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True
@@ -1729,6 +1735,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            multimodal_metadata=request_metadata.multimodal_metadata,
         )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
