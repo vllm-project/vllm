@@ -262,11 +262,12 @@ class CompilerManager:
                 now = time.time()
                 elapsed = now - compilation_start_time
                 compilation_config.compilation_time += elapsed
-                logger.info(
+                logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
+                    scope="local",
                 )
             return compiled_graph
 
