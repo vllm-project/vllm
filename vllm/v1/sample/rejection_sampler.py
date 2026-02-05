@@ -293,7 +293,6 @@ class RejectionSampler(nn.Module):
                 logits, bad_words_token_ids, output_token_ids, metadata.num_draft_tokens
             )
 
-        # Apply min_tokens constraint via MinTokensLogitsProcessor.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             if isinstance(processor, MinTokensLogitsProcessor):
                 logits = processor.apply_with_spec_decode(

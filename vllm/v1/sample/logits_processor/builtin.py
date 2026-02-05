@@ -246,11 +246,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             return logits
 
         num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
-        # Compute cumulative offsets for logit rows: [0, n0, n0+n1, ...]
         cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
 
-        # Collect entries: (req_idx, min_tokens, current_len, stop_token_ids)
-        # Only include requests that have min_tokens constraints and stop tokens
         entries = [
             (req_idx, min_tok, len(out_tok_ids), list(stop_tok_ids))
             for req_idx, (min_tok, out_tok_ids, stop_tok_ids) in self.min_toks.items()
@@ -260,29 +257,23 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if not entries:
             return logits
 
-        # Build (logit_row, stop_token) pairs for masking
         all_rows: list[np.ndarray] = []
         all_toks: list[np.ndarray] = []
 
         for req_idx, min_tok, current_len, stop_toks in entries:
-            # Number of positions that still need min_tokens protection
             remaining = min_tok - current_len
-            # Clip to [0, num_draft_tokens] for this request
             n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
 
             if n_mask > 0:
                 offset = cumsum[req_idx]
-                # Row indices for positions 0..(n_mask-1)
                 row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
                 n_stop = len(stop_toks)
-                # Expand: each row pairs with each stop token
                 all_rows.append(np.repeat(row_indices, n_stop))
                 all_toks.append(np.tile(stop_toks, n_mask))
 
         if all_rows:
             rows_arr = np.concatenate(all_rows)
             toks_arr = np.concatenate(all_toks)
-            # Convert numpy arrays directly to tensors (avoid .tolist())
             logits_slice = (
                 torch.from_numpy(rows_arr).to(self.device, non_blocking=True),
                 torch.from_numpy(toks_arr).to(self.device, non_blocking=True),
