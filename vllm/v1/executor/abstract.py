@@ -250,6 +250,17 @@ class Executor(ABC):
             kwargs=dict(path=path, pattern=pattern, max_size=max_size),
         )
 
+    def save_serverless_llm_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        self.collective_rpc(
+            "save_serverless_llm_state",
+            kwargs=dict(path=path, pattern=pattern, max_size=max_size),
+        )
+
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an

@@ -619,6 +619,16 @@ class EngineCore:
             path=path, pattern=pattern, max_size=max_size
         )
 
+    def save_serverless_llm_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        self.model_executor.save_serverless_llm_state(
+            path=path, pattern=pattern, max_size=max_size
+        )
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
