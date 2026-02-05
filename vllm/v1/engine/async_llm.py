@@ -293,6 +293,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        **kwargs,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -401,7 +402,7 @@ class AsyncLLM(EngineClient):
             child_request.request_id = request_id
             child_request.sampling_params = child_params
             await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
+                child_request, prompt_text, parent_request, idx, queue, **kwargs
             )
         return queue
 
@@ -412,9 +413,10 @@ class AsyncLLM(EngineClient):
         parent_req: ParentRequest | None,
         index: int,
         queue: RequestOutputCollector,
+        **kwargs,
     ):
         # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, prompt, parent_req, index, queue)
+        self.output_processor.add_request(request, prompt, parent_req, index, queue, **kwargs)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -538,6 +540,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        **kwargs,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -566,6 +569,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                **kwargs,
             )
 
             # The output_handler task pushes items into the queue.

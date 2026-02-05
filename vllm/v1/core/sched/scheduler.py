@@ -47,7 +47,7 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -1237,6 +1237,22 @@ class Scheduler(SchedulerInterface):
             scheduler_output.scheduled_spec_decode_tokens,
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
+
+    def exception_output(self) -> dict[int, "EngineCoreOutputs"]:
+        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        for request in self.running:
+            req_id = request.request_id
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.ERROR,
+                ))
+        engine_core_outputs = {
+            client_index: EngineCoreOutputs(outputs=outs)
+            for client_index, outs in outputs.items()
+        }
+        return engine_core_outputs
 
     def update_from_output(
         self,

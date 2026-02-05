@@ -84,6 +84,12 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
+    def exception_output(self) -> dict[int, "EngineCoreOutputs"]:
+        """
+        Return EngineCoreOutputs when encountered an exception
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
         """Update requests with newly generated draft token ids, applying

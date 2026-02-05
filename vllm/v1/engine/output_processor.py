@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -40,7 +41,7 @@ from vllm.v1.metrics.stats import (
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
-
+logger = init_logger(__name__)
 
 class RequestOutputCollector:
     """
@@ -149,6 +150,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        log_request_str: str | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -184,6 +186,7 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        self.log_request_str = log_request_str
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -215,6 +218,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        log_request_str: str | None,
     ) -> "RequestState":
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
@@ -264,6 +268,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            log_request_str=log_request_str,
         )
 
     def make_request_output(
@@ -520,6 +525,7 @@ class OutputProcessor:
         parent_req: ParentRequest | None = None,
         request_index: int = 0,
         queue: RequestOutputCollector | None = None,
+        **kwargs,
     ) -> None:
         request_id = request.request_id
         req_state = self.request_states.get(request_id)
@@ -536,6 +542,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
+            log_request_str=kwargs["log_request_str"] if "log_request_str" in kwargs else "",
         )
         if self._requests_drained.is_set():
             self._requests_drained.clear()
@@ -614,6 +621,9 @@ class OutputProcessor:
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
+                continue
+            if engine_core_output.finish_reason == FinishReason.ERROR:
+                logger.error(f"Exception in request {req_id}, User request detail: {req_state.log_request_str}")
                 continue
 
             # 1) Compute stats for this iteration.

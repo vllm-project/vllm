@@ -5,6 +5,7 @@ import queue
 import signal
 import threading
 import time
+from abc import abstractmethod
 from collections import deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -80,12 +81,12 @@ class EngineCore:
     """Inner loop of vLLM's Engine."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-        log_stats: bool,
-        executor_fail_callback: Callable | None = None,
-        include_finished_set: bool = False,
+            self,
+            vllm_config: VllmConfig,
+            executor_class: type[Executor],
+            log_stats: bool,
+            executor_fail_callback: Callable | None = None,
+            include_finished_set: bool = False,
     ):
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -131,9 +132,9 @@ class EngineCore:
                 vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
-            vllm_config.cache_config.block_size
-            * vllm_config.parallel_config.decode_context_parallel_size
-            * vllm_config.parallel_config.prefill_context_parallel_size
+                vllm_config.cache_config.block_size
+                * vllm_config.parallel_config.decode_context_parallel_size
+                * vllm_config.parallel_config.prefill_context_parallel_size
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
@@ -180,15 +181,15 @@ class EngineCore:
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
+                deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.is_ec_producer = (
-            vllm_config.ec_transfer_config is not None
-            and vllm_config.ec_transfer_config.is_ec_producer
+                vllm_config.ec_transfer_config is not None
+                and vllm_config.ec_transfer_config.is_ec_producer
         )
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
@@ -220,7 +221,7 @@ class EngineCore:
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(
-        self, vllm_config: VllmConfig
+            self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
@@ -305,7 +306,7 @@ class EngineCore:
                 )
 
         if request.kv_transfer_params is not None and (
-            not self.scheduler.get_kv_connector()
+                not self.scheduler.get_kv_connector()
         ):
             logger.warning(
                 "Got kv_transfer_params, but no KVConnector found. "
@@ -322,6 +323,10 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    @abstractmethod
+    def output_exception(self, outputs: dict[int, EngineCoreOutputs]):
+        raise NotImplementedError
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -333,6 +338,8 @@ class EngineCore:
             # error from execute_model itself.
 
             # NOTE: This method is exception-free
+            engine_core_outputs = self.scheduler.exception_output()
+            self.output_exception(engine_core_outputs)
             dump_engine_exception(
                 self.vllm_config, scheduler_output, self.scheduler.make_stats()
             )
@@ -410,7 +417,7 @@ class EngineCore:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
     def step_with_batch_queue(
-        self,
+            self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
@@ -465,9 +472,9 @@ class EngineCore:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
+                        model_executed
+                        and len(batch_queue) < self.batch_queue_size
+                        and not batch_queue[-1][0].done()
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
@@ -561,7 +568,7 @@ class EngineCore:
         self.model_executor.reset_mm_cache()
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+            self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
@@ -612,21 +619,21 @@ class EngineCore:
         return self.model_executor.pin_lora(lora_id)
 
     def save_sharded_state(
-        self,
-        path: str,
-        pattern: str | None = None,
-        max_size: int | None = None,
+            self,
+            path: str,
+            pattern: str | None = None,
+            max_size: int | None = None,
     ) -> None:
         self.model_executor.save_sharded_state(
             path=path, pattern=pattern, max_size=max_size
         )
 
     def collective_rpc(
-        self,
-        method: str | Callable[..., _R],
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict[str, Any] | None = None,
+            self,
+            method: str | Callable[..., _R],
+            timeout: float | None = None,
+            args: tuple = (),
+            kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
@@ -662,15 +669,15 @@ class EngineCoreProc(EngineCore):
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_client: bool,
-        handshake_address: str,
-        executor_class: type[Executor],
-        log_stats: bool,
-        client_handshake_address: str | None = None,
-        *,
-        engine_index: int = 0,
+            self,
+            vllm_config: VllmConfig,
+            local_client: bool,
+            handshake_address: str,
+            executor_class: type[Executor],
+            log_stats: bool,
+            client_handshake_address: str | None = None,
+            *,
+            engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
@@ -683,11 +690,11 @@ class EngineCoreProc(EngineCore):
         self.engines_running = False
 
         with self._perform_handshakes(
-            handshake_address,
-            identity,
-            local_client,
-            vllm_config,
-            client_handshake_address,
+                handshake_address,
+                identity,
+                local_client,
+                vllm_config,
+                client_handshake_address,
         ) as addresses:
             self.client_count = len(addresses.outputs)
 
@@ -702,8 +709,8 @@ class EngineCoreProc(EngineCore):
                 self.frontend_stats_publish_address,
             )
             internal_dp_balancing = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb
+                    self.has_coordinator
+                    and not vllm_config.parallel_config.data_parallel_external_lb
             )
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
@@ -758,12 +765,12 @@ class EngineCoreProc(EngineCore):
 
     @contextmanager
     def _perform_handshakes(
-        self,
-        handshake_address: str,
-        identity: bytes,
-        local_client: bool,
-        vllm_config: VllmConfig,
-        client_handshake_address: str | None,
+            self,
+            handshake_address: str,
+            identity: bytes,
+            local_client: bool,
+            vllm_config: VllmConfig,
+            client_handshake_address: str | None,
     ) -> Generator[EngineZmqAddresses, None, None]:
         """
         Perform startup handshakes.
@@ -817,22 +824,22 @@ class EngineCoreProc(EngineCore):
 
     @contextmanager
     def _perform_handshake(
-        self,
-        ctx: zmq.Context,
-        handshake_address: str,
-        identity: bytes,
-        local_client: bool,
-        headless: bool,
-        vllm_config: VllmConfig,
-        parallel_config_to_update: ParallelConfig | None = None,
+            self,
+            ctx: zmq.Context,
+            handshake_address: str,
+            identity: bytes,
+            local_client: bool,
+            headless: bool,
+            vllm_config: VllmConfig,
+            parallel_config_to_update: ParallelConfig | None = None,
     ) -> Generator[EngineZmqAddresses, None, None]:
         with make_zmq_socket(
-            ctx,
-            handshake_address,
-            zmq.DEALER,
-            identity=identity,
-            linger=5000,
-            bind=False,
+                ctx,
+                handshake_address,
+                zmq.DEALER,
+                identity=identity,
+                linger=5000,
+                bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
             addresses = self.startup_handshake(
@@ -864,10 +871,10 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def startup_handshake(
-        handshake_socket: zmq.Socket,
-        local_client: bool,
-        headless: bool,
-        parallel_config: ParallelConfig | None = None,
+            handshake_socket: zmq.Socket,
+            local_client: bool,
+            headless: bool,
+            parallel_config: ParallelConfig | None = None,
     ) -> EngineZmqAddresses:
         # Send registration message.
         handshake_socket.send(
@@ -1004,9 +1011,9 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while (
-            not self.engines_running
-            and not self.scheduler.has_requests()
-            and not self.batch_queue
+                not self.engines_running
+                and not self.scheduler.has_requests()
+                and not self.batch_queue
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1047,7 +1054,7 @@ class EngineCoreProc(EngineCore):
         return model_executed
 
     def _handle_client_request(
-        self, request_type: EngineCoreRequestType, request: Any
+            self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         """Dispatch request from client."""
 
@@ -1089,8 +1096,8 @@ class EngineCoreProc(EngineCore):
         return tuple(
             msgspec.convert(v, type=p.annotation)
             if isclass(p.annotation)
-            and issubclass(p.annotation, msgspec.Struct)
-            and not isinstance(v, p.annotation)
+               and issubclass(p.annotation, msgspec.Struct)
+               and not isinstance(v, p.annotation)
             else v
             for v, p in zip(args, arg_types)
         )
@@ -1110,11 +1117,11 @@ class EngineCoreProc(EngineCore):
             )
 
     def process_input_sockets(
-        self,
-        input_addresses: list[str],
-        coord_input_address: str | None,
-        identity: bytes,
-        ready_event: threading.Event,
+            self,
+            input_addresses: list[str],
+            coord_input_address: str | None,
+            identity: bytes,
+            ready_event: threading.Event,
     ):
         """Input socket IO thread."""
 
@@ -1191,10 +1198,10 @@ class EngineCoreProc(EngineCore):
                     self.input_queue.put_nowait((request_type, request))
 
     def process_output_sockets(
-        self,
-        output_paths: list[str],
-        coord_output_path: str | None,
-        engine_index: int,
+            self,
+            output_paths: list[str],
+            coord_output_path: str | None,
+            engine_index: int,
     ):
         """Output socket IO thread."""
 
@@ -1284,19 +1291,23 @@ class EngineCoreProc(EngineCore):
             )
         )
 
+    def output_exception(self, outputs: dict[int, EngineCoreOutputs]):
+        for output in (outputs.items() if outputs else ()):
+            self.output_queue.put_nowait(output)
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
     in a data parallel context."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_client: bool,
-        handshake_address: str,
-        executor_class: type[Executor],
-        log_stats: bool,
-        client_handshake_address: str | None = None,
+            self,
+            vllm_config: VllmConfig,
+            local_client: bool,
+            handshake_address: str,
+            executor_class: type[Executor],
+            log_stats: bool,
+            client_handshake_address: str | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -1352,12 +1363,12 @@ class DPEngineCoreProc(EngineCoreProc):
         super().add_request(request, request_wave)
 
     def _handle_client_request(
-        self, request_type: EngineCoreRequestType, request: Any
+            self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         if request_type == EngineCoreRequestType.START_DP_WAVE:
             new_wave, exclude_eng_index = request
             if exclude_eng_index != self.engine_index and (
-                new_wave >= self.current_wave
+                    new_wave >= self.current_wave
             ):
                 self.current_wave = new_wave
                 if not self.engines_running:
@@ -1435,7 +1446,7 @@ class DPEngineCoreProc(EngineCoreProc):
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
 
     def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
+            self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         stateless_destroy_torch_distributed_process_group(self.dp_group)
         self.shutdown()
@@ -1447,8 +1458,8 @@ class DPEngineCoreProc(EngineCoreProc):
             parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank
         # local rank specifies device visibility, it should not be changed
         assert (
-            reconfig_request.new_data_parallel_rank_local
-            == ReconfigureRankType.KEEP_CURRENT_RANK
+                reconfig_request.new_data_parallel_rank_local
+                == ReconfigureRankType.KEEP_CURRENT_RANK
         )
         parallel_config.data_parallel_master_ip = (
             reconfig_request.new_data_parallel_master_ip
@@ -1476,8 +1487,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # CUDA graph is not used
             self.model_executor.collective_rpc("compile_or_warm_up_model")
         if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+                reconfig_request.new_data_parallel_rank
+                == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         ):
             self.shutdown()
             logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
@@ -1493,11 +1504,11 @@ class EngineCoreActorMixin:
     """
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        addresses: EngineZmqAddresses,
-        dp_rank: int = 0,
-        local_dp_rank: int = 0,
+            self,
+            vllm_config: VllmConfig,
+            addresses: EngineZmqAddresses,
+            dp_rank: int = 0,
+            local_dp_rank: int = 0,
     ):
         # Initialize tracer for distributed tracing if configured.
         maybe_init_worker_tracer(
@@ -1541,7 +1552,7 @@ class EngineCoreActorMixin:
             )
 
     def _set_cuda_visible_devices(
-        self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
+            self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
     ):
         world_size = vllm_config.parallel_config.world_size
         # Set CUDA_VISIBLE_DEVICES or equivalent.
@@ -1560,12 +1571,12 @@ class EngineCoreActorMixin:
 
     @contextmanager
     def _perform_handshakes(
-        self,
-        handshake_address: str,
-        identity: bytes,
-        local_client: bool,
-        vllm_config: VllmConfig,
-        client_handshake_address: str | None,
+            self,
+            handshake_address: str,
+            identity: bytes,
+            local_client: bool,
+            vllm_config: VllmConfig,
+            client_handshake_address: str | None,
     ):
         """
         For Ray, we don't need to actually perform handshake.
@@ -1604,14 +1615,14 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
     """Used for MoE model data parallel cases."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_client: bool,
-        addresses: EngineZmqAddresses,
-        executor_class: type[Executor],
-        log_stats: bool,
-        dp_rank: int = 0,
-        local_dp_rank: int = 0,
+            self,
+            vllm_config: VllmConfig,
+            local_client: bool,
+            addresses: EngineZmqAddresses,
+            executor_class: type[Executor],
+            log_stats: bool,
+            dp_rank: int = 0,
+            local_dp_rank: int = 0,
     ):
         vllm_config.parallel_config.data_parallel_rank = dp_rank
 
@@ -1627,14 +1638,14 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
     """Used for non-MoE and/or non-DP cases."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_client: bool,
-        addresses: EngineZmqAddresses,
-        executor_class: type[Executor],
-        log_stats: bool,
-        dp_rank: int = 0,
-        local_dp_rank: int = 0,
+            self,
+            vllm_config: VllmConfig,
+            local_client: bool,
+            addresses: EngineZmqAddresses,
+            executor_class: type[Executor],
+            log_stats: bool,
+            dp_rank: int = 0,
+            local_dp_rank: int = 0,
     ):
         vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.parallel_config.data_parallel_size_local = 1

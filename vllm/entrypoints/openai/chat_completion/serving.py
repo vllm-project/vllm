@@ -376,6 +376,9 @@ class OpenAIServingChat(OpenAIServing):
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
+        request_dict = request.model_dump()
+        request_str = json.dumps(request_dict)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -462,6 +465,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
+                        log_request_str=request_str,
                     )
 
                 generators.append(generator)
