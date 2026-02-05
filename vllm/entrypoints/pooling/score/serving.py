@@ -119,6 +119,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         pooling_params = request.to_pooling_params()
+        pooling_params.task = "embed"  # Overwrite the task
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -354,6 +355,7 @@ class ServingScores(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         default_pooling_params = request.to_pooling_params()
+        default_pooling_params.task = "score"  # Overwrite the task
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
