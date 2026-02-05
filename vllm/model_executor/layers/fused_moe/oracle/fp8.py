@@ -472,7 +472,7 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> tuple[mk.FusedMoEModularKernel, bool]:
+) -> mk.FusedMoEModularKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -512,8 +512,10 @@ def make_fp8_moe_kernel(
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=(
+            not moe_config.disable_inplace
+            and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
+        ),
     )
 
-    # TODO(rob): update inplace logic to be part of the kernel.
-    inplace = fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
-    return kernel, inplace
+    return kernel
