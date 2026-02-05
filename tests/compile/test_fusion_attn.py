@@ -102,58 +102,20 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
-        backend = self.attn.backend
 
-        # TODO(luka) use get_kv_cache_stride_order
-        # Create dummy KV cache for the selected backend
-        if backend == AttentionBackendEnum.ROCM_ATTN:
-            # k/v as 1st dimention
-            # HND: [num_blocks, num_kv_heads, block_size, head_size]
-            kv_cache = torch.zeros(
-                2,
-                num_blocks,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            # k/v as 1st dimention
-            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
-            kv_cache = torch.zeros(
-                2,
-                num_blocks,
-                self.block_size,
-                self.num_kv_heads,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.TRITON_ATTN:
-            # k/v as 2nd dimention
-            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
-            kv_cache = torch.zeros(
-                num_blocks,
-                2,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.FLASHINFER:
-            kv_cache = torch.zeros(
-                num_blocks,
-                2,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            ).permute(0, 1, 3, 2, 4)
-        else:
-            raise ValueError(f"Unsupported backend: {backend}")
+        # Create dummy KV cache
+        attn_backend = self.attn.attn_backend
+        kv_cache_shape = attn_backend.get_kv_cache_shape(num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+        try:
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+        except (AttributeError, NotImplementedError):
+            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        kv_cache = torch.empty(
+            *kv_cache_shape,
+            dtype=self.kv_cache_dtype,
+            device=self.device,
+        ).permute(kv_cache_stride_order)
+
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
@@ -269,7 +231,7 @@ elif current_platform.is_rocm():
     PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
-    BACKENDS = [
+    BACKENDS_FP8 = [
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
