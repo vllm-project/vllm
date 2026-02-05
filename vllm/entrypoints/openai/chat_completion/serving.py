@@ -827,7 +827,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_parser = tool_parsers[i]
 
                     if (
-                        self.reasoning_parser
+                        reasoning_parser
                         and res.prompt_token_ids
                         and prompt_is_reasoning_end_arr[i] is None
                     ):
