@@ -615,6 +615,7 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    num_test_prompts: int = 1,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -640,52 +641,73 @@ async def benchmark(
     )
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0].prompt,
-        input_requests[0].prompt_len,
-        input_requests[0].expected_output_len,
-        input_requests[0].multi_modal_data,
-    )
 
-    assert (
-        test_mm_content is None
-        or isinstance(test_mm_content, dict)
-        or (
-            isinstance(test_mm_content, list)
-            and all(isinstance(item, dict) for item in test_mm_content)
+    def _create_test_input(request: SampleRequest) -> RequestFuncInput:
+        mm_content = request.multi_modal_data
+        assert (
+            mm_content is None
+            or isinstance(mm_content, dict)
+            or (
+                isinstance(mm_content, list)
+                and all(isinstance(item, dict) for item in mm_content)
+            )
+        ), "multi_modal_data must be a dict or list[dict]"
+        return RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=request.prompt,
+            api_url=api_url,
+            prompt_len=request.prompt_len,
+            output_len=request.expected_output_len,
+            logprobs=logprobs,
+            multi_modal_content=mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
         )
-    ), "multi_modal_data must be a dict or list[dict]"
-    test_input = RequestFuncInput(
-        model=model_id,
-        model_name=model_name,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-        extra_headers=extra_headers,
-        extra_body=extra_body,
-    )
 
     if ready_check_timeout_sec > 0:
-        test_output = await wait_for_endpoint(
-            request_func,
-            test_input,
-            session,
-            timeout_seconds=ready_check_timeout_sec,
-        )
-        if not test_output.success:
+        num_prompts_to_try = min(num_test_prompts, len(input_requests))
+        test_output = None
+        failed_errors: list[str] = []
+        for i in range(num_prompts_to_try):
+            test_request = input_requests[i]
+            test_input = _create_test_input(test_request)
+
+            test_output = await wait_for_endpoint(
+                request_func,
+                test_input,
+                session,
+                timeout_seconds=ready_check_timeout_sec,
+            )
+
+            if test_output.success:
+                print(
+                    f"Initial test run completed (prompt {i + 1}/{num_prompts_to_try})."
+                )
+                break
+            else:
+                failed_errors.append(f"Prompt {i + 1}: {test_output.error}")
+                if i < num_prompts_to_try - 1:
+                    print(f"Test prompt {i + 1} failed, trying next...")
+
+        if test_output is None or not test_output.success:
             raise ValueError(
                 "Initial test run failed - Please make sure benchmark "
                 "arguments are correctly specified. "
-                f"Error: {test_output.error}"
+                f"Tried {num_prompts_to_try} prompts.\n"
+                f"Errors:\n" + "\n".join(failed_errors)
             )
-        else:
-            print("Initial test run completed.")
     else:
         print("Skipping endpoint ready check.")
+        test_request = input_requests[0]
+        test_input = _create_test_input(test_request)
+
+    # Extract variables needed for profiling (used later in the function)
+    test_prompt = test_request.prompt
+    test_prompt_len = test_request.prompt_len
+    test_output_len = test_request.expected_output_len
+    test_mm_content = test_request.multi_modal_data
 
     if num_warmups > 0:
         print(f"Warming up with {num_warmups} requests...")
@@ -1492,6 +1514,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds. Ready check will be skipped by default.",
     )
+    parser.add_argument(
+        "--num-test-prompts",
+        type=int,
+        default=1,
+        help="Number of different prompts to try during the initial test run. "
+        "If all prompts fail, the benchmark will fail. Default: 1.",
+    )
 
     parser.add_argument(
         "--extra-body",
@@ -1531,6 +1560,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
         if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+
+    # Validate num_test_prompts
+    if args.num_test_prompts < 1:
+        raise ValueError("--num-test-prompts must be at least 1")
 
     label = args.label
 
@@ -1680,6 +1713,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        num_test_prompts=args.num_test_prompts,
     )
 
     # Save config and results to json
