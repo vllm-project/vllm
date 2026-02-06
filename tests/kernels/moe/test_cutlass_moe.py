@@ -207,6 +207,7 @@ def run_with_expert_maps(
                 ),
                 quant_config=new_quant_config,
             ),
+            inplace=False,
         )
         out_tensor = out_tensor + kernel(**kwargs)
 
@@ -266,6 +267,7 @@ def run_8_bit(
                 ),
                 quant_config=quant_config,
             ),
+            inplace=False,
         )
         return kernel(**kwargs)
 
