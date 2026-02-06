@@ -513,7 +513,7 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
-                if self.tracer:
+                if self.tracing_enabled:
                     self.do_tracing(req_state=req_state, error=error)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
@@ -740,11 +740,10 @@ class OutputProcessor:
         error: BaseException | None = None,
     ) -> None:
         assert req_state.stats is not None
-        assert iteration_stats is not None
 
         metrics = req_state.stats
         arrival_time_ns = int(metrics.arrival_time * 1e9)
-        trace_context = extract_trace_context(engine_core_output.trace_headers)
+        trace_context = extract_trace_context(req_state.trace_headers)
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -757,7 +756,11 @@ class OutputProcessor:
         ]
 
         # Calculate timing metrics
-        e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
+        e2e_time = (
+            iteration_stats.iteration_timestamp - metrics.arrival_time
+            if iteration_stats
+            else time.time() - metrics.arrival_time
+        )
         queued_time = metrics.scheduled_ts - metrics.queued_ts
         prefill_time = metrics.first_token_ts - metrics.scheduled_ts
         decode_time = metrics.last_token_ts - metrics.first_token_ts
