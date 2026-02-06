@@ -1390,12 +1390,6 @@ class VllmConfig:
                     resolved,
                 )
                 self.cache_config.cache_dtype = resolved
-            else:
-                # For fp16 models, "auto" is kept but we inform the user
-                logger.info(
-                    "Using kv_cache_dtype='auto' (model dtype: %s).",
-                    self.model_config.dtype,
-                )
 
         architecture = self.model_config.architecture
         if architecture is None:

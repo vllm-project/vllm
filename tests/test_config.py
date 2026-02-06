@@ -1162,13 +1162,12 @@ def test_resolve_kv_cache_dtype_string():
     mock_model_config.hf_config.quantization_config = None
     assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "bfloat16"
 
-    # Test 3: auto with float16 model dtype should return "auto"
-    # (since "float16" is not a valid CacheDType)
+    # Test 3: auto with float16 model dtype should return "float16"
     mock_model_config = MagicMock()
     mock_model_config.dtype = torch.float16
     mock_model_config.hf_config = MagicMock()
     mock_model_config.hf_config.quantization_config = None
-    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "auto"
+    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "float16"
 
     # Test 4: auto with FP8 quantization config should return "fp8"
     mock_model_config = MagicMock()
