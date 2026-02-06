@@ -19,10 +19,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator
 from itertools import islice
 
-import math
 import torch
 from torch import nn
 
@@ -42,6 +42,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -49,7 +50,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
@@ -640,7 +640,7 @@ class SarvamMLAModel(nn.Module):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
-    def extract_moe_parameters(self, example_moe: "SarvamMLAMoE | None") -> None:
+    def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
 
