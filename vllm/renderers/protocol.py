@@ -10,7 +10,12 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 from .embed_utils import safe_load_prompt_embeds
-from .inputs import DictPrompt, EncoderDecoderTokPrompt, TokPrompt
+from .inputs import (
+    DictPrompt,
+    EncoderDecoderDictPrompt,
+    EncoderDecoderTokPrompt,
+    TokPrompt,
+)
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -137,25 +142,51 @@ class BaseRenderer(ABC):
 
         return prompt
 
+    def _tokenize_enc_dec_prompt(
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt:
+        enc_prompt, dec_prompt = (
+            self.tokenize_prompt(prompt["encoder_prompt"], params),
+            (
+                None
+                if prompt["decoder_prompt"] is None
+                else self.tokenize_prompt(prompt["decoder_prompt"], params)
+            ),
+        )
+
+        return EncoderDecoderTokPrompt(
+            encoder_prompt=enc_prompt,
+            decoder_prompt=dec_prompt,
+        )
+
+    async def _tokenize_enc_dec_prompt_async(
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt:
+        enc_prompt, dec_prompt = await asyncio.gather(
+            self.tokenize_prompt_async(prompt["encoder_prompt"], params),
+            (
+                asyncio.sleep(0)
+                if prompt["decoder_prompt"] is None
+                else self.tokenize_prompt_async(prompt["decoder_prompt"], params)
+            ),
+        )
+
+        return EncoderDecoderTokPrompt(
+            encoder_prompt=enc_prompt,
+            decoder_prompt=dec_prompt,
+        )
+
     def tokenize_prompt(
         self,
         prompt: DictPrompt,
         params: TokenizeParams,
     ) -> TokPrompt:
         if "encoder_prompt" in prompt:
-            enc_prompt, dec_prompt = (
-                self.tokenize_prompt(prompt["encoder_prompt"], params),
-                (
-                    None
-                    if prompt["decoder_prompt"] is None
-                    else self.tokenize_prompt(prompt["decoder_prompt"], params)
-                ),
-            )
-
-            return EncoderDecoderTokPrompt(
-                encoder_prompt=enc_prompt,
-                decoder_prompt=dec_prompt,
-            )
+            return self._tokenize_enc_dec_prompt(prompt, params)
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
@@ -182,19 +213,7 @@ class BaseRenderer(ABC):
         params: TokenizeParams,
     ) -> TokPrompt:
         if "encoder_prompt" in prompt:
-            enc_prompt, dec_prompt = await asyncio.gather(
-                self.tokenize_prompt_async(prompt["encoder_prompt"], params),
-                (
-                    asyncio.sleep(0)
-                    if prompt["decoder_prompt"] is None
-                    else self.tokenize_prompt_async(prompt["decoder_prompt"], params)
-                ),
-            )
-
-            return EncoderDecoderTokPrompt(
-                encoder_prompt=enc_prompt,
-                decoder_prompt=dec_prompt,
-            )
+            return await self._tokenize_enc_dec_prompt_async(prompt, params)
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
