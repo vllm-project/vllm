@@ -9,7 +9,7 @@ import regex as re
 
 @dataclass
 class ForbiddenImport:
-    pattern: re.Pattern
+    pattern: str
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
     allowed_files: set[str] = field(default_factory=set)
