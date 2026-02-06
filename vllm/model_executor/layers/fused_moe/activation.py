@@ -34,9 +34,19 @@ class MoEActivation(Enum):
         return not self.value.endswith("_no_mul")
 
     @property
-    def op_name(self) -> str:
-        """Return the base activation function name without the _no_mul suffix."""
-        return self.value.replace("_no_mul", "")
+    def custom_op_name(self) -> str:
+        """Maps to the CustomOp name of activations
+        in vllm/model_executor/layers/activation.py."""
+        mapping: dict[MoEActivation, str] = {
+            MoEActivation.SILU: "silu_and_mul",
+            MoEActivation.GELU: "gelu_and_mul",
+            MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
+            MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
+            MoEActivation.SILU_NO_MUL: "silu_and_mul",
+            MoEActivation.GELU_NO_MUL: "gelu_and_mul",
+            MoEActivation.RELU2_NO_MUL: "relu2",
+        }
+        return mapping[self]
 
     def without_mul(self) -> "MoEActivation":
         """Get the non-gated variant of this activation.
