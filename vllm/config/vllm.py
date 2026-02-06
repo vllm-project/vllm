@@ -130,7 +130,7 @@ OPTIMIZATION_LEVEL_00 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "disable_flashinfer_autotune": True,
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_01 = {
@@ -149,7 +149,7 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "disable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -168,7 +168,7 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "disable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -187,7 +187,7 @@ OPTIMIZATION_LEVEL_03 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "disable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 

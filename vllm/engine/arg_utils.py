@@ -538,8 +538,8 @@ class EngineArgs:
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
-    disable_flashinfer_autotune: bool = get_field(
-        KernelConfig, "disable_flashinfer_autotune"
+    enable_flashinfer_autotune: bool | None = get_field(
+        KernelConfig, "enable_flashinfer_autotune"
     )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
@@ -1177,8 +1177,8 @@ class EngineArgs:
             description=KernelConfig.__doc__,
         )
         kernel_group.add_argument(
-            "--disable-flashinfer-autotune",
-            **kernel_kwargs["disable_flashinfer_autotune"],
+            "--enable-flashinfer-autotune",
+            **kernel_kwargs["enable_flashinfer_autotune"],
         )
 
         # vLLM arguments
@@ -1738,14 +1738,14 @@ class EngineArgs:
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
-        if self.disable_flashinfer_autotune is not None:
-            if kernel_config.disable_flashinfer_autotune is not None:
+        if self.enable_flashinfer_autotune is not None:
+            if kernel_config.enable_flashinfer_autotune is not None:
                 raise ValueError(
-                    "disable_flashinfer_autotune and "
-                    "kernel_config.disable_flashinfer_autotune "
+                    "enable_flashinfer_autotune and "
+                    "kernel_config.enable_flashinfer_autotune "
                     "are mutually exclusive"
                 )
-            kernel_config.disable_flashinfer_autotune = self.disable_flashinfer_autotune
+            kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
 
         load_config = self.create_load_config()
 
