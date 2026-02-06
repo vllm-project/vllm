@@ -67,6 +67,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/xpu.txt
 
+ # used for suffix method speculative decoding
+ # build deps for proto + nanobind-based extensions to set up the build environment
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install grpcio-tools protobuf nanobind
  # arctic-inference is built from source which needs torch-xpu properly installed first
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/intel/oneapi/setvars.sh --force && \
