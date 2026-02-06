@@ -826,11 +826,6 @@ class LLM:
         renderer = self.llm_engine.renderer
         model_config = self.model_config
 
-        # Some MM and encoder-decoder models have non-default `add_special_tokens`
-        # TODO: Move multi-modal processor into tokenization
-        is_mm_or_enc_dec = (
-            model_config.is_multimodal_model or model_config.is_encoder_decoder
-        )
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
         engine_prompts = list[DictPrompt]()
@@ -838,10 +833,12 @@ class LLM:
             parsed_prompt = parse_model_prompt(model_config, prompt)
             in_prompt = renderer.render_completion(parsed_prompt)
 
+            # Some MM models have non-default `add_special_tokens`
+            # TODO: Move multi-modal processor into tokenization
             engine_prompts.append(
-                renderer.tokenize_prompt(in_prompt, tok_params)
-                if not is_mm_or_enc_dec and "encoder_prompt" not in in_prompt
-                else in_prompt
+                in_prompt
+                if model_config.is_multimodal_model
+                else renderer.tokenize_prompt(in_prompt, tok_params)
             )
 
         return engine_prompts
