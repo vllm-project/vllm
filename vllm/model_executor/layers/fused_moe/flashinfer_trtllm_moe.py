@@ -302,6 +302,8 @@ def fi_trtllm_fp8_per_tensor_moe(
         per_act_token_quant=False,
     )
 
+    from flashinfer.fused_moe.core import ActivationType
+
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
 
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
@@ -323,6 +325,9 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        # TODO: Required for flashinfer==0.6.3, remove with update
+        # https://github.com/flashinfer-ai/flashinfer/pull/2508
+        activation_type=ActivationType.Swiglu,
     )
 
 
