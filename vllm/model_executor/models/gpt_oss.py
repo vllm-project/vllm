@@ -440,7 +440,6 @@ class GptOssModel(nn.Module):
                 weight = weight.view(
                     num_experts, -1, intermediate_size // 2
                 ).contiguous()
-
                 if use_ep:
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
