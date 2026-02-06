@@ -75,7 +75,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
 
-    async def render_prompt_request(
+    async def render_completion_request(
         self,
         request: CompletionRequest,
     ) -> list[TokPrompt] | ErrorResponse:
@@ -134,7 +134,7 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
-        result = await self.render_prompt_request(request)
+        result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
             return result
 
