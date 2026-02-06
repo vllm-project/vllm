@@ -426,17 +426,27 @@ async def run_single_iteration(
     benchmark_prompt: str,
     batch_size: int,
     dp_size: int,
+    trace_prefix: str | None = None,
 ) -> tuple[float, int, int]:
     """Run one iteration: sleep → queue requests → wake → measure."""
 
-    # 1. Pause scheduling on ALL endpoints
+    # 1. Start profiling (captures entire iteration)
+    if trace_prefix:
+        logger.info("Starting profiler with prefix=%s", trace_prefix)
+        await call_debug_endpoint(
+            session, rotator, "/debug/profile/start", {"prefix": trace_prefix}
+        )
+
+    # 2. Pause scheduling on ALL endpoints
+    logger.info("Putting server to sleep...")
     await call_debug_endpoint(session, rotator, "/debug/sleep", {"level": "0"})
 
-    # 2. Build requests and start sending them (they queue while server sleeps)
+    # 3. Build requests and start sending them (they queue while server sleeps)
     # Explicitly target each DP domain via X-data-parallel-rank header
     max_tokens = 1 if config.mode == "prefill" else config.iterations
     tasks = []
 
+    logger.info("Enqueueing %d requests...", batch_size)
     for i in range(batch_size):
         endpoint = rotator.next()
         dp_rank = i % dp_size
@@ -457,18 +467,36 @@ async def run_single_iteration(
         tasks.append(task)
 
     # Small delay to ensure last request is queued on server
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(1.0)
 
-    # 3. Resume scheduling on ALL endpoints and time the batch
+    # 4. Resume scheduling on ALL endpoints and time the batch
+    logger.info("Waking server up, processing will start!")
     start = time.perf_counter()
     await call_debug_endpoint(session, rotator, "/debug/wake_up")
-    responses = await asyncio.gather(*tasks)
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
-    # 4. Count tokens
+    # 5. Check success rate and count tokens
+    success_count = sum(
+        1 for r in responses if not isinstance(r, Exception) and r.status == 200
+    )
+    logger.info("Responses: %d/%d succeeded", success_count, len(responses))
+
+    # 6. Stop profiling
+    if trace_prefix:
+        logger.info("Stopping profiler...")
+        await call_debug_endpoint(session, rotator, "/debug/profile/stop")
+
     total_prompt_tokens = 0
     total_completion_tokens = 0
     for resp in responses:
+        if isinstance(resp, Exception):
+            logger.warning("Request failed with exception: %s", resp)
+            continue
+        if resp.status != 200:
+            logger.warning("Request failed with status %d", resp.status)
+            await resp.read()
+            continue
         try:
             data = await resp.json()
             prompt_tokens, completion_tokens = count_tokens(data)
@@ -589,6 +617,10 @@ async def run_benchmark(
                 num_output_tokens,
             )
 
+            # Reset prefix cache to start each test with clean KV cache
+            logger.info("Flushing KV cache")
+            await call_debug_endpoint(session, rotator, "/debug/reset_prefix_cache")
+
             # Prefix cache warmup: populate KV cache before profiling
             # This is NOT profiled - we only profile the actual benchmark
             await run_prefix_cache_warmup(
@@ -600,22 +632,14 @@ async def run_benchmark(
                 dp_size,
             )
 
-            # Start profiling for this param combo (after prefix cache warmup)
-            # Use batch_size_per_dp in trace prefix for consistency with SA naming
-            # Include run_id timestamp for unique trace identification
+            # Build trace prefix (profiling happens inside run_single_iteration)
             trace_prefix = None
             if config.profile:
                 trace_prefix = (
                     f"{run_id}_{config.mode}_ctx{ctx_len}_in{in_len}"
                     f"_bs{batch_size_per_dp}"
                 )
-                started = await call_debug_endpoint(
-                    session, rotator, "/debug/profile/start", {"prefix": trace_prefix}
-                )
-                if started:
-                    trace_prefixes.append(trace_prefix)
-                else:
-                    logger.warning("Failed to start profiling for %s", trace_prefix)
+                trace_prefixes.append(trace_prefix)
 
             (
                 elapsed_ms,
@@ -628,11 +652,8 @@ async def run_benchmark(
                 benchmark_prompt,
                 global_batch_size,
                 dp_size,
+                trace_prefix,
             )
-
-            # Stop profiling for this param combo
-            if config.profile and trace_prefix:
-                await call_debug_endpoint(session, rotator, "/debug/profile/stop")
 
             total_tokens = prompt_tokens + completion_tokens
             tokens_per_second = (
@@ -671,11 +692,11 @@ async def run_benchmark(
         if config.profile and trace_prefixes:
             logger.info("Fetching traces for %d runs...", len(trace_prefixes))
 
-            # Retry fetching traces (async write by torch profiler)
+            # Retry fetching traces (trace files should be ready after profile/stop)
             max_retries = 3
             all_downloaded: list[str] = []
             for attempt in range(max_retries):
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(5.0)
                 for prefix in trace_prefixes:
                     downloaded = await fetch_traces(session, rotator, prefix, "traces")
                     all_downloaded.extend(downloaded)

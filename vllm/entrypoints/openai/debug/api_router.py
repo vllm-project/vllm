@@ -48,6 +48,13 @@ async def debug_profile_stop(request: Request):
     return JSONResponse(content={"status": "stopped"})
 
 
+@router.post("/reset_prefix_cache")
+async def debug_reset_prefix_cache(request: Request):
+    """Reset the prefix cache (KV cache) to start fresh."""
+    result = await engine_client(request).reset_prefix_cache()
+    return JSONResponse(content={"status": "reset", "success": result})
+
+
 @router.get("/traces")
 async def debug_list_traces(request: Request):
     """List available trace files."""
