@@ -21,6 +21,7 @@ class MPLinearLayerConfig:
     zero_points: bool
     has_g_idx: bool
     out_type: torch.dtype | None = None
+    checkpoint_format: str = ""
 
 
 class MPLinearKernel(ABC):

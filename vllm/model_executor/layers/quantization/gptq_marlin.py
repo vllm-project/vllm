@@ -38,7 +38,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_act_int8_process_scales,
@@ -46,7 +45,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
     marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks,
-    verify_marlin_supported,
 )
 from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
@@ -95,8 +93,12 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     # (num_bits, is_sym) -> quant_type
     TYPE_MAP = {
+        (2, True): scalar_types.uint2b2,
+        (3, True): scalar_types.uint3b4,
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
+        (4, False): scalar_types.uint4,
+        (8, False): scalar_types.uint8,
     }
 
     def __init__(
@@ -109,6 +111,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         dynamic: dict[str, dict[str, int | bool]],
         full_config: dict[str, Any],
         modules_in_block_to_quantize: list[str] | None = None,
+        checkpoint_format: str = "",
     ) -> None:
         super().__init__()
         if desc_act and group_size == -1:
@@ -160,6 +163,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = full_config.get("autoround_version", "")
+        self.checkpoint_format = checkpoint_format
 
     def __repr__(self) -> str:
         return (
@@ -181,7 +185,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -195,10 +199,13 @@ class GPTQMarlinConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        is_sym = cls.get_from_keys(config, ["sym"])
+        is_sym = cls.get_from_keys_or(config, ["sym"], default=True)
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         modules_in_block_to_quantize = cls.get_from_keys_or(
             config, ["modules_in_block_to_quantize"], default=None
+        )
+        checkpoint_format = cls.get_from_keys_or(
+            config, ["checkpoint_format"], default=""
         )
         return cls(
             weight_bits,
@@ -209,13 +216,14 @@ class GPTQMarlinConfig(QuantizationConfig):
             dynamic,
             config,
             modules_in_block_to_quantize,
+            checkpoint_format,
         )
 
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
+        can_convert = cls.is_gptq_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "gptq_marlin"
@@ -270,10 +278,14 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
+        return cls.is_gptq_compatible(quant_config)
+
+    @classmethod
+    def is_gptq_compatible(cls, quant_config: dict[str, Any]):
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
-        sym = quant_config.get("sym")
+        sym = quant_config.get("sym", True)
         desc_act = quant_config.get("desc_act")
 
         if not (current_platform.is_cuda() or current_platform.is_cpu()):
@@ -282,16 +294,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         if quant_method != "gptq":
             return False
 
-        # Marlin conversion is only valid if required properties are found
-        if num_bits is None or group_size is None or sym is None or desc_act is None:
+        if num_bits is None or group_size is None or desc_act is None:
             return False
 
-        if (num_bits, sym) not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[(num_bits, sym)], group_size=group_size
-        )
+        return (num_bits, sym) in cls.TYPE_MAP
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper):
         if self.modules_in_block_to_quantize is not None:
@@ -336,12 +342,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
 
-        # Verify supported on platform.
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
-        )
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -366,8 +366,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             weight_type=self.quant_config.quant_type,
             act_type=params_dtype if input_dtype is None else input_dtype,
             group_size=self.quant_config.group_size,
-            zero_points=False,
+            zero_points=not self.quant_config.is_sym,
             has_g_idx=self.quant_config.desc_act,
+            checkpoint_format=self.quant_config.checkpoint_format,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
