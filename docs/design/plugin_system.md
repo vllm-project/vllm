@@ -45,7 +45,7 @@ Every plugin has three parts:
 
 ## Types of supported plugins
 
-- **General plugins** (with group name `vllm.general_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree models into vLLM. This is done by calling `ModelRegistry.register_model` to register the model inside the plugin function.
+- **General plugins** (with group name `vllm.general_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree models into vLLM. This is done by calling `ModelRegistry.register_model` to register the model inside the plugin function. For an example of an official model plugin, see the [bart-plugin](https://github.com/vllm-project/bart-plugin) which adds support for `BartForConditionalGeneration`.
 
 - **Platform plugins** (with group name `vllm.platform_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree platforms into vLLM. The plugin function should return `None` when the platform is not supported in the current environment, or the platform class's fully qualified name when the platform is supported.
 
@@ -100,7 +100,7 @@ Every plugin has three parts:
     - `_enum`: This property is the device enumeration from [PlatformEnum][vllm.platforms.interface.PlatformEnum]. Usually, it should be `PlatformEnum.OOT`, which means the platform is out-of-tree.
     - `device_type`: This property should return the type of the device which pytorch uses. For example, `"cpu"`, `"cuda"`, etc.
     - `device_name`: This property is set the same as `device_type` usually. It's mainly used for logging purposes.
-    - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc, can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
+    - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
@@ -126,7 +126,7 @@ Every plugin has three parts:
 
 5. Implement the attention backend class `MyDummyAttention` in `my_dummy_attention.py`. The attention backend class should inherit from [AttentionBackend][vllm.v1.attention.backend.AttentionBackend]. It's used to calculate attentions with your device. Take `vllm.v1.attention.backends` as examples, it contains many attention backend implementations.
 
-6. Implement custom ops for high performance. Most ops can be ran by pytorch native implementation, while the performance may not be good. In this case, you can implement specific custom ops for your plugins. Currently, there are kinds of custom ops vLLM supports:
+6. Implement custom ops for high performance. Most ops can be run by pytorch native implementation, while the performance may not be good. In this case, you can implement specific custom ops for your plugins. Currently, there are kinds of custom ops vLLM supports:
 
     - pytorch ops
       there are 3 kinds of pytorch ops:
@@ -154,4 +154,4 @@ The interface for the model/module may change during vLLM's development. If you 
 !!! warning "Deprecations"
     - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It has been removed in v0.13.0.
     - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
-    - `seed_everything` platform interface is deprecated. It will be removed in v0.15.0 or later. Please use `vllm.utils.torch_utils.set_random_seed` instead.
+    - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.

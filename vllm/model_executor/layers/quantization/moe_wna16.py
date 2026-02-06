@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -163,7 +163,7 @@ class MoeWNA16Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             if isinstance(layer, FusedMoE):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
@@ -378,7 +378,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             layer.w2_qweight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,
+            inplace=not self.moe.disable_inplace,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,

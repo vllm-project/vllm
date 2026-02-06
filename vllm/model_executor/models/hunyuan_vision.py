@@ -599,6 +599,11 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     ) -> HunYuanVLProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return HunYuanVLMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -687,7 +692,7 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.info.get_hf_processor(typ=HunYuanVLProcessor)
         image_token: str = hf_processor.image_token
 
         return image_token * num_images
@@ -710,9 +715,6 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
 
 
 class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return HunYuanVLMultiModalDataParser()
-
     def _call_hf_processor(
         self,
         prompt: str,

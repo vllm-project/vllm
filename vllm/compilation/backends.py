@@ -19,19 +19,16 @@ from typing import Any
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
+from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .compiler_interface import (
@@ -42,8 +39,12 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+from .partition_rules import (
+    inductor_partition_rule_context,
+    should_split,
+)
+from .passes.inductor_pass import InductorPass, pass_context
+from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
@@ -233,6 +234,7 @@ class CompilerManager:
         )
         return compiled_graph
 
+    @instrument(span_name="Compile graph")
     def compile(
         self,
         graph: fx.GraphModule,
@@ -358,7 +360,14 @@ def split_graph(
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
-            subgraph_id += 1
+
+            # keep consecutive splitting ops together
+            # (we know node.next exists because node isn't the last (output) node)
+            if should_split(node.next, splitting_ops):
+                # this will get incremented by the next node
+                subgraph_id -= 1
+            else:
+                subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
 
@@ -489,6 +498,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
+    @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
         # maybe instead just assert inputs are fake?
         fake_args = [
@@ -529,6 +539,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 sym_shape_indices,
                 self.vllm_backend,
                 graph_returns_tuple(submod),
+                submod_name=target,
             )
 
             self.module.__dict__[target] = wrap_with_cudagraph_if_needed(
@@ -735,12 +746,61 @@ class VllmBackend:
                 )
         self.inductor_config[self.pass_key] = self.pass_manager
 
+    def _log_compilation_config(self):
+        """Log vLLM compilation config for TORCH_TRACE/tlparse."""
+        cc = self.compilation_config
+        pass_cfg = cc.pass_config
+
+        # Helper to convert lists to comma-separated strings for tlparse display
+        def list_to_str(lst: list | None) -> str:
+            if lst is None:
+                return ""
+            return ", ".join(str(x) for x in lst)
+
+        # Get enabled passes by introspecting dataclass fields
+        enabled_passes = [
+            f.name
+            for f in dataclasses.fields(pass_cfg)
+            if isinstance(getattr(pass_cfg, f.name), bool) and getattr(pass_cfg, f.name)
+        ]
+
+        trace_structured(
+            "artifact",
+            metadata_fn=lambda: {
+                "name": "vllm_compilation_config",
+                "encoding": "json",
+            },
+            payload_fn=lambda: json.dumps(
+                {
+                    "model": self.vllm_config.model_config.model,
+                    "prefix": self.prefix,
+                    "mode": str(cc.mode),
+                    "backend": cc.backend,
+                    "custom_ops": list_to_str(cc.custom_ops),
+                    "splitting_ops": list_to_str(cc.splitting_ops),
+                    "cudagraph_mode": str(cc.cudagraph_mode),
+                    "compile_sizes": list_to_str(cc.compile_sizes),
+                    "compile_ranges_split_points": list_to_str(
+                        cc.compile_ranges_split_points
+                    ),
+                    "use_inductor_graph_partition": cc.use_inductor_graph_partition,
+                    "inductor_passes": list_to_str(list(cc.inductor_passes.keys())),
+                    "enabled_passes": list_to_str(enabled_passes),
+                    "dynamic_shapes_type": str(cc.dynamic_shapes_config.type),
+                    "dynamic_shapes_evaluate_guards": cc.dynamic_shapes_config.evaluate_guards,  # noqa: E501
+                }
+            ),
+        )
+
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
         )
 
         vllm_config = self.vllm_config
+
+        self._log_compilation_config()
+
         # Minimal hashing here with existing utilities, reused below.
 
         env_factors = envs.compile_factors()
@@ -864,6 +924,11 @@ class VllmBackend:
         )
         self.compilation_config.compilation_time += dynamo_time
 
+        # Record Dynamo time in tracing if available
+        start_time = int(torch_compile_start_time * 1e9)
+        attributes = {"dynamo.time_seconds": dynamo_time}
+        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
+
         # we control the compilation process, each instance can only be
         # called once
         assert not self._called, "VllmBackend can only be called once"
@@ -891,6 +956,13 @@ class VllmBackend:
         # for debugging, no need to print the graph here
         lazy_format_graph_code("before split", self.graph)
         lazy_format_graph_code("after split", self.split_gm)
+
+        # Log the piecewise split graph for TORCH_TRACE/tlparse
+        trace_structured(
+            "graph_dump",
+            metadata_fn=lambda: {"name": "vllm_piecewise_split_graph"},
+            payload_fn=lambda: self.split_gm.print_readable(print_output=False),
+        )
 
         compilation_counter.num_piecewise_graphs_seen += len(self.piecewise_graphs)
         submod_names_to_compile = [

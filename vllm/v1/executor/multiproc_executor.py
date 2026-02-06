@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
@@ -528,6 +529,7 @@ class WorkerProc:
                 )
             )
 
+    @instrument(span_name="Worker init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -744,6 +746,15 @@ class WorkerProc:
 
         try:
             reader.close()
+
+            # Initialize tracer
+            rank = kwargs.get("rank", 0)
+            maybe_init_worker_tracer(
+                instrumenting_module_name="vllm.worker",
+                process_kind="worker",
+                process_name=f"Worker_{rank}",
+            )
+
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
 
