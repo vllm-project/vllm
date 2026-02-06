@@ -285,7 +285,11 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,

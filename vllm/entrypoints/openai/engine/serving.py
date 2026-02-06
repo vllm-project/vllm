@@ -989,7 +989,7 @@ class OpenAIServing:
             if (v := getattr(request, k, None)) is not None
         }
         for in_prompt in in_prompts:
-            target_prompt: SingletonDictPrompt = in_prompt.get(
+            target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
                 "encoder_prompt", in_prompt
             )
             target_prompt.update(extra_items)  # type: ignore
@@ -1028,7 +1028,9 @@ class OpenAIServing:
         conversation, in_prompt = await renderer.render_messages_async(
             messages, chat_params
         )
-        target_prompt: SingletonDictPrompt = in_prompt.get("encoder_prompt", in_prompt)
+        target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
+            "encoder_prompt", in_prompt
+        )
 
         extra_items = {
             k: v

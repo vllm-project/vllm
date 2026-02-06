@@ -891,7 +891,7 @@ class LLM:
         for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
-                target_prompt: SingletonDictPrompt = in_prompt.get(
+                target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
                     "encoder_prompt", in_prompt
                 )
                 target_prompt["mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore
