@@ -48,8 +48,16 @@ def cutlass_group_gemm_supported() -> bool:
     return ops.cutlass_group_gemm_supported(capability)
 
 
-CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
-CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
+# Handle case where CUTLASS ops might not be available (build issue)
+try:
+    CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+except (AttributeError, RuntimeError):
+    CUTLASS_FP8_SUPPORTED = False
+
+try:
+    CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
+except (AttributeError, RuntimeError):
+    CUTLASS_BLOCK_FP8_SUPPORTED = False
 
 
 def per_tensor_dequantize(
