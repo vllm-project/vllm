@@ -53,6 +53,7 @@ class PoolingCompletionRequest(
             self.use_activation = self.normalize
 
         return PoolingParams(
+            task=self.task,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
@@ -85,6 +86,7 @@ class PoolingChatRequest(
             self.use_activation = self.normalize
 
         return PoolingParams(
+            task=self.task,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
@@ -99,7 +101,7 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     task: PoolingTask = "plugin"
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(task=self.task)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
