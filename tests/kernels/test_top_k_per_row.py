@@ -301,7 +301,7 @@ def test_deepseek_hybrid_topk() -> None:
         top_k,
     )
 
-    # Test case 2: Long sequences (>= 8192) - should use fast_topk kernel
+    # Test case 2: Long sequences (>= 8192) - should use large_context_topk kernel
     batch_size_long = 4
     num_rows_long = batch_size_long * next_n
 
@@ -321,14 +321,14 @@ def test_deepseek_hybrid_topk() -> None:
 
     indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device="cuda")
 
-    # Use fast_topk kernel for long sequences
+    # Use large_context_topk kernel for long sequences
     if next_n == 1:
         lengths = seq_lens_long
     else:
         offsets = torch.arange(next_n, device=logits_long.device, dtype=torch.int32)
         lengths = (seq_lens_long.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    torch.ops._C.fast_topk(
+    torch.ops._C.large_context_topk(
         logits_long,
         indices,
         lengths,
@@ -360,4 +360,4 @@ def test_deepseek_hybrid_topk() -> None:
 
     assert compare_top_k_results(
         logits_long, indices, torch_indices_long, row_starts_long, row_ends_long, top_k
-    ), "fast_topk kernel (long sequences) doesn't match torch.topk"
+    ), "large_context_topk kernel (long sequences) doesn't match torch.topk"

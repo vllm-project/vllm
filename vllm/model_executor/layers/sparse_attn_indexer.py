@@ -164,19 +164,18 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        max_seq_len = decode_metadata.seq_lens.max().item()
-        use_fast_topk = max_seq_len > 8192  # Observed threshold for fast topk
-
-        if use_fast_topk:
+        if decode_metadata.use_large_context_topk:
             if next_n == 1:
                 lengths = decode_metadata.seq_lens
             else:
-                offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
                 lengths = (
-                    decode_metadata.seq_lens.unsqueeze(1) - next_n + 1 + offsets
+                    decode_metadata.seq_lens.unsqueeze(1)
+                    - next_n
+                    + 1
+                    + decode_metadata.offsets
                 ).flatten()
-            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-            torch.ops._C.fast_topk(
+
+            torch.ops._C.large_context_topk(
                 logits,
                 topk_indices,
                 lengths,

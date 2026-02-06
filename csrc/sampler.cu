@@ -1054,9 +1054,10 @@ void top_k_per_row_prefill(const torch::Tensor& logits,
   }
 }
 
-void fast_topk(const torch::Tensor& logits, torch::Tensor& indices,
-               const torch::Tensor& seq_lens,
-               c10::optional<torch::Tensor> row_starts = c10::nullopt) {
+void large_context_topk(
+    const torch::Tensor& logits, torch::Tensor& indices,
+    const torch::Tensor& seq_lens,
+    c10::optional<torch::Tensor> row_starts = c10::nullopt) {
   TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
   TORCH_CHECK(indices.is_cuda(), "indices must be a CUDA tensor");
   TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be a CUDA tensor");
@@ -1076,5 +1077,5 @@ void fast_topk(const torch::Tensor& logits, torch::Tensor& indices,
 
   const cudaError_t result = cudaGetLastError();
   TORCH_CHECK(result == cudaSuccess,
-              "fast_topk kernel failed: ", cudaGetErrorString(result));
+              "large_context_topk kernel failed: ", cudaGetErrorString(result));
 }
