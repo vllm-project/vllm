@@ -1184,6 +1184,11 @@ class DeepseekV2ForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+        # Dynamic Quantize proj weights if using QuarkConfig
+        if isinstance(quant_config, QuarkConfig):
+            quant_config.dynamic_mxfp4_quant = True
 
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)

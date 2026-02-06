@@ -108,7 +108,11 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            return UnquantizedLinearMethod()
+            if prefix == "lm_head" or not self.dynamic_mxfp4_quant:
+                return UnquantizedLinearMethod()
+            scheme = self.get_scheme(layer=layer, layer_name=prefix, dynamic_mxfp4_quant=self.dynamic_mxfp4_quant)
+            layer.scheme = scheme
+            return QuarkLinearMethod(self)
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
@@ -419,7 +423,7 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
+    def _get_scheme_from_config(self, config: dict[str, Any], dynamic_mxfp4_quant: bool = False) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -442,7 +446,7 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_ocp_mx(weight_config, input_config):
-            return QuarkOCP_MX(weight_config, input_config)
+            return QuarkOCP_MX(weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant)
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -450,11 +454,14 @@ class QuarkConfig(QuantizationConfig):
             f"Input config: {input_config}"
         )
 
-    def get_scheme(self, layer: torch.nn.Module, layer_name: str) -> "QuarkScheme":
+    def get_scheme(self, layer: torch.nn.Module, layer_name: str, dynamic_mxfp4_quant: bool = False) -> "QuarkScheme":
         layer_quant_config = self._find_matched_config(layer_name, layer)
+        #print(f"layer_quant_config: {layer_quant_config.__class__.__name__}")
+        # Find all members in the layer_quant_config dictionary
+        #print(f"All members in layer_quant_config: {list(layer_quant_config.keys())}")
 
         # Find the quant_scheme
-        scheme = self._get_scheme_from_config(layer_quant_config)
+        scheme = self._get_scheme_from_config(layer_quant_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant)
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
