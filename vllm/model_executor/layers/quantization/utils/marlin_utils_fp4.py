@@ -88,8 +88,24 @@ def nvfp4_marlin_process_global_scale(global_scale):
     return global_scale * (2.0 ** (exponent_bias - 7))
 
 
+def marlin_input_scale(
+    x: torch.Tensor,
+    input_scale_factor: torch.Tensor,
+) -> torch.Tensor:
+    acc_factor = x.shape[-1]
+    x_abs = x.abs().nan_to_num(nan=0.0)
+    max_x = x_abs.max().float()
+    k = max_x * acc_factor * input_scale_factor
+    torch.clamp_(k, min=1.0, max=1024.0)
+    torch.log2_(k)
+    torch.floor_(k)
+    torch.exp2_(k)
+    return k.to(dtype=x.dtype)
+
+
 def apply_fp4_marlin_linear(
     input: torch.Tensor,
+    input_scale_factor: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_global_scale: torch.Tensor | None,
@@ -102,6 +118,13 @@ def apply_fp4_marlin_linear(
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP4 quantization
+
+    input_scale = None
+
+    # Only use input scale if input dtype is float16
+    if input.dtype == torch.float16:
+        input_scale = marlin_input_scale(input, input_scale_factor)
+        input.mul_(torch.reciprocal(input_scale))
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
@@ -141,7 +164,25 @@ def apply_fp4_marlin_linear(
         use_fp32_reduce=use_fp32_reduce,
     )
 
-    return output.reshape(out_shape)
+    out = output.reshape(out_shape)
+    if input_scale is not None:
+        out.mul_(input_scale)
+    return out
+
+
+def marlin_input_scale_factor(
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor | None,
+) -> torch.Tensor:
+    safe_limit = 1 / torch.finfo(torch.float16).max
+    weight_max = 6.0
+    weight_scale_float = weight_scale.cpu().float().cuda(device=weight_scale.device)
+    weight_scale_max = weight_scale_float.abs().nan_to_num(nan=0.0).max()
+
+    input_scale_factor = safe_limit * weight_max * weight_scale_max
+    if weight_global_scale is not None:
+        input_scale_factor *= weight_global_scale.abs()
+    return input_scale_factor
 
 
 def prepare_fp4_layer_for_marlin(
@@ -220,6 +261,13 @@ def prepare_fp4_layer_for_marlin(
             weight_scale, input_dtype=input_dtype
         )
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+    input_scale_factor = marlin_input_scale_factor(
+        layer.weight_scale, layer.weight_global_scale
+    )
+    layer.input_scale_factor = torch.nn.Parameter(
+        input_scale_factor, requires_grad=False
+    )
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
