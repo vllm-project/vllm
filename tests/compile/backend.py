@@ -109,3 +109,9 @@ class TestBackend:
     def op_count(self, op: OpOverload, before=False) -> int:
         graph = self.graph_pre_pass if before else self.graph_post_pass
         return len(list(find_op_nodes(op, graph)))
+
+    def print_graphs(self):
+        print("=== Graph before custom passes ===")
+        print(self.graph_pre_pass.python_code(root_module="self").src)
+        print("=== Graph after custom passes ===")
+        print(self.graph_post_pass.python_code(root_module="self").src)
