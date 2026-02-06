@@ -1128,7 +1128,7 @@ def _awq_gemm_triton(
                     act = act_padded
 
                 # Look up optimal split-k from config
-                split_k = get_awq_gemv_split_k(N)
+                split_k = get_awq_gemv_split_k(K, N)
 
                 ctx = (
                     nullcontext()

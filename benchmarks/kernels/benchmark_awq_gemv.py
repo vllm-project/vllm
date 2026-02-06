@@ -5,7 +5,7 @@ Benchmark AWQ GEMV split-k selection and generate optimized configs.
 
 This script benchmarks the AWQ GEMV HIP kernel with different split-k
 values for the linear layer shapes of a given model, then saves the
-optimal N-threshold rules to a JSON config file.
+optimal (K, N) -> split_k mapping to a JSON config file.
 
 Usage:
     # Tune for a specific model and save config
@@ -67,7 +67,7 @@ def extract_awq_shapes(
         trust_remote_code: Whether to trust remote code
 
     Returns:
-        List of unique (K, N) tuples, sorted by N
+        List of unique (K, N) tuples, sorted by (N, K)
     """
     from vllm.model_executor.layers.quantization.awq import AWQConfig
     from vllm.transformers_utils.config import get_config
@@ -94,7 +94,6 @@ def extract_awq_shapes(
     vocab_size = config.vocab_size
 
     # Apply tensor parallelism
-    # For TP, attention heads and intermediate size are divided
     assert num_attention_heads % tp_size == 0, (
         f"num_attention_heads ({num_attention_heads}) must be divisible "
         f"by tp_size ({tp_size})"
@@ -149,7 +148,7 @@ def extract_awq_shapes(
             continue
         filtered.append((K, N))
 
-    filtered.sort(key=lambda x: x[1])  # Sort by N
+    filtered.sort(key=lambda x: (x[1], x[0]))  # Sort by (N, K)
     return filtered
 
 
@@ -165,15 +164,27 @@ def compute_padding(K: int, group_size: int, split_k: int) -> int:
     return padded_groups * group_size
 
 
+# L2 cache size to flush (8 MB should cover RDNA GPUs)
+_L2_FLUSH_SIZE = 8 * 1024 * 1024
+
+
+def _flush_l2_cache(flush_buf: torch.Tensor) -> None:
+    """Flush the GPU L2 cache by writing to a large buffer."""
+    flush_buf.zero_()
+
+
 def benchmark_shape(
     K: int,
     N: int,
     group_size: int,
     split_k: int,
-    num_warmup: int = 20,
-    num_iters: int = 100,
+    num_warmup: int = 50,
+    num_iters: int = 200,
 ) -> float:
     """Benchmark AWQ GEMV for a specific shape and split_k.
+
+    Clears the L2 cache between each iteration to get realistic
+    latencies that don't benefit from cached data.
 
     Returns:
         Average kernel time in microseconds.
@@ -199,85 +210,60 @@ def benchmark_shape(
         0, 2**31 - 1, (num_groups, N // 8), dtype=torch.int32, device="cuda"
     )
 
-    # Warmup
+    # L2 cache flush buffer
+    flush_buf = torch.empty(_L2_FLUSH_SIZE // 4, dtype=torch.float32, device="cuda")
+
+    # Warmup (with cache flushing too, to stabilize clocks)
     for _ in range(num_warmup):
+        _flush_l2_cache(flush_buf)
         awq_gemv_hip(act, qweight, scales, qzeros, split_k)
     torch.cuda.synchronize()
 
-    # Benchmark with CUDA events
+    # Benchmark with CUDA events and L2 cache clearing
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
     latencies = []
     for _ in range(num_iters):
+        _flush_l2_cache(flush_buf)
+        torch.cuda.synchronize()
+
         start_event.record()
         awq_gemv_hip(act, qweight, scales, qzeros, split_k)
         end_event.record()
         end_event.synchronize()
         latencies.append(start_event.elapsed_time(end_event) * 1000)  # us
 
-    return sum(latencies) / len(latencies)
+    # Remove outliers: drop top/bottom 5%
+    latencies.sort()
+    trim = max(1, len(latencies) // 20)
+    trimmed = latencies[trim:-trim]
 
-
-def check_monotonicity(
-    results: dict[int, tuple[int, float]],
-) -> list[str]:
-    """Check that split_k is non-increasing as N increases.
-
-    Args:
-        results: dict mapping N -> (best_split_k, best_time_us)
-
-    Returns:
-        List of warning messages for violations.
-    """
-    warnings = []
-    sorted_ns = sorted(results.keys())
-
-    for i in range(len(sorted_ns) - 1):
-        n_small = sorted_ns[i]
-        n_large = sorted_ns[i + 1]
-        sk_small, _ = results[n_small]
-        sk_large, _ = results[n_large]
-
-        if sk_large > sk_small:
-            warnings.append(
-                f"  Non-monotonic: N={n_small} -> split_k={sk_small}, "
-                f"but N={n_large} -> split_k={sk_large} "
-                f"(expected split_k to be <= {sk_small} for larger N)"
-            )
-
-    return warnings
+    return sum(trimmed) / len(trimmed)
 
 
 def check_against_existing(
-    results: dict[int, tuple[int, float]],
-    existing_config: dict,
-    all_timings: dict[int, dict[int, float]],
+    results: dict[tuple[int, int], tuple[int, float]],
+    existing_config: dict[str, int],
+    all_timings: dict[tuple[int, int], dict[int, float]],
 ) -> list[str]:
-    """Check new results against existing config rules.
+    """Check new results against existing config entries.
 
     Args:
-        results: dict mapping N -> (best_split_k, best_time_us)
-        existing_config: existing JSON config with "rules" and "default_split_k"
-        all_timings: dict mapping N -> {split_k: time_us} for all measured values
+        results: dict mapping (K, N) -> (best_split_k, best_time_us)
+        existing_config: existing JSON config mapping "K,N" -> split_k
+        all_timings: dict mapping (K, N) -> {split_k: time_us}
 
     Returns:
         List of warning messages for contradictions.
     """
     warnings = []
-    rules = existing_config.get("rules", [])
-    default = existing_config.get("default_split_k", 4)
 
-    for N, (best_sk, best_time) in sorted(results.items()):
-        # What would the existing config prescribe?
-        existing_sk = default
-        for n_threshold, sk in rules:
-            if n_threshold >= N:
-                existing_sk = sk
-                break
-
-        if existing_sk != best_sk:
-            existing_time = all_timings.get(N, {}).get(existing_sk)
+    for (K, N), (best_sk, best_time) in sorted(results.items()):
+        key = f"{K},{N}"
+        existing_sk = existing_config.get(key)
+        if existing_sk is not None and existing_sk != best_sk:
+            existing_time = all_timings.get((K, N), {}).get(existing_sk)
             time_str = ""
             if existing_time is not None:
                 delta_pct = (
@@ -286,94 +272,24 @@ def check_against_existing(
                     else 0
                 )
                 time_str = (
-                    f"\n    Existing config split_k={existing_sk} @ "
+                    f"\n    Existing split_k={existing_sk} @ "
                     f"{existing_time:.1f}us vs best split_k={best_sk} @ "
                     f"{best_time:.1f}us (delta={delta_pct:+.1f}%)"
                 )
             warnings.append(
-                f"  N={N}: benchmark found split_k={best_sk} but existing "
-                f"config says split_k={existing_sk} "
-                f"(via rule N<={n_threshold if existing_sk != default else 'inf'})"
-                f"{time_str}"
+                f"  K={K}, N={N}: benchmark found split_k={best_sk} but "
+                f"existing config says split_k={existing_sk}{time_str}"
             )
 
     return warnings
 
 
-def derive_threshold_rules(
-    results: dict[int, tuple[int, float]],
-) -> tuple[list[list[int]], int]:
-    """Derive N-threshold rules from per-shape benchmark results.
-
-    Args:
-        results: dict mapping N -> (best_split_k, best_time_us)
-
-    Returns:
-        Tuple of (rules, default_split_k) where rules is a list of
-        [N_threshold, split_k] entries.
-    """
-    if not results:
-        return [], 4
-
-    sorted_items = sorted(results.items())  # Sort by N
-
-    # Group consecutive N values with the same split_k
-    rules = []
-    current_sk = sorted_items[0][1][0]
-    current_max_n = sorted_items[0][0]
-
-    for N, (sk, _) in sorted_items[1:]:
-        if sk != current_sk:
-            rules.append([current_max_n, current_sk])
-            current_sk = sk
-        current_max_n = N
-
-    # The last group becomes the default
-    default_split_k = current_sk
-
-    return rules, default_split_k
-
-
-def load_existing_config(config_path: str) -> dict | None:
+def load_existing_config(config_path: str) -> dict[str, int] | None:
     """Load existing config file if it exists."""
     if os.path.exists(config_path):
         with open(config_path) as f:
             return json.load(f)
     return None
-
-
-def merge_with_existing(
-    new_results: dict[int, tuple[int, float]],
-    existing_config: dict | None,
-) -> dict[int, tuple[int, float]]:
-    """Merge new benchmark results with data points implied by existing config.
-
-    The existing config's threshold rules imply data points at the threshold
-    N values. We merge these with the new results, where new results take
-    priority for N values that were actually benchmarked.
-
-    Args:
-        new_results: dict mapping N -> (best_split_k, best_time_us)
-        existing_config: existing JSON config or None
-
-    Returns:
-        Merged results dict.
-    """
-    if existing_config is None:
-        return new_results
-
-    merged = {}
-
-    # Add data points from existing config rules
-    rules = existing_config.get("rules", [])
-    for n_threshold, sk in rules:
-        # Only add if we don't have a new measurement at this exact N
-        if n_threshold not in new_results:
-            merged[n_threshold] = (sk, 0.0)  # 0.0 = not measured
-
-    # New results override existing
-    merged.update(new_results)
-    return merged
 
 
 def main(args: argparse.Namespace):
@@ -387,7 +303,7 @@ def main(args: argparse.Namespace):
         for s in args.shapes:
             k, n = s.split(",")
             shapes.append((int(k), int(n)))
-        shapes.sort(key=lambda x: x[1])
+        shapes.sort(key=lambda x: (x[1], x[0]))
     else:
         if not args.model:
             print("Error: either --model or --shapes must be specified")
@@ -412,15 +328,16 @@ def main(args: argparse.Namespace):
 
     split_k_values = [1, 2, 4, 8, 16]
 
-    # Benchmark all shapes × split_k values
-    all_timings: dict[int, dict[int, float]] = {}  # N -> {split_k: time_us}
-    results: dict[int, tuple[int, float]] = {}  # N -> (best_split_k, best_time)
+    # Benchmark all shapes x split_k values
+    # Keyed on (K, N) tuples
+    all_timings: dict[tuple[int, int], dict[int, float]] = {}
+    results: dict[tuple[int, int], tuple[int, float]] = {}
 
     for K, N in shapes:
         num_groups = K // args.group_size
         print(f"Benchmarking K={K}, N={N} (num_groups={num_groups}):")
 
-        shape_timings = {}
+        shape_timings: dict[int, float] = {}
         best_sk = 1
         best_time = float("inf")
 
@@ -458,29 +375,21 @@ def main(args: argparse.Namespace):
             except Exception as e:
                 print(f"  split_k={sk:2d}: ERROR - {e}")
 
-        all_timings[N] = shape_timings
-        results[N] = (best_sk, best_time)
+        all_timings[(K, N)] = shape_timings
+        results[(K, N)] = (best_sk, best_time)
         print(f"  ==> Best: split_k={best_sk} @ {best_time:.1f} us")
         print()
 
     # Print summary table
     print("=" * 60)
     print("Summary:")
-    print(f"{'N':>8} {'K':>8} {'Best SK':>8} {'Time (us)':>10}")
+    print(f"{'K':>8} {'N':>8} {'Best SK':>8} {'Time (us)':>10}")
     print("-" * 60)
     for K, N in shapes:
-        sk, time = results[N]
-        print(f"{N:>8} {K:>8} {sk:>8} {time:>10.1f}")
+        sk, time = results[(K, N)]
+        print(f"{K:>8} {N:>8} {sk:>8} {time:>10.1f}")
     print("=" * 60)
     print()
-
-    # Contradiction checks
-    mono_warnings = check_monotonicity(results)
-    if mono_warnings:
-        print("WARNING: Non-monotonic split_k results detected:")
-        for w in mono_warnings:
-            print(w)
-        print()
 
     # Check against existing config
     config_path = os.path.join(
@@ -489,11 +398,13 @@ def main(args: argparse.Namespace):
     )
     existing_config = load_existing_config(config_path)
 
+    has_warnings = False
     if existing_config is not None:
         existing_warnings = check_against_existing(
             results, existing_config, all_timings
         )
         if existing_warnings:
+            has_warnings = True
             print("WARNING: Results contradict existing config:")
             for w in existing_warnings:
                 print(w)
@@ -503,25 +414,18 @@ def main(args: argparse.Namespace):
         print("Run with --tune to save results to config file.")
         return
 
-    # Derive threshold rules
-    merged = merge_with_existing(results, existing_config)
-    rules, default_split_k = derive_threshold_rules(merged)
+    # Build new config: merge with existing
+    new_config: dict[str, int] = {}
+    if existing_config is not None:
+        new_config.update(existing_config)
 
-    new_config = {
-        "rules": rules,
-        "default_split_k": default_split_k,
-    }
+    # Add/overwrite with new results
+    for (K, N), (best_sk, _best_time) in results.items():
+        new_config[f"{K},{N}"] = best_sk
 
     print("Derived config:")
     print(json.dumps(new_config, indent=4))
     print()
-
-    # Check for contradictions before saving
-    has_warnings = bool(mono_warnings)
-    if existing_config is not None:
-        has_warnings = has_warnings or bool(
-            check_against_existing(results, existing_config, all_timings)
-        )
 
     if has_warnings and not args.force:
         response = input(
@@ -575,14 +479,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-warmup",
         type=int,
-        default=20,
-        help="Number of warmup iterations (default: 20)",
+        default=50,
+        help="Number of warmup iterations (default: 50)",
     )
     parser.add_argument(
         "--num-iters",
         type=int,
-        default=100,
-        help="Number of benchmark iterations (default: 100)",
+        default=200,
+        help="Number of benchmark iterations (default: 200)",
     )
     parser.add_argument(
         "--tune",

@@ -4,17 +4,14 @@
 Configuration loading for AWQ GEMV split-k selection on ROCm.
 
 The AWQ GEMV HIP kernel uses split-k parallelism to improve occupancy
-for small N dimensions. The optimal split-k value depends on N (output
-dimension) and the target device. This module loads per-device config
-files that specify N-threshold rules for split-k selection.
+for small N dimensions. The optimal split-k value depends on both the
+K and N dimensions and the target device. This module loads per-device
+config files that specify (K, N) -> split_k mappings.
 
 Config file format (JSON):
 {
-    "rules": [
-        [N_threshold, split_k],   // first rule where N <= threshold wins
-        ...
-    ],
-    "default_split_k": <int>      // used when N exceeds all thresholds
+    "K,N": split_k,    // e.g. "2560,2560": 16
+    ...
 }
 
 Config files are stored in awq_gemv_configs/ directory, named by device:
@@ -24,7 +21,6 @@ Config files are stored in awq_gemv_configs/ directory, named by device:
 import functools
 import json
 import os
-from typing import Any
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -41,7 +37,7 @@ def _get_config_file_name() -> str:
 
 
 @functools.lru_cache
-def get_awq_gemv_config() -> dict[str, Any] | None:
+def get_awq_gemv_config() -> dict[str, int] | None:
     """Load the AWQ GEMV split-k config for the current device.
 
     Checks (in order):
@@ -49,7 +45,7 @@ def get_awq_gemv_config() -> dict[str, Any] | None:
     2. Built-in awq_gemv_configs/ directory
 
     Returns:
-        Config dict with "rules" and "default_split_k", or None if not found.
+        Config dict mapping "K,N" strings to split_k values, or None.
     """
     json_file_name = _get_config_file_name()
     config_file_paths: list[str] = []
@@ -75,14 +71,6 @@ def get_awq_gemv_config() -> dict[str, Any] | None:
                     config_file_path,
                 )
                 config = json.load(f)
-                # Validate structure
-                if "rules" not in config or "default_split_k" not in config:
-                    logger.warning(
-                        "Invalid AWQ GEMV config (missing 'rules' or "
-                        "'default_split_k'): %s",
-                        config_file_path,
-                    )
-                    continue
                 return config
 
     logger.info(
@@ -106,15 +94,16 @@ def _default_split_k_heuristic(N: int) -> int:
         return 4
 
 
-def get_awq_gemv_split_k(N: int) -> int:
-    """Get the optimal split-k value for AWQ GEMV given output dimension N.
+def get_awq_gemv_split_k(K: int, N: int) -> int:
+    """Get the optimal split-k value for AWQ GEMV given dimensions K and N.
 
     Checks (in priority order):
     1. AWQ_GEMV_SPLIT_K environment variable (for manual tuning)
-    2. Device-specific config file (threshold rules)
-    3. Default heuristic
+    2. Device-specific config file (exact (K, N) match)
+    3. Default heuristic (based on N)
 
     Args:
+        K: Input/reduction dimension (before any padding).
         N: Output dimension of the GEMV operation.
 
     Returns:
@@ -125,15 +114,14 @@ def get_awq_gemv_split_k(N: int) -> int:
     if env_split_k is not None:
         return int(env_split_k)
 
-    # Priority 2: Device config file
+    # Priority 2: Device config file (exact K,N match)
     config = get_awq_gemv_config()
     if config is not None:
-        rules = config["rules"]
-        default = config["default_split_k"]
-        for n_threshold, split_k in rules:
-            if n_threshold >= N:
-                return split_k
-        return default
+        key = f"{K},{N}"
+        if key in config:
+            return config[key]
+        # No exact match found - fall through to heuristic
+        logger.debug("No AWQ GEMV config entry for K=%d, N=%d; using heuristic", K, N)
 
     # Priority 3: Default heuristic
     return _default_split_k_heuristic(N)

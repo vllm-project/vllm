@@ -60,7 +60,8 @@ def compute_awq_padding_for_rocm(
     MAX_PADDING_OVERHEAD = 0.15  # 15%
 
     # Get the target split-k from config (or heuristic fallback)
-    target_split_k = get_awq_gemv_split_k(N)
+    K = num_groups * group_size
+    target_split_k = get_awq_gemv_split_k(K, N)
 
     # Try the target split-k first, then fall back to lower values
     split_k_candidates = []
