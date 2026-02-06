@@ -8,11 +8,11 @@ import os
 for key in ["CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"]:
     os.environ.pop(key, None)
 
-import torch
+import torch  # noqa: E402
 
 assert not torch.cuda.is_initialized(), "CUDA initialized before import"
 
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform  # noqa: E402
 
 assert not torch.cuda.is_initialized(), (
     f"CUDA was initialized during vllm.platforms import on {current_platform}"

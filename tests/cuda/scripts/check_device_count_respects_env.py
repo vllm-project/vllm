@@ -9,7 +9,7 @@ import sys
 for key in ["CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"]:
     os.environ.pop(key, None)
 
-import torch
+import torch  # noqa: E402
 
 if torch.cuda.device_count() == 0:
     sys.exit(0)  # Skip: no GPUs
