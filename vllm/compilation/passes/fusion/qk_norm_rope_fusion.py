@@ -15,10 +15,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
-from .fusion import empty_bf16, empty_fp32, empty_i64
-from .inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode
+from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
-from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 

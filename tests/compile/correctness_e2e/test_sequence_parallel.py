@@ -21,8 +21,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ...models.registry import HF_EXAMPLE_MODELS
+from ...utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_sequence_parallel")
 
