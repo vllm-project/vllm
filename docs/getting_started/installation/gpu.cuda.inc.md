@@ -297,6 +297,23 @@ You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
 
+#### Running on Systems with Older CUDA Drivers
+
+vLLM's Docker image comes with [CUDA compatibility libraries](https://docs.nvidia.com/deploy/cuda-compatibility/index.html) pre-installed. This allows you to run vLLM on systems with NVIDIA drivers that are older than the CUDA Toolkit version used in the image, but only supports select professional and datacenter NVIDIA GPUs.
+
+To enable this feature, set the `VLLM_ENABLE_CUDA_COMPATIBILITY` environment variable to `1` or `true` when running the container:
+
+```bash
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    --env "VLLM_ENABLE_CUDA_COMPATIBILITY=1" \
+    vllm/vllm-openai <args...>
+```
+
+This will automatically configure `LD_LIBRARY_PATH` to point to the compatibility libraries before loading PyTorch and other dependencies.
+
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
