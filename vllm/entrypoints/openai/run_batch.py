@@ -84,7 +84,7 @@ class BatchTranscriptionRequest(TranscriptionRequest):
     )
 
     # Override file to be optional and unused for batch processing
-    file: UploadFile | None = Field(default=None, exclude=True)
+    file: UploadFile | None = Field(default=None, exclude=True)  # type: ignore[assignment]
 
     @model_validator(mode="before")
     @classmethod
@@ -114,7 +114,7 @@ class BatchTranslationRequest(TranslationRequest):
     )
 
     # Override file to be optional and unused for batch processing
-    file: UploadFile | None = Field(default=None, exclude=True)
+    file: UploadFile | None = Field(default=None, exclude=True)  # type: ignore[assignment]
 
     @model_validator(mode="before")
     @classmethod
