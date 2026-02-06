@@ -32,7 +32,7 @@ class TestDecorateLogsDisablePrefix:
         buf = io.StringIO()
         _add_prefix(buf, "TestProc", 9999)
         buf.write("hello\n")
-        assert "(TestProc pid=9999) hello\n" == buf.getvalue()
+        assert buf.getvalue() == "(TestProc pid=9999) hello\n"
 
     def test_decorate_logs_applies_prefix_by_default(self):
         """decorate_logs should add prefix when not disabled."""
