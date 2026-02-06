@@ -257,7 +257,7 @@ class Llama4VisionAttention(nn.Module):
             self.num_local_heads,
             self.head_dim,
             self.scaling,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
         if use_data_parallel:

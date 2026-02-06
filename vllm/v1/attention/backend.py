@@ -347,7 +347,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -361,7 +361,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
@@ -480,9 +480,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
+                max_num_queries_for_spec = (
+                    1
+                    + (2 if speculative_config.parallel_drafting else 1)
+                    * speculative_config.num_speculative_tokens
+                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    1 + speculative_config.num_speculative_tokens,
+                    max_num_queries_for_spec,
                 )
 
         if (

@@ -50,6 +50,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
+from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
@@ -190,11 +191,11 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
         register_generate_api_routers(app)
 
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
-            attach_router as register_translations_api_router,
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
+            attach_router as register_speech_to_text_api_router,
         )
 
-        register_translations_api_router(app)
+        register_speech_to_text_api_router(app)
 
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import (
@@ -318,7 +319,7 @@ async def init_app_state(
         )
 
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
             init_transcription_state,
         )
 
@@ -377,6 +378,7 @@ def validate_api_server_args(args):
         )
 
 
+@instrument(span_name="API server setup")
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""

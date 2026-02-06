@@ -32,9 +32,6 @@ llm = LLM(
     gpu_memory_utilization=random.uniform(0.7, 0.9),
     swap_space=random.randint(1, 4),
     seed=0,
-    # FIXME(Isotr0py): async scheduling causes deadlock
-    # on torchrun with PP, need to investigate further.
-    async_scheduling=False,
 )
 
 outputs = llm.generate(prompts, sampling_params)

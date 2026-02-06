@@ -26,6 +26,10 @@ class SharedFusedMoE(FusedMoE):
         routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
+        # Pass has_shared_experts so FusedMoE.__init__ can set disable_inplace
+        # without accessing self.shared_experts (submodules cannot be set before
+        # Module.__init__()).
+        kwargs["has_shared_experts"] = shared_experts is not None
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
         self._routed_input_transform = routed_input_transform

@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from vllm import SamplingParams
-from vllm.inputs.data import StreamingInput
+from vllm.inputs import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind

@@ -231,13 +231,76 @@ class FinishedRequestStats:
     num_cached_tokens: int = 0
 
 
+@dataclass
+class PromptTokenStats:
+    """Breakdown of prompt tokens by source.
+
+    Fields:
+        computed: Tokens prefilled locally (actual compute work).
+        local_cache_hit: Tokens from local prefix cache.
+        external_kv_transfer: Tokens from external KV transfer.
+        cached_tokens: Tokens skipped during prefill (from scheduler).
+        recomputed_tokens: Cached tokens that were recomputed (see below).
+        total: Total prompt tokens.
+
+    Invariants:
+        computed + local_cache_hit + external_kv_transfer - recomputed_tokens = total
+        local_cache_hit + external_kv_transfer - recomputed_tokens = cached_tokens
+    """
+
+    ALL_SOURCES: tuple[str, ...] = (
+        "local_compute",
+        "local_cache_hit",
+        "external_kv_transfer",
+    )
+
+    computed: int = 0
+    local_cache_hit: int = 0
+    external_kv_transfer: int = 0
+    cached_tokens: int = 0
+    recomputed_tokens: int = 0
+    total: int = 0
+
+    def update_from_output(
+        self,
+        num_cached_tokens: int,
+        num_external_computed_tokens: int,
+        prompt_len: int,
+    ) -> None:
+        """Update stats from a prefill output."""
+        # When all tokens are cached, the scheduler reduces num_cached_tokens
+        # by 1 to force the model to recompute the last token, since the model
+        # needs at least one input token to run a forward pass.
+        recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
+
+        self.computed += prompt_len - num_cached_tokens
+        self.external_kv_transfer += num_external_computed_tokens
+        self.local_cache_hit += (
+            num_cached_tokens + recomputed - num_external_computed_tokens
+        )
+        self.cached_tokens += num_cached_tokens
+        self.recomputed_tokens += recomputed
+        self.total += prompt_len
+
+    def get_by_source(self, source: str) -> int:
+        """Get token count by source label."""
+        source_map = {
+            "local_compute": self.computed,
+            "local_cache_hit": self.local_cache_hit,
+            "external_kv_transfer": self.external_kv_transfer,
+        }
+        if source not in source_map:
+            raise ValueError(f"Unknown source: {source}")
+        return source_map[source]
+
+
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
     def __init__(self):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
-        self.num_prompt_tokens = 0
+        self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
@@ -249,6 +312,11 @@ class IterationStats:
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
         return f"{self.__class__.__name__}({field_to_value_str})"
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        """Total prompt tokens (for backward compatibility)."""
+        return self.prompt_token_stats.total
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -268,7 +336,11 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            self.num_prompt_tokens += prompt_len
+            self.prompt_token_stats.update_from_output(
+                num_cached_tokens=output.num_cached_tokens,
+                num_external_computed_tokens=output.num_external_computed_tokens,
+                prompt_len=prompt_len,
+            )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)

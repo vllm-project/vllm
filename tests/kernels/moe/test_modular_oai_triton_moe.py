@@ -180,7 +180,11 @@ def oai_triton_moe_impl(
     else:
         fused_experts = OAITritonExperts(make_dummy_moe_config(), quant_config)
 
-    mk = FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), fused_experts)
+    mk = FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        fused_experts,
+        inplace=False,
+    )
 
     return mk.forward(
         hidden_states=x,
@@ -188,7 +192,6 @@ def oai_triton_moe_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=True,
         activation="swigluoai",
         global_num_experts=num_experts,
         expert_map=None,
