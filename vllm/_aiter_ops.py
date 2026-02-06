@@ -885,12 +885,12 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
                 f"Unsupported backend for RoPE+KVCache fusion: {attn_layer.backend}"
             )
 
-        is_fp8_kv_cache = attn_layer.impl.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = attn_layer.impl.kv_cache_dtype.startswith("fp8")  # type: ignore[attr-defined]
         if is_fp8_kv_cache:
             key_cache_og_dtype = key_cache.dtype
             value_cache_og_dtype = value_cache.dtype
-            key_cache = key_cache.view(attn_layer.impl.fp8_dtype)
-            value_cache = value_cache.view(attn_layer.impl.fp8_dtype)
+            key_cache = key_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
+            value_cache = value_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
 
         query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
