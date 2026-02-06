@@ -13,6 +13,7 @@ from transformers.activations import ACT2FN
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     ModelConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -31,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule,
+    fused_qkvzba_split_reshape_cat,
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -366,6 +368,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        self.is_cuda_graph = (
+            get_current_vllm_config().compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE
+        )
 
     def fix_query_key_value_ordering(
         self,
@@ -455,13 +461,31 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
+        # triton grid should be less than 66536
+        divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(
+            self.num_k_heads, self.tp_size
         )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        if (
+            self.num_v_heads // self.num_k_heads in [1, 2, 4]
+            and self.is_cuda_graph
+            and divide_grid < 65536
+        ):
+            mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
+                projected_states_qkvz,
+                projected_states_ba,
+                triton.cdiv(self.num_k_heads, self.tp_size),
+                triton.cdiv(self.num_v_heads, self.tp_size),
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+        else:
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
