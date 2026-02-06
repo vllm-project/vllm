@@ -1354,6 +1354,9 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
+                logger.debug(
+                    "Registering layer %s with cache shape: %s", layer_name, cache.shape
+                )
                 kernel_block_size = cache.shape[self.kv_topo.block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
@@ -2320,15 +2323,15 @@ class NixlConnectorWorker:
 
                 # Get descs ids for the layer.
                 layer_local_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id,
+                    self.engine_id,
                     layer_local_block_ids,
                     layer_idx,
+                    block_size_ratio=block_size_ratio,
                 )
                 layer_remote_desc_ids = self._get_block_descs_ids(
-                    self.engine_id,
+                    dst_engine_id,
                     layer_remote_block_ids,
                     layer_idx,
-                    block_size_ratio=block_size_ratio,
                 )
 
                 local_descs_list.append(layer_local_desc_ids)
