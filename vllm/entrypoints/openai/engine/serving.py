@@ -1062,6 +1062,12 @@ class OpenAIServing:
 
         return conversation, [engine_prompt]
 
+    def _extract_prompt_components(self, prompt: TokPrompt):
+        return extract_prompt_components(self.model_config, prompt)
+
+    def _extract_prompt_text(self, prompt: TokPrompt):
+        return self._extract_prompt_components(prompt).text
+
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
@@ -1097,7 +1103,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text = engine_prompt.get("prompt")
+        prompt_text = self._extract_prompt_text(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1167,7 +1173,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text = engine_prompt.get("prompt")
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
@@ -1190,15 +1196,13 @@ class OpenAIServing:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = extract_prompt_components(
-            self.model_config, inputs
-        )
+        components = self._extract_prompt_components(inputs)
 
         self.request_logger.log_inputs(
             request_id,
-            prompt,
-            prompt_token_ids,
-            prompt_embeds,
+            components.prompt,
+            components.prompt_token_ids,
+            components.prompt_embeds,
             params=params,
             lora_request=lora_request,
         )

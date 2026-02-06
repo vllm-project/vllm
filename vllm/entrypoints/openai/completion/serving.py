@@ -160,7 +160,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text = engine_prompt.get("prompt")
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
@@ -277,7 +277,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     engine_prompt = engine_prompts[i]
-                    final_res.prompt = engine_prompt.get("prompt")
+                    final_res.prompt = self._extract_prompt_text(engine_prompt)
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -347,7 +347,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
                 if prompt_text is None:
                     engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = engine_prompt.get("prompt")
+                    prompt_text = self._extract_prompt_text(engine_prompt)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
