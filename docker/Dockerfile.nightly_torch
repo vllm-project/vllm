@@ -217,13 +217,13 @@ RUN pip install setuptools==75.6.0 packaging==23.2 ninja==1.11.1.3 build==1.2.2.
 
 
 # build flashinfer for torch nightly from source around 10 mins
-# release version: v0.6.2
+# release version: v0.6.3
 # todo(elainewy): cache flashinfer build result for faster build
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     echo "git clone flashinfer..." \
-    && git clone --depth 1 --branch v0.6.2 --recursive https://github.com/flashinfer-ai/flashinfer.git \
+    && git clone --depth 1 --branch v0.6.3 --recursive https://github.com/flashinfer-ai/flashinfer.git \
     && cd flashinfer \
     && git submodule update --init --recursive \
     && echo "finish git clone flashinfer..." \

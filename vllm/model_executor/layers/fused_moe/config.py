@@ -124,6 +124,23 @@ class RoutingMethodType(IntEnum):
     Unspecified = 8.0
 
 
+def get_routing_method_type(
+    scoring_func: str, top_k: int, renormalize: bool
+) -> RoutingMethodType:
+    if scoring_func == "sigmoid":
+        if top_k == 1:
+            return RoutingMethodType.Llama4
+        else:
+            return RoutingMethodType.DeepSeekV3
+    elif scoring_func == "softmax":
+        if renormalize:
+            return RoutingMethodType.Renormalize
+        else:
+            return RoutingMethodType.Default
+    else:
+        return RoutingMethodType.Unspecified
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
