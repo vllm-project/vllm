@@ -20,6 +20,7 @@ Config files are stored in awq_gemv_configs/ directory, named by device:
 
 import functools
 import json
+import math
 import os
 
 from vllm import envs
@@ -94,13 +95,34 @@ def _default_split_k_heuristic(N: int) -> int:
         return 4
 
 
+def _find_nearest_split_k(config: dict[str, int], K: int, N: int) -> int:
+    """Find the split_k of the closest (K, N) entry in the config.
+
+    Uses Euclidean distance in (K, N) space to find the nearest neighbor.
+    """
+    best_dist = math.inf
+    best_sk = _default_split_k_heuristic(N)
+
+    for key, sk in config.items():
+        parts = key.split(",")
+        if len(parts) != 2:
+            continue
+        ck, cn = int(parts[0]), int(parts[1])
+        dist = math.hypot(ck - K, cn - N)
+        if dist < best_dist:
+            best_dist = dist
+            best_sk = sk
+
+    return best_sk
+
+
 def get_awq_gemv_split_k(K: int, N: int) -> int:
     """Get the optimal split-k value for AWQ GEMV given dimensions K and N.
 
     Checks (in priority order):
     1. AWQ_GEMV_SPLIT_K environment variable (for manual tuning)
-    2. Device-specific config file (exact (K, N) match)
-    3. Default heuristic (based on N)
+    2. Device-specific config file (exact (K, N) match, or nearest neighbor)
+    3. Default heuristic (based on N) when no config file exists
 
     Args:
         K: Input/reduction dimension (before any padding).
@@ -114,14 +136,22 @@ def get_awq_gemv_split_k(K: int, N: int) -> int:
     if env_split_k is not None:
         return int(env_split_k)
 
-    # Priority 2: Device config file (exact K,N match)
+    # Priority 2: Device config file
     config = get_awq_gemv_config()
     if config is not None:
         key = f"{K},{N}"
         if key in config:
             return config[key]
-        # No exact match found - fall through to heuristic
-        logger.debug("No AWQ GEMV config entry for K=%d, N=%d; using heuristic", K, N)
+        # No exact match - use nearest neighbor from config entries
+        sk = _find_nearest_split_k(config, K, N)
+        logger.debug(
+            "No exact AWQ GEMV config for K=%d, N=%d; "
+            "nearest neighbor gives split_k=%d",
+            K,
+            N,
+            sk,
+        )
+        return sk
 
-    # Priority 3: Default heuristic
+    # Priority 3: Default heuristic (no config file at all)
     return _default_split_k_heuristic(N)
