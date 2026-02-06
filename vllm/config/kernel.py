@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
