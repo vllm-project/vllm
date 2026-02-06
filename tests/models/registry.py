@@ -520,6 +520,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "HF_ColBERT": _HfExamplesInfo("answerdotai/answerai-colbert-small-v1"),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -564,6 +565,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
+    "VoyageQwen3BidirectionalEmbedModel": _HfExamplesInfo(
+        "voyageai/voyage-4-nano", trust_remote_code=True
+    ),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
@@ -758,8 +762,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
-        min_transformers_version="5.0.0",
-        is_available_online=False,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
