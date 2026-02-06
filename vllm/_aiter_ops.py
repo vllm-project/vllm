@@ -14,7 +14,10 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer_fake,
 )
 
-_FP8_DTYPE = current_platform.fp8_dtype()
+# fp8_dtype is not cached.
+# on ROCm the fp8_dtype always calls is_fp8_fnuz
+# which is a host op, so we cache it once here.
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def is_aiter_found() -> bool:
@@ -66,30 +69,6 @@ def if_aiter_supported(func: Callable) -> Callable:
         return None
 
     return wrapper
-
-
-# Can't use dtypes.fp8 directly inside an op
-# because it returns wrong result on gfx942.
-# This is a workaround to get the correct FP8 dtype.
-# This might because that the get_gfx() is wrapped as a custom op.
-#
-# Import strategy to avoid unwanted JIT warnings:
-# - Only import aiter dtypes at module load if VLLM_ROCM_USE_AITER=1 (env var set)
-# - This prevents JIT warnings during backend auto-discovery when aiter is not preferred
-# - Explicit backend selection (via attention_config) still works because:
-#   1. Backend modules (rocm_aiter_fa.py) import aiter directly when loaded
-#   2. Individual op implementations import aiter locally when called
-#   3. This module's ops are only called when an aiter backend is actually in use
-if is_aiter_found_and_supported() and envs.VLLM_ROCM_USE_AITER:
-    from aiter import dtypes
-
-    AITER_FP8_DTYPE = dtypes.fp8
-else:
-    # Placeholder when AITER is not the default - prevents NameError during module load.
-    # Note: This fallback is used for fake implementations and type checking.
-    # If an AITER backend is explicitly selected (even with env var=0),
-    # the backend module will import aiter directly (rocm_aiter_fa.py line 35).
-    AITER_FP8_DTYPE = _FP8_DTYPE
 
 
 def _rocm_aiter_fused_moe_impl(
@@ -558,7 +537,7 @@ def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
@@ -600,7 +579,7 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
@@ -649,10 +628,10 @@ def _rocm_aiter_per_token_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.quant import dynamic_per_token_scaled_quant
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     out_shape = x.shape
-    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+    out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
@@ -672,7 +651,7 @@ def _rocm_aiter_per_token_quant_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_shape = x.shape
     return (
-        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
+        torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
     )
 
@@ -694,7 +673,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
         res1=residual,
     )
     return (
@@ -714,7 +693,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty_like(residual, device=residual.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
@@ -736,7 +715,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
         res1=None,
     )
     return (x_quant, x_quant_scales)
@@ -751,7 +730,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
 
@@ -764,7 +743,7 @@ def _rocm_aiter_group_fp8_quant_impl(
     from aiter import QuantType, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-    return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
+    return aiter_per1x128_quant(x.contiguous(), quant_dtype=FP8_DTYPE)
 
 
 def _rocm_aiter_group_fp8_quant_fake(
@@ -772,7 +751,7 @@ def _rocm_aiter_group_fp8_quant_fake(
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=AITER_FP8_DTYPE, device=x.device)
+    x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
@@ -794,7 +773,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
         x,
         activation="silu",
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
     )
 
 
@@ -805,7 +784,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     M, N = x.shape
     assert N % 2 == 0
     N_half = N // 2
-    x_fp8 = torch.empty((M, N_half), dtype=AITER_FP8_DTYPE, device=x.device)
+    x_fp8 = torch.empty((M, N_half), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
