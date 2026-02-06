@@ -1336,7 +1336,7 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
-        if self.speculative_config is None and self.acceptance_rate_threshold is None:
+        if self.speculative_config is None:
             return None
 
         if self.speculative_config is None:
