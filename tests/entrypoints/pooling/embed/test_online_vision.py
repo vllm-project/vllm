@@ -10,7 +10,7 @@ from transformers import AutoProcessor
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.multimodal.media import MediaWithBytes
-from vllm.multimodal.utils import fetch_image, encode_image_url
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
@@ -125,7 +125,6 @@ def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == MODEL_NAME
     assert len(output.data[0].embedding) == 3072
     assert output.usage.prompt_tokens == 767
-
 
 
 def get_hf_prompt_tokens(model_name, content, image_url):
