@@ -1033,6 +1033,8 @@ class GPUModelRunner(
                     num_accepted = valid_sampled_token_count[prev_req_index] - 1
                     num_rejected = req_state.prev_num_draft_len - num_accepted
                     num_computed_tokens -= num_rejected
+                    print("[_update_states] num_accepted: ", num_accepted)
+                    print("[_update_states] num_rejected: ", num_rejected)
                     print("[_update_states] removed %d rejected tokens; num_computed_tokens: %d" % (num_rejected, num_computed_tokens))
                     req_state.output_token_ids.extend([-1] * num_accepted)
 

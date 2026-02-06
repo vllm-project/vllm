@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm.utils.math_utils import cdiv
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -143,7 +144,12 @@ def preprocess_mamba(
             # if num_computed_tokens is 0, prev_state_idx will be -1
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
-        num_blocks = len(req_state.block_ids[mamba_group_ids[0]])
+        num_blocks_old = len(req_state.block_ids[mamba_group_ids[0]])
+        
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        num_blocks: int = cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size) + num_speculative_blocks
+
+        print("num_blocks_old: %d, num_blocks: %d" % (num_blocks_old, num_blocks))
 
         # We always save the current running state at the last
         # (1 + num_speculative_blocks) block.
