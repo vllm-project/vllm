@@ -674,9 +674,9 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_device_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Get a device view of a CPU tensor using Unified Virtual Addressing (UVA).
+    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     from vllm.platforms import current_platform
