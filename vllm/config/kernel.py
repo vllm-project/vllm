@@ -42,4 +42,3 @@ class KernelConfig:
         if value is None:
             return value
         return handler(value)
-
