@@ -380,7 +380,7 @@ class GptOssModel(nn.Module):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -402,7 +402,7 @@ class GptOssModel(nn.Module):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w2",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -428,7 +428,7 @@ class GptOssModel(nn.Module):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -452,7 +452,7 @@ class GptOssModel(nn.Module):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w2",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -471,7 +471,7 @@ class GptOssModel(nn.Module):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -487,11 +487,7 @@ class GptOssModel(nn.Module):
                     if tp_rank != 0:
                         weight.zero_()
                 weight_loader(
-                    param,
-                    weight,
-                    weight_name=name,
-                    shard_id="w2",
-                    expert_id=None,
+                    param, weight, weight_name=name, shard_id=None, expert_id=None
                 )
                 loaded_params.add(name)
                 continue
