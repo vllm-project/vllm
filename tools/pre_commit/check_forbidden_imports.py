@@ -84,7 +84,7 @@ def check_file(path: str) -> int:
         if path in forbidden_import.allowed_files:
             continue
         # Search for forbidden imports
-        if match := re.search(forbidden_import.pattern, content, re.MULTILINE):
+        for match in re.finditer(forbidden_import.pattern, content, re.MULTILINE):
             # Check if it's allowed
             if forbidden_import.allowed_pattern.match(match.group()):
                 continue
