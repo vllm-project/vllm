@@ -19,7 +19,6 @@ from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
 
 logger = init_logger(__name__)
 
-PADDING_SLOT_ID = -1
 BLOCK_HIDDEN = 128
 BLOCK_TOKENS = 128
 
@@ -471,7 +470,7 @@ def _multi_layer_eagle_shift_and_cache(
     shift: torch.Tensor,
     cached_lens: torch.Tensor,
     cached_prev_token_ids: torch.Tensor,
-    cached_prev_positions: Any,
+    cached_prev_positions: torch.Tensor,
     cached_prev_hidden_states: torch.Tensor,
     cached_slot_mappings: torch.Tensor,
     common_attn_metadata: CommonAttentionMetadata,
@@ -480,6 +479,12 @@ def _multi_layer_eagle_shift_and_cache(
         return
 
     assert max_shift > 0
+    assert cached_prev_positions.is_contiguous()
+    assert cached_prev_token_ids.is_contiguous()
+    assert cached_prev_hidden_states.is_contiguous()
+    assert cached_slot_mappings.is_contiguous()
+    assert src_hidden_states.is_contiguous()
+    assert dst_hidden_states.is_contiguous()
 
     # If src/dst are the same tensor, shifting is unsafe without a separate src.
     if src_slot_mapping.data_ptr() == dst_slot_mapping.data_ptr():
@@ -558,7 +563,7 @@ def _multi_layer_eagle_shift_and_cache(
     # when hidden_size is large.
     num_hidden_blocks = max(1, (hidden_size + BLOCK_HIDDEN - 1) // BLOCK_HIDDEN)
 
-    _shift_hidden_kernel[(batch_size, num_blocks, num_hidden_blocks)](
+    _shift_and_gather_hidden_kernel[(batch_size, num_blocks, num_hidden_blocks)](
         src_hidden_states,
         dst_hidden_states,
         cached_prev_hidden_states,
@@ -566,33 +571,12 @@ def _multi_layer_eagle_shift_and_cache(
         end_token_indices,
         shift,
         cached_lens,
-        src_hidden_states.stride(0),
-        src_hidden_states.stride(1),
-        dst_hidden_states.stride(0),
-        dst_hidden_states.stride(1),
-        cached_prev_hidden_states.stride(0),
-        cached_prev_hidden_states.stride(1),
-        cached_prev_hidden_states.stride(2),
-        MAX_SHIFT=max_shift,
-        HIDDEN_SIZE=hidden_size,
-        BLOCK_TOKENS=BLOCK_TOKENS,
-        BLOCK_HIDDEN=BLOCK_HIDDEN,
-        num_warps=4,
-    )
-
-    _gather_cache_hidden_kernel[(batch_size, num_hidden_blocks)](
-        dst_hidden_states,
-        cached_prev_hidden_states,
         store_start,
         store_lens,
-        dst_hidden_states.stride(0),
-        dst_hidden_states.stride(1),
-        cached_prev_hidden_states.stride(0),
-        cached_prev_hidden_states.stride(1),
-        cached_prev_hidden_states.stride(2),
         MAX_SHIFT=max_shift,
-        HIDDEN_SIZE=hidden_size,
         PADDED_SHIFT=triton.next_power_of_2(max_shift),
+        HIDDEN_SIZE=hidden_size,
+        BLOCK_TOKENS=BLOCK_TOKENS,
         BLOCK_HIDDEN=BLOCK_HIDDEN,
         num_warps=4,
     )
@@ -655,13 +639,13 @@ def _shift_and_gather_cache_1d_kernel(
     store_len = tl.load(store_len_ptr + pid_seq).to(tl.int32)
     m = tl.arange(0, PADDED_SHIFT)
     store_mask = m < MAX_SHIFT
-    src_idx = store_start + m
-    val = tl.load(dst_ptr + src_idx, mask=store_mask & (m < store_len), other=0)
+    dst_idx = store_start + m
+    val = tl.load(dst_ptr + dst_idx, mask=store_mask & (m < store_len), other=0)
     tl.store(base_cached + m, val, mask=store_mask)
 
 
 @triton.jit
-def _shift_hidden_kernel(
+def _shift_and_gather_hidden_kernel(
     src_ptr,
     dst_ptr,
     cached_ptr,
@@ -669,14 +653,10 @@ def _shift_hidden_kernel(
     end_ptr,
     shift_ptr,
     cached_len_ptr,
-    src_s0,
-    src_s1,
-    dst_s0,
-    dst_s1,
-    cached_s0,
-    cached_s1,
-    cached_s2,
+    store_start_ptr,
+    store_len_ptr,
     MAX_SHIFT: tl.constexpr,
+    PADDED_SHIFT: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     BLOCK_TOKENS: tl.constexpr,
     BLOCK_HIDDEN: tl.constexpr,
@@ -690,71 +670,46 @@ def _shift_hidden_kernel(
     shift = tl.load(shift_ptr + pid_seq).to(tl.int32)
     cached_len = tl.load(cached_len_ptr + pid_seq).to(tl.int32)
 
-    window_len = end - start + 1
-    cached_base = cached_ptr + pid_seq * cached_s0
-    k = tl.arange(0, BLOCK_TOKENS)
+    assert cached_len >= shift
 
+    # get dst indices
     base = pid_blk * BLOCK_TOKENS
-    m = base + k
-    m_mask = m < window_len
-    head = m < shift
-
-    dst_tok = start + m
-    src_tok = start + m - shift
-    cached_tok = cached_len - shift + m
-
-    cached_in_range = (
-        head & (cached_tok >= 0) & (cached_tok < cached_len) & (cached_tok < MAX_SHIFT)
-    )
-    cached_tok_safe = tl.where(cached_in_range, cached_tok, 0)
-    src_tok = tl.where(head, 0, src_tok)
-
+    k = tl.arange(0, BLOCK_TOKENS)
+    tok_offs = base + k
+    dst_tok = start + tok_offs
     n = pid_hid * BLOCK_HIDDEN + tl.arange(0, BLOCK_HIDDEN)
+    dst_ptrs = dst_ptr + dst_tok[:, None] * HIDDEN_SIZE + n[None, :] * 1
+
+    # get dst mask
+    window_len = end - start + 1
+    tok_mask = tok_offs < window_len
     n_mask = n < HIDDEN_SIZE
-    mask = m_mask[:, None] & n_mask[None, :]
+    mask = tok_mask[:, None] & n_mask[None, :]
 
-    src_ptrs = src_ptr + src_tok[:, None] * src_s0 + n[None, :] * src_s1
-    dst_ptrs = dst_ptr + dst_tok[:, None] * dst_s0 + n[None, :] * dst_s1
-    cached_ptrs = (
-        cached_base + cached_tok_safe[:, None] * cached_s1 + n[None, :] * cached_s2
-    )
+    # load from cached
+    base_cached = cached_ptr + pid_seq * HIDDEN_SIZE * MAX_SHIFT
+    cached_tok = cached_len - shift + tok_offs
+    cached_ptrs = base_cached + cached_tok[:, None] * HIDDEN_SIZE + n[None, :] * 1
+    cached_mask = tok_offs < shift
+    val_cached = tl.load(cached_ptrs, mask=mask & cached_mask[:, None], other=0)
 
-    val_head = tl.load(cached_ptrs, mask=mask & cached_in_range[:, None], other=0)
-    val_body = tl.load(src_ptrs, mask=mask & ~head[:, None], other=0)
-    val = tl.where(head[:, None], val_head, val_body)
+    # load from src
+    src_tok = start + tok_offs - shift
+    src_ptrs = src_ptr + src_tok[:, None] * HIDDEN_SIZE + n[None, :] * 1
+    val_src = tl.load(src_ptrs, mask=mask & ~cached_mask[:, None], other=0)
+
+    # store to dst
+    val = tl.where(cached_mask[:, None], val_cached, val_src)
     tl.store(dst_ptrs, val, mask=mask)
 
-
-@triton.jit
-def _gather_cache_hidden_kernel(
-    src_ptr,
-    out_ptr,
-    cache_start_ptr,
-    cache_len_ptr,
-    src_s0,
-    src_s1,
-    out_s0,
-    out_s1,
-    out_s2,
-    MAX_SHIFT: tl.constexpr,
-    HIDDEN_SIZE: tl.constexpr,
-    PADDED_SHIFT: tl.constexpr,
-    BLOCK_HIDDEN: tl.constexpr,
-):
-    pid_seq = tl.program_id(0)
-    pid_hid = tl.program_id(1)
-
-    cache_start = tl.load(cache_start_ptr + pid_seq).to(tl.int32)
-    cache_len = tl.load(cache_len_ptr + pid_seq).to(tl.int32)
+    # store to cached
+    store_start = tl.load(store_start_ptr + pid_seq).to(tl.int32)
+    store_len = tl.load(store_len_ptr + pid_seq).to(tl.int32)
     m = tl.arange(0, PADDED_SHIFT)
-    m_mask = (m < MAX_SHIFT) & (m < cache_len)
-    tok = cache_start + m
-
-    n = pid_hid * BLOCK_HIDDEN + tl.arange(0, BLOCK_HIDDEN)
-    n_mask = n < HIDDEN_SIZE
+    m_mask = (m < MAX_SHIFT) & (m < store_len)
+    store_tok = store_start + m
+    dst_ptrs = dst_ptr + store_tok[:, None] * HIDDEN_SIZE + n[None, :] * 1
+    store_ptrs = base_cached + m[:, None] * HIDDEN_SIZE + n[None, :] * 1
     mask = m_mask[:, None] & n_mask[None, :]
-
-    src_ptrs = src_ptr + tok[:, None] * src_s0 + n[None, :] * src_s1
-    out_ptrs = out_ptr + pid_seq * out_s0 + m[:, None] * out_s1 + n[None, :] * out_s2
-    val = tl.load(src_ptrs, mask=mask, other=0)
-    tl.store(out_ptrs, val, mask=mask)
+    val = tl.load(dst_ptrs, mask=mask, other=0)
+    tl.store(store_ptrs, val, mask=mask)
