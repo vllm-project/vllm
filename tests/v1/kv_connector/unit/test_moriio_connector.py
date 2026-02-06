@@ -392,7 +392,7 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-def test_register_kv_caches(default_vllm_config, mock_parallel_groups):
+def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
     IP = get_ip()
@@ -486,7 +486,7 @@ def test_register_kv_caches(default_vllm_config, mock_parallel_groups):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-def test_moriio_handshake_returns_metadata(default_vllm_config, mock_parallel_groups):
+def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
 
     ROLE = "kv_consumer"
