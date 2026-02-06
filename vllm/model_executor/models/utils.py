@@ -36,7 +36,7 @@ from vllm.utils.platform_utils import (
 )
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    get_cuda_view_from_cpu_tensor,
+    get_accelerator_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
@@ -663,7 +663,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         else:
             # keep the cpu data alive
             p._vllm_offloaded_cpu_data = cpu_data
-            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+            p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
 
