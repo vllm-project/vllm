@@ -896,7 +896,8 @@ class LLM:
         for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
-                in_prompt["mm_processor_kwargs"] = mm_processor_kwargs
+                target_prompt = in_prompt.get("encoder_prompt", in_prompt)
+                target_prompt["mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore
 
             engine_prompts.append(renderer.tokenize_prompt(in_prompt, tok_params))
 

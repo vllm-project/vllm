@@ -22,6 +22,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -216,7 +217,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,

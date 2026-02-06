@@ -974,7 +974,7 @@ class OpenAIServing:
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(
-                [prompt_embeds] if isinstance(prompt_embeds, bytes) else prompt_embeds
+                [prompt_embeds] if isinstance(prompt_embeds, bytes) else prompt_embeds  # type: ignore[arg-type]
             )
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
@@ -988,15 +988,17 @@ class OpenAIServing:
             for prompt in prompts
         ]
         in_prompts = await renderer.render_prompts_async(parsed_prompts)
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        for prompt in engine_prompts:
-            prompt.update(extra_items)  # type: ignore
+        for in_prompt in in_prompts:
+            target_prompt = in_prompt.get("encoder_prompt", in_prompt)
+            target_prompt.update(extra_items)  # type: ignore
+
+        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         return engine_prompts
 
@@ -1027,17 +1029,19 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        conversation, prompt = await renderer.render_messages_async(
+        conversation, in_prompt = await renderer.render_messages_async(
             messages, chat_params
         )
-        engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
+        target_prompt = in_prompt.get("encoder_prompt", in_prompt)
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        engine_prompt.update(extra_items)  # type: ignore
+        target_prompt.update(extra_items)  # type: ignore
+
+        engine_prompt = await renderer.tokenize_prompt_async(target_prompt, tok_params)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser

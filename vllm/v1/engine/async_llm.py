@@ -28,6 +28,7 @@ from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
@@ -530,7 +531,11 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -771,7 +776,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
