@@ -86,7 +86,7 @@ def triton_kernel_moe_forward(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    activation: MoEActivation = MoEActivation.SILU,
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -125,7 +125,7 @@ def triton_kernel_fused_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     topk: int,
-    activation: MoEActivation = MoEActivation.SILU,
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,

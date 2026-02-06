@@ -1156,7 +1156,10 @@ def test_fused_marlin_moe_with_bias(m):
 @pytest.mark.parametrize("m", [1, 64, 256])
 @pytest.mark.parametrize("n,k", [(1024, 1024), (2048, 2048)])
 @pytest.mark.parametrize("e,topk", [(8, 2), (64, 4)])
-def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
+@pytest.mark.parametrize("activation", [MoEActivation.RELU2_NO_MUL])
+def test_fused_marlin_moe_non_gated(
+    m: int, n: int, k: int, e: int, topk: int, activation: MoEActivation
+):
     """Test Marlin MoE with non-gated activation (relu2_no_mul).
 
     Non-gated activations like relu2 don't have the gate-up projection pattern,
@@ -1199,7 +1202,7 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
             w2_data.w_ref,
             score,
             topk,
-            activation="relu2",
+            activation=activation,
         )
 
     marlin_output = fused_marlin_moe(
@@ -1224,7 +1227,7 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
         is_k_full=is_k_full,
-        activation="relu2_no_mul",
+        activation=activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
