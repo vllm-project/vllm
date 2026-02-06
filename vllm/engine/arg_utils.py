@@ -55,6 +55,7 @@ from vllm.config import (
     SpeculativeConfig,
     StructuredOutputsConfig,
     VllmConfig,
+    WeightTransferConfig,
     get_attr_docs,
 )
 from vllm.config.cache import (
@@ -583,6 +584,11 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    weight_transfer_config: WeightTransferConfig | None = None
+    """Configuration for weight transfer during RL training. 
+    Accepts a JSON string or dict with backend-specific options.
+    Example: '{"backend": "nccl"}'"""
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -593,6 +599,10 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.weight_transfer_config, dict):
+            self.weight_transfer_config = WeightTransferConfig(
+                **self.weight_transfer_config
+            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -1192,6 +1202,9 @@ class EngineArgs:
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
+        vllm_group.add_argument(
+            "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
+        )
 
         # Other arguments
         parser.add_argument(
@@ -1769,6 +1782,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            weight_transfer_config=self.weight_transfer_config,
         )
 
         return config
