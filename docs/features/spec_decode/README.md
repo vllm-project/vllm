@@ -293,6 +293,45 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 | Qwen2-7B-Instruct                                                    | yuhuili/EAGLE-Qwen2-7B-Instruct          | 0.26B              |
 | Qwen2-72B-Instruct                                                   | yuhuili/EAGLE-Qwen2-72B-Instruct         | 1.05B              |
 
+## Speculating using DFlash draft models
+
+vLLM also supports speculative decoding with DFlash draft models via
+`"method": "dflash"`.
+
+??? code
+
+    ```python
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "Summarize speculative decoding in one paragraph.",
+    ]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=64)
+
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "dflash",
+            "model": "z-lab/Qwen3-8B-DFlash-b16",
+            "num_speculative_tokens": 16,
+        },
+    )
+
+    outputs = llm.generate(prompts, sampling_params)
+    print(outputs[0].outputs[0].text)
+    ```
+
+Important constraints for DFlash:
+
+1. DFlash draft models are currently intended for Qwen3-based checkpoints.
+2. `runtime_mode="block_drafting"` is currently BS1-only. For batch size > 1,
+   vLLM falls back to the shared EAGLE-style draft path.
+3. DFlash requires an attention backend with non-causal drafting support.
+   If backend validation fails, use FlashAttention or Triton attention backend.
+
+The offline benchmark/example script supports this path:
+`examples/offline_inference/spec_decode.py --method dflash --draft-model <dflash-model>`.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

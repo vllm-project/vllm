@@ -65,6 +65,39 @@ def test_resolve_mask_token_id_raises_out_of_vocab():
         proposer._resolve_mask_token_id_from_config()
 
 
+def test_maybe_combine_target_hidden_states_passthrough_without_hook():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.model = SimpleNamespace()
+    target_hidden_states = torch.zeros(2, 4, dtype=torch.float32)
+
+    out = proposer._maybe_combine_target_hidden_states(target_hidden_states)
+    assert out is target_hidden_states
+
+
+def test_maybe_combine_target_hidden_states_with_model_hook():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.hidden_size = 4
+    proposer.model = SimpleNamespace(
+        combine_hidden_states=lambda hs: hs + 1,
+    )
+    target_hidden_states = torch.zeros(2, 4, dtype=torch.float32)
+
+    out = proposer._maybe_combine_target_hidden_states(target_hidden_states)
+    assert torch.equal(out, torch.ones(2, 4, dtype=torch.float32))
+
+
+def test_maybe_combine_target_hidden_states_raises_on_hidden_size_mismatch():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.hidden_size = 4
+    proposer.model = SimpleNamespace(
+        combine_hidden_states=lambda _hs: torch.zeros(2, 3, dtype=torch.float32),
+    )
+    target_hidden_states = torch.zeros(2, 4, dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="combined hidden size mismatch"):
+        proposer._maybe_combine_target_hidden_states(target_hidden_states)
+
+
 def _make_propose_inputs(batch_size: int):
     num_tokens = 2 * batch_size
     return {
@@ -146,6 +179,32 @@ def test_dflash_proposer_raises_on_invalid_draft_shape():
         pytest.raises(RuntimeError, match="unexpected draft token shape"),
     ):
         proposer.propose(**inputs)
+
+
+def test_block_drafting_requires_resolved_mask_token_id():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.mask_token_id = None
+
+    with pytest.raises(ValueError, match="requires a resolved mask token id"):
+        proposer._propose_block_drafting(
+            target_positions=torch.tensor([0], dtype=torch.int64),
+            target_hidden_states=torch.zeros(1, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1], dtype=torch.int32),
+            common_attn_metadata=SimpleNamespace(batch_size=lambda: 1),
+        )
+
+
+def test_block_drafting_rejects_batch_size_gt1():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.mask_token_id = 0
+
+    with pytest.raises(NotImplementedError, match="batch size 1 only"):
+        proposer._propose_block_drafting(
+            target_positions=torch.tensor([0], dtype=torch.int64),
+            target_hidden_states=torch.zeros(1, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            common_attn_metadata=SimpleNamespace(batch_size=lambda: 2),
+        )
 
 
 def test_dflash_get_slot_mapping_pads_with_padding_slot_id():

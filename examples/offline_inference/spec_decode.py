@@ -53,7 +53,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash"],
     )
     parser.add_argument("--backend", type=str, default="openai")
     parser.add_argument("--num-spec-tokens", type=int, default=2)
@@ -131,7 +131,7 @@ def main(args):
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
         }
-    elif args.method == "draft_model":
+    elif args.method in ("draft_model", "dflash"):
         assert args.draft_model is not None and args.draft_model != ""
         speculative_config = {
             "method": args.method,
