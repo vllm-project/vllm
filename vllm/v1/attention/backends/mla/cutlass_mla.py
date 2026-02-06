@@ -9,6 +9,12 @@ import torch
 import vllm._custom_ops as ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBackend,
+    MLACommonImpl,
+    MLACommonMetadata,
+    MLACommonMetadataBuilder,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -16,12 +22,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
-)
-from vllm.v1.attention.backends.mla.common import (
-    MLACommonBackend,
-    MLACommonImpl,
-    MLACommonMetadata,
-    MLACommonMetadataBuilder,
 )
 
 logger = init_logger(__name__)
@@ -38,6 +38,7 @@ class CutlassMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
     ]
@@ -243,7 +244,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return out, lse
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,

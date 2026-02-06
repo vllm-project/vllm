@@ -23,8 +23,8 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
@@ -149,8 +149,8 @@ class EngineCore:
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = engine_receiver_cache_from_config(
-            vllm_config, mm_registry
+        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
+            vllm_config
         )
 
         # If a KV connector is initialized for scheduler, we want to collect
@@ -218,6 +218,7 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+    @instrument(span_name="Prepare model")
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
@@ -566,6 +567,26 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        Clears both the scheduler's cache manager and the GPU model runner's cache.
+        """
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 sender, P1 receiver)
+        if self.scheduler.has_unfinished_requests():
+            logger.warning(
+                "Resetting the encoder cache when requests are "
+                "in progress may lead to desynced internal caches."
+            )
+
+        # Reset the scheduler's encoder cache manager (logical state)
+        self.scheduler.reset_encoder_cache()
+        # Reset the GPU model runner's encoder cache (physical storage)
+        self.model_executor.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
@@ -639,6 +660,7 @@ class EngineCoreProc(EngineCore):
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
 
+    @instrument(span_name="EngineCoreProc init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -907,10 +929,31 @@ class EngineCoreProc(EngineCore):
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name=f"EngineCore_DP{dp_rank}",
+                )
                 set_process_title("EngineCore", f"DP{dp_rank}")
             else:
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name="EngineCore",
+                )
                 set_process_title("EngineCore")
             decorate_logs()
+
+            if data_parallel and vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
 
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
@@ -926,6 +969,7 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_rank = 0
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
+            assert engine_core is not None
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -1286,17 +1330,6 @@ class DPEngineCoreProc(EngineCoreProc):
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
-        if vllm_config.kv_transfer_config is not None:
-            # modify the engine_id and append the local_dp_rank to it to ensure
-            # that the kv_transfer_config is unique for each DP rank.
-            vllm_config.kv_transfer_config.engine_id = (
-                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
-            )
-            logger.debug(
-                "Setting kv_transfer_config.engine_id to %s",
-                vllm_config.kv_transfer_config.engine_id,
-            )
-
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
@@ -1466,6 +1499,13 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        # Initialize tracer for distributed tracing if configured.
+        maybe_init_worker_tracer(
+            instrumenting_module_name="vllm.engine_core",
+            process_kind="engine_core",
+            process_name=f"DPEngineCoreActor_DP{dp_rank}",
+        )
+
         self.addresses = addresses
         vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank

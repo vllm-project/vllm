@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -41,7 +41,8 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,
@@ -52,7 +53,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -106,6 +106,17 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(Gemma3nProcessor, **kwargs)
+
+    def get_feature_extractor(self, **kwargs: object) -> Gemma3nAudioFeatureExtractor:
+        return self.get_hf_processor(**kwargs).feature_extractor
+
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "audio": None}
@@ -200,10 +211,6 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 
 
 class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_hf_processor().feature_extractor
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -503,31 +510,35 @@ class Gemma3nForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
 
-        self.vision_tower = AutoModel.from_config(config=config.vision_config)
-        self.audio_tower = AutoModel.from_config(config=config.audio_config)
-        self.embed_vision = Gemma3nMultimodalEmbedder(
-            config.vision_config, config.text_config
-        )
-        self.embed_audio = Gemma3nMultimodalEmbedder(
-            config.audio_config, config.text_config
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.embed_vision = Gemma3nMultimodalEmbedder(
+                config.vision_config, config.text_config
+            )
 
-        self.language_model: nn.Module = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Gemma3nForCausalLM"],
-        )
-        self.language_model = cast(Gemma3nForCausalLM, self.language_model)
-        # NOTE (NickLucche) In order to be compatible with cudagraph, the
-        # buffer needs to be consistent, so we pre-allocate here.
-        self.per_layer_embeddings = torch.zeros(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.config.text_config.num_hidden_layers,
-            self.config.text_config.hidden_size_per_layer_input,
-            device=self.language_model.model.embed_tokens.weight.device,
-            dtype=self.language_model.model.embed_tokens.weight.dtype,
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = AutoModel.from_config(config=config.audio_config)
+            self.embed_audio = Gemma3nMultimodalEmbedder(
+                config.audio_config, config.text_config
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model: Gemma3nForCausalLM = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Gemma3nForCausalLM"],
+            )
+
+            # NOTE (NickLucche) In order to be compatible with cudagraph, the
+            # buffer needs to be consistent, so we pre-allocate here.
+            self.per_layer_embeddings = torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input,
+                device=self.language_model.model.embed_tokens.weight.device,
+                dtype=self.language_model.model.embed_tokens.weight.dtype,
+            )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -583,8 +594,6 @@ class Gemma3nForConditionalGeneration(
         self,
         image_input: Gemma3nImageInputs,
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         vision_outputs = self.vision_tower(
             pixel_values=pixel_values, do_pooling=False, return_dict=True
@@ -609,14 +618,18 @@ class Gemma3nForConditionalGeneration(
         self,
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
-        assert self.audio_tower is not None
         # Run on padded features to enable batching
         input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
-        audio_outputs, audio_mask = self.audio_tower(
-            input_features, ~input_features_mask
-        )
-        audio_features = self.embed_audio(inputs_embeds=audio_outputs)
+        audio_outputs = self.audio_tower(input_features, ~input_features_mask)
+        if isinstance(audio_outputs, tuple):
+            # Transformers v4
+            audio_encodings, audio_mask = audio_outputs
+        else:
+            # Transformers v5
+            audio_encodings = audio_outputs.last_hidden_state
+            audio_mask = audio_outputs.audio_mel_mask
+        audio_features = self.embed_audio(inputs_embeds=audio_encodings)
 
         # The Gemma3nProcessor expects all audio will be 30s in length and
         # inserts 188 audio soft tokens into the text to account for this.
@@ -650,9 +663,6 @@ class Gemma3nForConditionalGeneration(
 
         # Return a list of embeddings instead of a batched tensor
         return audio_features.unbind(0)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -709,7 +719,7 @@ class Gemma3nForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -802,9 +812,10 @@ class Gemma3nForConditionalGeneration(
 
         prompt += ": <audio_soft_token><end_of_turn>\n<start_of_turn>model\n"
 
-        audio = (audio, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio}, "prompt": prompt}
-        return cast(PromptType, prompts_dict)
+        return TextPrompt(
+            prompt=prompt,
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
 
     @classmethod
     def get_speech_to_text_config(

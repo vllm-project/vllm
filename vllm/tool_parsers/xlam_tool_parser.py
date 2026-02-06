@@ -6,10 +6,11 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import regex as re
-
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,

@@ -19,7 +19,7 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
@@ -272,6 +272,7 @@ class MistralTokenizer(TokenizerLike):
         # Vocab sorted by token id.
         self._vocab = self.tokenizer.vocab()
         self._max_token_id = self.vocab_size - 1
+        self._max_chars_per_token = max(len(tok) for tok in self._vocab)
 
         # Cache special tokens for faster access.
         self._special_token_ids = self._get_special_token_ids()
@@ -324,6 +325,10 @@ class MistralTokenizer(TokenizerLike):
     @property
     def max_token_id(self) -> int:
         return self._max_token_id
+
+    @property
+    def max_chars_per_token(self) -> int:
+        return self._max_chars_per_token
 
     @property
     def truncation_side(self) -> str:
