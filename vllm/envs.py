@@ -230,7 +230,6 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
-    VLLM_DISABLE_LOG_PREFIX: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
 
 
@@ -1535,12 +1534,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
-    # Disable process/thread log prefixing (e.g. "(APIServer pid=12345)").
-    # Useful when using custom logging configurations or log aggregation
-    # systems that already handle process identification.
-    "VLLM_DISABLE_LOG_PREFIX": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_LOG_PREFIX", "0"))
-    ),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),

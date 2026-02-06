@@ -427,7 +427,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
     # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer")
+    decorate_logs("APIServer",
+                  disable_prefix=getattr(args, "disable_log_prefix", False))
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
@@ -503,9 +504,5 @@ if __name__ == "__main__":
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)
-
-    # Propagate CLI flag to env var so all child processes inherit it.
-    if getattr(args, "disable_log_prefix", False):
-        os.environ["VLLM_DISABLE_LOG_PREFIX"] = "1"
 
     uvloop.run(run_server(args))

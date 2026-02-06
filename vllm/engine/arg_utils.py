@@ -526,6 +526,7 @@ class EngineArgs:
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
+    disable_log_prefix: bool = ObservabilityConfig.disable_log_prefix
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
@@ -1086,6 +1087,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
+        )
+        observability_group.add_argument(
+            "--disable-log-prefix",
+            **observability_kwargs["disable_log_prefix"],
         )
         observability_group.add_argument(
             "--enable-mfu-metrics",
@@ -1765,6 +1770,7 @@ class EngineArgs:
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
+            disable_log_prefix=self.disable_log_prefix,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,

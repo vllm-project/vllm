@@ -968,7 +968,10 @@ class EngineCoreProc(EngineCore):
                     process_name="EngineCore",
                 )
                 set_process_title("EngineCore")
-            decorate_logs()
+            decorate_logs(
+                disable_prefix=vllm_config.observability_config
+                .disable_log_prefix,
+            )
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
                 # modify the engine_id and append the local_dp_rank to it to ensure

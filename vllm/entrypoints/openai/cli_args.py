@@ -80,11 +80,6 @@ class FrontendArgs:
         "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
-    disable_log_prefix: bool = False
-    """Disable the process/thread log prefix (e.g. '(APIServer pid=12345)')
-    that vLLM adds to stdout/stderr. Useful when using custom logging
-    configurations or log aggregation systems. Can also be set via the
-    VLLM_DISABLE_LOG_PREFIX environment variable."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
     disable_access_log_for_endpoints: str | None = None
