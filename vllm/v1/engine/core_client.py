@@ -78,6 +78,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        shutdown_timeout: float = 5.0,
     ) -> "EngineCoreClient":
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
@@ -88,11 +89,11 @@ class EngineCoreClient(ABC):
 
         if multiprocess_mode and asyncio_mode:
             return EngineCoreClient.make_async_mp_client(
-                vllm_config, executor_class, log_stats
+                vllm_config, executor_class, log_stats, shutdown_timeout=shutdown_timeout
             )
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class, log_stats)
+            return SyncMPClient(vllm_config, executor_class, log_stats, shutdown_timeout)
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
@@ -105,6 +106,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shutdown_timeout: float = 5.0,
     ) -> "MPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -114,6 +116,7 @@ class EngineCoreClient(ABC):
             client_addresses,
             client_count,
             client_index,
+            shutdown_timeout,
         )
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
@@ -459,6 +462,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: dict[str, str] | None = None,
+        shutdown_timeout: float = 5.0,
     ):
         self.vllm_config = vllm_config
         # Serialization setup.
@@ -487,7 +491,8 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
             else:
                 # Engines are managed by this client.
-                with launch_core_engines(vllm_config, executor_class, log_stats) as (
+                with launch_core_engines(vllm_config, executor_class, log_stats,
+                                        shutdown_timeout=shutdown_timeout) as (
                     engine_manager,
                     coordinator,
                     addresses,
@@ -654,13 +659,15 @@ class SyncMPClient(MPClient):
 
     @instrument(span_name="SyncMPClient init")
     def __init__(
-        self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
+        self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool,
+        shutdown_timeout: float = 5.0
     ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=log_stats,
+            shutdown_timeout=shutdown_timeout,
         )
 
         self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
@@ -831,6 +838,7 @@ class AsyncMPClient(MPClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shutdown_timeout: float = 5.0,
     ):
         super().__init__(
             asyncio_mode=True,
@@ -838,6 +846,7 @@ class AsyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
             client_addresses=client_addresses,
+            shutdown_timeout=shutdown_timeout,
         )
 
         self.client_count = client_count
@@ -1045,6 +1054,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shutdown_timeout: float = 5.0,
     ):
         self.current_wave = 0
 
@@ -1055,6 +1065,7 @@ class DPAsyncMPClient(AsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            shutdown_timeout,
         )
 
         # List of [waiting, running] pair per engine.
@@ -1201,6 +1212,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shutdown_timeout: float = 5.0,
     ):
         self.client_count = client_count
 
@@ -1214,6 +1226,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            shutdown_timeout,
         )
 
         assert len(self.core_engines) > 1

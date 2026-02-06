@@ -225,6 +225,31 @@ def decorate_logs(process_name: str | None = None) -> None:
     _add_prefix(sys.stderr, process_name, pid)
 
 
+def terminate_process_tree(pid: int):
+    """
+    Terminates all descendant processes of the given pid by sending SIGTERM.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGTERM to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGTERM)
+
+    # Finally terminate the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+
+
 def kill_process_tree(pid: int):
     """
     Kills all descendant processes of the given pid by sending SIGKILL.
