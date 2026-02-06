@@ -32,6 +32,7 @@ import torch
 from scipy.io import wavfile
 from transformers.feature_extraction_utils import BatchFeature
 
+import vllm.tokenizers.hf as _hf_tokenizer_module
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -61,11 +62,85 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.tokenizers.hf import get_cached_tokenizer as _orig_get_cached_tokenizer
 
 # Import the native Kimi Audio Tower for integrated audio processing
 from .kimi_audio_tower import KimiAudioTower
 
 logger = init_logger(__name__)
+
+# ---- tokenizer compatibility patch ----
+# Kimi's TikTokenTokenizer doesn't expose all_special_ids that vLLM expects.
+# We monkey-patch get_cached_tokenizer to wrap such tokenizers.
+
+
+def _patch_tokenizer_for_kimi(tokenizer):
+    """Patch TikTokenTokenizer class to add missing methods/properties."""
+    orig_class = tokenizer.__class__
+
+    # Only patch once per class
+    if hasattr(orig_class, "_kimi_patched"):
+        return tokenizer
+
+    # Check if this is a TikToken-like tokenizer that needs patching
+    needs_patch = False
+    try:
+        _ = tokenizer.all_special_ids
+    except AttributeError:
+        needs_patch = True
+
+    if not needs_patch:
+        return tokenizer
+
+    # Define properties on the class
+    @property
+    def all_special_ids(self):
+        if hasattr(self, "special_tokens"):
+            return list(self.special_tokens.values())
+        return []
+
+    @property
+    def all_special_tokens(self):
+        if hasattr(self, "special_tokens"):
+            return list(self.special_tokens.keys())
+        return []
+
+    @property
+    def total_vocab_size(self):
+        # TikTokenTokenizer uses n_words for vocab size
+        return getattr(self, "n_words", 0)
+
+    # Define get_vocab method
+    def get_vocab(self):
+        # TikTokenTokenizer has vocab: token -> id (what vLLM expects)
+        if hasattr(self, "vocab"):
+            return self.vocab
+        # Fallback: invert inv_vocab if that's all we have
+        if hasattr(self, "inv_vocab"):
+            return {v: k for k, v in self.inv_vocab.items()}
+        return {}
+
+    # Define __len__ method
+    def __len__(self):
+        return self.total_vocab_size
+
+    # Add to class
+    orig_class.all_special_ids = all_special_ids
+    orig_class.all_special_tokens = all_special_tokens
+    orig_class.total_vocab_size = total_vocab_size
+    orig_class.get_vocab = get_vocab
+    orig_class.__len__ = __len__
+    orig_class._kimi_patched = True
+
+    return tokenizer
+
+
+def _patched_get_cached_tokenizer(tokenizer):
+    _patch_tokenizer_for_kimi(tokenizer)
+    return _orig_get_cached_tokenizer(tokenizer)
+
+
+_hf_tokenizer_module.get_cached_tokenizer = _patched_get_cached_tokenizer
 
 __all__ = ["KimiAudioForConditionalGeneration"]
 
