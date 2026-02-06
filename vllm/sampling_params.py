@@ -44,9 +44,9 @@ class StructuredOutputsParams:
     whitespace_pattern: str | None = None
     structural_tag: str | None = None
 
-    _backend: str | None = field(default=None, init=False)
+    _backend: str | None = field(default=None)
     """CAUTION: Should only be set by Processor._validate_structured_output"""
-    _backend_was_auto: bool = field(default=False, init=False)
+    _backend_was_auto: bool = field(default=False)
     """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
