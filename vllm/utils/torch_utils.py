@@ -674,7 +674,7 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_device_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     Get a device view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
