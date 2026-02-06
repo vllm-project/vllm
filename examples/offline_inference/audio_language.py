@@ -12,6 +12,8 @@ import os
 from dataclasses import asdict
 from typing import Any, NamedTuple
 
+# kimia_infer is required for Kimi-Audio preprocessing
+import kimia_infer.api.prompt_manager  # noqa: F401
 import librosa
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -24,12 +26,6 @@ from vllm.model_executor.models.kimi_audio_asr import (
     _write_wav_tmp,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-# kimia_infer is required for Kimi-Audio preprocessing
-try:
-    import kimia_infer.api.prompt_manager  # noqa: F401
-except ImportError:
-    kimia_infer = None  # type: ignore
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
@@ -501,12 +497,6 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     This example is intended as a minimal smoke-test and only builds inputs for
     a single audio clip.
     """
-    if kimia_infer is None:
-        raise RuntimeError(
-            "kimia_infer is required for Kimi-Audio. "
-            "Install from https://github.com/MoonshotAI/Kimi-Audio"
-        )
-
     assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
 
     # Use HuggingFace model path.
