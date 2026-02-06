@@ -5,12 +5,12 @@ from typing import Any
 
 import torch
 
-from vllm.utils.math_utils import cdiv
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -137,19 +137,17 @@ def preprocess_mamba(
     num_elements_list: list[int] = []
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
-        print("[preprocess_mamba] req_state.num_computed_tokens: ", req_state.num_computed_tokens)
         prev_state_idx = mamba_state_idx.get(req_id)
         if prev_state_idx is None:
             # new / resumed request, no previous state
             # if num_computed_tokens is 0, prev_state_idx will be -1
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
-        num_blocks_old = len(req_state.block_ids[mamba_group_ids[0]])
-        
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        num_blocks: int = cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size) + num_speculative_blocks
-
-        print("num_blocks_old: %d, num_blocks: %d" % (num_blocks_old, num_blocks))
+        num_blocks: int = (
+            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
+            + num_speculative_blocks
+        )
 
         # We always save the current running state at the last
         # (1 + num_speculative_blocks) block.
@@ -205,15 +203,8 @@ def postprocess_mamba(
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
-   
-        
-
         num_draft_tokens = len(scheduled_spec_decode_tokens_dict.get(req_id, []))
         num_scheduled_tokens = num_scheduled_tokens_dict[req_id]
-
-        print("[postprocess_mamba] num_computed_tokens: ", num_computed_tokens)
-        print("[postprocess_mamba] num_scheduled_tokens: ", num_scheduled_tokens)
-
         num_accepted_tokens = num_accepted_tokens_cpu[i]
         num_tokens_running_state = (
             num_computed_tokens + num_scheduled_tokens - num_draft_tokens
@@ -227,8 +218,6 @@ def postprocess_mamba(
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
-
-            print("src_block_idx: %d, dest_block_idx: %d, accept_token_bias: %d" % (src_block_idx, dest_block_idx, accept_token_bias))
             collect_mamba_copy_meta(
                 src_state_list,
                 dest_state_list,
@@ -245,4 +234,3 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(src_state_list, dest_state_list, num_elements_list)
-    print("[postprocess_mamba] finish")

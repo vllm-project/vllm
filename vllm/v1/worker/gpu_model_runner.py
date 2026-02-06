@@ -880,7 +880,6 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
-        print("[gpu_model_runner::_update_states] enter")
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -906,12 +905,6 @@ class GPUModelRunner(
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
-
-        print("[gpu_model_runner::_update_states] scheduled_req_ids: ", scheduled_req_ids)
-        print("[gpu_model_runner::_update_states] cached_req_ids: ", cached_req_ids)
-        print("[gpu_model_runner::_update_states] resumed_req_ids: ", resumed_req_ids)
-
-
         # NOTE(zhuohan): cached_req_ids and resumed_req_ids are usually disjoint,
         # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids` holds
         # apart from the forced-preemption case in reset_prefix_cache. And in
@@ -986,7 +979,7 @@ class GPUModelRunner(
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             if self.uses_xdrope_dim > 0:
                 self._init_xdrope_positions(req_state)
-            print("[gpu_model_runner::_update_states] req_state.num_computed_tokens: ", req_state.num_computed_tokens)
+
             reqs_to_add.append(req_state)
 
         # Update the states of the running/resumed requests.
@@ -997,15 +990,10 @@ class GPUModelRunner(
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
         valid_sampled_token_count = self._get_valid_sampled_token_count()
-        print("[gpu_model_runner::_update_states] valid_sampled_token_count: ", valid_sampled_token_count)
 
-        print("[gpu_model_runner::_update_states] req_data.req_ids: ", req_data.req_ids)
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
-            print("[gpu_model_runner::_update_states] num_computed_tokens: ", num_computed_tokens)
-
-
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
@@ -1033,14 +1021,11 @@ class GPUModelRunner(
                     num_accepted = valid_sampled_token_count[prev_req_index] - 1
                     num_rejected = req_state.prev_num_draft_len - num_accepted
                     num_computed_tokens -= num_rejected
-                    print("[_update_states] num_accepted: ", num_accepted)
-                    print("[_update_states] num_rejected: ", num_rejected)
-                    print("[_update_states] removed %d rejected tokens; num_computed_tokens: %d" % (num_rejected, num_computed_tokens))
                     req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
-           
+
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
@@ -2959,7 +2944,6 @@ class GPUModelRunner(
             # when preparing inputs.
             # With spec decoding, this is done in propose_draft_token_ids().
             if self.input_batch.prev_sampled_token_ids is None:
-                print("sampled_token_ids: ", sampled_token_ids)
                 assert sampled_token_ids.shape[-1] == 1
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
             self.input_batch.prev_req_id_to_index = {
@@ -3913,10 +3897,6 @@ class GPUModelRunner(
     def _copy_valid_sampled_token_count(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
     ) -> None:
-
-        print("[gpu_model_runner::_copy_valid_sampled_token_count] next_token_ids: ", next_token_ids)
-        print("[gpu_model_runner::_copy_valid_sampled_token_count] valid_sampled_tokens_count: ", valid_sampled_tokens_count)
-
         if self.valid_sampled_token_count_event is None:
             return
 
@@ -3936,11 +3916,6 @@ class GPUModelRunner(
     def _get_valid_sampled_token_count(self) -> list[int]:
         # Wait until valid_sampled_tokens_count is copied to cpu,
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        print("[gpu_model_runner::_get_valid_sampled_token_count] prev_sampled_token_ids: ", prev_sampled_token_ids)
-
-        if prev_sampled_token_ids is not None:
-            print("[gpu_model_runner::_get_valid_sampled_token_count] prev_sampled_token_ids.shape: ", prev_sampled_token_ids.shape)
-
         sampled_count_event = self.valid_sampled_token_count_event
         if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
@@ -3948,7 +3923,6 @@ class GPUModelRunner(
         counts_cpu = self.valid_sampled_token_count_cpu
         assert counts_cpu is not None
         sampled_count_event.synchronize()
-        print("[gpu_model_runner::_get_valid_sampled_token_count] counts_cpu: ", counts_cpu)
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
@@ -4044,10 +4018,6 @@ class GPUModelRunner(
                         self.discard_request_mask.gpu,
                     )
                 )
-
-                print("[gpu_model_runner::propose_draft_token_ids] next_token_ids: ", next_token_ids)
-                print("[gpu_model_runner::propose_draft_token_ids] valid_sampled_tokens_count: ", next_token_ids)
-
                 self._copy_valid_sampled_token_count(
                     next_token_ids, valid_sampled_tokens_count
                 )
@@ -4125,8 +4095,6 @@ class GPUModelRunner(
                 slot_mappings=slot_mappings,
             )
 
-        print("[propose_draft_token_ids] draft_token_ids: ", draft_token_ids)
-    
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

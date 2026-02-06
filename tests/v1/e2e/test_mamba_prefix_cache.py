@@ -74,16 +74,10 @@ def get_fake_sample_fn() -> SamplerOutput:
                 ),
                 logprobs_tensors=None,
             )
-        num_sampled_tokens = spec_decode_metadata.cu_num_sampled_tokens[0].item() + 1
         accpeted_tokens = prompt_token_ids[
             first_token_id_index : first_token_id_index
             + min(num_accepted_tokens, logits.shape[0])
         ]
-        '''
-        sampled_token_ids = accpeted_tokens + [-1] * (
-            num_sampled_tokens - len(accpeted_tokens)
-        )
-        '''
         sampled_token_ids = accpeted_tokens
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
@@ -95,7 +89,7 @@ def get_fake_sample_fn() -> SamplerOutput:
     return fake_sample_fn
 
 
-def get_fake_propose_draft_token_ids_fn(original_propose_draft_token_ids_fn: Callable):
+def get_fake_propose_draft_token_ids_fn():
     def fake_propose_draft_token_ids_fn(
         self: GPUModelRunner,
         scheduler_output: SchedulerOutput,
@@ -126,46 +120,23 @@ def get_fake_propose_draft_token_ids_fn(original_propose_draft_token_ids_fn: Cal
             ]
         ]
 
-        test = prompt_token_ids[
-            first_token_id_index-1 : first_token_id_index-1 + num_accepted_tokens
-        ]
-        print("prompt_token_ids: ", test)
-        
         next_token_ids = torch.tensor(
             prompt_token_ids[
-                first_token_id_index-1 : first_token_id_index-1 + num_accepted_tokens
-            ], 
-            device='cuda', 
-            dtype=torch.int32
+                first_token_id_index - 1 : first_token_id_index
+                - 1
+                + num_accepted_tokens
+            ],
+            device="cuda",
+            dtype=torch.int32,
         )
-        print("next_token_ids: ", next_token_ids)
 
         valid_sampled_tokens_count = torch.tensor(
-            [num_accepted_tokens], 
-            device='cuda', 
-            dtype=torch.int32
+            [num_accepted_tokens], device="cuda", dtype=torch.int32
         )
 
-        self._copy_valid_sampled_token_count(
-            next_token_ids, valid_sampled_tokens_count
-        )
+        self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
-        '''
-        original_propose_draft_token_ids_fn(
-            self,
-            scheduler_output,
-            sampled_token_ids,
-            sampling_metadata,
-            hidden_states,
-            sample_hidden_states,
-            aux_hidden_states,
-            spec_decode_metadata,
-            common_attn_metadata,
-            slot_mappings
-        )
-        '''
-
-        return torch.tensor(proposed_draft_token_ids, device='cuda', dtype=torch.int32)
+        return torch.tensor(proposed_draft_token_ids, device="cuda", dtype=torch.int32)
 
     return fake_propose_draft_token_ids_fn
 
@@ -225,7 +196,7 @@ mamba_kv_cache_dict = {}
 
 def get_fake_execute_model_fn(original_execute_model_fn: Callable):
     last_num_computed_tokens = 0
-    prompt_tokens = None
+    num_prompt_tokens = None
 
     def fake_execute_model_fn(
         self: GPUModelRunner,
@@ -243,25 +214,30 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             mamba_group_id
         ].layer_names[0]
         nonlocal last_num_computed_tokens
-        nonlocal prompt_tokens
+        nonlocal num_prompt_tokens
 
-        if len(scheduler_output.scheduled_new_reqs) > 0:
-            if scheduler_output.scheduled_new_reqs[0].prompt_token_ids is not None:
-                # record number of prompt tokens
-                prompt_tokens = len(scheduler_output.scheduled_new_reqs[0].prompt_token_ids)
+        if (
+            len(scheduler_output.scheduled_new_reqs) > 0
+            and scheduler_output.scheduled_new_reqs[0].prompt_token_ids is not None
+        ):
+            # record number of prompt tokens
+            num_prompt_tokens = len(
+                scheduler_output.scheduled_new_reqs[0].prompt_token_ids
+            )
 
         if len(scheduler_output.scheduled_cached_reqs.req_ids) > 0:
             num_computed_tokens = (
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
             )
-            print("[fake_execute_model_fn] num_computed_tokens: ", num_computed_tokens)
-            print("[fake_execute_model_fn] prompt_tokens: ", prompt_tokens)
-
-            if num_computed_tokens > 0 and prompt_tokens is None:
-                prompt_tokens = num_computed_tokens
-            if self.num_spec_tokens and prompt_tokens is not None and num_computed_tokens > prompt_tokens:
-                print("[fake_execute_model_fn] SUBTRACTING REJECETED TOKENS!!!!")
-                num_computed_tokens -= (num_speculative_tokens + 1 - num_accepted_tokens)
+            if (
+                self.num_spec_tokens
+                and num_prompt_tokens is not None
+                and num_computed_tokens > num_prompt_tokens
+            ):
+                # NOTE (tdoublep) with async scheduling, the scheduler does not have an
+                # accurate measure of the number of computed tokens; we need to subtract
+                # the number of reject tokens from the previous timestep.
+                num_computed_tokens -= num_speculative_tokens + 1 - num_accepted_tokens
             if (
                 num_computed_tokens // BLOCK_SIZE
                 > last_num_computed_tokens // BLOCK_SIZE
@@ -427,8 +403,7 @@ def run_ref_mamba_state_in_subprocess() -> None:
 def _run_ref_mamba_state_worker():
     try:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
-        num_generated_tokens = 100
+        num_generated_tokens = 8000
         num_prompt_tokens = 500
         sampling_params = SamplingParams(
             temperature=0.0, max_tokens=num_generated_tokens
@@ -444,7 +419,6 @@ def _run_ref_mamba_state_worker():
             block_size=BLOCK_SIZE,
             hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
             seed=42,
-            enforce_eager=True,
         )
         global prompt_token_ids
         prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
@@ -454,8 +428,6 @@ def _run_ref_mamba_state_worker():
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
-        print("outputs: ", _outputs)
-
         # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
         # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
         # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
@@ -511,7 +483,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
 
-    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn(GPUModelRunner.propose_draft_token_ids)
+    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
     monkeypatch.setattr(
         GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
     )
@@ -537,13 +509,11 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
-
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
-    #run_ref_mamba_state_in_subprocess()
+    run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
     full_prompt = prompt_dataset["train"][0]["text"]
-
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -774,21 +744,19 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             ],
         ),
     }
-    
 
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
-        max_num_batched_tokens=3072,
-        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
-        seed=42,
-        enforce_eager=True,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        max_num_batched_tokens=3072,
+        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        seed=42,
     )
     global prompt_token_ids
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
@@ -816,25 +784,17 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                     step_action_next.kv_cache_block_ids = prev_block_ids.copy()
         global step_actions
         step_actions = test_config.step_actions
-        outputs = engine.generate(
+        _ = engine.generate(
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
-        print("outputs: ", outputs)
-
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
         print(f"End test case: {test_case_name}")
-        
-        '''
         keys_to_check = [
             (action.postprocess_copy_idx[1] + 1) * BLOCK_SIZE
             for action in test_config.step_actions
             if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
         ]
-     
-        print("keys_to_check: ", keys_to_check)
         mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
-        '''
-        
