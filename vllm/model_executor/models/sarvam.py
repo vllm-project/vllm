@@ -1,4 +1,6 @@
-# coding=utf-8
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
 # Copyright 2026 Sarvam AI team. All rights reserved.
 #
 # This code is based on Llama, Deepseek, and Bailing MoE implementations
