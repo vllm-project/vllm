@@ -30,6 +30,7 @@ from io import BytesIO
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
+import msgspec
 import numpy as np
 from PIL import Image
 from typing_extensions import deprecated
@@ -81,6 +82,90 @@ class SampleRequest:
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+
+
+def serialize_sample_requests(
+    requests: list[SampleRequest],
+    output_path: str,
+) -> None:
+    """
+    Serialize SampleRequest objects to JSON for caching/reuse.
+
+    Args:
+        requests: List of SampleRequest objects to serialize.
+        output_path: Path to write the JSON file.
+    """
+    serializable_requests = []
+    for req in requests:
+        req_dict: dict[str, Any] = {
+            "prompt": req.prompt,
+            "prompt_len": req.prompt_len,
+            "expected_output_len": req.expected_output_len,
+            "request_id": req.request_id,
+        }
+
+        # Handle multi_modal_data (may contain base64 images)
+        if req.multi_modal_data is not None:
+            req_dict["multi_modal_data"] = req.multi_modal_data
+
+        # Handle lora_request (use msgspec for complete serialization)
+        if req.lora_request is not None:
+            req_dict["lora_request"] = msgspec.to_builtins(req.lora_request)
+
+        serializable_requests.append(req_dict)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "version": "1.0",
+                "num_requests": len(requests),
+                "requests": serializable_requests,
+            },
+            f,
+            indent=2,
+        )
+
+    logger.info("Saved %d sample requests to %s", len(requests), output_path)
+
+
+def deserialize_sample_requests(input_path: str) -> list[SampleRequest]:
+    """
+    Deserialize SampleRequest objects from a JSON cache file.
+
+    Args:
+        input_path: Path to the JSON file to read.
+
+    Returns:
+        List of SampleRequest objects.
+    """
+    with open(input_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    if data.get("version") != "1.0":
+        logger.warning(
+            "Sample cache version mismatch. Expected 1.0, got %s",
+            data.get("version"),
+        )
+
+    requests = []
+    for req_dict in data["requests"]:
+        lora_request = None
+        if req_dict.get("lora_request"):
+            lora_request = msgspec.convert(req_dict["lora_request"], LoRARequest)
+
+        requests.append(
+            SampleRequest(
+                prompt=req_dict["prompt"],
+                prompt_len=req_dict["prompt_len"],
+                expected_output_len=req_dict["expected_output_len"],
+                multi_modal_data=req_dict.get("multi_modal_data"),
+                lora_request=lora_request,
+                request_id=req_dict.get("request_id"),
+            )
+        )
+
+    logger.info("Loaded %d sample requests from %s", len(requests), input_path)
+    return requests
 
 
 # -----------------------------------------------------------------------------
@@ -508,7 +593,7 @@ class RandomDataset(BenchmarkDataset):
         requests = []
         token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,

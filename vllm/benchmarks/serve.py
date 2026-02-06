@@ -39,7 +39,13 @@ import aiohttp
 import numpy as np
 from tqdm.asyncio import tqdm
 
-from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samples
+from vllm.benchmarks.datasets import (
+    SampleRequest,
+    add_dataset_parser,
+    deserialize_sample_requests,
+    get_samples,
+    serialize_sample_requests,
+)
 from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     OPENAI_COMPATIBLE_BACKENDS,
@@ -1502,6 +1508,32 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
     )
 
+    # Interactive mode and sample caching arguments
+    interactive_group = parser.add_argument_group("interactive mode options")
+    interactive_group.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Enable interactive mode. After each benchmark run, prompt to "
+        "repeat with the same sampled data or adjust parameters "
+        "(e.g., request rate, concurrency).",
+    )
+    interactive_group.add_argument(
+        "--save-samples",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Save sampled requests to a JSON file for reuse in future runs. "
+        "This avoids re-sampling overhead when repeating benchmarks.",
+    )
+    interactive_group.add_argument(
+        "--load-samples",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load pre-sampled requests from a JSON file instead of sampling. "
+        "Skips dataset sampling entirely for faster benchmark startup.",
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1599,8 +1631,21 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     ):
         args.ignore_eos = True
 
-    # Load the dataset.
-    input_requests = get_samples(args, tokenizer)
+    # Load the dataset (with caching support).
+    if args.load_samples:
+        # Load pre-sampled requests from disk
+        print(f"Loading pre-sampled requests from {args.load_samples}...")
+        input_requests = deserialize_sample_requests(args.load_samples)
+        print(f"Loaded {len(input_requests)} pre-sampled requests.")
+    else:
+        # Sample requests from dataset
+        input_requests = get_samples(args, tokenizer)
+
+    # Save samples if requested
+    if args.save_samples:
+        serialize_sample_requests(input_requests, args.save_samples)
+        print(f"Saved {len(input_requests)} sampled requests to {args.save_samples}")
+
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
@@ -1653,115 +1698,190 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Avoid GC processing "static" data - reduce pause times.
     freeze_gc_heap()
 
-    benchmark_result = await benchmark(
-        task_type=task_type,
-        endpoint_type=backend,
-        api_url=api_url,
-        base_url=base_url,
-        model_id=model_id,
-        model_name=model_name,
-        tokenizer=tokenizer,
-        input_requests=input_requests,
-        logprobs=args.logprobs,
-        request_rate=args.request_rate,
-        burstiness=args.burstiness,
-        disable_tqdm=args.disable_tqdm,
-        num_warmups=args.num_warmups,
-        profile=args.profile,
-        selected_percentile_metrics=percentile_metrics.split(","),
-        selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
-        ignore_eos=args.ignore_eos,
-        goodput_config_dict=goodput_config_dict,
-        max_concurrency=args.max_concurrency,
-        lora_modules=args.lora_modules,
-        extra_headers=headers,
-        extra_body=extra_body,
-        ramp_up_strategy=args.ramp_up_strategy,
-        ramp_up_start_rps=args.ramp_up_start_rps,
-        ramp_up_end_rps=args.ramp_up_end_rps,
-        ready_check_timeout_sec=args.ready_check_timeout_sec,
-    )
-
-    # Save config and results to json
+    # Interactive benchmark loop
+    run_number = 0
     result_json: dict[str, Any] = {}
 
-    # Setup
-    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-    result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.backend  # for backward compatibility
-    result_json["backend"] = args.backend
-    result_json["label"] = label
-    result_json["model_id"] = model_id
-    result_json["tokenizer_id"] = tokenizer_id
-    result_json["num_prompts"] = args.num_prompts
+    while True:
+        run_number += 1
 
-    # Metadata
-    if args.metadata:
-        for item in args.metadata:
-            if "=" in item:
-                kvstring = item.split("=", 1)
-                result_json[kvstring[0].strip()] = kvstring[1].strip()
-            else:
-                raise ValueError(
-                    "Invalid metadata format. Please use KEY=VALUE format."
-                )
+        if run_number > 1:
+            print(f"\n{'=' * 60}")
+            print(f"Starting benchmark run #{run_number}")
+            print(f"  request_rate: {args.request_rate}")
+            print(f"  max_concurrency: {args.max_concurrency}")
+            print(f"  burstiness: {args.burstiness}")
+            print(f"{'=' * 60}\n")
 
-    # Traffic
-    result_json["request_rate"] = (
-        args.request_rate if args.request_rate < float("inf") else "inf"
-    )
-    result_json["burstiness"] = args.burstiness
-    result_json["max_concurrency"] = args.max_concurrency
+        benchmark_result = await benchmark(
+            task_type=task_type,
+            endpoint_type=backend,
+            api_url=api_url,
+            base_url=base_url,
+            model_id=model_id,
+            model_name=model_name,
+            tokenizer=tokenizer,
+            input_requests=input_requests,
+            logprobs=args.logprobs,
+            request_rate=args.request_rate,
+            burstiness=args.burstiness,
+            disable_tqdm=args.disable_tqdm,
+            num_warmups=args.num_warmups if run_number == 1 else 0,
+            profile=args.profile,
+            selected_percentile_metrics=percentile_metrics.split(","),
+            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
+            ignore_eos=args.ignore_eos,
+            goodput_config_dict=goodput_config_dict,
+            max_concurrency=args.max_concurrency,
+            lora_modules=args.lora_modules,
+            extra_headers=headers,
+            extra_body=extra_body,
+            ramp_up_strategy=args.ramp_up_strategy,
+            ramp_up_start_rps=args.ramp_up_start_rps,
+            ramp_up_end_rps=args.ramp_up_end_rps,
+            ready_check_timeout_sec=args.ready_check_timeout_sec
+            if run_number == 1
+            else 0,
+        )
 
-    if args.ramp_up_strategy is not None:
-        result_json["ramp_up_strategy"] = args.ramp_up_strategy
-        result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
-        result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+        # Save config and results to json
+        result_json = {}
 
-    # Merge with benchmark result
-    result_json = {**result_json, **benchmark_result}
+        # Setup
+        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json["date"] = current_dt
+        result_json["endpoint_type"] = args.backend  # for backward compatibility
+        result_json["backend"] = args.backend
+        result_json["label"] = label
+        result_json["model_id"] = model_id
+        result_json["tokenizer_id"] = tokenizer_id
+        result_json["num_prompts"] = args.num_prompts
+        if run_number > 1:
+            result_json["run_number"] = run_number
 
-    if not args.save_detailed:
-        # Remove fields with too many data points
-        for field in [
-            "input_lens",
-            "output_lens",
-            "start_times",
-            "ttfts",
-            "itls",
-            "generated_texts",
-            "errors",
-        ]:
-            if field in result_json:
-                del result_json[field]
-            if field in benchmark_result:
-                del benchmark_result[field]
+        # Metadata
+        if args.metadata:
+            for item in args.metadata:
+                if "=" in item:
+                    kvstring = item.split("=", 1)
+                    result_json[kvstring[0].strip()] = kvstring[1].strip()
+                else:
+                    raise ValueError(
+                        "Invalid metadata format. Please use KEY=VALUE format."
+                    )
+
+        # Traffic
+        result_json["request_rate"] = (
+            args.request_rate if args.request_rate < float("inf") else "inf"
+        )
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        if args.ramp_up_strategy is not None:
+            result_json["ramp_up_strategy"] = args.ramp_up_strategy
+            result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+            result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
+
+        if not args.save_detailed:
+            # Remove fields with too many data points
+            for field in [
+                "input_lens",
+                "output_lens",
+                "start_times",
+                "ttfts",
+                "itls",
+                "generated_texts",
+                "errors",
+            ]:
+                if field in result_json:
+                    del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Save to file
-    if args.save_result or args.append_result:
-        base_model_id = model_id.split("/")[-1]
-        max_concurrency_str = (
-            f"-concurrency{args.max_concurrency}"
-            if args.max_concurrency is not None
-            else ""
-        )
-        label = label or args.backend
-        if args.ramp_up_strategy is not None:
-            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+        if args.save_result or args.append_result:
+            base_model_id = model_id.split("/")[-1]
+            max_concurrency_str = (
+                f"-concurrency{args.max_concurrency}"
+                if args.max_concurrency is not None
+                else ""
+            )
+            run_suffix = f"-run{run_number}" if run_number > 1 else ""
+            result_label = label or args.backend
+            if args.ramp_up_strategy is not None:
+                file_name = f"{result_label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}{run_suffix}.json"  # noqa
+            else:
+                file_name = f"{result_label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}{run_suffix}.json"  # noqa
+            if args.result_filename:
+                file_name = args.result_filename
+            if args.result_dir:
+                os.makedirs(args.result_dir, exist_ok=True)
+                file_name = os.path.join(args.result_dir, file_name)
+            with open(
+                file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
+            ) as outfile:
+                # Append a newline.
+                if args.append_result and outfile.tell() != 0:
+                    outfile.write("\n")
+                json.dump(result_json, outfile)
+            save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+        # Check for interactive mode
+        if not args.interactive:
+            break
+
+        # Interactive prompt
+        print("\n" + "=" * 60)
+        print("Interactive Mode - Commands:")
+        print("  [Enter]           Repeat benchmark with same parameters")
+        print("  q / quit          Exit")
+        print("  rate=N            Set request rate (e.g., rate=10, rate=inf)")
+        print("  concurrency=N     Set max concurrency (e.g., concurrency=5)")
+        print("  burstiness=N      Set burstiness (e.g., burstiness=0.5)")
+        print("=" * 60)
+
+        try:
+            user_input = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting interactive mode.")
+            break
+
+        if user_input.lower() in ("q", "quit", "exit"):
+            print("Exiting interactive mode.")
+            break
+        elif user_input == "":
+            # Repeat with same parameters
+            continue
+        elif "=" in user_input:
+            # Parse parameter change
+            key, value = user_input.split("=", 1)
+            key = key.strip().lower().replace("-", "_")
+            value = value.strip()
+
+            try:
+                if key in ("rate", "request_rate"):
+                    args.request_rate = (
+                        float("inf") if value.lower() == "inf" else float(value)
+                    )
+                    print(f"Updated request_rate to {args.request_rate}")
+                elif key in ("concurrency", "max_concurrency"):
+                    args.max_concurrency = (
+                        None if value.lower() == "none" else int(value)
+                    )
+                    print(f"Updated max_concurrency to {args.max_concurrency}")
+                elif key == "burstiness":
+                    args.burstiness = float(value)
+                    print(f"Updated burstiness to {args.burstiness}")
+                else:
+                    print(f"Unknown parameter: {key}")
+                    print("Available: rate, concurrency, burstiness")
+            except ValueError as e:
+                print(f"Invalid value: {e}")
         else:
-            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-        if args.result_filename:
-            file_name = args.result_filename
-        if args.result_dir:
-            os.makedirs(args.result_dir, exist_ok=True)
-            file_name = os.path.join(args.result_dir, file_name)
-        with open(
-            file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
-        ) as outfile:
-            # Append a newline.
-            if args.append_result and outfile.tell() != 0:
-                outfile.write("\n")
-            json.dump(result_json, outfile)
-        save_to_pytorch_benchmark_format(args, result_json, file_name)
+            print(f"Unknown command: {user_input}")
+            print("Press Enter to repeat, 'q' to quit, or 'param=value' to change.")
 
     return result_json
