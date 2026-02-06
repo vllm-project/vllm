@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.translations.protocol import (
+from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
@@ -401,7 +401,7 @@ class OpenAISpeechToText(OpenAIServing):
         audio_data: bytes,
         request: SpeechToTextRequest,
         raw_request: Request,
-        response_class: type[T | V],
+        response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
