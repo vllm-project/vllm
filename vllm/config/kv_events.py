@@ -5,13 +5,11 @@
 from typing import Literal
 
 from pydantic import Field
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class KVEventsConfig:
     """Configuration for KV event publishing."""
 

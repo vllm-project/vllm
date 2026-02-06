@@ -9,7 +9,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 
 def async_copy_to_gpu(
@@ -38,7 +38,7 @@ class UvaBuffer:
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
-        self.uva = get_cuda_view_from_cpu_tensor(self.cpu)
+        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
 
 
 class UvaBufferPool:
