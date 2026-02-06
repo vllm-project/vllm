@@ -184,7 +184,7 @@ class ServingTokens(OpenAIServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            if sampling_params.logprobs:
+            if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_tokens_logprobs(
                     token_ids=token_ids,
