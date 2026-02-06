@@ -5,7 +5,11 @@
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.sonic_moe import (
     SonicMoeExperts,
     _check_sonicmoe_available,
@@ -21,6 +25,29 @@ requires_cuda = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="CUDA required",
 )
+
+
+def make_dummy_moe_config(
+    num_experts: int = 1,
+    experts_per_token: int = 1,
+    hidden_dim: int = 1,
+    intermediate_size_per_partition: int = 1,
+    in_dtype: torch.dtype = torch.bfloat16,
+    device: torch.device | str = "cuda",
+    activation: str = "silu",
+) -> FusedMoEConfig:
+    return FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_dim,
+        intermediate_size_per_partition=intermediate_size_per_partition,
+        num_local_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation,
+        in_dtype=in_dtype,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+    )
 
 
 def test_check_sonicmoe_available():
@@ -197,22 +224,6 @@ def test_sonic_moe_vs_triton(
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1).to(dtype)
 
-    triton_kernel = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG),
-    )
-    out_triton = triton_kernel(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=False,
-        activation="silu",
-        global_num_experts=num_experts,
-    )
-
-    w1_sonic = permute_weights_for_sonic(w1)
     moe_config = make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=topk,
@@ -220,6 +231,25 @@ def test_sonic_moe_vs_triton(
         intermediate_size_per_partition=n // 2,
         in_dtype=dtype,
     )
+
+    triton_kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        TritonExperts(
+            moe_config=moe_config,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        ),
+    )
+    out_triton = triton_kernel(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation="silu",
+        global_num_experts=num_experts,
+    )
+
+    w1_sonic = permute_weights_for_sonic(w1)
     sonic_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         SonicMoeExperts(moe_config=moe_config, weights_prepermuted=True),
@@ -230,7 +260,6 @@ def test_sonic_moe_vs_triton(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         activation="silu",
         global_num_experts=num_experts,
     )
@@ -260,6 +289,14 @@ def test_sonic_moe_apply_router_weight_on_input():
     num_experts = 8
     dtype = torch.float16
 
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size_per_partition=n // 2,
+        in_dtype=dtype,
+    )
+
     hidden_states = torch.randn(m, k, device="cuda", dtype=dtype) / 10
     w1 = torch.randn(num_experts, n, k, device="cuda", dtype=dtype) / 10
     w2 = torch.randn(num_experts, k, n // 2, device="cuda", dtype=dtype) / 10
@@ -269,7 +306,10 @@ def test_sonic_moe_apply_router_weight_on_input():
 
     triton_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG),
+        TritonExperts(
+            moe_config=moe_config,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        ),
     )
     out_triton = triton_kernel(
         hidden_states=hidden_states,
@@ -277,20 +317,12 @@ def test_sonic_moe_apply_router_weight_on_input():
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         activation="silu",
         apply_router_weight_on_input=True,
         global_num_experts=num_experts,
     )
 
     w1_sonic = permute_weights_for_sonic(w1)
-    moe_config = make_dummy_moe_config(
-        num_experts=num_experts,
-        experts_per_token=topk,
-        hidden_dim=k,
-        intermediate_size_per_partition=n // 2,
-        in_dtype=dtype,
-    )
     sonic_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         SonicMoeExperts(moe_config=moe_config, weights_prepermuted=True),
@@ -301,7 +333,6 @@ def test_sonic_moe_apply_router_weight_on_input():
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         activation="silu",
         apply_router_weight_on_input=True,
         global_num_experts=num_experts,

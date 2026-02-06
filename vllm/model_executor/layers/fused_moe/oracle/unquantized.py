@@ -83,6 +83,10 @@ def select_unquantized_moe_backend(
         and is_act_and_mul
         and not has_bias
         and not use_ep
+        and not moe_config.moe_parallel_config.is_sequence_parallel
+        and moe_config.experts_per_token <= 16
+        and moe_config.in_dtype in (torch.float16, torch.bfloat16)
+        and moe_config.activation in ("silu", "silu_and_mul")
     )
     if sonic_requested and sonic_supported and not sonic_enabled:
         if use_ep:
@@ -93,6 +97,22 @@ def select_unquantized_moe_backend(
             logger.debug_once("Sonic MoE disabled because MoE biases are enabled.")
         elif not is_act_and_mul:
             logger.debug_once("Sonic MoE disabled because is_act_and_mul is False.")
+        elif moe_config.moe_parallel_config.is_sequence_parallel:
+            logger.debug_once(
+                "Sonic MoE disabled because sequence parallelism is enabled."
+            )
+        elif moe_config.experts_per_token > 16:
+            logger.debug_once("Sonic MoE disabled because topk > 16.")
+        elif moe_config.in_dtype not in (torch.float16, torch.bfloat16):
+            logger.debug_once(
+                "Sonic MoE disabled because input dtype is unsupported: %s",
+                moe_config.in_dtype,
+            )
+        elif moe_config.activation not in ("silu", "silu_and_mul"):
+            logger.debug_once(
+                "Sonic MoE disabled because activation is unsupported: %s",
+                moe_config.activation,
+            )
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -242,8 +262,8 @@ def make_unquantized_moe_kernel(
                 quant_config=quant_config,
                 weights_prepermuted=True,
             ),
+            inplace=False,
         )
-        use_inplace = False
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe import XPUExperts
 
