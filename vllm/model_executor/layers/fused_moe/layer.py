@@ -335,6 +335,7 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
+        has_shared_experts: bool = False,
     ):
         super().__init__()
 
@@ -564,7 +565,7 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or self.shared_experts is not None,
+            disable_inplace=disable_inplace() or has_shared_experts,
         )
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
