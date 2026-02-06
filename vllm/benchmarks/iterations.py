@@ -83,6 +83,47 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# Verified 1-token words (GPT-4 tokenizer verified, likely 1 token in most tokenizers)
+SINGLE_TOKEN_WORDS = [
+    "I",
+    "a",
+    "an",
+    "in",
+    "on",
+    "at",
+    "is",
+    "it",
+    "to",
+    "do",
+    "go",
+    "he",
+    "we",
+    "me",
+    "my",
+    "of",
+    "up",
+    "so",
+    "no",
+    "by",
+    "or",
+    "the",
+    "and",
+    "for",
+    "you",
+    "are",
+    "was",
+    "not",
+    "but",
+    "can",
+    "all",
+    "out",
+    "one",
+    "get",
+    "him",
+    "her",
+    "who",
+]
+
 
 @dataclass
 class BenchmarkConfig:
@@ -106,7 +147,8 @@ class IterationResult:
     mode: str
     context_len: int
     input_len: int
-    batch_size: int
+    batch_size: int  # per-DP batch size
+    global_batch_size: int  # total batch size across all DP domains
     iteration: int
     total_latency_ms: float
     latency_per_iter_ms: float
@@ -178,7 +220,7 @@ def build_prompts(
     - benchmark_prompt: Used for the actual benchmark run
 
     For prefill mode:
-        context_prompt = context_len tokens ("hello " repeated)
+        context_prompt = context_len tokens
         benchmark_prompt = context_len + input_len tokens
         The first context_len tokens match context_prompt (prefix cache hit).
         We measure prefill of the remaining input_len new tokens.
@@ -188,9 +230,15 @@ def build_prompts(
         benchmark_prompt = same as context_prompt (full prefix cache hit)
         We measure only decode iterations (no prefill work).
     """
-    # Build context portion ("hello " is roughly 1-2 tokens per word)
-    context_words = context_len // 2
-    context_part = "hello " * max(1, context_words) if context_len > 0 else ""
+    import random
+
+    # Build context portion with random tokens (seeded for reproducibility)
+    rng = random.Random(42)  # Fixed seed for reproducible prompts
+    context_part = (
+        " ".join(rng.choice(SINGLE_TOKEN_WORDS) for _ in range(context_len))
+        if context_len > 0
+        else ""
+    )
 
     # Context prompt for prefix cache warmup
     context_prompt = context_part if context_len > 0 else None
@@ -198,9 +246,15 @@ def build_prompts(
     # Build benchmark prompt
     if mode == "prefill":
         # Add new input tokens after context (these will be prefilled)
-        input_words = input_len // 2
-        input_part = "world " * max(1, input_words)
-        benchmark_prompt = context_part + input_part
+        # Use different seed to ensure input differs from context
+        input_rng = random.Random(43)
+        input_part = " ".join(
+            input_rng.choice(SINGLE_TOKEN_WORDS) for _ in range(input_len)
+        )
+        # Add space separator between context and input
+        benchmark_prompt = (
+            context_part + " " + input_part if context_part else input_part
+        )
     else:
         # Decode: same as context (full prefix cache hit, no prefill)
         benchmark_prompt = context_part
@@ -249,27 +303,67 @@ async def run_compilation_warmup(
     session: aiohttp.ClientSession,
     rotator: EndpointRotator,
     model: str,
+    dp_size: int,
+    input_len: int,
 ) -> None:
-    """Send a warmup request to trigger runtime compilation."""
-    endpoint = rotator.all()[0]
-    logger.info("Sending warmup request to trigger compilation...")
-    try:
-        resp = await session.post(
-            f"{endpoint}/v1/completions",
-            json={
-                "model": model,
-                "prompt": "Hello",
-                "max_tokens": 1,
-                "stream": False,
-            },
+    """Send warmup requests to trigger runtime compilation on all DP domains.
+
+    Sends dp_size requests with input_len tokens each to ensure all DP domains
+    compile their CUDA graphs before the actual benchmark.
+    """
+    import random
+
+    # Build warmup prompt with input_len tokens
+    rng = random.Random(99)  # Different seed from benchmark prompts
+    warmup_prompt = " ".join(rng.choice(SINGLE_TOKEN_WORDS) for _ in range(input_len))
+
+    logger.info(
+        "Compilation warmup: sending %d requests with %d tokens each...",
+        dp_size,
+        input_len,
+    )
+
+    # Send dp_size requests to cover all DP domains
+    # Explicitly target each DP domain via X-data-parallel-rank header
+    tasks = []
+
+    for i in range(dp_size):
+        endpoint = rotator.next()
+        task = asyncio.ensure_future(
+            session.post(
+                f"{endpoint}/v1/completions",
+                json={
+                    "model": model,
+                    "prompt": warmup_prompt,
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+                headers={"X-data-parallel-rank": str(i)},
+            )
         )
-        if resp.status == 200:
-            await resp.json()
-            logger.info("Compilation warmup complete")
-        else:
-            logger.warning("Warmup request failed: HTTP %d", resp.status)
-    except Exception as e:
-        logger.warning("Warmup request failed: %s", e)
+        tasks.append(task)
+
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    success_count = sum(
+        1 for r in responses if not isinstance(r, Exception) and r.status == 200
+    )
+
+    # Consume response bodies
+    for resp in responses:
+        if not isinstance(resp, Exception):
+            await resp.read()
+
+    if success_count < dp_size:
+        logger.warning(
+            "Compilation warmup: only %d/%d requests succeeded - "
+            "some DP domains may not be warmed up",
+            success_count,
+            dp_size,
+        )
+    else:
+        logger.info(
+            "Compilation warmup: %d/%d requests succeeded", success_count, dp_size
+        )
 
 
 async def run_prefix_cache_warmup(
@@ -278,6 +372,7 @@ async def run_prefix_cache_warmup(
     model: str,
     context_prompt: str | None,
     batch_size: int,
+    dp_size: int,
 ) -> None:
     """Populate prefix cache with context tokens before benchmarking.
 
@@ -289,10 +384,13 @@ async def run_prefix_cache_warmup(
 
     logger.info("Populating prefix cache...")
 
-    # Send warmup requests to all endpoints (round-robin)
+    # Send warmup requests to all endpoints
+    # Explicitly target each DP domain via X-data-parallel-rank header
     tasks = []
-    for _ in range(batch_size):
+
+    for i in range(batch_size):
         endpoint = rotator.next()
+        dp_rank = i % dp_size
         task = asyncio.ensure_future(
             session.post(
                 f"{endpoint}/v1/completions",
@@ -302,6 +400,7 @@ async def run_prefix_cache_warmup(
                     "max_tokens": 1,
                     "stream": False,
                 },
+                headers={"X-data-parallel-rank": str(dp_rank)},
             )
         )
         tasks.append(task)
@@ -326,6 +425,7 @@ async def run_single_iteration(
     rotator: EndpointRotator,
     benchmark_prompt: str,
     batch_size: int,
+    dp_size: int,
 ) -> tuple[float, int, int]:
     """Run one iteration: sleep → queue requests → wake → measure."""
 
@@ -333,13 +433,13 @@ async def run_single_iteration(
     await call_debug_endpoint(session, rotator, "/debug/sleep", {"level": "0"})
 
     # 2. Build requests and start sending them (they queue while server sleeps)
-    # We use asyncio.ensure_future to actually start the requests immediately,
-    # not just create coroutines. The requests will be sent to the server
-    # and queue there while scheduling is paused.
+    # Explicitly target each DP domain via X-data-parallel-rank header
     max_tokens = 1 if config.mode == "prefill" else config.iterations
     tasks = []
-    for _ in range(batch_size):
+
+    for i in range(batch_size):
         endpoint = rotator.next()
+        dp_rank = i % dp_size
 
         # ensure_future schedules the coroutine immediately
         task = asyncio.ensure_future(
@@ -351,12 +451,13 @@ async def run_single_iteration(
                     "max_tokens": max_tokens,
                     "stream": False,
                 },
+                headers={"X-data-parallel-rank": str(dp_rank)},
             )
         )
         tasks.append(task)
 
-    # Small delay to ensure requests are queued on server
-    await asyncio.sleep(0.1)
+    # Small delay to ensure last request is queued on server
+    await asyncio.sleep(0.05)
 
     # 3. Resume scheduling on ALL endpoints and time the batch
     start = time.perf_counter()
@@ -415,6 +516,9 @@ async def run_benchmark(
 ) -> tuple[list[IterationResult], ServerConfig]:
     """Main benchmark loop with parameter sweeping."""
 
+    # Generate unique run ID for trace files (yymmddHHMMSS format)
+    run_id = time.strftime("%y%m%d%H%M%S")
+
     rotator = EndpointRotator(config.endpoints)
     results: list[IterationResult] = []
 
@@ -436,7 +540,13 @@ async def run_benchmark(
         )
 
         # Warmup: trigger runtime compilation before benchmarking
-        await run_compilation_warmup(session, rotator, config.model)
+        # Use max(context_len + input_len) to ensure compilation covers all cases
+        max_context_len = max(config.context_lens) if config.context_lens else 0
+        max_input_len = max(config.input_lens) if config.input_lens else 1
+        warmup_tokens = max_context_len + max_input_len
+        await run_compilation_warmup(
+            session, rotator, config.model, dp_size, warmup_tokens
+        )
 
         # Sweep all parameter combinations
         param_combos = list(
@@ -482,15 +592,22 @@ async def run_benchmark(
             # Prefix cache warmup: populate KV cache before profiling
             # This is NOT profiled - we only profile the actual benchmark
             await run_prefix_cache_warmup(
-                session, rotator, config.model, context_prompt, global_batch_size
+                session,
+                rotator,
+                config.model,
+                context_prompt,
+                global_batch_size,
+                dp_size,
             )
 
             # Start profiling for this param combo (after prefix cache warmup)
             # Use batch_size_per_dp in trace prefix for consistency with SA naming
+            # Include run_id timestamp for unique trace identification
             trace_prefix = None
             if config.profile:
                 trace_prefix = (
-                    f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size_per_dp}"
+                    f"{run_id}_{config.mode}_ctx{ctx_len}_in{in_len}"
+                    f"_bs{batch_size_per_dp}"
                 )
                 started = await call_debug_endpoint(
                     session, rotator, "/debug/profile/start", {"prefix": trace_prefix}
@@ -510,6 +627,7 @@ async def run_benchmark(
                 rotator,
                 benchmark_prompt,
                 global_batch_size,
+                dp_size,
             )
 
             # Stop profiling for this param combo
@@ -532,6 +650,7 @@ async def run_benchmark(
                     context_len=ctx_len,
                     input_len=in_len,
                     batch_size=batch_size_per_dp,
+                    global_batch_size=global_batch_size,
                     iteration=num_output_tokens,
                     total_latency_ms=elapsed_ms,
                     latency_per_iter_ms=latency_per_iter,
@@ -588,9 +707,9 @@ def print_results_summary(
         logger.warning("No results to summarize")
         return
 
-    print("\n" + "=" * 110)
+    print("\n" + "=" * 130)
     print("BENCHMARK RESULTS SUMMARY")
-    print("=" * 110)
+    print("=" * 130)
 
     if server_config:
         print(
@@ -599,22 +718,24 @@ def print_results_summary(
             f"PP={server_config.pipeline_parallel_size}, "
             f"World={server_config.world_size}"
         )
-        print("-" * 110)
+        print("-" * 130)
 
     print(
-        f"{'Mode':>8} {'Context':>8} {'Input':>8} {'Batch':>6} {'Iters':>6} "
-        f"{'Total (ms)':>12} {'Per-Iter (ms)':>14} {'Tokens/s':>12}"
+        f"{'Mode':>8} {'Context':>8} {'Input':>8} {'DP-BS':>6} {'G-BS':>6} "
+        f"{'Iters':>6} {'PromptTok':>10} {'Total (ms)':>12} {'Per-Iter':>10} "
+        f"{'Tokens/s':>12}"
     )
-    print("-" * 110)
+    print("-" * 130)
 
     for r in results:
         print(
             f"{r.mode:>8} {r.context_len:>8} {r.input_len:>8} {r.batch_size:>6} "
-            f"{r.iteration:>6} {r.total_latency_ms:>12.2f} "
-            f"{r.latency_per_iter_ms:>14.2f} {r.tokens_per_second:>12.2f}"
+            f"{r.global_batch_size:>6} {r.iteration:>6} {r.prompt_tokens:>10} "
+            f"{r.total_latency_ms:>12.2f} {r.latency_per_iter_ms:>10.2f} "
+            f"{r.tokens_per_second:>12.2f}"
         )
 
-    print("=" * 110 + "\n")
+    print("=" * 130 + "\n")
 
 
 def write_results_json(results: list[IterationResult], output_path: str) -> None:
