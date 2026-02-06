@@ -821,11 +821,11 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
                 version_str = str(config.version)
                 version_parts = version_str.split(".")
                 version = tuple(int(x) for x in version_parts[:2])
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
                 raise ValueError(
                     f"Invalid model version format in config: {config.version}. "
                     "Expected a dot-separated version string like '4.5'."
-                )
+                ) from e
         else:
             # Default to 2.6 for backward compatibility
             version = (2, 6)
