@@ -117,7 +117,6 @@ class IterStats(msgspec.Struct):
     iter_total_tokens_count: int = 0
     token_scheduled_time: float = 0.0
     token_output_time: float = 0.0
-    num_cached_tokens: int = 0
 
 
 @dataclass

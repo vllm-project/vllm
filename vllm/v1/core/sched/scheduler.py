@@ -1399,7 +1399,6 @@ class Scheduler(SchedulerInterface):
                     iter_batch_size=iter_batch_size,
                     token_scheduled_time=schedule_time,
                     token_output_time=token_output_time,
-                    num_cached_tokens=request.num_cached_tokens,
                 )
                 if self.vllm_config.observability_config.token_level_profiling
                 else None

@@ -22,7 +22,6 @@ class Event:
 class ObservableContext:
     token_related_events: list[Event]
     engine_core_events: list[EngineCoreEvent]
-    num_cached_tokens: int | None = None
     not_empty: bool = False
 
     @classmethod
@@ -68,9 +67,6 @@ class ObservableContext:
                 attributes=token_attrs,
             )
         )
-
-        if self.num_cached_tokens is None:
-            self.num_cached_tokens = iter_stats.num_cached_tokens
 
     def _update_events(self, events: list[EngineCoreEvent]) -> None:
         self.engine_core_events.extend(events)
