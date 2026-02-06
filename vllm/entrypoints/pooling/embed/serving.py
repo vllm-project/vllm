@@ -28,10 +28,11 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.renderers.inputs import TokPrompt
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.serial_utils import EmbedDType, Endianness
@@ -369,7 +370,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -424,12 +425,6 @@ class OpenAIServingEmbedding(OpenAIServing):
             if isinstance(pooling_params, ErrorResponse):
                 return pooling_params
 
-            # Verify and set the task for pooling params
-            try:
-                pooling_params.verify("embed", self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
-
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
 
@@ -463,8 +458,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return None
 
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _collect_batch(
         self,
@@ -634,7 +628,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return None
 
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def create_embedding(
         self,
@@ -661,18 +655,3 @@ class OpenAIServingEmbedding(OpenAIServing):
         )
 
         return await self.handle(ctx)  # type: ignore[return-value]
-
-    def _create_pooling_params(
-        self,
-        ctx: EmbeddingServeContext,
-    ) -> PoolingParams | ErrorResponse:
-        pooling_params = super()._create_pooling_params(ctx)
-        if isinstance(pooling_params, ErrorResponse):
-            return pooling_params
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-        return pooling_params

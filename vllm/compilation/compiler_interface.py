@@ -101,6 +101,7 @@ class CompilerInterface:
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         """
@@ -301,6 +302,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
@@ -525,6 +527,7 @@ class InductorAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)

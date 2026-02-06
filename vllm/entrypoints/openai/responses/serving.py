@@ -63,7 +63,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -117,12 +116,13 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
-from vllm.inputs.parse import get_prompt_len
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.parser import ParserManager
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -217,8 +217,13 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser = self._get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
+        # Set up the unified parser - either a unified parser or fall back to
+        # separate parsers accessed through the parser interface
+        self.parser = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -263,10 +268,6 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_call_id_type = "random"
 
         self.enable_auto_tools = enable_auto_tools
-        # set up tool use
-        self.tool_parser = self._get_tool_parser(
-            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
-        )
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -291,10 +292,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = get_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_prompt)
         if self.max_model_len <= prompt_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
@@ -441,7 +442,7 @@ class OpenAIServingResponses(OpenAIServing):
                 default_max_tokens = get_max_tokens(
                     self.max_model_len,
                     request,
-                    engine_prompt,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
                 )
 
@@ -469,9 +470,13 @@ class OpenAIServingResponses(OpenAIServing):
                         context = ParsableContext(
                             response_messages=messages,
                             tokenizer=tokenizer,
-                            reasoning_parser_cls=self.reasoning_parser,
+                            reasoning_parser_cls=self.parser.reasoning_parser_cls
+                            if self.parser
+                            else None,
                             request=request,
-                            tool_parser_cls=self.tool_parser,
+                            tool_parser_cls=self.parser.tool_parser_cls
+                            if self.parser
+                            else None,
                             available_tools=available_tools,
                             chat_template=self.chat_template,
                             chat_template_content_format=self.chat_template_content_format,
@@ -479,8 +484,8 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = SimpleContext()
 
-                if self.reasoning_parser is not None:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
                     if (
                         isinstance(
                             struct_out := sampling_params.structured_outputs,
@@ -617,7 +622,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=None,
             tool_dicts=tool_dicts,
-            tool_parser=self.tool_parser,
+            tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
         return messages, engine_prompts
 
@@ -909,114 +914,57 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
-        if self.reasoning_parser:
-            try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in reasoning parser creation.")
-                raise e
-
-            reasoning, content = reasoning_parser.extract_reasoning(
-                final_output.text, request=request
-            )
-        else:
-            reasoning = None
-            content = final_output.text
-
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
-            output_text = ""
-            if content:
-                output_text = content
-            elif reasoning:
-                output_text = f"[reasoning: {reasoning}]"
-
-            if output_text:
-                self.request_logger.log_outputs(
-                    request_id=request.request_id,
-                    outputs=output_text,
-                    output_token_ids=final_output.token_ids,
-                    finish_reason=final_output.finish_reason,
-                    is_streaming=False,
-                    delta=False,
-                )
-
-        reasoning_item = None
-        message_item = None
-        if reasoning:
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
-                ],
-                status=None,  # NOTE: Only the last output item has status.
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=False,
+                delta=False,
             )
-        tool_calls, content = self._parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            content=content,
-            enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.tool_parser,
-        )
 
-        if content or (self.use_harmony and tool_calls):
-            res_text_part = None
-            if content:
-                res_text_part = ResponseOutputText(
-                    text=content,
-                    annotations=[],  # TODO
-                    type="output_text",
-                    logprobs=(
-                        self._create_response_logprobs(
-                            token_ids=final_output.token_ids,
-                            logprobs=final_output.logprobs,
-                            tokenizer=tokenizer,
-                            top_logprobs=request.top_logprobs,
-                        )
-                        if request.is_include_output_logprobs()
-                        else None
-                    ),
-                )
-            message_item = ResponseOutputMessage(
+        # Compute logprobs if requested
+        logprobs = None
+        if request.is_include_output_logprobs() and final_output.logprobs:
+            logprobs = self._create_response_logprobs(
+                token_ids=final_output.token_ids,
+                logprobs=final_output.logprobs,
+                tokenizer=tokenizer,
+                top_logprobs=request.top_logprobs,
+            )
+
+        # Use parser to extract and create response output items
+        if self.parser:
+            parser = self.parser(tokenizer)
+            return parser.extract_response_outputs(
+                model_output=final_output.text,
+                request=request,
+                enable_auto_tools=self.enable_auto_tools,
+                tool_call_id_type=self.tool_call_id_type,
+                logprobs=logprobs,
+            )
+
+        # Fallback when no parser is configured
+        return [
+            ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[res_text_part] if res_text_part else [],
+                content=[
+                    ResponseOutputText(
+                        text=final_output.text,
+                        annotations=[],
+                        type="output_text",
+                        logprobs=logprobs,
+                    )
+                ]
+                if final_output.text
+                else [],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-        outputs = []
-
-        if reasoning_item:
-            outputs.append(reasoning_item)
-        if message_item:
-            outputs.append(message_item)
-        if tool_calls:
-            # We use a simple counter for history_tool_call_count because
-            # we don't track the history of tool calls in the Responses API yet.
-            # This means that the tool call index will start from 0 for each
-            # request.
-            tool_call_items = []
-            for history_tool_call_cnt, tool_call in enumerate(tool_calls):
-                tool_call_items.append(
-                    ResponseFunctionToolCall(
-                        id=f"fc_{random_uuid()}",
-                        call_id=tool_call.id
-                        if tool_call.id
-                        else make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=history_tool_call_cnt,
-                        ),
-                        type="function_call",
-                        status="completed",
-                        name=tool_call.name,
-                        arguments=tool_call.arguments,
-                    )
-                )
-            outputs.extend(tool_call_items)
-        return outputs
+        ]
 
     def _make_response_output_items_with_harmony(
         self,
@@ -1339,8 +1287,8 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id = ""
         reasoning_parser = None
-        if self.reasoning_parser:
-            reasoning_parser = self.reasoning_parser(tokenizer)
+        if self.parser and self.parser.reasoning_parser_cls:
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         previous_text = ""
         previous_token_ids: list[int] = []
         first_delta_sent = False
