@@ -67,15 +67,6 @@ from .kimi_audio_tower import KimiAudioTower
 
 logger = init_logger(__name__)
 
-
-# Debug toggle: set KIMI_AUDIO_ASR_DEBUG=1 to emit one-time diagnostics.
-
-_DEBUG_ASR = os.getenv("KIMI_AUDIO_ASR_DEBUG", "0") not in ("0", "false", "False", "")
-
-_DEBUG_LOG_COUNT = 0
-_DEBUG_LOG_LIMIT = 5
-
-
 __all__ = ["KimiAudioForConditionalGeneration"]
 
 
@@ -87,19 +78,12 @@ _KIMIA_PROMPT_MANAGER_KEY: tuple[str, int, int] | None = None
 
 
 def _write_wav_tmp(audio: np.ndarray, sample_rate: int) -> str:
-    """Write float32 waveform to a temporary wav file. Returns the file path."""
-
-    # Convert float32 [-1,1] to int16 PCM.
-
+    """Write float32 waveform to a temporary wav file."""
     x = np.clip(audio, -1.0, 1.0)
-
     pcm16 = (x * 32767.0).astype(np.int16)
-
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_name = tmp.name
-
     wavfile.write(tmp_name, sample_rate, pcm16)
-
     return tmp_name
 
 
@@ -470,52 +454,6 @@ class KimiAudioForConditionalGeneration(
 
         if isinstance(audio_input_ids, torch.Tensor) and audio_input_ids.dim() == 2:
             audio_input_ids = audio_input_ids.squeeze(0)
-
-        global _DEBUG_LOG_COUNT
-
-        if _DEBUG_ASR:
-            wi = whisper_input_features
-            mi = is_continuous_mask
-            ti = text_input_ids
-            ai = audio_input_ids
-
-            should_log = (
-                _DEBUG_LOG_COUNT < _DEBUG_LOG_LIMIT
-                or wi is not None
-                or (
-                    isinstance(input_ids, torch.Tensor) and input_ids.numel() > 64
-                    # Likely prefill / full prompt.
-                )
-            )
-
-            if should_log:
-                _DEBUG_LOG_COUNT += 1
-                try:
-                    logger.warning(
-                        "[Kimi-Audio ASR DEBUG] embed_input_ids received: "
-                        "input_ids=%s whisper_input_features=%s is_continuous_mask=%s "
-                        "text_input_ids=%s audio_input_ids=%s",
-                        tuple(input_ids.shape),
-                        None if wi is None else tuple(getattr(wi, "shape", ())),
-                        None if mi is None else tuple(getattr(mi, "shape", ())),
-                        None if ti is None else tuple(getattr(ti, "shape", ())),
-                        None if ai is None else tuple(getattr(ai, "shape", ())),
-                    )
-
-                    if isinstance(mi, torch.Tensor):
-                        logger.warning(
-                            "[Kimi-Audio ASR DEBUG] is_continuous_mask true_count=%s",
-                            int(mi.to(torch.bool).sum().item()),
-                        )
-
-                    if isinstance(wi, torch.Tensor):
-                        logger.warning(
-                            "[Kimi-Audio ASR DEBUG] whisper_input_features abs_mean=%s",
-                            float(wi.abs().mean().item()),
-                        )
-
-                except Exception:
-                    logger.exception("[Kimi-Audio ASR DEBUG] failed to log mm kwargs")
 
         true_input_ids = input_ids
         if isinstance(text_input_ids, torch.Tensor) and (

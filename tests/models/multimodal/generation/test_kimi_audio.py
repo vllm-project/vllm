@@ -20,7 +20,6 @@ class _DummyEmbedTokens:
         self.weight = torch.zeros((1, hidden), dtype=torch.float16)
 
     def __call__(self, ids: torch.Tensor) -> torch.Tensor:
-        # ids: [S]
         s = int(ids.numel())
         return torch.zeros((s, self.embedding_dim), dtype=self.weight.dtype)
 
@@ -31,7 +30,6 @@ class _DummyVQAdaptor(torch.nn.Module):
         self.hidden = hidden
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Expect [S, B, F] and return [S, B, H]
         assert x.dim() == 3
         s, b = int(x.shape[0]), int(x.shape[1])
         return torch.zeros((s, b, self.hidden), dtype=torch.float16)
@@ -44,9 +42,7 @@ class _DummyModel:
 
 
 def test_embed_input_ids_smoke_no_shape_errors():
-    # This is a lightweight unit test to ensure the embed_input_ids mixing path
-    # works with flattened token shapes (vLLM V1 convention) and does not crash
-    # on common [S] / [S, F] inputs.
+    # Lightweight smoke test for embed_input_ids mixing path.
     hidden = 3584
     s = 8
 
