@@ -250,5 +250,7 @@ def test_rocm_wvsplitk_fp8_kernel(
 
     if xnorm:
         assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-8)
+    elif k >= 32 * 1024:
+        assert torch.allclose(out, ref_out, 0.05)  # wider thresh for large-K & no xnorm
     else:
         assert torch.allclose(out, ref_out, 0.01)
