@@ -582,10 +582,10 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    weight_transfer_config: WeightTransferConfig | None = None
-    """Configuration for weight transfer during RL training. 
-    Accepts a JSON string or dict with backend-specific options.
-    Example: '{"backend": "nccl"}'"""
+    weight_transfer_config: WeightTransferConfig | None = get_field(
+        VllmConfig,
+        "weight_transfer_config",
+    )
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
