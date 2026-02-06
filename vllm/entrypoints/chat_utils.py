@@ -1432,6 +1432,42 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
+_ROLES_TEXT_ONLY = frozenset({"system", "developer"})
+"""Roles whose ``content`` field must only contain text parts,
+per the OpenAI Chat Completion API specification."""
+
+_TEXT_CONTENT_TYPES = frozenset({
+    "text", "input_text", "output_text", "thinking", "refusal",
+})
+"""Content part types that are considered text-only."""
+
+
+def _validate_text_only_content(
+    role: str,
+    content: list[ChatCompletionContentPartParam],
+) -> None:
+    """Raise ``ValueError`` if *content* contains non-text parts for a
+    text-only role (system / developer).
+
+    According to the OpenAI API specification, ``system`` and ``developer``
+    role messages only accept ``text`` content type.  Multimodal content
+    parts (e.g. ``image_url``, ``input_audio``, ``video_url``) are not
+    permitted in these roles.
+
+    See: https://platform.openai.com/docs/api-reference/chat/create
+    """
+    for part in content:
+        if isinstance(part, str):
+            continue
+        part_type = part.get("type")
+        if part_type is not None and part_type not in _TEXT_CONTENT_TYPES:
+            raise ValueError(
+                f"Content part type '{part_type}' is not supported "
+                f"in '{role}' messages. Only text content is accepted "
+                f"for '{role}' role messages."
+            )
+
+
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
@@ -1446,6 +1482,11 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+
+    # Validate that system/developer messages only contain text content
+    if role in _ROLES_TEXT_ONLY and isinstance(content, list):
+        _validate_text_only_content(role, content)  # type: ignore[arg-type]
+
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
