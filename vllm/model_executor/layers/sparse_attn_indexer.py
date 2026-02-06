@@ -126,6 +126,15 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
+            # Compute lengths from row spans
+            # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
+            # torch.ops._C.large_context_topk(
+            #    logits,
+            #    topk_indices,
+            #    lengths,
+            #    chunk.cu_seqlen_ks,  # row_starts
+            # )
+
     if has_decode:
         decode_metadata = attn_metadata.decode
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
@@ -168,6 +177,7 @@ def sparse_attn_indexer(
             if next_n == 1:
                 lengths = decode_metadata.seq_lens
             else:
+                # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
                 lengths = (
                     decode_metadata.seq_lens.unsqueeze(1)
                     - next_n
