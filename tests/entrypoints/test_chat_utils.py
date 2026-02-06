@@ -2735,6 +2735,62 @@ def test_system_message_rejects_non_text_content(
 
 
 @pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize(
+    ("part", "part_type_label"),
+    [
+        (
+            {"image_url": "https://example.com/img.png"},
+            "image_url",
+        ),
+        (
+            {"audio_url": "https://example.com/audio.mp3"},
+            "audio_url",
+        ),
+        (
+            {"video_url": "https://example.com/vid.mp4"},
+            "video_url",
+        ),
+        (
+            {"input_audio": {"data": "abc", "format": "wav"}},
+            "input_audio",
+        ),
+    ],
+    ids=[
+        "image_url_no_type",
+        "audio_url_no_type",
+        "video_url_no_type",
+        "input_audio_no_type",
+    ],
+)
+def test_system_message_rejects_mm_content_without_type_key(
+    phi3v_model_config, role, part, part_type_label
+):
+    """Parts without an explicit ``type`` field but with a multimodal key
+    (e.g. ``{"image_url": "..."}`` ) must also be rejected for text-only
+    roles.
+
+    See https://github.com/vllm-project/vllm/issues/33925
+    """
+    messages = [
+        {
+            "role": role,
+            "content": [part],
+        },
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+    ]
+
+    with pytest.raises(ValueError, match=f"'{part_type_label}' is not supported"):
+        parse_chat_messages(
+            messages,
+            phi3v_model_config,
+            content_format="string",
+        )
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
 def test_system_message_accepts_text_content(phi3v_model_config, role):
     """System and developer messages with text-only content should work."""
     messages = [
