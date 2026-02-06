@@ -110,14 +110,14 @@ message GenerateRequest {
 // Output logprobs - matches SGLang structure for code reuse
 message OutputLogProbs {
   repeated float token_logprobs = 1;   // Logprob for each output token
-  repeated int32 token_ids = 2;        // Token ID for each position
+  repeated uint32 token_ids = 2;       // Token ID for each position
   repeated TopLogProbs top_logprobs = 3; // Top-k alternatives per position
 }
 
 // Input (prompt) logprobs - first token has no logprob (None)
 message InputLogProbs {
   repeated InputTokenLogProb token_logprobs = 1;  // Logprob per prompt token
-  repeated int32 token_ids = 2;                   // Prompt token IDs
+  repeated uint32 token_ids = 2;                  // Prompt token IDs
   repeated TopLogProbs top_logprobs = 3;          // Top-k alternatives per position
 }
 
@@ -128,7 +128,7 @@ message InputTokenLogProb {
 
 message TopLogProbs {
   repeated float values = 1;           // Logprob values for top-k tokens
-  repeated int32 token_ids = 2;        // Token IDs for top-k tokens
+  repeated uint32 token_ids = 2;       // Token IDs for top-k tokens
 }
 
 // =====================
