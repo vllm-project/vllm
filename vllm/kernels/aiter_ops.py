@@ -49,6 +49,8 @@ def rms_norm(
 ) -> Tensor:
     assert variance_size is None
     assert x.dtype in (torch.float16, torch.bfloat16)
+    if weight is None:
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     return torch.ops.vllm_aiter.rms_norm(x, weight, epsilon)
 
 

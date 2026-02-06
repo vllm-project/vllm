@@ -100,6 +100,16 @@ class TestRMSNorm:
         assert not impl.supports_args(x, weight, epsilon, 4)
         assert not impl.supports_args(x, weight, epsilon, variance_size=4)
 
+        # test weight=None behavior
+        out_impl_no_weight = impl.impl_fn(x, None, epsilon)
+        out_impl_unit_weight = impl.impl_fn(x, torch.ones_like(weight), epsilon)
+        torch.testing.assert_close(
+            out_impl_no_weight,
+            out_impl_unit_weight,
+            rtol=get_default_rtol(out_impl_no_weight),
+            atol=2e-4,
+        )
+
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
