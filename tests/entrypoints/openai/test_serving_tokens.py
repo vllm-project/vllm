@@ -88,6 +88,32 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("logprobs_value", [0, 1, 5])
+async def test_generate_logprobs(client, logprobs_value):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 5,
+            "temperature": 0.0,
+            "logprobs": logprobs_value,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    choice = data["choices"][0]
+    assert choice["logprobs"] is not None
+    logprobs_content = choice["logprobs"]["content"]
+    assert len(logprobs_content) == len(choice["token_ids"])
+    for entry in logprobs_content:
+        assert "logprob" in entry
+        assert len(entry["top_logprobs"]) >= 1
+        assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+
+
+@pytest.mark.asyncio
 async def test_same_response_as_chat_completions(client, tokenizer, messages):
     token_ids = tokenizer.apply_chat_template(
         messages,
