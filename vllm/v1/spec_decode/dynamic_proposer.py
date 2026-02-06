@@ -65,7 +65,6 @@ class DynamicProposer(EagleProposer):
         )
 
         logger.info("DynamicProposer initialized for adaptive k.")
-        print("[DynamicProposer] INITIALIZED")
 
         # If the method is eagle_dynamic and the draft model is eagle3,
         # we treat it as eagle3 to enable eagle3-specific logic
@@ -182,11 +181,11 @@ class DynamicProposer(EagleProposer):
                 f"req={short_id} acc={avg_acceptance_rate:.0%} k={k_change}"
             )
 
-        # Print batch summary in one line
+        # Log batch summary
         if batch_summary_parts:
             batch_size = len(batch_summary_parts)
             summary = " | ".join(batch_summary_parts)
-            print(f"[DynamicProposer] Batch({batch_size}): {summary}", flush=True)
+            logger.debug("Batch(%d): %s", batch_size, summary)
 
         return spec_tokens_for_batch
 
@@ -197,7 +196,7 @@ class DynamicProposer(EagleProposer):
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor,
+        token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -254,7 +253,7 @@ class DynamicProposer(EagleProposer):
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
                 next_token_ids=next_token_ids,
-                last_token_indices=last_token_indices,
+                token_indices_to_sample=token_indices_to_sample,
                 common_attn_metadata=common_attn_metadata,
                 sampling_metadata=sampling_metadata,
                 mm_embed_inputs=mm_embed_inputs,
