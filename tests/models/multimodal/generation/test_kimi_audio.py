@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-import kimia_infer.api.prompt_manager  # noqa: F401
 import librosa
 import pytest
 import torch
@@ -13,6 +12,12 @@ from tests.models.utils import check_logprobs_close
 from vllm.assets.audio import AudioAsset
 from vllm.model_executor.models.kimi_audio_asr import KimiAudioForConditionalGeneration
 from vllm.platforms import current_platform
+
+# Skip entire module if kimia_infer is not installed (optional dependency)
+try:
+    import kimia_infer.api.prompt_manager  # noqa: F401
+except Exception as e:  # noqa: BLE001
+    pytest.skip(f"kimia_infer not available: {e}", allow_module_level=True)
 
 
 class _DummyEmbedTokens:

@@ -19,10 +19,6 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.models.kimi_audio_asr import (
-    _get_kimia_prompt_manager,
-    _write_wav_tmp,
-)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -495,6 +491,12 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     This example is intended as a minimal smoke-test and only builds inputs for
     a single audio clip.
     """
+    # Lazy import Kimi-Audio utilities since they're only needed for this model
+    from vllm.model_executor.models.kimi_audio_asr import (
+        _get_kimia_prompt_manager,
+        _write_wav_tmp,
+    )
+
     assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
 
     # Lazy import kimia_infer since it's only needed for Kimi-Audio
