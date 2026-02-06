@@ -764,6 +764,7 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
+            SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS: req_state.num_cached_tokens,
         }
 
         # Add optional request parameters
@@ -785,10 +786,6 @@ class OutputProcessor:
         if req_state.observable_context and req_state.observable_context.not_empty:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
             ob_context = req_state.observable_context
-            if ob_context.num_cached_tokens is not None:
-                attributes[SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS] = (
-                    ob_context.num_cached_tokens
-                )
 
             for event in ob_context.engine_core_events:
                 events.append(
