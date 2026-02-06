@@ -21,6 +21,76 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
 
 
+def _lse_weighted_combine(
+    outputs: torch.Tensor,
+    lses: torch.Tensor,
+    return_lse: bool = False,
+    is_lse_base_on_e: bool = True,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """
+    CPU reference implementation for LSE-weighted combination.
+    
+    This is a pure PyTorch implementation for testing purposes.
+    For GPU execution, use helix_lse_combine_triton instead.
+    
+    Args:
+        outputs: Partial attention outputs [N, B, H, D]
+                 N = number of KV shards (ranks)
+                 B = batch size
+                 H = number of heads
+                 D = head dimension
+        lses: Log-sum-exp values [N, B, H]
+        return_lse: If True, also return the global LSE
+        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+    
+    Returns:
+        Combined output [B, H, D], and optionally global LSE [B, H]
+    """
+    N, B, H, D = outputs.shape
+    
+    # Handle NaN and inf in LSEs
+    lses = torch.where(
+        torch.isnan(lses) | torch.isinf(lses),
+        torch.tensor(float('-inf'), device=lses.device, dtype=lses.dtype),
+        lses,
+    )
+    
+    # Compute max LSE for numerical stability
+    lse_max, _ = lses.max(dim=0)  # [B, H]
+    lse_max = torch.where(
+        lse_max == float('-inf'),
+        torch.zeros_like(lse_max),
+        lse_max,
+    )
+    
+    # Compute weights: softmax over the N dimension
+    if is_lse_base_on_e:
+        weights = torch.exp(lses - lse_max.unsqueeze(0))  # [N, B, H]
+    else:
+        weights = torch.pow(2.0, lses - lse_max.unsqueeze(0))  # [N, B, H]
+    
+    # Handle NaN weights
+    weights = torch.where(torch.isnan(weights), torch.zeros_like(weights), weights)
+    
+    # Normalize weights
+    weight_sum = weights.sum(dim=0, keepdim=True)  # [1, B, H]
+    weights = weights / weight_sum.clamp(min=1e-10)  # [N, B, H]
+    
+    # Weighted combination: sum over N dimension
+    # outputs: [N, B, H, D], weights: [N, B, H] -> need to expand weights
+    result = (outputs * weights.unsqueeze(-1)).sum(dim=0)  # [B, H, D]
+    
+    if return_lse:
+        # Compute global LSE: logsumexp over N dimension
+        if is_lse_base_on_e:
+            global_lse = torch.log(weight_sum.squeeze(0)) + lse_max  # [B, H]
+        else:
+            global_lse = torch.log2(weight_sum.squeeze(0)) + lse_max  # [B, H]
+        return result, global_lse
+    
+    return result
+
+
 @triton.jit
 def _helix_lse_combine_kernel(
     # Input pointers
