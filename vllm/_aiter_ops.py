@@ -1266,6 +1266,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_triton_qk_rope_reshape_and_cache",
                 op_func=_rocm_aiter_triton_qk_rope_reshape_and_cache_impl,
+                mutates_args=["query", "key"],
                 fake_impl=_rocm_aiter_triton_qk_rope_reshape_and_cache_fake,
             )
 
