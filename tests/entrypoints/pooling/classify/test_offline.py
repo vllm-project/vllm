@@ -109,6 +109,6 @@ def test_score_api(llm: LLM):
 
 @pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = r"pooling_task must be one of.+"
+    err_msg = f"Unsupported task: '{task}' Supported tasks.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

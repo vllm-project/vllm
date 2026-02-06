@@ -27,14 +27,14 @@ text = "A cat standing in the snow."
 multi_modal_data = {"image": fetch_image(image_url)}
 
 
-def run_clip():
+def run_clip(seed: int):
     engine_args = EngineArgs(
         model="openai/clip-vit-base-patch32",
         runner="pooling",
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -52,7 +52,7 @@ def run_clip():
     print_embeddings(outputs[0].outputs.embedding)
 
 
-def run_e5_v():
+def run_e5_v(seed: int):
     engine_args = EngineArgs(
         model="royokong/e5-v",
         runner="pooling",
@@ -60,7 +60,7 @@ def run_e5_v():
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
 
     llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
@@ -83,7 +83,7 @@ def run_e5_v():
     print_embeddings(outputs[0].outputs.embedding)
 
 
-def run_qwen3_vl():
+def run_qwen3_vl(seed: int):
     try:
         from qwen_vl_utils import smart_resize
     except ModuleNotFoundError:
@@ -121,7 +121,7 @@ def run_qwen3_vl():
     prompt_image = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}<|im_end|>\n<|im_start|>assistant\n"
     prompt_image_text = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}{text}<|im_end|>\n<|im_start|>assistant\n"
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(prompt_text, use_tqdm=False)
@@ -148,14 +148,14 @@ def run_qwen3_vl():
     print_embeddings(outputs[0].outputs.embedding)
 
 
-def run_siglip():
+def run_siglip(seed: int):
     engine_args = EngineArgs(
         model="google/siglip-base-patch16-224",
         runner="pooling",
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -173,7 +173,7 @@ def run_siglip():
     print_embeddings(outputs[0].outputs.embedding)
 
 
-def run_vlm2vec_phi3v():
+def run_vlm2vec_phi3v(seed: int):
     engine_args = EngineArgs(
         model="TIGER-Lab/VLM2Vec-Full",
         runner="pooling",
@@ -183,7 +183,7 @@ def run_vlm2vec_phi3v():
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
     image_token = "<|image_1|>"
 
     print("Text embedding output:")
@@ -216,7 +216,7 @@ def run_vlm2vec_phi3v():
     print_embeddings(outputs[0].outputs.embedding)
 
 
-def run_vlm2vec_qwen2vl():
+def run_vlm2vec_qwen2vl(seed: int):
     # vLLM does not support LoRA adapters on multi-modal encoder,
     # so we merge the weights first
     from huggingface_hub.constants import HF_HUB_CACHE
@@ -270,7 +270,7 @@ def run_vlm2vec_qwen2vl():
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**asdict(engine_args) | {"seed": seed})
     image_token = "<|image_pad|>"
 
     print("Text embedding output:")
@@ -325,11 +325,17 @@ def parse_args():
         choices=model_example_map.keys(),
         help="The name of the embedding model.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Set the seed when initializing `vllm.LLM`.",
+    )
     return parser.parse_args()
 
 
 def main(args):
-    model_example_map[args.model]()
+    model_example_map[args.model](args.seed)
 
 
 if __name__ == "__main__":
