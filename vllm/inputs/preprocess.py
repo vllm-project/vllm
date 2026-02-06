@@ -24,6 +24,7 @@ from vllm.renderers.inputs import (
     EncoderDecoderDictPrompt,
     EncoderDictPrompt,
     SingletonDictPrompt,
+    TokPrompt,
 )
 from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
@@ -527,7 +528,7 @@ class InputPreprocessor:
 
     def _preprocess(
         self,
-        prompt: PromptType | DictPrompt,
+        prompt: PromptType | DictPrompt | TokPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -549,7 +550,7 @@ class InputPreprocessor:
 
     def preprocess(
         self,
-        prompt: PromptType | DictPrompt,
+        prompt: PromptType | DictPrompt | TokPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,

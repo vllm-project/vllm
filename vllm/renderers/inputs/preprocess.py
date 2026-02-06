@@ -106,7 +106,7 @@ that has been standardized into a dictionary.
 """
 
 
-def parse_dec_only_prompt(prompt: PromptType | DictPrompt) -> DecoderOnlyDictPrompt:
+def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -123,12 +123,19 @@ def parse_dec_only_prompt(prompt: PromptType | DictPrompt) -> DecoderOnlyDictPro
         if "encoder_prompt" in prompt:
             raise TypeError("Cannot pass encoder-decoder prompt to decoder-only models")
 
-        return prompt
+        if (
+            "prompt" in prompt
+            or "prompt_token_ids" in prompt
+            or "prompt_embeds" in prompt
+        ):
+            return prompt  # type: ignore[return-value]
+
+        raise TypeError("Prompt dictionary must contain text, tokens, or embeddings")
 
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: SingletonPrompt) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -142,12 +149,15 @@ def _parse_enc_prompt(prompt: SingletonPrompt) -> EncoderDictPrompt:
         if "prompt_embeds" in prompt:
             raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
 
-        return prompt
+        if "prompt" in prompt or "prompt_token_ids" in prompt:
+            return prompt  # type: ignore[return-value]
+
+        raise TypeError("Prompt dictionary must contain text or tokens")
 
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: SingletonPrompt) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -168,20 +178,21 @@ def _parse_dec_prompt(prompt: SingletonPrompt) -> DecoderDictPrompt:
         ):
             raise TypeError("Cannot pass multi-modal inputs to decoder prompt")
 
-        return prompt
+        if "prompt" in prompt or "prompt_token_ids" in prompt:
+            return prompt  # type: ignore[return-value]
+
+        raise TypeError("Prompt dictionary must contain text or tokens")
 
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def parse_enc_dec_prompt(
-    prompt: PromptType | DictPrompt,
-) -> EncoderDecoderDictPrompt:
+def parse_enc_dec_prompt(prompt: object) -> EncoderDecoderDictPrompt:
     """
     Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
     """
     if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-        enc_prompt: SingletonPrompt = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
-        dec_prompt: SingletonPrompt | None = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
+        enc_prompt: object = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
+        dec_prompt: object | None = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
     else:
         enc_prompt = prompt
         dec_prompt = None
@@ -192,7 +203,7 @@ def parse_enc_dec_prompt(
     )
 
 
-def parse_model_prompt(model_config: "ModelConfig", prompt: PromptType):
+def parse_model_prompt(model_config: "ModelConfig", prompt: object):
     if model_config.is_encoder_decoder:
         return parse_enc_dec_prompt(prompt)
 
@@ -205,18 +216,17 @@ class PromptComponents(NamedTuple):
     embeds: "torch.Tensor | None" = None
 
 
-def get_prompt_components(prompt: "PromptType | DictPrompt") -> PromptComponents:
-    # TODO: Remove the non-dict cases once we finish updating all APIs to use Renderer
-    if isinstance(prompt, str):
-        return PromptComponents(text=prompt)
-    if isinstance(prompt, list):
-        return PromptComponents(token_ids=prompt)
-
-    if encoder_prompt := prompt.get("encoder_prompt"):
-        return get_prompt_components(encoder_prompt)  # type: ignore[arg-type]
+def extract_prompt_components(
+    model_config: "ModelConfig", prompt: object
+) -> PromptComponents:
+    target_prompt = (
+        parse_enc_dec_prompt(prompt)["encoder_prompt"]
+        if model_config.is_encoder_decoder
+        else parse_dec_only_prompt(prompt)
+    )
 
     return PromptComponents(
-        text=prompt.get("prompt"),  # type: ignore[arg-type]
-        token_ids=prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
-        embeds=prompt.get("prompt_embeds"),
+        text=target_prompt.get("prompt"),
+        token_ids=target_prompt.get("prompt_token_ids"),
+        embeds=target_prompt.get("prompt_embeds"),
     )

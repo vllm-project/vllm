@@ -3,7 +3,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
@@ -180,6 +180,20 @@ class BaseRenderer(ABC):
             decoder_prompt=dec_prompt,
         )
 
+    @overload
+    def tokenize_prompt(
+        self,
+        prompt: TextPrompt | TokensPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt: ...
+
+    @overload
+    def tokenize_prompt(  # type: ignore[misc]
+        self,
+        prompt: DictPrompt,
+        params: TokenizeParams,
+    ) -> TokPrompt: ...
+
     def tokenize_prompt(
         self,
         prompt: DictPrompt,
@@ -206,6 +220,20 @@ class BaseRenderer(ABC):
         params: TokenizeParams,
     ) -> list[TokPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
+
+    @overload
+    async def tokenize_prompt_async(
+        self,
+        prompt: TextPrompt | TokensPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt: ...
+
+    @overload
+    async def tokenize_prompt_async(  # type: ignore[misc]
+        self,
+        prompt: DictPrompt,
+        params: TokenizeParams,
+    ) -> TokPrompt: ...
 
     async def tokenize_prompt_async(
         self,

@@ -28,6 +28,7 @@ from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -42,7 +43,6 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.utils import get_prompt_text
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -367,7 +367,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank=data_parallel_rank,
                 supported_tasks=await self.get_supported_tasks(),
             )
-            prompt_text = get_prompt_text(prompt)
+            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         self.input_processor.assign_request_id(request)
 
@@ -484,7 +484,9 @@ class AsyncLLM(EngineClient):
                         raise ValueError(
                             "prompt_embeds not supported for streaming inputs"
                         )
-                    prompt_text = get_prompt_text(input_chunk.prompt)
+                    prompt_text, _, _ = extract_prompt_components(
+                        self.model_config, input_chunk.prompt
+                    )
                     await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True

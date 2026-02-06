@@ -106,7 +106,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
-    get_prompt_components,
+    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -1179,14 +1179,16 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType,
+        inputs: PromptType | TokPrompt,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = get_prompt_components(inputs)
+        prompt, prompt_token_ids, prompt_embeds = extract_prompt_components(
+            self.model_config, inputs
+        )
 
         self.request_logger.log_inputs(
             request_id,

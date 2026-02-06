@@ -73,10 +73,10 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import DecoderOnlyDictPrompt, DictPrompt
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
-    get_prompt_components,
+    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -812,7 +812,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPrompt]:
+    ) -> list[DictPrompt | TokPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -828,7 +828,7 @@ class LLM:
 
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPrompt]()
+        engine_prompts = list[DictPrompt | TokPrompt]()
         for prompt in prompts:
             parsed_prompt = parse_model_prompt(model_config, prompt)
             in_prompt = renderer.render_prompt(parsed_prompt)
@@ -864,7 +864,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[DecoderOnlyDictPrompt]:
+    ) -> list[DictPrompt | TokPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -892,7 +892,7 @@ class LLM:
         )
         tok_params = self._get_chat_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DecoderOnlyDictPrompt]()
+        engine_prompts = list[DictPrompt | TokPrompt]()
         for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
@@ -1769,13 +1769,13 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: PromptType | DictPrompt,
+        prompt: PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> str:
-        prompt_text, _, _ = get_prompt_components(prompt)
+        prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
         request_id = str(next(self.request_counter))
 
         if params.truncate_prompt_tokens is not None:
