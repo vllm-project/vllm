@@ -422,8 +422,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
+            kv_cache_dummy_dep = None
             if self.use_direct_call:
-                kv_cache_dummy_dep = None
                 # Skip this if sharing KV cache with an earlier attention layer.
                 if (
                     not self.attn_backend.forward_includes_kv_cache_update
