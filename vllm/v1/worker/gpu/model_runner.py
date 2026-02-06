@@ -3,7 +3,6 @@
 import gc
 import time
 from copy import deepcopy
-from typing import Any
 
 import numpy as np
 import torch
@@ -11,11 +10,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
+from vllm.distributed.parallel_state import (
+    prepare_communication_buffer_for_model,
+)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -54,6 +56,10 @@ from vllm.v1.worker.gpu.kv_connector import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.pp_handler import (
+    PPHandler,
+    get_pp_handler,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -175,6 +181,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
+        # PP Handler for pipeline parallelism.
+        # Initialize here since distributed groups are set up before model runner.
+        self.pp_handler: PPHandler = get_pp_handler(self.parallel_config)
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -287,7 +297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def _dummy_run(
         self, num_tokens: int, *args, skip_attn: bool = True, **kwargs
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
@@ -303,13 +313,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Disable any use of KVConnector for dummy runs.
         self.kv_connector.set_disabled(True)
 
+        # For non-first PP ranks, create dummy intermediate_tensors.
+        intermediate_tensors = None
+        if not self.pp_handler.receives_raw_inputs:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=num_tokens,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
+
         # Execute the model.
         self.execute_model(
-            dummy_scheduler_output, dummy_run=True, skip_attn_for_dummy_run=skip_attn
+            dummy_scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=True,
+            skip_attn_for_dummy_run=skip_attn,
         )
         self.kv_connector.set_disabled(False)
+
+        # Non-last PP ranks don't produce output for sampling.
+        if not self.pp_handler.produces_final_output:
+            return None, None
+
         assert self.execute_model_state is not None
         hidden_states, input_batch, _ = self.execute_model_state
+        assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
@@ -342,7 +370,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True
         )
-        self._dummy_sampler_run(sample_hidden_states)
+        # Only run sampler on last PP rank (non-last ranks return None).
+        if self.pp_handler.produces_final_output:
+            assert sample_hidden_states is not None
+            self._dummy_sampler_run(sample_hidden_states)
         if self.do_spec_decode:
             num_tokens_across_dp = make_num_tokens_across_dp(
                 self.parallel_config.data_parallel_size, self.max_num_tokens
@@ -375,6 +406,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
+            )
+            return 0
+
+        # TODO (zhanqiu): support CUDA graph for PP.
+        if self.pp_handler.is_enabled:
+            logger.warning_once(
+                "Skipping CUDA graph capture because pipeline parallel is "
+                "enabled. Pipeline parallel is currently eager-only.",
             )
             return 0
 
@@ -506,7 +545,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        # NOTE: In PP mode, every rank must construct the *exact* same request
+        # ordering for the batched token dimension. Python's `sorted(..., key=...)`
+        # is stable, so ties would otherwise be broken by the input dict's
+        # insertion order, which can differ across processes. Use `req_id` as a
+        # deterministic tie-breaker to keep PP stages in sync.
+        req_ids = sorted(
+            num_tokens_per_req,
+            key=lambda req_id: (num_tokens_per_req[req_id], req_id),
+        )
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -796,11 +843,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
-        intermediate_tensors: Any | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
-    ) -> ModelRunnerOutput | None:
-        assert intermediate_tensors is None
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
             self.finish_requests(scheduler_output)
@@ -846,8 +892,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 self._set_active_loras(*lora_inputs)
 
-            if self.supports_mm_inputs:
-                # Execute the multimodal encoder.
+            # Multimodal embeddings: only first PP rank prepares them.
+            should_prepare_mm_embeddings = (
+                self.supports_mm_inputs and self.pp_handler.receives_raw_inputs
+            )
+            if should_prepare_mm_embeddings:
                 mm_embeds, is_mm_embed = self.get_mm_embeddings(
                     scheduler_output.scheduled_encoder_inputs, input_batch
                 )
@@ -889,6 +938,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
+
+            # PP input preparation: handler centralizes all PP input logic.
+            model_inputs = self.pp_handler.prepare_model_inputs(
+                input_batch.input_ids,
+                positions,
+                input_batch.inputs_embeds,
+                intermediate_tensors,
+            )
+
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
@@ -899,27 +957,52 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
-                hidden_states = self.model(
-                    input_ids=input_batch.input_ids,
-                    positions=positions,
-                    inputs_embeds=input_batch.inputs_embeds,
-                )
+                hidden_states = self.model(**model_inputs)
 
+        # PP output handling: use handler so all PP output logic lives in one place.
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-        self.execute_model_state = hidden_states, input_batch, kv_connector_output
+        output = self.pp_handler.prepare_output(hidden_states, kv_connector_output)
+
+        if isinstance(output, IntermediateTensors):
+            # Non-last rank: return intermediate tensors to worker for sending
+            self.execute_model_state = (None, input_batch, kv_connector_output)
+            return output
+
+        # Last rank: store hidden states for sampling
+        self.execute_model_state = (output, input_batch, kv_connector_output)
         return None
 
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | ModelRunnerOutput:
+    ) -> AsyncOutput | ModelRunnerOutput | None:
         assert self.execute_model_state is not None
         hidden_states, input_batch, kv_connector_output = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
+        # Non-last PP rank: receive tokens and update state.
+        # Don't need to sample tokens here - just receive from last rank.
+        if hidden_states is None:
+            received = self.pp_handler.maybe_receive_sampled_tokens(
+                input_batch.num_reqs,
+                self.device,
+                max_sample_len=self.num_speculative_steps + 1,
+            )
+            if received is not None:
+                sampled, num_sampled, num_rejected = received
+                self.postprocess(input_batch, sampled, num_sampled, num_rejected)
+            return None
+
+        # Last rank: sample tokens
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+
+        # Broadcast to non-last ranks (handles spec decode multi-token)
+        self.pp_handler.maybe_broadcast_sampled_tokens(
+            sampler_output, num_sampled, num_rejected
+        )
+
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
             hidden_states,
