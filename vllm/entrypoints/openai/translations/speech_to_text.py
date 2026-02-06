@@ -37,7 +37,8 @@ from vllm.entrypoints.openai.translations.protocol import (
     TranslationStreamResponse,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
@@ -137,6 +138,9 @@ class OpenAISpeechToText(OpenAIServing):
         if not supports_transcription(self.model_cls):
             return
 
+        if getattr(self.model_cls, "skip_warmup_audio_preprocessing", False):
+            return
+
         try:
             warmup_start = time.perf_counter()
             logger.info("Warming up audio preprocessing libraries...")
@@ -149,9 +153,7 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
-            from vllm.transformers_utils.processor import (
-                cached_processor_from_config,
-            )
+            from vllm.transformers_utils.processor import cached_processor_from_config
 
             processor = cached_processor_from_config(self.model_config)
             feature_extractor = None
@@ -296,25 +298,36 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                if not isinstance(prompt, dict):
+                if not is_explicit_encoder_decoder_prompt(prompt):
                     raise VLLMValidationError(
-                        "Expected prompt to be a dict",
+                        "Expected prompt to be an encoder-decoder prompt",
                         parameter="prompt",
                         value=type(prompt).__name__,
                     )
-                prompt_dict = cast(dict, prompt)
-                decoder_prompt = prompt.get("decoder_prompt")
-                if not isinstance(decoder_prompt, str):
-                    raise VLLMValidationError(
-                        "Expected decoder_prompt to be str",
-                        parameter="decoder_prompt",
-                        value=type(decoder_prompt).__name__,
-                    )
-                prompt_dict["decoder_prompt"] = decoder_prompt.replace(
-                    "<|notimestamps|>", "<|0.00|>"
-                )
+
+                prompt = self._preprocess_verbose_prompt(prompt)
+
             prompts.append(prompt)
         return prompts, duration
+
+    def _repl_verbose_text(self, text: str):
+        return text.replace("<|notimestamps|>", "<|0.00|>")
+
+    def _preprocess_verbose_prompt(self, prompt: ExplicitEncoderDecoderPrompt):
+        dec_prompt = prompt["decoder_prompt"]
+
+        if isinstance(dec_prompt, str):
+            prompt["decoder_prompt"] = self._repl_verbose_text(dec_prompt)
+        elif isinstance(dec_prompt, dict) and "prompt" in dec_prompt:
+            dec_prompt["prompt"] = self._repl_verbose_text(dec_prompt["prompt"])
+        else:
+            raise VLLMValidationError(
+                "Expected decoder_prompt to contain text",
+                parameter="decoder_prompt",
+                value=type(dec_prompt).__name__,
+            )
+
+        return prompt
 
     def _get_verbose_segments(
         self,
@@ -406,8 +419,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(
-                ("Currently only support response_format")
-                + ("`text`, `json` or `verbose_json`")
+                "Currently only support response_format: "
+                "`text`, `json` or `verbose_json`"
             )
 
         if (
@@ -518,7 +531,8 @@ class OpenAISpeechToText(OpenAIServing):
                         total_segments.extend(segments)
                         text_parts.extend([seg.text for seg in segments])
                     else:
-                        text_parts.append(op.outputs[0].text)
+                        raw_text = op.outputs[0].text
+                        text_parts.append(self.model_cls.post_process_output(raw_text))
             text = "".join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
@@ -607,6 +621,10 @@ class OpenAISpeechToText(OpenAIServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
 
+                    # TODO: For models that output structured formats (e.g.,
+                    # Qwen3-ASR with "language X<asr_text>" prefix), streaming
+                    # would need buffering to strip the prefix properly since
+                    # deltas may split the tag across chunks.
                     delta_message = DeltaMessage(content=output.text)
                     completion_tokens += len(output.token_ids)
 

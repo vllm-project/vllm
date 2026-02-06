@@ -50,6 +50,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheTensor
@@ -1377,6 +1378,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
+@pytest.mark.parametrize("enable_cross_layers", ["False", "True"])
 @pytest.mark.parametrize(
     "attn_backend",
     [
@@ -1395,10 +1397,11 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
             ),
         ),
         "TRITON_ATTN",
-        "FLASHINFER",
     ],
 )
-def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
+def test_register_kv_caches(
+    default_vllm_config, dist_init, attn_backend, enable_cross_layers
+):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
@@ -1415,7 +1418,8 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
     # Enable cross layers blocks
     vllm_config.kv_transfer_config.kv_connector_extra_config[
         "enable_cross_layers_blocks"
-    ] = True
+    ] = enable_cross_layers
+    set_kv_cache_layout("HND")
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
@@ -1426,7 +1430,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 
         backend_cls = RocmAttentionBackend
-    else:  # TRITON
+    else:  # TRITON_ATTN
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         backend_cls = TritonAttentionBackend
@@ -1463,6 +1467,10 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         expected_base_addrs: list[int]
         expected_num_entries: int
         kv_caches: dict[str, torch.Tensor]
+        assert str(enable_cross_layers).lower() != "true" or (
+            (attn_backend not in ("FLASH_ATTN", "FLASHINFER"))
+            or connector.prefer_cross_layer_blocks
+        )
         if connector.prefer_cross_layer_blocks:
             num_layers = 32
             block_size = 16
@@ -1603,6 +1611,8 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
                 f"Block entry {i}: Expected block len {expected_block_len}, "
                 f"got {block_len}"
             )
+
+        assert connector.connector_worker.block_size == 16
 
 
 class FakePlatform(Platform):

@@ -7,7 +7,6 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -17,15 +16,14 @@ from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, StreamingInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -51,18 +49,6 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class StreamingInput:
-    """Input data for a streaming generation request.
-
-    This is used with generate() to support multi-turn streaming sessions
-    where inputs are provided via an async generator.
-    """
-
-    prompt: PromptType
-    sampling_params: SamplingParams | None = None
 
 
 class InputStreamError(Exception):
@@ -283,7 +269,11 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = await self.engine_core.get_supported_tasks_async()
+
+        return self._supported_tasks
 
     async def add_request(
         self,
@@ -316,13 +306,20 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-        _validate_truncation_size(
-            self.model_config.max_model_len,
-            params.truncate_prompt_tokens,
-            tokenization_kwargs,
-        )
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.16. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
+            )
 
         if isinstance(prompt, AsyncGenerator):
             # Streaming input case.
@@ -356,12 +353,13 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text = get_prompt_text(prompt)
 
@@ -467,6 +465,7 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
+                    # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
@@ -618,7 +617,7 @@ class AsyncLLM(EngineClient):
                 except Exception as e2:
                     s = (
                         f"{e.__class__.__name__}: "
-                        + "error during printing an exception of class"
+                        "error during printing an exception of class"
                         + e2.__class__.__name__
                     )
                 logger.info("Request %s failed due to %s.", request_id, s)
@@ -747,6 +746,7 @@ class AsyncLLM(EngineClient):
         if clear_cache:
             await self.reset_prefix_cache()
             await self.reset_mm_cache()
+            await self.reset_encoder_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
@@ -769,7 +769,6 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -784,22 +783,10 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         q: RequestOutputCollector | None = None
         try:
-            if truncate_prompt_tokens is not None:
-                warnings.warn(
-                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
-                    "is deprecated and will be removed in v0.15. "
-                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -863,7 +850,7 @@ class AsyncLLM(EngineClient):
         return self.input_processor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_processor.renderer
 
     async def is_tracing_enabled(self) -> bool:
@@ -900,6 +887,9 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
+
+    async def reset_encoder_cache(self) -> None:
+        await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()

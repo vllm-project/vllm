@@ -9,15 +9,17 @@ import inspect
 import json
 import pathlib
 import textwrap
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, dataclass, field, fields, is_dataclass, replace
+from collections.abc import Callable, Mapping, Sequence, Set
+from dataclasses import MISSING, Field, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-import regex as re
 import torch
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
+from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
-from typing_extensions import runtime_checkable
+from typing_extensions import dataclass_transform, runtime_checkable
 
 from vllm.logger import init_logger
 
@@ -29,23 +31,39 @@ else:
     DataclassInstance = Any
 
 ConfigType = type[DataclassInstance]
-ConfigT = TypeVar("ConfigT", bound=ConfigType)
+ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
-def config(cls: ConfigT) -> ConfigT:
-    """
-    A decorator that ensures all fields in a dataclass have default values
-    and that each field has a docstring.
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(
+    cls: type[ConfigT] | None = None,
+    *,
+    config: ConfigDict | None = None,
+    **kwargs: Any,
+) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
+    """Decorator to create a pydantic dataclass with default config. The default config
+    for the dataclass forbids extra fields.
 
-    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
-    provided by `get_kwargs` will be
-    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
-    `cli_arg` as a JSON string which gets validated by `pydantic`.
+    All config classes in vLLM should use this decorator.
 
-    Config validation is performed by the tools/pre_commit/validate_config.py
-    script, which is invoked during the pre-commit checks.
-    """
-    return cls
+    Args:
+        cls: The class to decorate
+        config: The pydantic ConfigDict to use. If provided, it will be merged with
+            the default config.
+        **kwargs: Additional arguments to pass to pydantic.dataclass."""
+    # Extra fields are forbidden by default
+    merged_config = ConfigDict(extra="forbid")
+    if config is not None:
+        merged_config.update(config)
+
+    def decorator(cls):
+        return dataclass(cls, config=merged_config, **kwargs)
+
+    # Called with arguments: @config(config=...)
+    if cls is None:
+        return decorator
+    # Called without arguments: @config
+    return decorator(cls)
 
 
 def get_field(cls: ConfigType, name: str) -> Field:
@@ -53,29 +71,51 @@ def get_field(cls: ConfigType, name: str) -> Field:
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
-    cls_fields = {f.name: f for f in fields(cls)}
-    if name not in cls_fields:
-        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields[name]
-    if (default_factory := named_field.default_factory) is not MISSING:
-        return field(default_factory=default_factory)
-    if (default := named_field.default) is not MISSING:
-        if isinstance(default, FieldInfo):
-            # Handle pydantic.Field defaults
-            if default.default_factory is not None:
-                return field(default_factory=default.default_factory)
-            else:
-                default = default.default
-        return field(default=default)
+    try:
+        named_field = next(f for f in fields(cls) if f.name == name)
+    except StopIteration as e:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.") from e
 
-    raise ValueError(
-        f"{cls.__name__}.{name} must have a default value or default factory."
-    )
+    # The arguments to copy to the new field
+    default = named_field.default
+    default_factory = named_field.default_factory
+    init = named_field.init
+
+    # Handle pydantic.Field
+    if isinstance(default, FieldInfo):
+        if default.init is not None:
+            init = default.init
+        if default.default_factory is not None:
+            default_factory = cast(Callable[[], Any], default.default_factory)
+            default = MISSING
+        else:
+            default = default.default
+
+    if default is MISSING and default_factory is MISSING:
+        logger.warning_once(
+            "%s.%s has no default or default factory.", cls.__name__, name
+        )
+    return field(default=default, default_factory=default_factory, init=init)
+
+
+def is_init_field(cls: ConfigType, name: str) -> bool:
+    return get_field(cls, name).init
+
+
+def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
+    """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
+    but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
+    of `dataclasses.field`"""
+    cls = type(dataclass_instance)
+    dataclass_dict = dataclass_instance.__dict__
+    dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
+    dataclass_dict.update(kwargs)
+    return cls(**dataclass_dict)
 
 
 def getattr_iter(
     object: object,
-    names: Iterable[str],
+    names: Sequence[str],
     default: Any | None = None,
     default_factory: Callable[[], Any] | None = None,
     warn: bool = False,
@@ -101,34 +141,6 @@ def getattr_iter(
                 )
             return getattr(object, name)
     return default_factory() if default_factory is not None else default
-
-
-def contains_object_print(text: str) -> bool:
-    """
-    Check if the text looks like a printed Python object, e.g.
-    contains any substring matching the pattern: "at 0xFFFFFFF>"
-    We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64-bit system).
-
-    Args:
-        text (str): The text to check
-
-    Returns:
-        result (bool): `True` if a match is found, `False` otherwise.
-    """
-    pattern = r"at 0x[a-fA-F0-9]{2,16}>"
-    match = re.search(pattern, text)
-    return match is not None
-
-
-def assert_hashable(text: str) -> bool:
-    if not contains_object_print(text):
-        return True
-    raise AssertionError(
-        f"vLLM tried to hash some configs that may have Python objects ids "
-        f"in them. This is a bug, please file an issue. "
-        f"Text being hashed: {text}"
-    )
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -170,10 +182,6 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             out[target.id] = doc
 
     return out
-
-
-def is_init_field(cls: ConfigType, name: str) -> bool:
-    return next(f for f in fields(cls) if f.name == name).init
 
 
 @runtime_checkable
@@ -315,31 +323,6 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
-
-
-def handle_deprecated(
-    config: ConfigT,
-    old_name: str,
-    new_name_or_names: str | list[str],
-    removal_version: str,
-) -> None:
-    old_val = getattr(config, old_name)
-    if old_val is None:
-        return
-
-    if isinstance(new_name_or_names, str):
-        new_names = [new_name_or_names]
-    else:
-        new_names = new_name_or_names
-
-    msg = (
-        f"{old_name} is deprecated and will be removed in {removal_version}. "
-        f"Use {', '.join(new_names)} instead."
-    )
-    logger.warning(msg)
-
-    for new_name in new_names:
-        setattr(config, new_name, old_val)
 
 
 @dataclass
