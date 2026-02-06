@@ -30,6 +30,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
+from .fault_tolerance import FaultToleranceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -241,6 +242,10 @@ class VllmConfig:
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
+    fault_tolerance_config: FaultToleranceConfig = Field(
+        default_factory=FaultToleranceConfig
+    )
+    """The configurations for fault tolerance."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -1439,7 +1444,8 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r},"
+            f"fault_tolerance_config={self.fault_tolerance_config!r}, "
         )
 
     @model_validator(mode="after")

@@ -151,6 +151,656 @@ async def build_async_engine_client_from_engine_args(
         if async_llm:
             async_llm.shutdown()
 
+async def check_engine_fault(raw_request: Request):
+    client = engine_client(raw_request)
+    assert hasattr(client, "engine_core")
+    core_client = client.engine_core
+    if (
+        hasattr(core_client, "client_sentinel")
+        and core_client.client_sentinel.is_faulted.is_set()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Service is in faulted state, cannot process requests.",
+        )
+
+
+router = APIRouter()
+
+
+def base(request: Request) -> OpenAIServing:
+    # Reuse the existing instance
+    return tokenization(request)
+
+
+def models(request: Request) -> OpenAIServingModels:
+    return request.app.state.openai_serving_models
+
+
+def responses(request: Request) -> OpenAIServingResponses | None:
+    return request.app.state.openai_serving_responses
+
+
+def messages(request: Request) -> AnthropicServingMessages:
+    return request.app.state.anthropic_serving_messages
+
+
+def chat(request: Request) -> OpenAIServingChat | None:
+    return request.app.state.openai_serving_chat
+
+
+def completion(request: Request) -> OpenAIServingCompletion | None:
+    return request.app.state.openai_serving_completion
+
+
+def tokenization(request: Request) -> OpenAIServingTokenization:
+    return request.app.state.openai_serving_tokenization
+
+
+def transcription(request: Request) -> OpenAIServingTranscription:
+    return request.app.state.openai_serving_transcription
+
+
+def translation(request: Request) -> OpenAIServingTranslation:
+    return request.app.state.openai_serving_translation
+
+
+def engine_client(request: Request) -> EngineClient:
+    return request.app.state.engine_client
+
+
+def generate_tokens(request: Request) -> ServingTokens | None:
+    return request.app.state.serving_tokens
+
+
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    # This endpoint returns the current server load metrics.
+    # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/chat/completions
+    # - /v1/completions
+    # - /v1/audio/transcriptions
+    # - /v1/audio/translations
+    # - /v1/embeddings
+    # - /pooling
+    # - /classify
+    # - /score
+    # - /v1/score
+    # - /rerank
+    # - /v1/rerank
+    # - /v2/rerank
+    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
+
+
+@router.get("/v1/models")
+async def show_available_models(raw_request: Request):
+    handler = models(raw_request)
+
+    models_ = await handler.show_available_models()
+    return JSONResponse(content=models_.model_dump())
+
+
+@router.get("/version")
+async def show_version():
+    ver = {"version": VLLM_VERSION}
+    return JSONResponse(content=ver)
+
+
+async def _convert_stream_to_sse_events(
+    generator: AsyncGenerator[StreamingResponsesResponse, None],
+) -> AsyncGenerator[str, None]:
+    """Convert the generator to a stream of events in SSE format"""
+    async for event in generator:
+        event_type = getattr(event, "type", "unknown")
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
+        event_data = (
+            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+        )
+        yield event_data
+
+
+@router.post(
+    "/v1/responses",
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+async def create_responses(request: ResponsesRequest, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+    try:
+        generator = await handler.create_responses(request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(
+        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
+    )
+
+
+@router.get("/v1/responses/{response_id}")
+async def retrieve_responses(
+    response_id: str,
+    raw_request: Request,
+    starting_after: int | None = None,
+    stream: bool | None = False,
+):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    try:
+        response = await handler.retrieve_responses(
+            response_id,
+            starting_after=starting_after,
+            stream=stream,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+    elif isinstance(response, ResponsesResponse):
+        return JSONResponse(content=response.model_dump())
+    return StreamingResponse(
+        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
+    )
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    try:
+        response = await handler.cancel_responses(response_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+    return JSONResponse(content=response.model_dump())
+
+
+@router.post(
+    "/v1/messages",
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    def translate_error_response(response: ErrorResponse) -> JSONResponse:
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type=response.error.type,
+                message=response.error.message,
+            )
+        )
+        return JSONResponse(
+            status_code=response.error.code, content=anthropic_error.model_dump()
+        )
+
+    handler = messages(raw_request)
+    if handler is None:
+        error = base(raw_request).create_error_response(
+            message="The model does not support Messages API"
+        )
+        return translate_error_response(error)
+
+    try:
+        generator = await handler.create_messages(request, raw_request)
+    except Exception as e:
+        logger.exception("Error in create_messages: %s", e)
+        return JSONResponse(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
+
+    if isinstance(generator, ErrorResponse):
+        return translate_error_response(generator)
+
+    elif isinstance(generator, AnthropicMessagesResponse):
+        resp = generator.model_dump(exclude_none=True)
+        logger.debug("Anthropic Messages Response: %s", resp)
+        return JSONResponse(content=resp)
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    metrics_header_format = raw_request.headers.get(
+        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
+    )
+    handler = chat(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Chat Completions API"
+        )
+    try:
+        generator = await handler.create_chat_completion(request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, ChatCompletionResponse):
+        return JSONResponse(
+            content=generator.model_dump(),
+            headers=metrics_header(metrics_header_format),
+        )
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/completions",
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_completion(request: CompletionRequest, raw_request: Request):
+    metrics_header_format = raw_request.headers.get(
+        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
+    )
+    handler = completion(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Completions API"
+        )
+
+    try:
+        generator = await handler.create_completion(request, raw_request)
+    except OverflowError as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+    elif isinstance(generator, CompletionResponse):
+        return JSONResponse(
+            content=generator.model_dump(),
+            headers=metrics_header(metrics_header_format),
+        )
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/audio/transcriptions",
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_transcriptions(
+    raw_request: Request, request: Annotated[TranscriptionRequest, Form()]
+):
+    handler = transcription(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Transcriptions API"
+        )
+
+    audio_data = await request.file.read()
+    try:
+        generator = await handler.create_transcription(audio_data, request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, TranscriptionResponseVariant):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/audio/translations",
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_translations(
+    request: Annotated[TranslationRequest, Form()], raw_request: Request
+):
+    handler = translation(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Translations API"
+        )
+
+    audio_data = await request.file.read()
+    try:
+        generator = await handler.create_translation(audio_data, request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, TranslationResponseVariant):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+def load_log_config(log_config_file: str | None) -> dict | None:
+    if not log_config_file:
+        return None
+    try:
+        with open(log_config_file) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(
+            "Failed to load log config from file %s: error %s", log_config_file, e
+        )
+        return None
+
+
+class AuthenticationMiddleware:
+    """
+    Pure ASGI middleware that authenticates each request by checking
+    if the Authorization Bearer token exists and equals anyof "{api_key}".
+
+    Notes
+    -----
+    There are two cases in which authentication is skipped:
+        1. The HTTP method is OPTIONS.
+        2. The request path doesn't start with /v1 (e.g. /health).
+    """
+
+    def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
+        self.app = app
+        self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
+
+    def verify_token(self, headers: Headers) -> bool:
+        authorization_header_value = headers.get("Authorization")
+        if not authorization_header_value:
+            return False
+
+        scheme, _, param = authorization_header_value.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+
+        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+
+        token_match = False
+        for token_hash in self.api_tokens:
+            token_match |= secrets.compare_digest(param_hash, token_hash)
+
+        return token_match
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket") or scope["method"] == "OPTIONS":
+            # scope["type"] can be "lifespan" or "startup" for example,
+            # in which case we don't need to do anything
+            return self.app(scope, receive, send)
+        root_path = scope.get("root_path", "")
+        url_path = URL(scope=scope).path.removeprefix(root_path)
+        headers = Headers(scope=scope)
+        # Type narrow to satisfy mypy.
+        if url_path.startswith("/v1") and not self.verify_token(headers):
+            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+            return response(scope, receive, send)
+        return self.app(scope, receive, send)
+
+
+class XRequestIdMiddleware:
+    """
+    Middleware the set's the X-Request-Id header for each response
+    to a random uuid4 (hex) value if the header isn't already
+    present in the request, otherwise use the provided request id.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket"):
+            return self.app(scope, receive, send)
+
+        # Extract the request headers.
+        request_headers = Headers(scope=scope)
+
+        async def send_with_request_id(message: Message) -> None:
+            """
+            Custom send function to mutate the response headers
+            and append X-Request-Id to it.
+            """
+            if message["type"] == "http.response.start":
+                response_headers = MutableHeaders(raw=message["headers"])
+                request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
+                response_headers.append("X-Request-Id", request_id)
+            await send(message)
+
+        return self.app(scope, receive, send_with_request_id)
+
+
+def _extract_content_from_chunk(chunk_data: dict) -> str:
+    """Extract content from a streaming response chunk."""
+    try:
+        from vllm.entrypoints.openai.protocol import (
+            ChatCompletionStreamResponse,
+            CompletionStreamResponse,
+        )
+
+        # Try using Completion types for type-safe parsing
+        if chunk_data.get("object") == "chat.completion.chunk":
+            chat_response = ChatCompletionStreamResponse.model_validate(chunk_data)
+            if chat_response.choices and chat_response.choices[0].delta.content:
+                return chat_response.choices[0].delta.content
+        elif chunk_data.get("object") == "text_completion":
+            completion_response = CompletionStreamResponse.model_validate(chunk_data)
+            if completion_response.choices and completion_response.choices[0].text:
+                return completion_response.choices[0].text
+    except pydantic.ValidationError:
+        # Fallback to manual parsing
+        if "choices" in chunk_data and chunk_data["choices"]:
+            choice = chunk_data["choices"][0]
+            if "delta" in choice and choice["delta"].get("content"):
+                return choice["delta"]["content"]
+            elif choice.get("text"):
+                return choice["text"]
+    return ""
+
+
+class SSEDecoder:
+    """Robust Server-Sent Events decoder for streaming responses."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.content_buffer = []
+
+    def decode_chunk(self, chunk: bytes) -> list[dict]:
+        """Decode a chunk of SSE data and return parsed events."""
+        import json
+
+        try:
+            chunk_str = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            # Skip malformed chunks
+            return []
+
+        self.buffer += chunk_str
+        events = []
+
+        # Process complete lines
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            line = line.rstrip("\r")  # Handle CRLF
+
+            if line.startswith("data: "):
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    events.append({"type": "done"})
+                elif data_str:
+                    try:
+                        event_data = json.loads(data_str)
+                        events.append({"type": "data", "data": event_data})
+                    except json.JSONDecodeError:
+                        # Skip malformed JSON
+                        continue
+
+        return events
+
+    def extract_content(self, event_data: dict) -> str:
+        """Extract content from event data."""
+        return _extract_content_from_chunk(event_data)
+
+    def add_content(self, content: str) -> None:
+        """Add content to the buffer."""
+        if content:
+            self.content_buffer.append(content)
+
+    def get_complete_content(self) -> str:
+        """Get the complete buffered content."""
+        return "".join(self.content_buffer)
+
+
+def _log_streaming_response(response, response_body: list) -> None:
+    """Log streaming response with robust SSE parsing."""
+    from starlette.concurrency import iterate_in_threadpool
+
+    sse_decoder = SSEDecoder()
+    chunk_count = 0
+
+    def buffered_iterator():
+        nonlocal chunk_count
+
+        for chunk in response_body:
+            chunk_count += 1
+            yield chunk
+
+            # Parse SSE events from chunk
+            events = sse_decoder.decode_chunk(chunk)
+
+            for event in events:
+                if event["type"] == "data":
+                    content = sse_decoder.extract_content(event["data"])
+                    sse_decoder.add_content(content)
+                elif event["type"] == "done":
+                    # Log complete content when done
+                    full_content = sse_decoder.get_complete_content()
+                    if full_content:
+                        # Truncate if too long
+                        if len(full_content) > 2048:
+                            full_content = full_content[:2048] + ""
+                            "...[truncated]"
+                        logger.info(
+                            "response_body={streaming_complete: content=%r, chunks=%d}",
+                            full_content,
+                            chunk_count,
+                        )
+                    else:
+                        logger.info(
+                            "response_body={streaming_complete: no_content, chunks=%d}",
+                            chunk_count,
+                        )
+                    return
+
+    response.body_iterator = iterate_in_threadpool(buffered_iterator())
+    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
+
+
+def _log_non_streaming_response(response_body: list) -> None:
+    """Log non-streaming response."""
+    try:
+        decoded_body = response_body[0].decode()
+        logger.info("response_body={%s}", decoded_body)
+    except UnicodeDecodeError:
+        logger.info("response_body={<binary_data>}")
+
+
+
 
 def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
     if args.disable_fastapi_docs:

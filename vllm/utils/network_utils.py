@@ -331,3 +331,47 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=linger)
+
+
+def recv_router_dealer_message(
+    socket: zmq.Socket,
+    use_poller: bool = False,
+    poll_timeout: int = 1000,
+) -> tuple[bool, None | bytes, None | str]:
+    """
+    Receive multipart ZMQ messages, automatically inferring message format
+    based on socket type (ROUTER or DEALER).
+
+    Returns:
+        (success, identity, message)
+        - identity is only set for ROUTER sockets
+        - success=False on timeout or error
+    """
+    sock_type = socket.getsockopt(zmq.TYPE)
+
+    # optional non-blocking receive
+    if use_poller:
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+        socks = dict(poller.poll(poll_timeout))
+        if socket not in socks:
+            return (False, None, None)
+
+    parts = socket.recv_multipart()
+
+    if sock_type == zmq.ROUTER:
+        # ROUTER message: [identity, empty, message]
+        assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+        identity_bytes, empty_frame, message_bytes = parts
+        identity = identity_bytes
+    elif sock_type == zmq.DEALER:
+        # DEALER message: [empty, message]
+        assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+        empty_frame, message_bytes = parts
+        identity = None
+    else:
+        raise ValueError(f"Unsupported socket type: {sock_type}")
+
+    assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+    message = message_bytes.decode("utf-8")
+    return (True, identity, message)

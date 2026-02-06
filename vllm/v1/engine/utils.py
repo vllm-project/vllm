@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import contextlib
+import json
+import multiprocessing
 import os
+import time
+import uuid
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
+import regex as re
 import zmq
 
 from vllm import envs
@@ -22,10 +26,17 @@ from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    recv_router_dealer_message,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
+from vllm.v1.serial_utils import serialize_method_call
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -58,6 +69,7 @@ class EngineZmqAddresses:
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
+
     # ZMQ input socket address of DP coordinator if applicable
     coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
@@ -66,6 +78,17 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+
+    # ZMQ fault_pub_socket address of client sentinel
+    fault_pub_socket_addr: str | None = None
+    # ZMQ client_cmd socket address of client sentinel
+    client_cmd_addr: str | None = None
+    # ZMQ engine_fault socket address of EngineCoreSentinel
+    engine_fault_socket_addr: str | None = None
+    # Identities of engine core DEALER sockets, keyed by engine index.
+    # These identities are used by the ClientSentinel (ROUTER) to route
+    # messages to the corresponding engine core.
+    engine_core_sentinel_identities: dict[int, bytes] | None = None
 
 
 @dataclass
@@ -106,7 +129,23 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
-
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            identity = generate_identity_group(
+                "core_engine_proc_manager", "client_sentinel", "report", 1
+            )[0]
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=identity,
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -131,6 +170,9 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.shutdown_monitor = False
+
+        self.vllm_config = vllm_config
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
@@ -155,12 +197,57 @@ class CoreEngineProcManager:
             if self.finished_procs():
                 self.close()
 
+    def _report_engine_dead(self, dead_message):
+        """Send engine dead message to ClientSentinel"""
+        try:
+            self.engine_down_socket.send_multipart(
+                [
+                    b"",  # Empty frame separator
+                    dead_message.encode("utf-8"),
+                ]
+            )
+            logger.info("Sent message to ClientSentinel: %s", dead_message)
+        except Exception as e:
+            logger.error("Failed to send message: %s", e)
+
     def close(self):
         """Shutdown all procs."""
         self._finalizer()
 
+    def notify_engine_down(self, engine_rank, died_proc):
+        """
+        Send fault notification to the engine_down_socket
+        and log the failure event.
+        """
+        fault_info = FaultInfo(
+            type="engine_core dead",
+            message=f"Engine core proc {died_proc.name} died unexpectedly.",
+            engine_id=engine_rank,
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", fault_info.serialize().encode("utf-8")]
+        )
+        logger.error("Engine core proc %s died unexpectedly", died_proc.name)
+
+    def monitor_engine_process(self, engine_down_callback):
+        """
+        Monitor engine core process liveness.
+        """
+        sentinels = [proc.sentinel for proc in self.processes]
+        while sentinels and not self.shutdown_monitor:
+            died = multiprocessing.connection.wait(sentinels)
+            for sentinel in died:
+                sentinel = cast(int, sentinel)
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                engine_rank = re.match(r"EngineCore_DP(\d+)", died_proc.name).group(1)
+                engine_down_callback(engine_rank, died_proc)
+                sentinels.remove(sentinel)
+
     def join_first(self):
-        """Wait for any process to exit."""
         connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
@@ -278,6 +365,24 @@ class CoreEngineActorManager:
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
 
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            identity = generate_identity_group(
+                "core_engine_actor_manager", "clinet_sentinel", "report", 1
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=identity,
+            )
+
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
@@ -350,6 +455,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
+
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -825,6 +931,33 @@ def launch_core_engines(
         ],
     )
 
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
+        addresses.engine_fault_socket_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host=vllm_config.parallel_config.data_parallel_master_ip,
+            port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+        )
+        addresses.client_cmd_addr = get_engine_client_zmq_addr(
+            local_only=client_local_only, host=host
+        )
+        identity_group = generate_identity_group(
+            peer1="client",
+            peer2="engine_core_sentinel",
+            use="report and cmd",
+            n=dp_size,
+        )
+        addresses.engine_core_sentinel_identities = {
+            rank: identity for rank, identity in enumerate(identity_group)
+        }
+        addresses.fault_pub_socket_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host="0.0.0.0",
+            port=vllm_config.fault_tolerance_config.external_fault_notify_port,
+        )
+
+    # Run the DP Coordinator process with rank 0 when in
+    # online DP mode.
+    run_coordinator = dp_size > 1 and not offline_mode and dp_rank == 0
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
     # 1. Internal/hybrid LB: collecting and publishing queue stats for load balancing
@@ -1094,3 +1227,141 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def generate_unique_uuids(n: int) -> set[uuid.UUID]:
+    """Generate a set of unique UUID v4 objects.
+
+    Generates a specified number of unique UUID (version 4) objects.
+    UUID v4 uses cryptographically strong random numbers, ensuring
+    an extremely low probability of collisions.
+
+    Args:
+        n: The number of unique UUIDs to generate
+
+    Returns:
+        A set containing 'n' unique UUID objects
+    """
+    uuids: set[uuid.UUID] = set()
+    while len(uuids) < n:
+        # Generate a random UUID (version 4) and add to the set
+        uuids.add(uuid.uuid4())
+    return uuids
+
+
+def generate_identity_group(peer1, peer2, use, n):
+    """
+    Generate n unique identities for ZMQ ROUTER nodes
+
+    Format: peer1_peer2_use_random number
+    Return: list with identities in byte type as elements
+    """
+    identitys = list()
+    uuids = generate_unique_uuids(n)
+    for id in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
+        identitys.append(identity_str)
+    return identitys
+
+
+def broadcast_instruction(
+    cmd_socket,
+    target_identities: set[bytes] | list[bytes],
+    method_name: str,
+    method_uuid: str | None = None,
+    **kwargs,
+) -> str:
+    """
+    Broadcast an instruction message to multiple remote endpoints.
+    It serializes the specified method_name along with its parameters and
+    dispatches it to all target identities via the provided ZeroMQ socket.
+    """
+    if method_uuid is None:
+        method_uuid = str(uuid.uuid4())
+
+    for identity in target_identities:
+        serialized_instruction = serialize_method_call(
+            method_name, method_uuid, **kwargs
+        )
+        cmd_socket.send_multipart(
+            [identity, b"", serialized_instruction.encode("utf-8")]
+        )
+
+    return method_uuid
+
+
+def wait_for_instruction_result(
+    cmd_socket: zmq.Socket,
+    target_identities: set[bytes] | list[bytes],
+    method_name: str,
+    timeout: int,
+    method_uuid: str,
+) -> dict[bytes, dict]:
+    """
+    Wait for acknowledgment or result messages from multiple endpoints.
+    This function listens for responses corresponding to a previously broadcasted
+    instruction, identified by the given `method_uuid`.
+
+    Args:
+        cmd_socket: The socket used to receive responses.
+        target_identities: Identities that are expected to respond.
+        method_name: The name of the method_name (used for logging).
+        timeout: The maximum wait time (in seconds).
+        method_uuid: The unique identifier associated with the method_name.
+
+    Notes:
+        - This function does not raise exceptions for timeouts or parsing errors.
+          Instead, it logs the issue and returns whatever responses have been collected.
+    """
+    start = time.monotonic()
+    responses: dict[bytes, dict] = {}
+
+    target_identities = set(target_identities)
+
+    while target_identities:
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            logger.debug(
+                'Timeout while waiting for responses of command "%s" '
+                "from identities: %s",
+                method_name,
+                target_identities,
+            )
+            # Return partial results collected so far
+            return responses
+
+        try:
+            has_msg, identity, response = recv_router_dealer_message(
+                cmd_socket,
+                use_poller=True,
+                poll_timeout=int(remaining * 1000),
+            )
+
+            # Skip if no message was received during this polling period
+            if not has_msg:
+                continue
+
+            assert identity is not None
+            assert response is not None
+            response_dict = json.loads(response)
+            recv_uuid = response_dict.get("method_uuid")
+
+            # Ignore outdated or unrelated messages
+            if recv_uuid != method_uuid:
+                logger.debug(
+                    "Discarding outdated response: expected method_uuid=%s, got %s",
+                    method_uuid,
+                    recv_uuid,
+                )
+                continue
+
+            # Record this engine's response
+            responses[identity] = response_dict
+            target_identities.discard(identity)
+
+        except Exception as e:
+            logger.error("Error while processing engine response: %s", e)
+            # Return partial results even on exception to avoid data loss
+            return responses
+
+    return responses

@@ -49,6 +49,12 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -460,7 +466,7 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self.preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -889,7 +895,11 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
+    def preempt_request(
+        self,
+        request: Request,
+        timestamp: float,
+    ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
@@ -1759,7 +1769,7 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                self._preempt_request(request, timestamp)
+                self.preempt_request(request, timestamp)
                 # NOTE(zhuohan): For async scheduling, we need to discard the latest
                 # output token on the fly to avoid a redundant repetitive output token.
                 request.num_output_placeholders = 0
