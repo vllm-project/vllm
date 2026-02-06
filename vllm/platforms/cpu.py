@@ -213,6 +213,13 @@ class CpuPlatform(Platform):
 
         cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
+        # reserve at least one core for nixl_connector under p/d case
+        if vllm_config.kv_transfer_config and (
+            envs.VLLM_CPU_NUM_OF_RESERVED_CPU == 0
+            or envs.VLLM_CPU_NUM_OF_RESERVED_CPU is None
+        ):
+            os.environ["VLLM_CPU_NUM_OF_RESERVED_CPU"] = "1"
+
         parallel_config = vllm_config.parallel_config
         if (
             parallel_config.world_size > 1

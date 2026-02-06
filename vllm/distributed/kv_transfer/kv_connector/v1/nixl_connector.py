@@ -53,7 +53,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -927,8 +926,16 @@ class NixlConnectorWorker:
         else:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
-        # do cpu core binding for start_load_kv() once.
-        self.flag_for_cpu_core_binding = 0
+        # reserve different cores for start_load_kv() from model_forward()
+        if self.device_type == "cpu":
+            numa_core_list = current_platform.discover_numa_topology()
+            # setup one last core in each numa for kv transfer.
+            rsv_cores_for_kv = [
+                max(each_numa_core_list) for each_numa_core_list in numa_core_list
+            ]
+
+            if rsv_cores_for_kv:
+                os.sched_setaffinity(0, rsv_cores_for_kv)
 
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
@@ -2102,19 +2109,6 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        # use the different numa cores from model_forward() for start_load_kv()
-        if self.device_type == "cpu" and self.flag_for_cpu_core_binding == 0:
-            self.flag_for_cpu_core_binding = 1
-
-            numa_core_list = CpuPlatform.discover_numa_topology()
-            # setup one last core in each numa for kv transfer.
-            rsv_cores_for_kv = [
-                max(each_numa_core_list) for each_numa_core_list in numa_core_list
-            ]
-
-            if rsv_cores_for_kv:
-                os.sched_setaffinity(0, rsv_cores_for_kv)
-
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
