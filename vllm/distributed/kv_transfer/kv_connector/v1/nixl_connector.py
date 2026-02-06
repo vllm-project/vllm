@@ -604,7 +604,12 @@ class NixlConnectorScheduler:
         )
         # For non-SWA groups, blocks_per_sw is 0 so we return all block_ids unchanged
         return tuple(
-            [blocks[-self.blocks_per_sw[i] :] for i, blocks in enumerate(block_ids)]
+            [
+                blocks[-self.blocks_per_sw[i] :]
+                if self.blocks_per_sw[i] > 0
+                else blocks
+                for i, blocks in enumerate(block_ids)
+            ]
         )
 
     def set_xfer_handshake_metadata(
