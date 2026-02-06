@@ -24,7 +24,11 @@ from transformers.processing_utils import ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsQuant,
+)
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
     MoonViT3dPretrainedModel,
@@ -302,7 +306,9 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     info=KimiK25ProcessingInfo,
     dummy_inputs=KimiK25DummyInputsBuilder,
 )
-class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class KimiK25ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
+):
     """Kimi-K2.5 model for conditional generation.
 
     Supports both image and video-chunk modalities.
@@ -312,8 +318,12 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     supports_encoder_tp_data = True
 
-    weights_mapper = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # For legacy NVFP4 checkpoint compatibility:
+            # see https://github.com/vllm-project/vllm/pull/33346#issuecomment-3851475033
+            "language_model.layers.": "language_model.model.layers.",
+            # mm projector
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
         }
@@ -465,4 +475,4 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.weights_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
