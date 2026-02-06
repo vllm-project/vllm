@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -123,22 +122,9 @@ def test_kimi_audio_hf_outputs_match_vllm(
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     # Kimi-Audio native prompt construction currently depends on kimia_infer.
-    # In vLLM dev setups, the upstream Kimi-Audio repo may be checked out next
-    # to vLLM (e.g. ./Kimi-Audio/). Mirror the model's import fallback behavior
-    # so we can run the HF comparison test locally.
+    # Since kimia_infer is not a vLLM dependency, skip if it is not installed.
     try:
         import kimia_infer.api.prompt_manager  # noqa: F401
-    except ModuleNotFoundError:
-        this_file = Path(__file__).resolve()
-        repo_root = next(
-            parent for parent in this_file.parents if (parent / "vllm").is_dir()
-        )
-        kimi_audio_root = repo_root / "Kimi-Audio"
-        sys.path.insert(0, str(kimi_audio_root))
-        try:
-            import kimia_infer.api.prompt_manager  # noqa: F401
-        except Exception as e:  # noqa: BLE001
-            pytest.skip(f"kimia_infer not available: {e}")
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"kimia_infer not available: {e}")
 
