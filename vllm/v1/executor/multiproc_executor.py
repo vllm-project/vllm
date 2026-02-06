@@ -573,8 +573,7 @@ class WorkerProc:
         # Set process title and log prefix
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel,
-            enable_log_prefix=vllm_config.observability_config
-            .enable_log_prefix,
+            enable_log_prefix=vllm_config.observability_config.enable_log_prefix,
         )
 
         # Load model
