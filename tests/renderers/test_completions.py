@@ -465,8 +465,8 @@ class TestRenderEmbedPrompt:
         )
 
         assert len(results) == 2
-        # First should be embed prompt
-        assert torch.equal(results[0]["prompt_embeds"], tensor_input)
-        # Second should be tokens prompt
-        assert "prompt_token_ids" in results[1]
-        assert len(results[1]["prompt_token_ids"]) == len(text_input)
+        # First should be tokens prompt
+        assert "prompt_token_ids" in results[0]
+        assert len(results[0]["prompt_token_ids"]) == len(text_input)
+        # Second should be embed prompt
+        assert torch.equal(results[1]["prompt_embeds"], tensor_input)
