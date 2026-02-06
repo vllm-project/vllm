@@ -549,6 +549,8 @@ class NixlConnectorScheduler:
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
+        if self._is_hma_enabled:
+            logger.info("Hybrid Memory Allocator is enabled with NIXL")
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
