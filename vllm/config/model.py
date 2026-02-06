@@ -1412,6 +1412,11 @@ class ModelConfig:
         )
 
     @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
+
+    @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
 
@@ -1508,6 +1513,10 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
+        # Check for embedding_size set by model config (e.g., Voyage models)
+        override = getattr(self.hf_config, "embedding_size", None)
+        if override is not None:
+            return override
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
