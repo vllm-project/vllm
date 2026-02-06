@@ -1,37 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 
 """Kimi-Audio (MoonshotKimiaForCausalLM) with vLLM-native Transcriptions API support.
 
-
 Goal:
-
 - Enable vLLM OpenAI-compatible endpoint: POST /v1/audio/transcriptions
-
 - Use vLLM engine for attention + decoding
-
 - Do *audio feature + token construction* natively within vLLM (using KimiAudioTower)
-
 - Do *whisper feature -> hidden adaptor* and *embedding-time mixing* inside the
-
   vLLM model forward, using the model's own parameters.
 
-
-
 Notes
-
 -----
-
 This is a native integration:
-
 - Audio preprocessing happens natively within vLLM via KimiAudioTower
-
 - No external dependencies for audio processing
-
 - Full integration with vLLM's multimodal pipeline
-
 """
 
 from __future__ import annotations
@@ -286,24 +270,14 @@ class KimiAudioASRMultiModalProcessor(
 ):
     """Minimal processor for Kimi-Audio ASR.
 
-
-
     Key point: Kimi-Audio does not ship a HuggingFace `ProcessorMixin`.
-
     Its tokenizer is a custom TikTokenTokenizer, so we must bypass
-
     vLLM's default HF-processor path.
 
-
-
     We therefore:
-
     - tokenize `prompt` ourselves
-
     - pass through our precomputed dict-of-tensors (whisper_input_features,
-
       is_continuous_mask, text_input_ids)
-
     """
 
     # NOTE: Do not override `_get_data_parser` / `build_data_parser`.
@@ -332,27 +306,17 @@ class KimiAudioASRMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Tokenize prompt without using HF ProcessorMixin.
-
         # For Kimi-Audio we intentionally collapse the prompt into a single
-
         # placeholder token. The PromptReplacement produced by
-
         # `_get_prompt_updates` will expand it to the correct sequence length.
-
         #
-
         # This also makes dummy/profiling paths deterministic.
-
         prompt_ids = [151666]
 
         # Pass-through multimodal dict tensors. The keys here are expected to be
-
         # a flattened dict produced by BaseMultiModalProcessor.
-
         out: dict[str, object] = {"input_ids": [prompt_ids]}
-
         out.update(mm_data)
-
         return BatchFeature(out, tensor_type="pt")
 
     def _apply_hf_processor_text_only(
@@ -361,11 +325,8 @@ class KimiAudioASRMultiModalProcessor(
         tokenization_kwargs: Mapping[str, object],
     ) -> list[int]:
         # For dummy/profiling paths vLLM may pass a string prompt.
-
         # We want a single placeholder token id so our PromptReplacement
-
         # can reliably match and expand it.
-
         return [151666]
 
     def _get_mm_fields_config(
@@ -382,41 +343,29 @@ class KimiAudioASRMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
         # vLLM requires one PromptUpdate per audio item to establish placeholder
-
         # ranges. For Kimi-Audio we use a token-id placeholder sequence of the
-
         # *same length as the prompt*, so the placeholder range covers the full
-
         # prompt. The model's forward() uses `audio_input_ids` + masks to apply
-
         # audio features at the right positions.
-
         audio_items = mm_items.get_items("audio", DictEmbeddingItems)
 
         def _placeholder_seq(item_idx: int) -> list[int]:
             d = audio_items.get(item_idx)
 
             audio_ids = d["audio_input_ids"]
-
             if isinstance(audio_ids, torch.Tensor):
                 if audio_ids.dim() == 2:
                     s = int(audio_ids.shape[1])
-
                 elif audio_ids.dim() == 1:
                     s = int(audio_ids.shape[0])
-
                 else:
                     s = 1
-
             else:
                 s = 1
-
             return [placeholder_id] * max(s, 1)
 
         # Expand the single placeholder token to cover the full audio sequence
-
         # length, so that vLLM's placeholder-range bookkeeping matches the
-
         # shapes of our tensors (audio_input_ids / masks / features).
 
         placeholder_id = 151666
@@ -473,11 +422,8 @@ class KimiAudioForConditionalGeneration(
     """Kimi-Audio model for conditional generation + transcription."""
 
     # vLLM V1: treat this as a "raw input only" multimodal model so that
-
     # multimodal kwargs (whisper_input_features / masks / ids) are forwarded
-
     # directly into the model forward/embed methods.
-
     supports_multimodal_raw_input_only = True
 
     def __init__(self, *, vllm_config, prefix: str = "", **kwargs):
@@ -499,7 +445,6 @@ class KimiAudioForConditionalGeneration(
             and not hasattr(self.model, "vq_adaptor")
         ):
             # Manually add vq_adaptor if not present (vLLM may not load it)
-
             input_dim = getattr(config, "kimia_adaptor_input_dim", 5120)
             hidden_size = config.hidden_size
             rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
@@ -516,19 +461,13 @@ class KimiAudioForConditionalGeneration(
         self, input_ids: torch.Tensor, **kwargs: object
     ) -> torch.Tensor:  # type: ignore[override]
         # Pop V1-only kwargs we don't use directly.
-
         kwargs.pop("multimodal_embeddings", None)
-
         whisper_input_features = kwargs.pop("whisper_input_features", None)
-
         is_continuous_mask = kwargs.pop("is_continuous_mask", None)
-
         text_input_ids = kwargs.pop("text_input_ids", None)
-
         audio_input_ids = kwargs.pop("audio_input_ids", None)
 
         # Squeeze batch dimension if present (vLLM returns batched tensors
-
         # but embed_input_ids is called per-sequence)
 
         if (
@@ -863,33 +802,21 @@ class KimiAudioForConditionalGeneration(
                 "audio_input_ids": audio_ids,
             }
 
-            # IMPORTANT:
-
-            # vLLM's multimodal pipeline expects *placeholder tokens* in the
-
-            # prompt to mark where multimodal items are inserted. Kimi-Audio's
-
-            # true  include non-text ids that a text tokenizer
-
-            # cannot validate/decode, so we keep the prompt ids minimal and
-
-            # represent the whole audio sequence with a single placeholder.
-
+            # IMPORTANT: vLLM's multimodal pipeline expects *placeholder
+            # tokens* in the prompt to mark where multimodal items are
+            # inserted. Kimi-Audio's true input_ids include non-text ids that
+            # a text tokenizer cannot validate/decode, so we keep the prompt
+            # ids minimal and represent the whole audio sequence with a single
+            # placeholder.
             #
-
             # The processor's PromptReplacement will expand this single
-
             # placeholder into a placeholder sequence of the same length as
-
-            # , ensuring vLLM's placeholder-range bookkeeping
-
+            # audio_input_ids, ensuring vLLM's placeholder-range bookkeeping
             # matches our tensors.
-
-            # Line removed: was unused after switching to input_ids.tolist()
-
+            #
             # Return a TextPrompt (not TokensPrompt) so vLLM runs the
-            # multimodal processor on text+mm together, producing mm_kwargs that
-            # are forwarded into EngineCore.
+            # multimodal processor on text+mm together, producing mm_kwargs
+            # that are forwarded into EngineCore.
             prompt: PromptType = {
                 "prompt": "",
                 "multi_modal_data": {"audio": mm_audio},
