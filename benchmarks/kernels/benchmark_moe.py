@@ -16,6 +16,7 @@ import torch
 from ray.experimental.tqdm_ray import tqdm
 
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -211,7 +212,7 @@ def benchmark_config(
                         hidden_dim=hidden_size,
                         intermediate_size_per_partition=shard_intermediate_size,
                         num_local_experts=num_experts,
-                        activation="silu",
+                        activation=MoEActivation.SILU,
                         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                         in_dtype=init_dtype,
                         routing_method=RoutingMethodType.TopK,

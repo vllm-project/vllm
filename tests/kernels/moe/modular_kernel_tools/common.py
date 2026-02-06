@@ -22,6 +22,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -597,7 +598,7 @@ def make_modular_kernel(
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation="silu",
+        activation=MoEActivation.SILU,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
     )

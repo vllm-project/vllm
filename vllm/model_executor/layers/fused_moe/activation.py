@@ -15,6 +15,7 @@ class MoEActivation(Enum):
     # and produce output of shape [..., d]
     SILU = "silu"
     GELU = "gelu"
+    RELU2 = "relu2"
     SWIGLUOAI = "swigluoai"
     SWIGLUSTEP = "swiglustep"
 
@@ -42,6 +43,7 @@ class MoEActivation(Enum):
             MoEActivation.GELU: "gelu_and_mul",
             MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
             MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
+            MoEActivation.RELU2: "relu2",
             MoEActivation.SILU_NO_MUL: "silu_and_mul",
             MoEActivation.GELU_NO_MUL: "gelu_and_mul",
             MoEActivation.RELU2_NO_MUL: "relu2",
@@ -58,6 +60,7 @@ class MoEActivation(Enum):
         mapping = {
             MoEActivation.SILU: MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU: MoEActivation.GELU_NO_MUL,
+            MoEActivation.RELU2: MoEActivation.RELU2_NO_MUL,
         }
         return mapping.get(self, self)
 
