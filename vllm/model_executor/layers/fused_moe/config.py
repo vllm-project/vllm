@@ -124,6 +124,23 @@ class RoutingMethodType(IntEnum):
     Unspecified = 8.0
 
 
+def get_routing_method_type(
+    scoring_func: str, top_k: int, renormalize: bool
+) -> RoutingMethodType:
+    if scoring_func == "sigmoid":
+        if top_k == 1:
+            return RoutingMethodType.Llama4
+        else:
+            return RoutingMethodType.DeepSeekV3
+    elif scoring_func == "softmax":
+        if renormalize:
+            return RoutingMethodType.Renormalize
+        else:
+            return RoutingMethodType.Default
+    else:
+        return RoutingMethodType.Unspecified
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -1083,12 +1100,15 @@ class FusedMoEConfig:
     router_logits_dtype: torch.dtype | None = None
 
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
-
     has_bias: bool = False
-
     is_act_and_mul: bool = True
-
     is_lora_enabled: bool = False
+
+    # This flag is used to disable the inplace optimization
+    # in MoE kernels. If this flag is True then the kernel
+    # should not be using inplace. If the flag is false, the
+    # kernel is free to use inplace or not.
+    disable_inplace: bool = True
 
     def __post_init__(self):
         if self.dp_size > 1:

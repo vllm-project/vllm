@@ -46,7 +46,6 @@ class UnquantizedMoeBackend(Enum):
 UNSUPPORTED_BACKEND = [
     UnquantizedMoeBackend.FLASHINFER_TRTLLM,
     UnquantizedMoeBackend.CPU,
-    UnquantizedMoeBackend.XPU,
     UnquantizedMoeBackend.TPU,
     UnquantizedMoeBackend.OOT,
 ]
@@ -155,11 +154,9 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> tuple[mk.FusedMoEModularKernel | None, bool]:
-    use_inplace = True
-
+) -> mk.FusedMoEModularKernel | None:
     if backend in UNSUPPORTED_BACKEND:
-        return None, use_inplace
+        return None
 
     if backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -172,8 +169,9 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=False,
         )
-        use_inplace = False
+
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
@@ -185,6 +183,7 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=not moe_config.disable_inplace,
         )
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
@@ -195,5 +194,17 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=not moe_config.disable_inplace,
         )
-    return kernel, use_inplace
+    elif backend == UnquantizedMoeBackend.XPU:
+        from vllm.model_executor.layers.fused_moe import XPUExperts
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            XPUExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=not moe_config.disable_inplace,
+        )
+    return kernel
