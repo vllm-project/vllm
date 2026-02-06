@@ -748,35 +748,36 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-        if not mode == "keep" and self._client_count > 1:
-            raise NotImplementedError(
-                "pause_generation is not supported with --api-server-count > 1"
-                " when mode is not 'keep'"
-            )
 
         if mode == "keep":
             # Freeze requests in the scheduler - they will resume on
             # resume_generation().
             await self.engine_core.pause_scheduler_async()
+        else:
+            if self._client_count > 1:
+                raise NotImplementedError(
+                    "pause_generation is not supported with --api-server-count > 1"
+                    " when mode is not 'keep'"
+                )
+            async with self._pause_cond:
+                if not self._paused:
+                    self._paused = True
 
-        async with self._pause_cond:
-            if self._paused:
-                return
-            self._paused = True
+                    if mode == "abort":
+                        request_ids = list(self.output_processor.request_states.keys())
+                        if request_ids:
+                            await self.abort(request_ids, internal=True)
+                    elif mode == "wait":
+                        if self.output_processor.has_unfinished_requests():
+                            await self.output_processor.wait_for_requests_to_drain()
+                    else:
+                        raise ValueError(f"Invalid mode: {mode}")
 
-            if mode == "abort":
-                request_ids = list(self.output_processor.request_states.keys())
-                if request_ids:
-                    await self.abort(request_ids, internal=True)
-            elif mode == "wait":
-                if self.output_processor.has_unfinished_requests():
-                    await self.output_processor.wait_for_requests_to_drain()
-
-            # Clear cache
-            if clear_cache:
-                await self.reset_prefix_cache()
-                await self.reset_mm_cache()
-                await self.reset_encoder_cache()
+        # Clear cache
+        if clear_cache:
+            await self.reset_prefix_cache()
+            await self.reset_mm_cache()
+            await self.reset_encoder_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
