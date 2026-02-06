@@ -69,6 +69,22 @@ def is_explicit_encoder_decoder_prompt(
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 
+def split_enc_dec_prompt(
+    prompt: PromptType,
+) -> tuple[SingletonPrompt, SingletonPrompt | None]:
+    if isinstance(prompt, str):
+        return prompt, None
+
+    if "encoder_prompt" in prompt and "decoder_prompt" in prompt:
+        # NOTE: This passes pyright but not mypy
+        return (
+            prompt["encoder_prompt"],  # type: ignore[typeddict-item]
+            prompt["decoder_prompt"],  # type: ignore[typeddict-item]
+        )
+
+    return prompt, None
+
+
 def split_enc_dec_inputs(
     inputs: ProcessorInputs,
 ) -> tuple[SingletonInputs | None, SingletonInputs]:
