@@ -732,8 +732,9 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         # `truncation` and `max_length` must be removed when audio data
         # is present, otherwise the feature extractor interprets
         # `max_length` as raw audio samples and truncates the audio.
-        tok_kwargs.pop("truncation", None)
-        tok_kwargs.pop("max_length", None)
+        tok_kwargs = {
+            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
+        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
