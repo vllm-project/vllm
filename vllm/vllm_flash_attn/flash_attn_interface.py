@@ -29,11 +29,17 @@ except ImportError as e:
     FA3_AVAILABLE = False
 
 try:
-    from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd  # noqa: F401
+    import os
+
+    _cute_interface_path = os.path.join(
+        os.path.dirname(__file__), "cute", "interface.py"
+    )
+    if not os.path.exists(_cute_interface_path):
+        raise ImportError("vllm.vllm_flash_attn.cute.interface not found")
 
     FA4_UNAVAILABLE_REASON = None
     FA4_AVAILABLE = True
-except ImportError as e:
+except (ImportError, ModuleNotFoundError) as e:
     FA4_UNAVAILABLE_REASON = str(e)
     FA4_AVAILABLE = False
 
@@ -360,6 +366,8 @@ def flash_attn_varlen_func(
                 "FA4 with paged KV is not supported on SM90 (Hopper). "
                 "Use FA3 or upgrade to Blackwell (SM100+)."
             )
+        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
         out, softmax_lse = _flash_attn_fwd(
             q,
             k,
