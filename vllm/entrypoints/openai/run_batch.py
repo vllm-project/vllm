@@ -572,7 +572,7 @@ def handle_endpoint_request(
     wrapper_fn: Callable[[Callable], Callable] | None = None,
 ) -> Awaitable[BatchRequestOutput] | None:
     """
-    Generic handler for endpoint requests that eliminates code duplication.
+    Generic handler for endpoint requests.
 
     Args:
         request: The batch request input
@@ -879,13 +879,12 @@ async def run_batch(
 
         request = BatchRequestInput.model_validate_json(request_json)
 
-        # Find matching endpoint in registry and handle the request
-        # Extract the last segment from the URL to use as a key
-        url_segments = [seg for seg in request.url.split("/") if seg]
-        endpoint_key = url_segments[-1] if url_segments else None
+        # Use the last segment of the URL as the endpoint key.
+        # More advanced URL matching is done in url_matcher of endpoint_registry.
+        endpoint_key = request.url.split("/")[-1]
 
         result = None
-        if endpoint_key and endpoint_key in endpoint_registry:
+        if endpoint_key in endpoint_registry:
             endpoint_config = endpoint_registry[endpoint_key]
             result = handle_endpoint_request(
                 request,
