@@ -565,6 +565,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
+    "VoyageQwen3BidirectionalEmbedModel": _HfExamplesInfo(
+        "voyageai/voyage-4-nano", trust_remote_code=True
+    ),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
