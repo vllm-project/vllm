@@ -4,6 +4,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._higher_order_ops import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
@@ -537,6 +538,10 @@ class RopeReshapeKVCachePattern:
         self.head_size_v = layer.head_size_v
         self.is_neox = is_neox
 
+        self.q_size = self.num_heads * self.head_size
+        self.k_size = self.num_kv_heads * self.head_size
+        self.v_size = self.num_kv_heads * self.head_size_v
+
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=self.is_neox,
             head_size=self.head_size,
@@ -548,27 +553,22 @@ class RopeReshapeKVCachePattern:
         # Sample inputs to help pattern tracing
         T = 5
         L = 4096
-        q = empty_bf16(T, self.num_heads * self.head_size)
-        k = empty_bf16(T, self.num_kv_heads * self.head_size)
-        v = empty_bf16(T, self.num_kv_heads * self.head_size_v)
+        qkv = empty_bf16(T, self.q_size + self.k_size + self.v_size)
         positions = empty_i64(T)
         cos_sin_cache = empty_bf16(L, self.head_size)
         return [
-            q,
-            k,
-            v,
+            qkv,
             positions,
             cos_sin_cache,
         ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
+            qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
@@ -579,16 +579,16 @@ class RopeReshapeKVCachePattern:
             return dummy, q, k, v
 
         def replacement(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
+            qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            q, k, v, dummy = self.FUSED_OP(
+            q, k, v, dummy = auto_functionalized(
+                self.FUSED_OP,
                 q,
                 k,
                 v,
@@ -650,7 +650,7 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         # TODO (Rohan138): Remove before merging!
-        # graph.print_tabular()
+        graph.print_tabular()
         # from torch.fx.passes.graph_drawer import FxGraphDrawer
 
         # gm = graph.owning_module

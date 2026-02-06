@@ -148,11 +148,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return attn_metadata
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, positions: torch.Tensor
+        self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Create copies so inplace ops do not modify the original tensors
-        q = q.clone()
-        k = k.clone()
+        # Create copy so inplace ops do not modify the original tensors
+        qkv = qkv.clone()
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
 
         # Instead of a full forward pass, match only the KV cache update op here
@@ -262,14 +262,12 @@ def test_rope_kvcache_fusion(
 
         T = 5
 
-        q = torch.randn(T, num_heads * head_size)
-        k = torch.randn(T, num_kv_heads * head_size)
-        v = torch.randn(T, num_kv_heads * head_size)
+        qkv = torch.randn(
+            T, num_heads * head_size + 2 * num_kv_heads * head_size, dtype=dtype
+        )
         pos = torch.arange(T, dtype=torch.long)
 
-        q_unfused = q.clone()
-        k_unfused = k.clone()
-        v_unfused = v.clone()
+        qkv_unfused = qkv.clone()
         pos_unfused = pos.clone()
 
         with set_forward_context(None, vllm_config):
@@ -278,16 +276,12 @@ def test_rope_kvcache_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, k_unfused, v_unfused, dummy = model(
-                q_unfused, k_unfused, v_unfused, pos_unfused
-            )
+            q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
 
-        torch._dynamo.mark_dynamic(q, 0)
-        torch._dynamo.mark_dynamic(k, 0)
-        torch._dynamo.mark_dynamic(v, 0)
+        torch._dynamo.mark_dynamic(qkv, 0)
         torch._dynamo.mark_dynamic(pos, 0)
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
@@ -296,10 +290,15 @@ def test_rope_kvcache_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_fused, k_fused, v_fused, dummy = model_fused(q, k, v, pos)
+            q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
+
+        assert fusion_pass.matched_count == 1
+
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
@@ -316,8 +315,3 @@ def test_rope_kvcache_fusion(
             atol=ATOL,
             rtol=RTOL,
         )
-
-        assert fusion_pass.matched_count == 1
-
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
