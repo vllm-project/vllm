@@ -8,6 +8,7 @@ import torch
 from torch.library import Library, infer_schema
 
 from vllm.logger import init_logger
+from vllm.logging_utils import lazy, tensors_str_no_data
 
 vllm_ir_lib = Library("vllm_ir", "FRAGMENT")
 
@@ -182,8 +183,8 @@ class IrOp:
                 "%s with args=%s kwargs=%s",
                 impl.provider,
                 self.name,
-                args,
-                kwargs,
+                lazy(lambda: tensors_str_no_data(args)),
+                lazy(lambda: tensors_str_no_data(kwargs)),
             )
 
         raise RuntimeError(
