@@ -12,7 +12,7 @@ affine==2.4.0
     # via rasterio
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.0
+aiohttp==3.13.3
     # via
     #   aiohttp-cors
     #   datasets
@@ -27,9 +27,15 @@ aiosignal==1.4.0
 albucore==0.0.16
     # via terratorch
 albumentations==1.4.6
-    # via terratorch
+    # via
+    #   -r requirements/test.in
+    #   terratorch
 alembic==1.16.4
-    # via mlflow
+    # via
+    #   mlflow
+    #   optuna
+annotated-doc==0.0.4
+    # via fastapi
 annotated-types==0.7.0
     # via pydantic
 antlr4-python3-runtime==4.9.3
@@ -141,6 +147,8 @@ colorama==0.4.6
     #   tqdm-multiprocess
 colorful==0.5.6
     # via ray
+colorlog==6.10.1
+    # via optuna
 contourpy==1.3.0
     # via matplotlib
 coverage==7.10.6
@@ -204,7 +212,7 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
-fastapi==0.116.1
+fastapi==0.128.0
     # via
     #   gpt-oss
     #   mlflow-skinny
@@ -248,7 +256,7 @@ fsspec==2024.9.0
     #   torch
 ftfy==6.3.1
     # via open-clip-torch
-genai-perf==0.0.8
+genai-perf==0.0.16
     # via -r requirements/test.in
 genson==1.3.0
     # via datamodel-code-generator
@@ -295,7 +303,7 @@ graphql-relay==3.2.0
     # via graphene
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.71.0
+grpcio==1.76.0
     # via ray
 gunicorn==23.0.0
     # via mlflow
@@ -324,7 +332,7 @@ httpx==0.27.2
     #   -r requirements/test.in
     #   perceptron
     #   schemathesis
-huggingface-hub==0.34.3
+huggingface-hub==0.36.2
     # via
     #   accelerate
     #   datasets
@@ -385,6 +393,7 @@ jinja2==3.1.6
     # via
     #   datamodel-code-generator
     #   flask
+    #   genai-perf
     #   mlflow
     #   torch
 jiwer==3.0.5
@@ -482,7 +491,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.8.8
+mistral-common==1.9.0
     # via -r requirements/test.in
 mlflow==2.22.0
     # via terratorch
@@ -524,7 +533,7 @@ numba==0.61.2
     #   librosa
 numexpr==2.10.1
     # via lm-eval
-numpy==1.26.4
+numpy==2.2.6
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -554,6 +563,7 @@ numpy==1.26.4
     #   numba
     #   numexpr
     #   opencv-python-headless
+    #   optuna
     #   pandas
     #   patsy
     #   peft
@@ -633,7 +643,7 @@ opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
     # via opencensus
-opencv-python-headless==4.11.0.86
+opencv-python-headless==4.13.0.90
     # via
     #   -r requirements/test.in
     #   albucore
@@ -656,6 +666,10 @@ opentelemetry-sdk==1.35.0
     #   ray
 opentelemetry-semantic-conventions==0.56b0
     # via opentelemetry-sdk
+optuna==3.6.1
+    # via genai-perf
+orjson==3.11.5
+    # via genai-perf
 packaging==24.2
     # via
     #   accelerate
@@ -674,6 +688,7 @@ packaging==24.2
     #   lightning-utilities
     #   matplotlib
     #   mlflow-skinny
+    #   optuna
     #   peft
     #   plotly
     #   pooch
@@ -713,6 +728,8 @@ peft==0.16.0
     #   lm-eval
 perceptron==0.1.4
     # via -r requirements/test.in
+perf-analyzer==0.1.0
+    # via genai-perf
 pillow==10.4.0
     # via
     #   genai-perf
@@ -723,7 +740,6 @@ pillow==10.4.0
     #   perceptron
     #   scikit-image
     #   segmentation-models-pytorch
-    #   sentence-transformers
     #   torchgeo
     #   torchvision
 platformdirs==4.3.6
@@ -757,7 +773,7 @@ propcache==0.2.0
     #   yarl
 proto-plus==1.26.1
     # via google-api-core
-protobuf==5.28.3
+protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
@@ -900,6 +916,7 @@ pyyaml==6.0.2
     #   lightning
     #   mlflow-skinny
     #   omegaconf
+    #   optuna
     #   peft
     #   pytorch-lightning
     #   ray
@@ -1023,7 +1040,7 @@ segmentation-models-pytorch==0.4.0
     # via
     #   terratorch
     #   torchgeo
-sentence-transformers==3.2.1
+sentence-transformers==5.2.0
     # via
     #   -r requirements/test.in
     #   mteb
@@ -1062,6 +1079,7 @@ sortedcontainers==2.4.0
 soundfile==0.12.1
     # via
     #   -r requirements/test.in
+    #   genai-perf
     #   librosa
     #   mistral-common
 soxr==0.5.0.post1
@@ -1072,11 +1090,12 @@ sqlalchemy==2.0.41
     # via
     #   alembic
     #   mlflow
+    #   optuna
 sqlitedict==2.1.0
     # via lm-eval
 sqlparse==0.5.3
     # via mlflow-skinny
-starlette==0.46.2
+starlette==0.50.0
     # via
     #   fastapi
     #   schemathesis
@@ -1201,6 +1220,7 @@ tqdm==4.66.6
     #   mteb
     #   nltk
     #   open-clip-torch
+    #   optuna
     #   peft
     #   pqdm
     #   pretrainedmodels
@@ -1211,7 +1231,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.57.3
+transformers==4.57.5
     # via
     #   -r requirements/test.in
     #   genai-perf
@@ -1223,10 +1243,8 @@ transformers-stream-generator==0.0.5
     # via -r requirements/test.in
 triton==3.5.1
     # via torch
-tritonclient==2.51.0
-    # via
-    #   -r requirements/test.in
-    #   genai-perf
+tritonclient==2.64.0
+    # via -r requirements/test.in
 typepy==1.3.2
     # via
     #   dataproperty
@@ -1248,6 +1266,7 @@ typing-extensions==4.15.0
     #   chz
     #   fastapi
     #   graphene
+    #   grpcio
     #   huggingface-hub
     #   librosa
     #   lightning
@@ -1263,7 +1282,9 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   sentence-transformers
     #   sqlalchemy
+    #   starlette
     #   torch
     #   torchgeo
     #   typer

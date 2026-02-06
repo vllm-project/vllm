@@ -71,14 +71,37 @@ def _get_audio_output_lengths_for_tower(
     merge_factor: int,
     conv_params: list[tuple[int, int, int]],
 ) -> torch.Tensor:
+    """
+    Calculate the output lengths after audio processing.
+
+    The output length accounts for:
+    1. Convolution layers (downsampling)
+    2. Merge factor (further downsampling during projection)
+
+    Args:
+        audio_tower: The audio encoder module
+        audio_lengths: Input feature lengths [batch_size]
+        merge_factor: Factor for merging adjacent features
+        conv_params: List of (padding, kernel_size, stride) for each conv layer
+
+    Returns:
+        Output lengths after all processing [batch_size]
+    """
+    # First, calculate the output length after convolutions
     if hasattr(audio_tower, "_get_feat_extract_output_lengths"):
-        _, audio_output_lengths = audio_tower._get_feat_extract_output_lengths(
+        _, conv_output_lengths = audio_tower._get_feat_extract_output_lengths(
             audio_lengths
         )
-        return audio_output_lengths
-    return _get_audio_output_lengths_from_lengths(
-        audio_lengths, merge_factor, conv_params
-    )
+    else:
+        conv_output_lengths = audio_lengths
+        for padding, kernel_size, stride in conv_params:
+            conv_output_lengths = _calculate_conv_output_length(
+                conv_output_lengths, padding, kernel_size, stride
+            )
+
+    # Then, apply merge_factor to get final output length
+    # Formula: (conv_output_lengths - merge_factor) // merge_factor + 1
+    return (conv_output_lengths - merge_factor) // merge_factor + 1
 
 
 def _flatten_audio_features_by_length(
@@ -143,23 +166,3 @@ def _extract_mask_for_item(
         return feature_attention_mask[start_idx:end_idx]
     mask_slice = feature_attention_mask[start_idx:end_idx]
     return _normalize_to_tensor(mask_slice)
-
-
-def _get_num_features_for_item(
-    feature_attention_mask: torch.Tensor | None,
-    chunk_counts: torch.Tensor | list[int] | None,
-    item_idx: int,
-    audio_embeds: list[torch.Tensor] | None,
-    merge_factor: int,
-    conv_params: list[tuple[int, int, int]],
-) -> int:
-    """Get number of features for a specific audio item."""
-    if feature_attention_mask is not None:
-        mask = _extract_mask_for_item(feature_attention_mask, chunk_counts, item_idx)
-        audio_output_lengths = _get_audio_output_lengths_from_mask(
-            mask, merge_factor, conv_params
-        )
-        return audio_output_lengths.sum().item()
-    if audio_embeds is not None:
-        return audio_embeds[item_idx].shape[0]
-    raise ValueError("Either feature_attention_mask or audio_embeds must be provided")

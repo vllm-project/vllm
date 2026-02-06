@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
             vllm_config=self.vllm_config,
