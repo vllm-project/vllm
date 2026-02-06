@@ -230,8 +230,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
-        if self.config.pad_token_id is not None:
-            self.pad_token_id = self.config.pad_token_id
+        if self.config.text_config.pad_token_id is not None:
+            self.pad_token_id = self.config.text_config.pad_token_id
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

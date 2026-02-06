@@ -236,7 +236,7 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        return {"audio": 1}
 
 
 class AudioFlamingo3DummyInputsBuilder(
