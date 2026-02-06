@@ -320,3 +320,16 @@ def test_lora_target_modules_default_none(serve_parser):
     """Test that lora-target-modules defaults to None"""
     args = serve_parser.parse_args(args=[])
     assert args.lora_target_modules is None
+
+
+### Tests for --disable-log-prefix flag
+def test_disable_log_prefix_default_false(serve_parser):
+    """Ensure --disable-log-prefix defaults to False."""
+    args = serve_parser.parse_args(args=[])
+    assert args.disable_log_prefix is False
+
+
+def test_disable_log_prefix_flag(serve_parser):
+    """Ensure --disable-log-prefix sets the attribute to True."""
+    args = serve_parser.parse_args(args=["--disable-log-prefix"])
+    assert args.disable_log_prefix is True
