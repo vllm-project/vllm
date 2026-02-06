@@ -141,24 +141,26 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
+    kv_cache_config: KVCacheConfig | None = None,
 ) -> Scheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
-    )
+    if kv_cache_config is None:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
     return Scheduler(
         vllm_config=vllm_config,
@@ -414,7 +416,10 @@ KVConnectorFactory.register_connector(
 
 
 def make_kv_cache_config(
-    block_size: int, hma_enabled: bool = False, sw_size: int = 128
+    block_size: int,
+    hma_enabled: bool = False,
+    sw_size: int = 128,
+    num_blocks: int = 100,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -441,5 +446,5 @@ def make_kv_cache_config(
             )
         )
     return KVCacheConfig(
-        num_blocks=100, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
     )
