@@ -4,6 +4,9 @@
 #include "cpu_attn_impl.hpp"
 #include <arm_neon.h>
 #include <type_traits>
+#ifdef ARM_BF16_SUPPORT
+  #include "cpu_attn_neon_bfmmla.hpp"
+#endif
 namespace cpu_attention {
 
 namespace {
@@ -57,7 +60,7 @@ FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
 #endif
 }
 
-// Mx8, with 1 <= M <= 8 , K streamed, unroll-by-4 with NEON FMLAs
+// Mx8, with 1 <= M <= 8 , K streamed, unroll-by-4 with ASIMD FMLAs
 // #Loads = (K // 4) * (M + 4 * sizeof(kv_cache_t) / 2)
 // #FMLAs = (K // 4) * (4 * 2 * M)
 // We have (4 * 2 * M) FMLAs for (M + 4 * sizeof(kv_cache_t) / 2) loads
@@ -381,6 +384,18 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
     }
   }
 };
+
+#ifdef ARM_BF16_SUPPORT
+// For BF16 on Arm, reuse the BFMMLA kernels with 32-token alignment.
+template <int64_t head_dim>
+class AttentionImpl<ISA::NEON, c10::BFloat16, head_dim>
+    : public AttentionImplNEONBFMMLA<BLOCK_SIZE_ALIGNMENT, ISA::NEON,
+                                     head_dim> {};
+#endif
 }  // namespace cpu_attention
 
-#endif  // #ifndef CPU_ATTN_NEON_HPP
+#undef BLOCK_SIZE_ALIGNMENT
+#undef HEAD_SIZE_ALIGNMENT
+#undef MAX_Q_HEAD_NUM_PER_ITER
+
+#endif  // #ifndef CPU_ATTN_ASIMD_HPP

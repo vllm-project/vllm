@@ -38,6 +38,15 @@ struct KernelVecType<c10::BFloat16> {
   using qk_vec_type = vec_op::BF16Vec32;
   using v_load_vec_type = vec_op::BF16Vec16;
 };
+
+#elif defined(__s390x__)
+template <>
+struct KernelVecType<c10::BFloat16> {
+  using qk_load_vec_type = vec_op::BF16Vec16;
+  using qk_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::BF16Vec16;
+};
+
 #elif defined(__aarch64__)
 template <>
 struct KernelVecType<c10::BFloat16> {
