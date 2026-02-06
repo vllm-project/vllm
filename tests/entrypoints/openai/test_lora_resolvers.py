@@ -52,6 +52,7 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

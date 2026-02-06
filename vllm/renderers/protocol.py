@@ -2,14 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
-from vllm.utils.collection_utils import is_list_of
 
 from .embed_utils import safe_load_prompt_embeds
+from .inputs import (
+    DictPrompt,
+    EncoderDecoderDictPrompt,
+    EncoderDecoderTokPrompt,
+    TokPrompt,
+)
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -57,140 +63,217 @@ class BaseRenderer(ABC):
         return self._async_tokenizer
 
     # Step 1: Convert raw inputs to prompts
-    def render_completion(
+    def render_prompt(
         self,
-        prompt_raw: str | list[int] | bytes,
-    ) -> TextPrompt | TokensPrompt | EmbedsPrompt:
-        error_msg = "Each prompt must be a string or an array of tokens"
+        prompt: DictPrompt | bytes,
+    ) -> DictPrompt:
+        if isinstance(prompt, bytes):
+            embeds = safe_load_prompt_embeds(self.config, prompt)
+            prompt = EmbedsPrompt(prompt_embeds=embeds)
 
-        if isinstance(prompt_raw, str):
-            return TextPrompt(prompt=prompt_raw)
+        return prompt
 
-        if isinstance(prompt_raw, list):
-            if not is_list_of(prompt_raw, int):
-                raise TypeError(error_msg)
-
-            return TokensPrompt(prompt_token_ids=prompt_raw)
-
-        if isinstance(prompt_raw, bytes):
-            embeds = safe_load_prompt_embeds(self.config, prompt_raw)
-            return EmbedsPrompt(prompt_embeds=embeds)
-
-        raise TypeError(error_msg)
-
-    def render_completions(
+    def render_prompts(
         self,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
-        prompt_embeds: bytes | list[bytes] | None = None,
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
-        prompts_raw = list[str | list[int] | bytes]()
-
-        if prompt_embeds is not None:  # embeds take higher priority
-            if isinstance(prompt_embeds, bytes):
-                prompts_raw.append(prompt_embeds)
-            else:
-                prompts_raw.extend(prompt_embeds)
-
-        if prompt_input is not None:
-            if isinstance(prompt_input, str) or (
-                len(prompt_input) > 0 and is_list_of(prompt_input, int)
-            ):
-                prompts_raw.append(prompt_input)  # type: ignore[arg-type]
-            else:
-                prompts_raw.extend(prompt_input)  # type: ignore[arg-type]
-
-        if len(prompts_raw) == 0:
+        prompts: Sequence[DictPrompt | bytes],
+    ) -> list[DictPrompt]:
+        if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        return [self.render_completion(prompt) for prompt in prompts_raw]
+        return [self.render_prompt(prompt) for prompt in prompts]
 
-    async def render_completions_async(
+    async def render_prompts_async(
         self,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
-        prompt_embeds: bytes | list[bytes] | None = None,
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
-        return self.render_completions(prompt_input, prompt_embeds)
+        prompts: Sequence[DictPrompt | bytes],
+    ) -> list[DictPrompt]:
+        return self.render_prompts(prompts)
 
     @abstractmethod
     def render_messages(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list["ConversationMessage"], DictPrompt]:
         raise NotImplementedError
 
     async def render_messages_async(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        prompt_token_ids = tokenizer.encode(
+            prompt["prompt"],
+            **params.get_encode_kwargs(),
+        )
+
+        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
+    async def _tokenize_prompt_async(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        tokenizer = self.get_async_tokenizer()
+        prompt_token_ids = await tokenizer.encode(
+            prompt["prompt"],
+            **params.get_encode_kwargs(),
+        )
+
+        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
+
+        return prompt
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_async_tokenizer()
+        prompt["prompt"] = await tokenizer.decode(prompt["prompt_token_ids"])
+
+        return prompt
+
+    def _tokenize_enc_dec_prompt(
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt:
+        enc_prompt, dec_prompt = (
+            self.tokenize_prompt(prompt["encoder_prompt"], params),
+            (
+                None
+                if prompt["decoder_prompt"] is None
+                else self.tokenize_prompt(prompt["decoder_prompt"], params)
+            ),
+        )
+
+        return EncoderDecoderTokPrompt(
+            encoder_prompt=enc_prompt,
+            decoder_prompt=dec_prompt,
+        )
+
+    async def _tokenize_enc_dec_prompt_async(
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt:
+        enc_prompt, dec_prompt = await asyncio.gather(
+            self.tokenize_prompt_async(prompt["encoder_prompt"], params),
+            (
+                asyncio.sleep(0)
+                if prompt["decoder_prompt"] is None
+                else self.tokenize_prompt_async(prompt["decoder_prompt"], params)
+            ),
+        )
+
+        return EncoderDecoderTokPrompt(
+            encoder_prompt=enc_prompt,
+            decoder_prompt=dec_prompt,
+        )
+
+    @overload
     def tokenize_prompt(
         self,
-        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
+        prompt: TextPrompt | TokensPrompt,
         params: TokenizeParams,
-    ) -> TokensPrompt | EmbedsPrompt:
+    ) -> TokensPrompt: ...
+
+    @overload
+    def tokenize_prompt(  # type: ignore[misc]
+        self,
+        prompt: EmbedsPrompt,
+        params: TokenizeParams,
+    ) -> EmbedsPrompt: ...
+
+    @overload
+    def tokenize_prompt(  # type: ignore[misc]
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt: ...
+
+    def tokenize_prompt(
+        self,
+        prompt: DictPrompt,
+        params: TokenizeParams,
+    ) -> TokPrompt:
+        if "encoder_prompt" in prompt:
+            return self._tokenize_enc_dec_prompt(prompt, params)  # type: ignore[arg-type]
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-
-            tokenizer = self.get_tokenizer()
-            prompt_token_ids = tokenizer.encode(
-                prompt["prompt"],
-                **params.get_encode_kwargs(),
-            )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+            prompt = self._tokenize_prompt(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            tokenizer = self.get_tokenizer()
-            prompt_text = tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
-            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
+            prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     def tokenize_prompts(
         self,
-        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        prompts: Sequence[DictPrompt],
         params: TokenizeParams,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[TokPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
+
+    @overload
+    async def tokenize_prompt_async(
+        self,
+        prompt: TextPrompt | TokensPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt: ...
+
+    @overload
+    async def tokenize_prompt_async(  # type: ignore[misc]
+        self,
+        prompt: EmbedsPrompt,
+        params: TokenizeParams,
+    ) -> EmbedsPrompt: ...
+
+    @overload
+    async def tokenize_prompt_async(  # type: ignore[misc]
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt: ...
 
     async def tokenize_prompt_async(
         self,
-        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
+        prompt: DictPrompt,
         params: TokenizeParams,
-    ) -> TokensPrompt | EmbedsPrompt:
+    ) -> TokPrompt:
+        if "encoder_prompt" in prompt:
+            return await self._tokenize_enc_dec_prompt_async(prompt, params)  # type: ignore[arg-type]
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-
-            tokenizer = self.get_async_tokenizer()
-            prompt_token_ids = await tokenizer.encode(
-                prompt["prompt"],
-                **params.get_encode_kwargs(),
-            )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+            prompt = await self._tokenize_prompt_async(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            tokenizer = self.get_async_tokenizer()
-            prompt_text = await tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
-            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
+            prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     async def tokenize_prompts_async(
         self,
-        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        prompts: Sequence[DictPrompt],
         params: TokenizeParams,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[TokPrompt]:
         return await asyncio.gather(
             *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
         )

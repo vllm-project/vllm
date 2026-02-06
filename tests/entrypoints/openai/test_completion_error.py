@@ -53,6 +53,7 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
+    is_encoder_decoder: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
