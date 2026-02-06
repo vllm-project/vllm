@@ -68,7 +68,6 @@ def init_pooling_state(
             OpenAIServingPooling(
                 engine_client,
                 state.openai_serving_models,
-                supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
@@ -76,7 +75,7 @@ def init_pooling_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if any(task in POOLING_TASKS for task in supported_tasks)
+        if any(t in supported_tasks for t in POOLING_TASKS)
         else None
     )
     state.openai_serving_embedding = (
