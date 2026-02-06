@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.compilation.sequence_parallelism import (
+from vllm.compilation.passes.fusion.sequence_parallelism import (
     SP_MIN_HIDDEN_SIZE,
     SP_MIN_PER_GPU_SIZE_MB,
     get_sequence_parallelism_threshold,

@@ -1381,7 +1381,7 @@ class VllmConfig:
             # Calculate min_token_num if not explicitly provided
             # User override works regardless of hidden_size
             if pass_config.sp_min_token_num is None:
-                from vllm.compilation.sequence_parallelism import (
+                from vllm.compilation.passes.fusion.sequence_parallelism import (
                     get_sequence_parallelism_threshold,
                 )
 
