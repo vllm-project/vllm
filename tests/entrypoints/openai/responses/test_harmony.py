@@ -79,6 +79,7 @@ def get_horoscope(sign):
 
 
 def call_function(name, args):
+    logger.info("Calling function %s with args %s", name, args)
     dispatch = {
         "get_weather": lambda: get_weather(**args),
         "get_place_to_travel": lambda: get_place_to_travel(),
@@ -86,7 +87,9 @@ def call_function(name, args):
     }
     if name not in dispatch:
         raise ValueError(f"Unknown function: {name}")
-    return dispatch[name]()
+    result = dispatch[name]()
+    logger.info("Function %s returned: %s", name, result)
+    return result
 
 
 @pytest.fixture(scope="module")
