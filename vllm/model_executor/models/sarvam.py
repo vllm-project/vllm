@@ -22,10 +22,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from itertools import islice
 
+import math
 import torch
 from torch import nn
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -44,7 +44,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -65,8 +64,16 @@ from .utils import (
 )
 
 
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
 def _is_gate_expert_bias_name(name: str) -> bool:
-    return name.endswith(".mlp.gate.e_score_correction_bias") or name.endswith(".gate.e_score_correction_bias")
+    return name.endswith(".mlp.gate.e_score_correction_bias") or name.endswith(
+        ".gate.e_score_correction_bias"
+    )
 
 
 def _zero_mean_tensor(t: torch.Tensor) -> torch.Tensor:
@@ -268,6 +275,7 @@ class SarvamMLAMoE(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.hidden_size = config.hidden_size
@@ -343,11 +351,16 @@ class SarvamMLAMoE(nn.Module):
             routed_scaling_factor=1.0,
         )
 
+    def maybe_get_fused_moe(self) -> SharedFusedMoE:
+        return self.experts
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(
-            hidden_states.to(self.router_dtype) if self.router_dtype is not None else hidden_states
+            hidden_states.to(self.router_dtype)
+            if self.router_dtype is not None
+            else hidden_states
         )
         router_logits = router_logits.to(hidden_states.dtype)
         final_hidden = self.experts(
@@ -366,7 +379,9 @@ class SarvamMLAMoE(nn.Module):
             expert_output = expert_output + shared_output
 
         if self.tp_size > 1:
-            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(expert_output)
+            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
+                expert_output
+            )
 
         return expert_output.view(num_tokens, hidden_dim)
 
@@ -403,7 +418,9 @@ class SarvamMLABlock(nn.Module):
         first_k_dense = getattr(config, "first_k_dense_replace", 0)
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         if use_moe:
-            is_moe_layer = layer_idx >= first_k_dense and ((layer_idx - first_k_dense) % moe_layer_freq == 0)
+            is_moe_layer = layer_idx >= first_k_dense and (
+                (layer_idx - first_k_dense) % moe_layer_freq == 0
+            )
         else:
             is_moe_layer = False
 
@@ -454,14 +471,15 @@ class SarvamMLAModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.hidden_size
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
-        if get_pp_group().is_first_rank or (self.tie_word_embeddings and get_pp_group().is_last_rank):
+        if get_pp_group().is_first_rank or (
+            self.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 self.embed_dim,
@@ -471,7 +489,9 @@ class SarvamMLAModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        self.embedding_dropout = torch.nn.Dropout(getattr(config, "embedding_dropout", 0.0))
+        self.embedding_dropout = torch.nn.Dropout(
+            getattr(config, "embedding_dropout", 0.0)
+        )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: SarvamMLABlock(
@@ -517,7 +537,9 @@ class SarvamMLAModel(nn.Module):
                 residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
         if residual is None:
             hidden_states = self.norm(hidden_states)
         else:
@@ -585,7 +607,9 @@ class SarvamMLAModel(nn.Module):
                         continue
 
                     param = params_dict[new_name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,
@@ -615,7 +639,51 @@ class SarvamMLAModel(nn.Module):
         return loaded_params
 
 
-class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
+class SarvamMixtureOfExperts(MixtureOfExperts):
+    def extract_moe_parameters(self, example_moe: "SarvamMLAMoE | None") -> None:
+        if example_moe is None:
+            raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
+
+        self.num_logical_experts = example_moe.num_experts
+        self.num_routed_experts = example_moe.num_experts  # routed pool size
+        self.num_shared_experts = getattr(example_moe.config, "num_shared_experts", 0)
+
+        self.num_physical_experts = self.num_logical_experts
+        self.num_local_physical_experts = self.num_logical_experts
+        self.num_redundant_experts = 0
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+
+        for moe in self.moe_mlp_layers:
+            moe.n_physical_experts = num_physical_experts
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+
+            fused = moe.experts
+            if hasattr(fused, "n_local_physical_experts"):
+                fused.n_local_physical_experts = num_local_physical_experts
+            if hasattr(fused, "n_physical_experts"):
+                fused.n_physical_experts = num_physical_experts
+            if hasattr(fused, "n_redundant_experts"):
+                fused.n_redundant_experts = self.num_redundant_experts
+            if hasattr(fused, "update_expert_map"):
+                fused.update_expert_map()
+
+    def set_eplb_state(self, eplb_state) -> None:
+        self.eplb_state = eplb_state
+        for moe in self.moe_layers:
+            if hasattr(moe, "set_eplb_state"):
+                moe.set_eplb_state(eplb_state)
+
+
+class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
     packed_modules_mapping = {
         "q_proj": ["q_proj"],
         "q_a_proj": ["q_a_proj"],
@@ -625,27 +693,21 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.config = config
         quant_config = vllm_config.quant_config
+        self.config = config
         self.quant_config = quant_config
-        self.max_position_embeddings = config.max_position_embeddings
+
         self.model = SarvamMLAModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
         )
-        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
             if self.tie_word_embeddings:
-                # Tie to embed_tokens like HF
                 self.lm_head = self.model.embed_tokens
             else:
                 self.lm_head = ParallelLMHead(
@@ -659,7 +721,28 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts
             self.lm_head = PPMissingLayer()
             self.logits_processor = None  # type: ignore
 
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+        self.expert_weights = []
+        self.num_moe_layers = 0
+        self.num_expert_groups = getattr(config, "n_group", None)
+
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, SarvamMLAMoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+                self.num_moe_layers += 1
+
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
