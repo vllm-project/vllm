@@ -63,8 +63,8 @@ def _supports_routing_method(
     """Monolithic kernels need to express router support."""
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
+        # Default routing is not implemented in FlashInfer TRTLLM.
         return routing_method in [
-            RoutingMethodType.Default,
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
@@ -86,7 +86,6 @@ def _supports_routing_method_bf16(
     routing_method: RoutingMethodType,
 ) -> bool:
     return routing_method in [
-        RoutingMethodType.Default,
         RoutingMethodType.Renormalize,
         RoutingMethodType.DeepSeekV3,
         RoutingMethodType.Llama4,
