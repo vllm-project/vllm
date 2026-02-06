@@ -213,25 +213,25 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 
 def decorate_logs(
     process_name: str | None = None,
-    disable_prefix: bool = False,
+    enable_prefix: bool = True,
 ) -> None:
     """Decorate stdout/stderr with process name and PID prefix.
 
-    The decoration can be disabled by passing ``--disable-log-prefix``
+    The decoration can be disabled by passing ``--no-enable-log-prefix``
     to the CLI.  This is useful when using custom logging configurations
     or log aggregation systems that already handle process identification.
 
     Args:
         process_name: Name to show in the prefix. If *None*, the current
             multiprocessing process name is used.
-        disable_prefix: When *True*, skip adding the prefix entirely.
+        enable_prefix: When *False*, skip adding the prefix entirely.
     """
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
         return
 
     # Allow users to opt out of the process/thread prefix
-    if disable_prefix:
+    if not enable_prefix:
         return
 
     if process_name is None:

@@ -296,7 +296,7 @@ def run_api_server_worker_proc(
     # Set process title and add process-specific prefix to stdout and stderr.
     set_process_title("APIServer", str(server_index))
     decorate_logs(
-        disable_prefix=getattr(args, "disable_log_prefix", False),
+        enable_prefix=getattr(args, "enable_log_prefix", True),
     )
 
     uvloop.run(

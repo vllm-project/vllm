@@ -428,7 +428,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer",
-                  disable_prefix=getattr(args, "disable_log_prefix", False))
+                  enable_prefix=getattr(args, "enable_log_prefix", True))
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
