@@ -148,6 +148,8 @@ class PassConfig:
         }, where key is the device capability"""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    decompose_all_gather: bool = True
+    """Decompose all_gather to expose reshape for Inductor fusion."""
 
     # TODO(luka) better pass enabling system.
 

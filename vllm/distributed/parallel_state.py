@@ -51,9 +51,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @dataclass
@@ -161,6 +159,27 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def all_gather_raw(
+    tensor: torch.Tensor, world_size: int, group_name: str
+) -> torch.Tensor:
+    """All-gather without reshape. Returns (world_size, *input_shape)."""
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_gather_raw(tensor)
+
+
+def all_gather_raw_fake(
+    tensor: torch.Tensor, world_size: int, group_name: str
+) -> torch.Tensor:
+    return torch.empty(
+        (world_size,) + tensor.shape,
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+
+
 def patched_fused_scaled_matmul_reduce_scatter_fake(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -261,6 +280,12 @@ direct_register_custom_op(
     op_name="all_gather",
     op_func=all_gather,
     fake_impl=all_gather_fake,
+)
+
+direct_register_custom_op(
+    op_name="all_gather_raw",
+    op_func=all_gather_raw,
+    fake_impl=all_gather_raw_fake,
 )
 
 # TODO: Remove this once the pytorch fix
@@ -524,6 +549,15 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gather(input_, dim)
+
+    def _all_gather_raw(self, input_: torch.Tensor) -> torch.Tensor:
+        """
+        Raw all_gather that only performs NCCL collective.
+        Returns tensor with shape (world_size, *input_shape).
+        """
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.all_gather_raw(input_)
 
     def all_gatherv(
         self,

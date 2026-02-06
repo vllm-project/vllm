@@ -7,8 +7,14 @@ import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._inductor.pattern_matcher import (
+    CallFunctionVarArgs,
+    Match,
+    PatternMatcherPass,
+    register_graph_pattern,
+)
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+from torch.fx.operator_schemas import normalize_function
 
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -1226,3 +1232,81 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(
                 self.ipc_handles, self.group
             )
+
+
+def _decompose_all_gather(match: Match, *args, **kwargs) -> None:
+    """
+    Decompose all_gather(dim!=0) to expose reshape for Inductor fusion.
+
+        all_gather -> all_gather_raw + movedim + reshape
+
+    This enables Inductor to fuse the reshape operations with subsequent
+    compute (e.g., RMSNorm), reducing memory traffic.
+    """
+    node = match.nodes[0]
+
+    # Only decompose for CUDA tensors (other communicators don't have raw op)
+    x_node = node.args[0]
+    if "val" not in x_node.meta or x_node.meta["val"].device.type != "cuda":
+        return
+
+    # Normalize args to get named parameters
+    normalized = normalize_function(
+        node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
+    )
+    if normalized is None:
+        return
+
+    _, norm_kwargs = normalized
+    dim = norm_kwargs["dim"]
+    world_size = norm_kwargs["world_size"]
+    group_name = norm_kwargs["group_name"]
+
+    # Skip decomposition for dim=0 (no clone required)
+    if dim == 0:
+        return
+
+    def repl(x: torch.Tensor) -> torch.Tensor:
+        # Normalize negative dim
+        d = dim
+        if d < 0:
+            d = d + x.dim()
+        input_size = x.shape
+        # all_gather_raw returns [world_size, *input_shape]
+        raw = torch.ops.vllm.all_gather_raw.default(x, world_size, group_name)
+        # movedim(0, d) moves world_size dim to gather position
+        moved = raw.movedim(0, d)
+        # reshape merges the world_size dim with the original gather dim
+        output_shape = (
+            input_size[:d] + (world_size * input_size[d],) + input_size[d + 1:]
+        )
+        return moved.reshape(output_shape)
+
+    match.replace_by_example(repl, [node.args[0]])
+
+
+class AllGatherDecomposePass(VllmInductorPass):
+    """
+    Decomposes all_gather(dim!=0) to expose reshape for Inductor fusion.
+
+        all_gather -> all_gather_raw + movedim + reshape
+
+    Runs after fusion passes so they get first chance to match.
+    """
+
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="all_gather_decompose"
+        )
+        # Register the pattern with the pass
+        register_graph_pattern(
+            CallFunctionVarArgs(torch.ops.vllm.all_gather.default),
+            pass_dict=self.patterns,
+        )(_decompose_all_gather)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        if self.matched_count > 0:
+            logger.debug("Decomposed %s all_gather ops", self.matched_count)

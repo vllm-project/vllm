@@ -154,10 +154,8 @@ class DeviceCommunicatorBase:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
+    def all_gather_raw(self, input_: torch.Tensor) -> torch.Tensor:
+        """All-gather without reshape. Returns (world_size, *input_shape)."""
         input_size = input_.size()
         # NOTE: we have to use concat-style all-gather here,
         # stack-style all-gather has compatibility issues with
@@ -170,7 +168,18 @@ class DeviceCommunicatorBase:
         # All-gather.
         dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
-        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        return output_tensor.reshape((self.world_size,) + input_size)
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+        input_size = input_.size()
+
+        # Use all_gather_raw for the NCCL collective
+        output_tensor = self.all_gather_raw(input_)
+
+        # Reshape to final output
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(
             input_size[:dim]
