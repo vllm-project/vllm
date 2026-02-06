@@ -185,7 +185,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_ATTN,
     ],
 )
-@pytest.mark.parametrize("enable_rope_custom_op", [True])
+@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("head_size", [64])
