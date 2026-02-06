@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 
 from vllm.inputs import (
     EmbedsPrompt,
+    ExplicitEncoderDecoderPrompt,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -32,14 +33,15 @@ def prompt_to_seq(
 
 @overload
 def prompt_to_seq(  # type: ignore[misc]
-    prompt_or_prompts: PromptType | Sequence[PromptType],
-) -> Sequence[PromptType]: ...
+    prompt_or_prompts: ExplicitEncoderDecoderPrompt
+    | Sequence[ExplicitEncoderDecoderPrompt],
+) -> Sequence[ExplicitEncoderDecoderPrompt]: ...
 
 
 def prompt_to_seq(
-    prompt_or_prompts: PromptType | bytes | Sequence[PromptType | bytes],
-) -> Sequence[PromptType | bytes]:
-    if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
+    prompt_or_prompts: PromptType | Sequence[PromptType],
+) -> Sequence[PromptType]:
+    if isinstance(prompt_or_prompts, (dict, str)) or (
         len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
     ):
         return [prompt_or_prompts]  # type: ignore[list-item]

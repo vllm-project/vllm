@@ -357,11 +357,11 @@ class InputPreprocessor:
     @overload
     def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
-        prompt: SingletonDictPrompt,
+        prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-    ) -> SingletonInputs: ...
+    ) -> DecoderOnlyInputs: ...
 
     def _prompt_to_llm_inputs(
         self,

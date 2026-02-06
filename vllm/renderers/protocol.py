@@ -190,9 +190,16 @@ class BaseRenderer(ABC):
     @overload
     def tokenize_prompt(  # type: ignore[misc]
         self,
-        prompt: DictPrompt,
+        prompt: EmbedsPrompt,
         params: TokenizeParams,
-    ) -> TokPrompt: ...
+    ) -> EmbedsPrompt: ...
+
+    @overload
+    def tokenize_prompt(  # type: ignore[misc]
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt: ...
 
     def tokenize_prompt(
         self,
@@ -231,9 +238,16 @@ class BaseRenderer(ABC):
     @overload
     async def tokenize_prompt_async(  # type: ignore[misc]
         self,
-        prompt: DictPrompt,
+        prompt: EmbedsPrompt,
         params: TokenizeParams,
-    ) -> TokPrompt: ...
+    ) -> EmbedsPrompt: ...
+
+    @overload
+    async def tokenize_prompt_async(  # type: ignore[misc]
+        self,
+        prompt: EncoderDecoderDictPrompt,
+        params: TokenizeParams,
+    ) -> EncoderDecoderTokPrompt: ...
 
     async def tokenize_prompt_async(
         self,

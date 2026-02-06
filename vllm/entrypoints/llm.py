@@ -73,7 +73,7 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import DictPrompt, TokPrompt
+from vllm.renderers.inputs import DictPrompt, SingletonDictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     extract_prompt_components,
@@ -891,7 +891,9 @@ class LLM:
         for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
-                target_prompt = in_prompt.get("encoder_prompt", in_prompt)
+                target_prompt: SingletonDictPrompt = in_prompt.get(
+                    "encoder_prompt", in_prompt
+                )
                 target_prompt["mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore
 
             engine_prompts.append(renderer.tokenize_prompt(in_prompt, tok_params))

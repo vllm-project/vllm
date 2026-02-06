@@ -106,6 +106,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
+    SingletonDictPrompt,
     extract_prompt_components,
     extract_prompt_len,
     parse_model_prompt,
@@ -988,7 +989,9 @@ class OpenAIServing:
             if (v := getattr(request, k, None)) is not None
         }
         for in_prompt in in_prompts:
-            target_prompt = in_prompt.get("encoder_prompt", in_prompt)
+            target_prompt: SingletonDictPrompt = in_prompt.get(
+                "encoder_prompt", in_prompt
+            )
             target_prompt.update(extra_items)  # type: ignore
 
         engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
@@ -1025,7 +1028,7 @@ class OpenAIServing:
         conversation, in_prompt = await renderer.render_messages_async(
             messages, chat_params
         )
-        target_prompt = in_prompt.get("encoder_prompt", in_prompt)
+        target_prompt: SingletonDictPrompt = in_prompt.get("encoder_prompt", in_prompt)
 
         extra_items = {
             k: v
