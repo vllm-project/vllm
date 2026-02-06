@@ -10,13 +10,7 @@ for key in ["CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES
     os.environ.pop(key, None)
 
 import torch  # noqa: E402
-
-if torch.cuda.device_count() == 0:
-    sys.exit(0)  # Skip: no GPUs
-
-initial_count = torch.cuda.device_count()
-if initial_count <= 1:
-    sys.exit(0)  # Skip: need multiple GPUs
+from vllm.platforms import current_platform  # noqa: F401, E402
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 count = torch.cuda.device_count()
