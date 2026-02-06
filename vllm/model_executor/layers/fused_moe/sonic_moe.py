@@ -211,8 +211,13 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, max(N, K))
-        workspace2 = (M * topk, N // 2)
+        # NOTE: In the non-chunked case, the modular-kernel runtime may reuse the
+        # same underlying storage for `workspace13` and the final `output`.
+        # Keep `y2` (down-projection output) out of `workspace13` to avoid any
+        # read/write aliasing with `output` during router reduction.
+        workspace2 = (M * topk, activation_out_dim + K)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -307,7 +312,7 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         z = workspace13[: M * topk, :two_n].view(M * topk, two_n)
         y1 = workspace2[: M * topk, :n].view(M * topk, n)
-        y2 = workspace13[: M * topk, :K].view(M * topk, K)
+        y2 = workspace2[: M * topk, n : n + K].view(M * topk, K)
 
         act_type = ActivationType.SWIGLU
 

@@ -169,6 +169,16 @@ def select_unquantized_moe_backend(
                     scope="local",
                 )
             backend = UnquantizedMoeBackend.TRITON
+        if sonic_enabled and backend in (
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+        ):
+            logger.info_once(
+                "VLLM_USE_SONIC_MOE=1 is set, but FlashInfer MoE is enabled and was "
+                "selected. To force Sonic for experiments, disable FlashInfer MoE "
+                "(e.g. VLLM_USE_FLASHINFER_MOE_FP16=0).",
+                scope="local",
+            )
     if current_platform.is_xpu():
         backend = UnquantizedMoeBackend.XPU
     if current_platform.is_cpu():

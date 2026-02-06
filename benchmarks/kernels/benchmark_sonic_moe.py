@@ -137,10 +137,20 @@ def main() -> int:
             )
 
             run_triton = partial(
-                triton_kernel, hidden_states, w1, w2, topk_weights, topk_ids
+                triton_kernel,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
             )
             run_sonic = partial(
-                sonic_kernel, hidden_states, w1_sonic, w2, topk_weights, topk_ids
+                sonic_kernel,
+                hidden_states=hidden_states,
+                w1=w1_sonic,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
             )
 
             with torch.inference_mode():

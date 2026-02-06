@@ -77,8 +77,8 @@ steps:
 
 - label: Kernels Sonic MoE Test (H100)
   timeout_in_minutes: 10
-  gpu: h100
-  num_gpus: 1
+  device: h100
+  num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/fused_moe/sonic_moe.py
   - tests/kernels/moe/test_sonic_moe.py
@@ -90,8 +90,8 @@ steps:
 - label: Kernels Sonic MoE Benchmark (H100)
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
-  gpu: h100
-  num_gpus: 1
+  device: h100
+  num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/fused_moe/sonic_moe.py
   - benchmarks/kernels/benchmark_sonic_moe.py
