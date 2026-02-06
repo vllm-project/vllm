@@ -474,6 +474,9 @@ class RayDistributedExecutor(Executor):
 
         if self.scheduler_config.async_scheduling:
             assert non_block
+            assert self.parallel_config.pipeline_parallel_size == 1, (
+                "Async scheduling is not supported with pipeline parallelism."
+            )
 
             # Delay getting the model runner output until next step execute_model
             # returns.
