@@ -39,7 +39,7 @@ class DynamicProposer(EagleProposer):
     """
 
     num_speculative_tokens: int
-    method: str
+    method: str  # type: ignore
 
     def __init__(
         self,
@@ -52,6 +52,7 @@ class DynamicProposer(EagleProposer):
         self.seq_states: dict[str, SequenceState] = {}
         self.last_proposed_k_per_seq: dict[str, int] = {}
 
+        assert vllm_config.speculative_config is not None
         self.acceptance_rate_threshold = (
             vllm_config.speculative_config.acceptance_rate_threshold
         )
