@@ -116,6 +116,10 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         return self.tokenizer.max_token_id
 
     @property
+    def max_chars_per_token(self) -> int:
+        return self.tokenizer.max_chars_per_token
+
+    @property
     def truncation_side(self) -> str:
         return self.tokenizer.truncation_side
 

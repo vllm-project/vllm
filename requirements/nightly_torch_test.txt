@@ -23,7 +23,7 @@ jiwer # required for audio tests
 timm # required for internvl test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[image,audio] >= 1.8.8 # required for voxtral test
+mistral_common[image,audio] >= 1.9.0 # required for voxtral test
 num2words # required for smolvlm test
 opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test

@@ -222,22 +222,24 @@ class Eagle2_5_VLForConditionalGeneration(
 
         self.select_layer = getattr(config, "select_layer", -1)
 
-        # Vision encoder (SigLIP)
-        self.vision_model = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            # Vision encoder (SigLIP)
+            self.vision_model = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
 
-        # Language model (Qwen2)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+            # MLP projection
+            self.mlp1 = self._init_mlp1(config)
 
-        # MLP projection
-        self.mlp1 = self._init_mlp1(config)
+        with self._mark_language_model(vllm_config):
+            # Language model (Qwen2)
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
 
@@ -399,9 +401,6 @@ class Eagle2_5_VLForConditionalGeneration(
         ]
         return image_embeds.split(image_feature_sizes)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Embed multimodal inputs."""
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -432,7 +431,7 @@ class Eagle2_5_VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -440,7 +439,6 @@ class Eagle2_5_VLForConditionalGeneration(
     ) -> IntermediateTensors:
         """Forward pass through the model."""
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {

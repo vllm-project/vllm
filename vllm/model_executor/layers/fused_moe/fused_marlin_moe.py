@@ -267,6 +267,7 @@ def fused_marlin_moe(
 
     if inplace:
         assert output is None, "Conflicting request"
+        assert not disable_inplace()
 
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
@@ -356,10 +357,7 @@ def fused_marlin_moe(
     ).view(-1, topk, K)
 
     if output is None:
-        if inplace and not disable_inplace():
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
+        output = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if moe_sum is None:
         return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
@@ -593,7 +591,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     @property
     def quant_type_id(self) -> int:

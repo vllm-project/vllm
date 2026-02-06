@@ -3,6 +3,7 @@
 
 import dataclasses
 import io
+import json
 import pickle
 from collections.abc import Callable
 from pickle import Pickler
@@ -11,6 +12,7 @@ from typing import Any
 import torch._functorch.config
 import torch.fx as fx
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
@@ -39,6 +41,7 @@ class PiecewiseBackend:
         vllm_backend: VllmBackend,
         returns_tuple: bool,
         compiled_runnables: dict[str, Callable[..., Any]] | None = None,
+        submod_name: str = "",
     ):
         """
         The backend for piecewise compilation.
@@ -70,6 +73,7 @@ class PiecewiseBackend:
         self.total_piecewise_compiles = total_piecewise_compiles
         self.vllm_backend = vllm_backend
         self.compiled_runnables = compiled_runnables
+        self.submod_name = submod_name
 
         self.is_first_graph = piecewise_compile_index == 0
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
@@ -130,6 +134,9 @@ class PiecewiseBackend:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
+
+        # Track whether we've logged the graph for this subgraph (only log once)
+        self._graph_logged = False
 
         # get the on_compilation_complete callback from context...
         # PiecewiseBackend is created during the first call,
@@ -221,6 +228,45 @@ class PiecewiseBackend:
         assert len(fake_example_inputs) == len(args)
         return fake_example_inputs
 
+    def _log_compile_start(self, compile_range: Range):
+        """Log compilation event for TORCH_TRACE/tlparse."""
+        is_cudagraph_size = (
+            self.compile_sizes is not None and compile_range.start in self.compile_sizes
+        )
+        subgraph_index = self.piecewise_compile_index
+        submod_name = self.submod_name
+        trace_structured(
+            "artifact",
+            metadata_fn=lambda: {
+                "name": "vllm_piecewise_compile_start",
+                "encoding": "json",
+            },
+            payload_fn=lambda: json.dumps(
+                {
+                    "piecewise_index": subgraph_index,
+                    "submod_name": submod_name,
+                    "total_piecewise_compiles": self.total_piecewise_compiles,
+                    "compile_range_start": compile_range.start,
+                    "compile_range_end": compile_range.end,
+                    "is_single_size": compile_range.is_single_size(),
+                    "is_cudagraph_capture_size": is_cudagraph_size,
+                }
+            ),
+        )
+
+        # Log the subgraph graph dump only once per subgraph (not per size)
+        # to reduce log file size. The graph code is the same for all sizes.
+        if not self._graph_logged:
+            self._graph_logged = True
+            assert self.graph is not None
+            trace_structured(
+                "graph_dump",
+                metadata_fn=lambda: {
+                    "name": f"vllm_{submod_name}",
+                },
+                payload_fn=lambda: self.graph.print_readable(print_output=False),
+            )
+
     def _maybe_compile_for_range_entry(
         self, range_entry: RangeEntry, args: tuple[Any, ...]
     ) -> Any:
@@ -230,6 +276,8 @@ class PiecewiseBackend:
                     self.compiled_runnables[str(range_entry.compile_range)]
                 )
             else:
+                self._log_compile_start(range_entry.compile_range)
+
                 # args are real arguments
                 # fakify for range, real args for concrete size.
                 # For concrete size, we clear the shape env in

@@ -4,12 +4,12 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -17,6 +17,8 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.inputs import PromptType
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -224,12 +226,8 @@ def get_device_indices(
     return value
 
 
-def get_prompt_text(prompt: Any) -> str | None:
-    if isinstance(prompt, str):
-        return prompt
-    if isinstance(prompt, Mapping):
-        return cast(str | None, prompt.get("prompt"))
-    return None
+def get_prompt_text(prompt: PromptType) -> str | None:
+    return get_prompt_components(prompt)[0]
 
 
 class CoreEngineActorManager:
@@ -312,6 +310,13 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                dp_vllm_config.kv_transfer_config.engine_id = (
+                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
+                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method

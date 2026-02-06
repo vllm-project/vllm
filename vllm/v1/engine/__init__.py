@@ -83,6 +83,8 @@ class EngineCoreRequest(
     # Used in outputs and to support abort(req_id, internal=False).
     external_req_id: str | None = None
 
+    reasoning_ended: bool | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -139,8 +141,10 @@ class EngineCoreOutput(
     kv_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
-    # The number of tokens with prefix cache hits.
+    # The number of tokens with prefix cache hits (local + external).
     num_cached_tokens: int = 0
+    # The number of tokens computed remotely (original count from connector).
+    num_external_computed_tokens: int = 0
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.

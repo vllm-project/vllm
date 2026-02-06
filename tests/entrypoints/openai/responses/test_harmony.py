@@ -62,7 +62,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
@@ -74,7 +74,7 @@ async def test_basic(client: OpenAI, model_name: str):
 async def test_basic_with_instructions(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
         instructions="Respond in Korean.",
     )
     assert response is not None
@@ -116,7 +116,7 @@ async def test_chat(client: OpenAI, model_name: str):
             {"role": "system", "content": "Respond in Korean."},
             {"role": "user", "content": "Hello!"},
             {"role": "assistant", "content": "Hello! How can I help you today?"},
-            {"role": "user", "content": "What is 13 * 24? Explain your answer."},
+            {"role": "user", "content": "What is 123 * 456? Explain your answer."},
         ],
     )
     assert response is not None
@@ -131,7 +131,7 @@ async def test_chat_with_input_type(client: OpenAI, model_name: str):
         input=[
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": "What is 13*24?"}],
+                "content": [{"type": "input_text", "text": "What is 123 * 456?"}],
             },
         ],
     )
@@ -200,7 +200,7 @@ async def test_store(client: OpenAI, model_name: str):
     for store in [True, False]:
         response = await client.responses.create(
             model=model_name,
-            input="What is 13 * 24?",
+            input="What is 123 * 456?",
             store=store,
         )
         assert response is not None
@@ -219,7 +219,7 @@ async def test_store(client: OpenAI, model_name: str):
 async def test_background(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
         background=True,
     )
     assert response is not None
@@ -256,7 +256,7 @@ async def test_background_cancel(client: OpenAI, model_name: str):
 async def test_stateful_multi_turn(client: OpenAI, model_name: str):
     response1 = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response1 is not None
     assert response1.status == "completed"
@@ -361,7 +361,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        "What is 13 * 24? Use python to calculate the result.",
+        "What is 123 * 456? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -976,6 +976,9 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.dependency(
+    depends=["test_mcp_code_interpreter_streaming[openai/gpt-oss-20b]"]
+)
 async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     """Test MCP tool calling across multiple turns.
 
@@ -992,7 +995,7 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     # First turn - make a calculation
     response1 = await client.responses.create(
         model=model_name,
-        input="Calculate 123 * 456 using python and print the result.",
+        input="Calculate 1234 * 4567 using python tool and print the result.",
         tools=tools,
         temperature=0.0,
         instructions=(
@@ -1117,8 +1120,10 @@ async def test_function_call_with_previous_input_messages(
         model=model_name,
         input="What is the horoscope for Aquarius today?",
         tools=tools,
+        temperature=0.0,
         extra_body={"enable_response_messages": True},
         stream=True,
+        max_output_tokens=1000,
     )
 
     response = None
@@ -1170,6 +1175,7 @@ async def test_function_call_with_previous_input_messages(
     stream_response_2 = await client.responses.create(
         model=model_name,
         tools=tools,
+        temperature=0.0,
         input="",
         extra_body={
             "previous_input_messages": previous_messages,

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.attention.layer import Attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -67,7 +67,7 @@ class PTPCFp8Config(Fp8Config):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()

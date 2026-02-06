@@ -19,11 +19,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class EagleCudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device = device
@@ -35,16 +31,10 @@ class EagleCudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
-        cudagraph_mode: CUDAGraphMode
-        if self.compilation_config.cudagraph_mode is None:
-            cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            if cudagraph_mode == CUDAGraphMode.FULL:
-                # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
-                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-
-        self.cudagraph_mode = cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        if self.cudagraph_mode == CUDAGraphMode.FULL:
+            # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
+            self.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
         self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
@@ -69,7 +59,7 @@ class EagleCudaGraphManager:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
-        attn_metadata = prepare_inputs_to_capture(
+        attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -81,13 +71,13 @@ class EagleCudaGraphManager:
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
         # Warm up.
-        generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)
+        generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
 
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, self.pool):
-            generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)
+            generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
         self.graphs[num_tokens] = graph
 
     @torch.inference_mode()

@@ -27,12 +27,12 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention.layer import Attention
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -249,7 +249,8 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+                getattr(self.text_config, "tie_word_embeddings", False)
+                and self.pp_group.is_last_rank
             ):
                 continue
             setattr(self.model, name, PPMissingLayer())
@@ -350,7 +351,7 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0.dev0", "encoder models support")
+            self.check_version("5.0.0", "encoder models support")
             attn_type = AttentionType.ENCODER_ONLY
         else:
             attn_type = AttentionType.DECODER
@@ -502,7 +503,7 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.0.0.dev0", "Eagle3 support")
+        self.check_version("5.0.0", "Eagle3 support")
         from transformers.utils.generic import OutputRecorder
 
         # The default value in PreTrainedModel is None

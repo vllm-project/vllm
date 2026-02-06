@@ -7,6 +7,7 @@ import pytest_asyncio
 from transformers import AutoTokenizer
 
 from vllm.config import ModelConfig
+from vllm.config.utils import getattr_iter
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 from ...utils import RemoteOpenAIServer
@@ -92,7 +93,8 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
 
     for ignore_eos in [True, False]:
         payload = {
@@ -130,7 +132,14 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             # Post-EOS generation is undefined and may differ
             eos_tokens = {
                 tokenizer.eos_token_id,
-                *tokenizer.additional_special_tokens_ids,
+                *getattr_iter(
+                    tokenizer,
+                    [
+                        "extra_special_tokens_ids",  # Transformers v5
+                        "additional_special_tokens_ids",  # Transformers v4
+                    ],
+                    [],
+                ),
             }
             # Find first EOS in generated tokens
             eos_pos = None
@@ -155,7 +164,8 @@ async def test_stop_string_workflow(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
     payload = {
         "model": MODEL_NAME,
         "token_ids": token_ids,
@@ -251,7 +261,8 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
     payload = {
         "model": "Alice",
         "token_ids": token_ids,

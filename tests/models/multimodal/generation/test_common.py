@@ -458,6 +458,20 @@ VLM_TEST_SETTINGS = {
         ],
         marks=[large_gpu_mark(min_gb=32)],
     ),
+    "glm_ocr": VLMTestInfo(
+        models=["zai-org/GLM-OCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
+        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
+        max_model_len=2048,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: [151329, 151336, 151338],
+        num_logprobs=10,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
     "h2ovl": VLMTestInfo(
         models=[
             "h2oai/h2ovl-mississippi-800m",

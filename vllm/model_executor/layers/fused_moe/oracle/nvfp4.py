@@ -7,15 +7,15 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     mxfp4_w4a16_moe_quant_config,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
@@ -391,59 +391,39 @@ def make_nvfp4_moe_quant_config(
     )
 
 
-def make_nvfp4_moe_kernel_for_mkm(
+def make_nvfp4_moe_kernel(
+    moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
-    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
+) -> mk.FusedMoEModularKernel:
+    # Create Prepare/Finalize.
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+
+    # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens_per_rank is not None
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens_per_rank,
+            quant_config=moe_quant_config,
+            max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_config=moe_quant_config,
         )
-
-    logger.debug_once("Using %s", experts.__class__.__name__)
-    return experts
-
-
-def make_nvfp4_moe_kernel(
-    moe_quant_config: FusedMoEQuantConfig,
-    moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
-) -> mk.FusedMoEModularKernel:
-    # TODO(rob): unify after we merge tp and dp/ep.
-    if (
-        moe_config.moe_parallel_config.use_all2all_kernels
-        and moe_config.moe_parallel_config.all2all_backend
-        not in ["allgather_reducescatter", "naive"]
-    ):
-        raise ValueError(
-            "NvFP4 Oracle should not create non-naive A2A P/F. "
-            "This should happen via the ModularKernelMethod."
-        )
-
-    # Create Prepare/Finalize.
-    prepare_finalize = MoEPrepareAndFinalizeNoEP(
-        defer_input_quant=experts_cls.expects_unquantized_inputs(
-            moe_config, moe_quant_config
-        ),
-    )
-
-    # Create Experts.
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-    )
 
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
@@ -451,8 +431,13 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
         experts,
-        shared_experts=None,
+        shared_experts=(
+            shared_experts
+            if moe_config.moe_parallel_config.use_all2all_kernels
+            else None
+        ),
         moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=False,
     )
 
     # TODO(rob): update inplace logic to be part of the kernel.

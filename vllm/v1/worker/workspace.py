@@ -5,7 +5,6 @@ import inspect
 import os
 from itertools import accumulate
 from math import prod
-from typing import Optional
 
 import torch
 
@@ -26,7 +25,7 @@ _MB = 1024**2
 _GiB = 1024**3
 
 # Global workspace manager instance
-_manager: Optional["WorkspaceManager"] = None
+_manager: "WorkspaceManager | None" = None
 
 
 class WorkspaceManager:

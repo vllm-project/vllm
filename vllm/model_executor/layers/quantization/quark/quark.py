@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -102,7 +102,7 @@ class QuarkConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(

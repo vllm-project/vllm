@@ -8,9 +8,9 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import get_cu_count
@@ -32,9 +32,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
-    import aiter
-
     from vllm.triton_utils import tl, triton
+
+    if rocm_aiter_ops.is_enabled():
+        import aiter
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
@@ -683,7 +684,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        return [16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

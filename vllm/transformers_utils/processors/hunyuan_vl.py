@@ -148,8 +148,8 @@ class HunYuanVLProcessor(ProcessorMixin):
         assert 0
 
     def apply_chat_template(self, *args, **kwargs):
-        token_ids = self.tokenizer.apply_chat_template(*args, **kwargs)
-        return token_ids
+        kwargs["return_dict"] = False
+        return self.tokenizer.apply_chat_template(*args, **kwargs)
 
     def get_imgs_pos(self, doc_ids):
         doc_ids = np.array(doc_ids, dtype=np.int64)
