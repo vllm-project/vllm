@@ -1,37 +1,14 @@
+---
+toc_depth: 2
+---
+
 # Using Docker
 
-!!! tip
-    For building Docker images, see [GPU Installation](../getting_started/installation/gpu.md).
+## Pre-built images
 
-=== "NVIDIA CUDA"
-    **Use Official Image**
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
+--8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
 
-    **Build from Source**
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-image-from-source"
+## Build image from source
 
-    **Run with Custom Image**
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:use-custom-docker-image"
+--8<-- "docs/getting_started/installation/gpu.md:build-image-from-source"
 
-=== "AMD ROCm"
-    **Use Official Image**
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-images"
-
-    **Build from Source**
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-image-from-source"
-
-    **Run with Custom Image**
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:use-custom-docker-image"
-
-    **Use AMD's Prebuilt Images**
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:amd-prebuilt-images"
-
-=== "Intel XPU"
-    **Use Official Image**
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
-
-    **Build from Source**
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
-
-    **Run with Custom Image**
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:use-custom-docker-image"

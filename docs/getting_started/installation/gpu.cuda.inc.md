@@ -327,7 +327,7 @@ DOCKER_BUILDKIT=1 docker build . \
 
     For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/#precompiled-wheels-usage), these args are similar.
 
-**Building vLLM's Docker Image from Source for Arm64/aarch64**
+#### Building vLLM's Docker Image from Source for Arm64/aarch64
 
 A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
 
@@ -381,8 +381,7 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
     After setting up QEMU, you can use the `--platform "linux/arm64"` flag in your `docker build` command.
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:use-custom-docker-image]
+#### Use the custom-built vLLM Docker image**
 
 To run vLLM with the custom-built Docker image:
 
@@ -399,7 +398,7 @@ The argument `vllm/vllm-openai` specifies the image to run, and should be replac
 !!! note
     **For version 0.4.1 and 0.4.2 only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. `/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable `VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` .
 
-# --8<-- [end:use-custom-docker-image]
+# --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
 See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.

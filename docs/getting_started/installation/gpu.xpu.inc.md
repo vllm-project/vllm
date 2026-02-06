@@ -50,12 +50,6 @@ Currently, we release prebuilt XPU images at docker [hub](https://hub.docker.com
 
 ```bash
 docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
-```
-
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:use-custom-docker-image]
-
-```bash
 docker run -it \
              --rm \
              --network=host \
@@ -66,7 +60,7 @@ docker run -it \
              vllm-xpu-env
 ```
 
-# --8<-- [end:use-custom-docker-image]
+# --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. For **pipeline parallel**, we support it on single node with mp as the backend. For example, a reference execution like following:

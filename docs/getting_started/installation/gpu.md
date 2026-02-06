@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # GPU
 
 vLLM is a Python library that supports the following GPU variants. Select your GPU type to see vendor specific instructions:
@@ -84,6 +88,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ### Pre-built images
 
+# --8<-- [start:pre-built-images]
 === "NVIDIA CUDA"
 
     --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
@@ -92,16 +97,14 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-images"
 
-    **Use AMD's Docker Images**
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:amd-prebuilt-images"
-
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
+# --8<-- [end:pre-built-images]
 
 ### Build image from source
 
+# --8<-- [start:build-image-from-source]
 === "NVIDIA CUDA"
 
     --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-image-from-source"
@@ -113,20 +116,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
-
-### Run the Custom Image
-
-=== "NVIDIA CUDA"
-
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:use-custom-docker-image"
-
-=== "AMD ROCm"
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:use-custom-docker-image"
-
-=== "Intel XPU"
-
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:use-custom-docker-image"
+# --8<-- [end:build-image-from-source]
 
 ## Supported features
 

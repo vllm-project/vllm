@@ -177,27 +177,6 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
 
-???+ console "Commands"
-    ```bash
-    docker run --rm \
-        --group-add=video \
-        --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v ~/.cache/huggingface:/root/.cache/huggingface \
-        --env "HF_TOKEN=$HF_TOKEN" \
-        -p 8000:8000 \
-        --ipc=host \
-        vllm/vllm-openai-rocm:latest \
-        --model Qwen/Qwen3-0.6B
-    ```
-
-# --8<-- [end:pre-built-images]
-# --8<-- [start:use-custom-docker-image]
-
-To run vLLM with the custom-built Docker image:
-
 ```bash
 docker run --rm \
     --group-add=video \
@@ -209,57 +188,36 @@ docker run --rm \
     --env "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
-    vllm/vllm-openai-rocm <args...>
+    vllm/vllm-openai-rocm:latest \
+    --model Qwen/Qwen3-0.6B
 ```
 
-The argument `vllm/vllm-openai-rocm` specifies the image to run, and should be replaced with the name of the custom-built image (the `-t` tag from the build command).
+#### Use AMD's Docker Images
 
-To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
-
-???+ console "Commands"
-    ```bash
-    docker run --rm -it \
-        --group-add=video \
-        --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v ~/.cache/huggingface:/root/.cache/huggingface \
-        --env "HF_TOKEN=$HF_TOKEN" \
-        --network=host \
-        --ipc=host \
-        --entrypoint bash \
-        vllm/vllm-openai-rocm
-    ```
-
-# --8<-- [end:use-custom-docker-image]
-# --8<-- [start:amd-prebuilt-images]
-
-Prior to January 20th, 2026 when the official docker images are available on [upstream vllm docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+Prior to January 20th, 2026 when the official docker images are available on [upstream vLLM docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
 docker image designed for validating inference performance on the AMD Instinct MI300X™ accelerator.
 AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
 
-???+ console "Commands"
-    ```bash
-    docker pull rocm/vllm-dev:nightly # to get the latest image
-    docker run -it --rm \
-    --network=host \
-    --group-add=video \
-    --ipc=host \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v <path/to/your/models>:/app/models \
-    -e HF_HOME="/app/models" \
-    rocm/vllm-dev:nightly
-    ```
+```bash
+docker pull rocm/vllm-dev:nightly # to get the latest image
+docker run -it --rm \
+--network=host \
+--group-add=video \
+--ipc=host \
+--cap-add=SYS_PTRACE \
+--security-opt seccomp=unconfined \
+--device /dev/kfd \
+--device /dev/dri \
+-v <path/to/your/models>:/app/models \
+-e HF_HOME="/app/models" \
+rocm/vllm-dev:nightly
+```
 
 !!! tip
     Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
     for instructions on how to use this prebuilt docker image.
 
-# --8<-- [end:amd-prebuilt-images]
+# --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
 You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm).
@@ -309,10 +267,46 @@ Their values can be passed in when running `docker build` with `--build-arg` opt
 
 To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
-
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
 ```
+
+
+To run vLLM with the custom-built Docker image:
+
+```bash
+docker run --rm \
+    --group-add=video \
+    --cap-add=SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --device /dev/kfd \
+    --device /dev/dri \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai-rocm <args...>
+```
+
+The argument `vllm/vllm-openai-rocm` specifies the image to run, and should be replaced with the name of the custom-built image (the `-t` tag from the build command).
+
+To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
+
+???+ console "Commands"
+    ```bash
+    docker run --rm -it \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        --network=host \
+        --ipc=host \
+        --entrypoint bash \
+        vllm/vllm-openai-rocm
+    ```
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
