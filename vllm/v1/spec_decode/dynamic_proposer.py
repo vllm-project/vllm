@@ -142,49 +142,51 @@ class DynamicProposer(EagleProposer):
         its average acceptance rate.
         """
         spec_tokens_for_batch: list[int] = []
+        batch_summary_parts: list[str] = []
+
         for req_id in req_ids:
             if req_id is None:
                 spec_tokens_for_batch.append(MIN_SPEC_TOKENS)
                 continue
 
-            # Print for every request to confirm loop entry
-            print(f"[DynamicProposer] Checking req {req_id}")
-
             state = self._get_or_create_state(req_id)
             history = state.acceptance_rate_history
 
-            # Always print statistics
-            print(
-                f"[DynamicProposer] Req {req_id} History Len: {len(history)} "
-                f"Avg: {np.mean(history) if history else 0:.2f}"
-            )
-
             if len(history) < MIN_HISTORY_FOR_ADJUSTMENT:
                 spec_tokens_for_batch.append(state.num_spec_tokens)
+                # Short req_id for logging (last 8 chars)
+                short_id = req_id.split("-")[-1][:8] if "-" in req_id else req_id[:8]
+                batch_summary_parts.append(f"req={short_id} k={state.num_spec_tokens}")
                 continue
 
             avg_acceptance_rate = float(np.mean(history))
             upper_bound = self.acceptance_rate_threshold + ACCEPTANCE_RATE_HYSTERESIS
             lower_bound = self.acceptance_rate_threshold - ACCEPTANCE_RATE_HYSTERESIS
 
-            new_k = state.num_spec_tokens
+            old_k = state.num_spec_tokens
+            new_k = old_k
             if avg_acceptance_rate >= upper_bound:
-                new_k = min(state.num_spec_tokens + 1, self.max_spec_tokens)
+                new_k = min(old_k + 1, self.max_spec_tokens)
             elif avg_acceptance_rate <= lower_bound:
-                new_k = max(state.num_spec_tokens - 1, MIN_SPEC_TOKENS)
+                new_k = max(old_k - 1, MIN_SPEC_TOKENS)
 
-            # Always print for debugging purposes
-            print(
-                f"[DynamicProposer] Req {req_id}: "
-                f"Avg Acc Rate {avg_acceptance_rate:.2f} -> "
-                f"k {state.num_spec_tokens} -> {new_k}",
-                flush=True,
-            )
-
-            if new_k != state.num_spec_tokens:
+            if new_k != old_k:
                 state.num_spec_tokens = new_k
 
             spec_tokens_for_batch.append(state.num_spec_tokens)
+
+            # Short req_id for logging
+            short_id = req_id.split("-")[-1][:8] if "-" in req_id else req_id[:8]
+            k_change = f"{old_k}->{new_k}" if old_k != new_k else str(new_k)
+            batch_summary_parts.append(
+                f"req={short_id} acc={avg_acceptance_rate:.0%} k={k_change}"
+            )
+
+        # Print batch summary in one line
+        if batch_summary_parts:
+            batch_size = len(batch_summary_parts)
+            summary = " | ".join(batch_summary_parts)
+            print(f"[DynamicProposer] Batch({batch_size}): {summary}", flush=True)
 
         return spec_tokens_for_batch
 
