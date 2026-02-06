@@ -6,6 +6,7 @@ from functools import wraps
 from weakref import WeakKeyDictionary
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -17,6 +18,7 @@ from .meta import (
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
+    materialize_layer_tensors_with_device_meta,
     restore_layer_on_meta,
 )
 from .types import LayerReloadingInfo
@@ -109,6 +111,33 @@ def initialize_layerwise_reload(model: torch.nn.Module):
                 tensor.weight_loader = make_online_process_loader(layer, name)
 
 
+@torch.no_grad()
+def initialize_layerwise_initial_load(model: torch.nn.Module, target_device):
+    """
+    TODO write me
+    """
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+
+        # Track loading progress to determine when to process/copy
+        info.load_numel = 0
+        info.load_numel_total = get_layer_size(layer)
+
+        # TODO better place for this?
+        layer._load_device = target_device
+
+        # Wrap each parameter's weight loader
+        # Note that nested wrapping will occur for shared tensors
+        for name, tensor in get_layer_tensors(layer).items():
+            if (
+                _get_weight_loader(tensor).__name__
+                != "online_initial_load_process_loader"
+            ):
+                tensor.weight_loader = make_online_initial_load_process_loader(
+                    layer, name
+                )
+
+
 def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
     """Create a wrapped weight loader that defers processing."""
     info = get_layerwise_info(layer)
@@ -163,6 +192,101 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     return online_process_loader
 
 
+# TODO(before review): move fp8's one to a common place and use that
+class CopyCounter(TorchDispatchMode):
+    """
+    Tracks total number of elements modified with `copy_`.
+
+    Useful for keeping track of weight loading where underlying weights can be
+    arbitrarily transformed (such as with `narrow`) before calling copy.
+
+    Note: Assumes that copy kwargs are not used.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.copied_numel = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if func is torch.ops.aten.copy_.default:
+            assert args[0].numel() == args[1].numel()
+            self.copied_numel += args[0].numel()
+
+        return func(*args, **kwargs)
+
+
+def make_online_initial_load_process_loader(
+    layer: torch.nn.Module, param_name: str
+) -> Callable:
+    """Create a wrapped weight loader that defers processing."""
+    info = get_layerwise_info(layer)
+    param = getattr(layer, param_name)
+    original_loader = _get_original_loader(param)
+    loader_signature = inspect.signature(original_loader)
+
+    @wraps(original_loader, assigned=("__doc__", "__annotations__"))
+    def online_initial_load_process_loader(*args, **kwargs):
+        if not info.can_process():
+            # Unfortunately, some qconfigs are set up to load the same weight
+            # multiple times. For example, CT_WNA16 loads `weight_shape` for
+            # each of the qkv partitions. This results in layers loading extra
+            # weights (beyond load_numel_total) after it's already processed.
+            #
+            # Best solution is to ensure that `load_numel_total` reflects the
+            # actual number of weights loaded, either by modifying qconfigs to
+            # create as many weights as loaded (see padding issue as well)
+            # or maybe capturing how many weights are loaded on first pass
+            #
+            # For now, `load_numel_total` is still safe to use as long as
+            # there's no way to reach `load_numel_total` without loading all
+            # necessary weights. `weight_shape` is very small, so this is safe.
+            # see Limitations(4)
+            logger.debug("%s: Excessive loading", layer.__class__.__name__)
+            return
+
+        if info.load_numel <= 0:
+            # Materialize any layer tensors on device meta onto device
+            with layer._load_device:
+                materialize_layer_tensors_with_device_meta(layer)
+
+        # Bind and normalize arguments
+        bound_args = loader_signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+
+        # Update param reference to point to the current (materialized) tensor
+        # instead of the old meta tensor that was captured when the loader was wrapped
+        current_param = getattr(layer, param_name)
+        bound_args.arguments["param"] = current_param
+
+        # Cache loaded weights, track loading progress
+        info.loaded_weights.append((param_name, bound_args))
+        # num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        with CopyCounter() as counter:
+            ret = original_loader(*bound_args.args, **bound_args.kwargs)
+
+        info.load_numel += counter.copied_numel
+
+        logger.debug(
+            "%s: %d / %d",
+            layer.__class__.__name__,
+            info.load_numel,
+            info.load_numel_total,
+        )
+
+        # Process and copy when all weights are loaded
+        if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
+            layer, (Attention, MLAAttention)
+        ):
+            _layerwise_initial_load_process(layer, info)
+
+        return ret
+
+    return online_initial_load_process_loader
+
+
 def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
     """
     Remove the outermost layer of weight loading wrappers.
@@ -199,6 +323,39 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
         elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
+
+        info.reset()
+
+
+def finalize_layerwise_initial_load(model: torch.nn.Module, model_config: ModelConfig):
+    """
+    TODO
+    """
+
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+
+        # Attention/MLA layers are processed after all other layers
+        if isinstance(layer, (Attention, MLAAttention)):
+            if info.load_numel > 0:
+                raise NotImplementedError(
+                    "Layerwise reloading of Q/K/V scale weights is not implemented yet"
+                )
+
+            else:
+                layer.process_weights_after_loading(model_config.dtype)
+
+        # No weights were loaded, place kernel tensors back
+        elif info.can_process() and info.load_numel <= 0:
+            pass
+
+        # Process non-attention layers which did not load all elements. This can happen
+        # if the created weight has extra padding elements which are not loaded
+        # Having too many of these delayed layers can lead to execess memory usage
+        # see Limitations(4)
+        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
+            logger.debug("%s: Delayed processing", layer.__class__.__name__)
+            _layerwise_initial_load_process(layer, info)
 
         info.reset()
 
@@ -241,6 +398,20 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
+
+    info.reset()
+    logger.debug("%s: Processed", layer.__class__.__name__)
+
+
+def _layerwise_initial_load_process(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """
+    TODO write me
+    """
+    # Process weights (quantization, repacking, etc.)
+    # Attention/MLA are processed in `finalize_layerwise_reload`
+    quant_method = getattr(layer, "quant_method", None)
+    if isinstance(quant_method, QuantizeMethodBase):
+        quant_method.process_weights_after_loading(layer)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
