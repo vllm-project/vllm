@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_AWQ_MARLIN_UNSAFE_CUDAGRAPH: bool = False
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -747,6 +748,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 8
     "VLLM_MEDIA_LOADING_THREAD_COUNT": lambda: int(
         os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")
+    ),
+    # Allow AWQ-Marlin to run with CUDA graphs without automatic safety
+    # mitigations. This is an advanced option that may cause illegal memory
+    # access. Only use if you understand the implications. Related: #32834
+    "VLLM_AWQ_MARLIN_UNSAFE_CUDAGRAPH": lambda: bool(
+        int(os.getenv("VLLM_AWQ_MARLIN_UNSAFE_CUDAGRAPH", "0"))
     ),
     # Maximum filesize in MB for a single audio file when processing
     # speech-to-text requests. Files larger than this will be rejected.

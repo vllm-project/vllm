@@ -703,6 +703,27 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
+        # Safety fix for AWQ-Marlin + CUDA Graph interaction (issue #32834).
+        # AWQ-Marlin kernels use workspace buffers with pointers that can
+        # become stale during CUDA graph replay, causing illegal memory access.
+        # Automatically enable cudagraph_copy_inputs to stabilize pointers.
+        if (
+            self.model_config is not None
+            and self.model_config.quantization == "awq_marlin"
+            and self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+            and not self.compilation_config.cudagraph_copy_inputs
+            and not envs.VLLM_AWQ_MARLIN_UNSAFE_CUDAGRAPH
+        ):
+            logger.warning_once(
+                "AWQ-Marlin quantization with CUDA graphs can cause illegal "
+                "memory access due to workspace buffer pointer instability. "
+                "Automatically enabling cudagraph_copy_inputs=True for safety. "
+                "This adds minor overhead but is much faster than --enforce-eager. "
+                "To disable this safety check (not recommended), set "
+                "VLLM_AWQ_MARLIN_UNSAFE_CUDAGRAPH=1. Related issue: #32834"
+            )
+            self.compilation_config.cudagraph_copy_inputs = True
+
         if (
             self.optimization_level > OptimizationLevel.O0
             and self.model_config is not None
