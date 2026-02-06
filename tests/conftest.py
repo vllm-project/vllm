@@ -74,7 +74,9 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from torch._inductor.utils import fresh_cache
 
 
-def use_aiter_if_available():
+# This function will load AITER function pointers and make them
+# available for vllm tests.
+def load_aiter_ops_if_available():
     from vllm.platforms import current_platform
     from importlib.util import find_spec
 
@@ -83,9 +85,15 @@ def use_aiter_if_available():
     # to use aiter will fail because no aiter ops will be loaded.
     if current_platform.is_rocm() and find_spec("aiter") is not None:
         os.environ["VLLM_ROCM_USE_AITER"] = "1"
+        # Load the ops so they can be used by tests that need them.
+        import vllm._aiter_ops
+
+        # Unset the environment variable, so tests that need this variable
+        # to be unset will function properly.
+        os.environ["VLLM_ROCM_USE_AITER"] = "0"
 
 
-use_aiter_if_available()
+load_aiter_ops_if_available()
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
