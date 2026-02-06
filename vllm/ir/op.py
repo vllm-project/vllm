@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Callable
-from typing import Any, overload
+from typing import Any, ClassVar, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -67,7 +67,7 @@ def register_op(
 
 
 class IrOp:
-    registry: dict[str, "IrOp"] = {}
+    registry: ClassVar[dict[str, "IrOp"]] = {}
 
     def __init__(
         self, name: str, native_impl: Callable, tags: tuple[torch.Tag, ...] = ()
@@ -76,6 +76,7 @@ class IrOp:
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[IrOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
+        self.native_fn = native_impl
 
         # native implementation, constructor also registers into impls
         self._native_impl = IrOpImpl(
@@ -90,7 +91,7 @@ class IrOp:
         vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key="CPU")
         vllm_ir_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
-        self._torch_op_call = getattr(torch.ops.vllm_ir, name).default
+        self.torch_op = getattr(torch.ops.vllm_ir, name).default
 
         assert name not in self.registry
         self.registry[name] = self
@@ -182,7 +183,7 @@ class IrOp:
         )
 
     def __call__(self, *args, **kwargs) -> Any:
-        return self._torch_op_call(*args, **kwargs)
+        return self.torch_op(*args, **kwargs)
 
     def get_priority(self) -> list[str]:
         """Get the current dispatch priority for implementations for this op."""
@@ -227,6 +228,9 @@ class IrOp:
             yield
         finally:
             self._priority_impls = old_priority_impls
+
+    def supported_providers(self) -> list[str]:
+        return [p.provider for p in self.impls.values() if p.supported]
 
 
 class IrOpImpl:
