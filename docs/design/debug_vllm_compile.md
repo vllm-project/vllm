@@ -269,7 +269,8 @@ can be compiled once and then reused after they have been compiled. This
 is a layer on top of [torch.compile's compiler cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html).
 
 While torch.compile's compiler cache is rock-stable, vLLM's compiler cache is unfortunately
-not always correct. You can disable it via setting `VLLM_DISABLE_COMPILE_CACHE=1`.
+not always correct. You can disable it via setting `vllm_enable_compile_cache=False` in
+`CompilationConfig`, or by setting the environment variable `VLLM_DISABLE_COMPILE_CACHE=1`.
 
 You can also manually remove this cache.
 
@@ -288,8 +289,8 @@ If this is not the case, then it will error out on save. Usually the fixes are t
 - rewrite the non-serializable pieces (perhaps difficult because it's difficult to
   tell right now what is serializable and what isn't)
 - file a bug report
-- ignore the error by setting `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will
-  make warm server starts a lot slower).
+- ignore the error by setting `vllm_enable_compile_cache=False` in `CompilationConfig`
+  or `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will make warm server starts a lot slower).
 
 ## Debugging CUDAGraphs
 
