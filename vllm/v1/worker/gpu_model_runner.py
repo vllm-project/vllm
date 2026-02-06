@@ -438,6 +438,9 @@ class GPUModelRunner(
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
+            print(
+                f"[GPUModelRunner] Spec Config Method: {self.speculative_config.method}"
+            )
             self.drafter: (
                 NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
@@ -457,6 +460,14 @@ class GPUModelRunner(
                 )
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "eagle_dynamic":
+                from vllm.v1.spec_decode.dynamic_proposer import DynamicProposer
+
+                self.drafter = DynamicProposer(self.vllm_config, self.device, self)
+                if self.drafter.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state
+                    )
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
@@ -467,14 +478,6 @@ class GPUModelRunner(
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
-            elif self.speculative_config.method == "eagle_dynamic":
-                from vllm.v1.spec_decode.dynamic_proposer import DynamicProposer
-
-                self.drafter = DynamicProposer(self.vllm_config, self.device, self)
-                if self.drafter.method == "eagle3":
-                    self.use_aux_hidden_state_outputs = (
-                        self.drafter.eagle3_use_aux_hidden_state
-                    )
             else:
                 raise ValueError(
                     "Unknown speculative decoding method: "

@@ -383,7 +383,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -425,7 +425,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
@@ -435,9 +435,16 @@ class SpeculativeConfig:
                     ):
                         pass
                     else:
+                        eagle_method = self.method
+                        if eagle_method == "eagle_dynamic":
+                            if "eagle3" in self.draft_model_config.model.lower():
+                                eagle_method = "eagle3"
+                            else:
+                                eagle_method = "eagle"
+
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method,
+                            method=eagle_method,
                             model_type="eagle",
                         )
                         # EAGLEConfig primarily updates architectures, so update

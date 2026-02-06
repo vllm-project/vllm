@@ -16,7 +16,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 logger = init_logger(__name__)
 
 # Constants for dynamic k adjustment
-MIN_SPEC_TOKENS = 0
+MIN_SPEC_TOKENS = 1
 ACCEPTANCE_HISTORY_LEN = 10
 ACCEPTANCE_RATE_HYSTERESIS = 0.05
 MIN_HISTORY_FOR_ADJUSTMENT = 3
@@ -65,6 +65,7 @@ class DynamicProposer(EagleProposer):
         )
 
         logger.info("DynamicProposer initialized for adaptive k.")
+        print("[DynamicProposer] INITIALIZED")
 
         # If the method is eagle_dynamic and the draft model is eagle3,
         # we treat it as eagle3 to enable eagle3-specific logic
@@ -146,8 +147,18 @@ class DynamicProposer(EagleProposer):
                 spec_tokens_for_batch.append(MIN_SPEC_TOKENS)
                 continue
 
+            # Print for every request to confirm loop entry
+            print(f"[DynamicProposer] Checking req {req_id}")
+
             state = self._get_or_create_state(req_id)
             history = state.acceptance_rate_history
+
+            # Always print statistics
+            print(
+                f"[DynamicProposer] Req {req_id} History Len: {len(history)} "
+                f"Avg: {np.mean(history) if history else 0:.2f}"
+            )
+
             if len(history) < MIN_HISTORY_FOR_ADJUSTMENT:
                 spec_tokens_for_batch.append(state.num_spec_tokens)
                 continue
@@ -162,14 +173,15 @@ class DynamicProposer(EagleProposer):
             elif avg_acceptance_rate <= lower_bound:
                 new_k = max(state.num_spec_tokens - 1, MIN_SPEC_TOKENS)
 
+            # Always print for debugging purposes
+            print(
+                f"[DynamicProposer] Req {req_id}: "
+                f"Avg Acc Rate {avg_acceptance_rate:.2f} -> "
+                f"k {state.num_spec_tokens} -> {new_k}",
+                flush=True,
+            )
+
             if new_k != state.num_spec_tokens:
-                logger.debug(
-                    "Accept rate %.2f -> req %s: k %d -> %d",
-                    avg_acceptance_rate,
-                    req_id,
-                    state.num_spec_tokens,
-                    new_k,
-                )
                 state.num_spec_tokens = new_k
 
             spec_tokens_for_batch.append(state.num_spec_tokens)
@@ -187,9 +199,15 @@ class DynamicProposer(EagleProposer):
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> list[list[int]]:
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
+    ) -> torch.Tensor:
         if self.runner is None:
             raise RuntimeError("DynamicProposer requires GPUModelRunner")
+
+        # print("[DynamicProposer] propose() called")
 
         batch_size = next_token_ids.shape[0]
         req_ids = self.runner.input_batch.req_ids[:batch_size]
@@ -218,8 +236,12 @@ class DynamicProposer(EagleProposer):
 
         max_k_in_batch = max(per_sequence_k) if per_sequence_k else 0
         if max_k_in_batch == 0:
-            # If no drafts are proposed in this step, return empty lists.
-            return [[] for _ in range(batch_size)]
+            # If no drafts are proposed in this step, return empty tensor
+            # (but handle padding later if needed, though usually max_k=0 implies skip)
+            # Actually, if max_k=0, we still need to return a tensor of width
+            # max_spec_tokens if the runner expects it. However, if max_k_in_batch is 0,
+            # EagleProposer won't run.
+            pass
 
         # 3. Get draft tokens from the parent (EagleProposer), requesting up to max_k.
         original_num_tokens = self.num_speculative_tokens
@@ -234,17 +256,27 @@ class DynamicProposer(EagleProposer):
                 common_attn_metadata=common_attn_metadata,
                 sampling_metadata=sampling_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                slot_mappings=slot_mappings,
             )
         finally:
             self.num_speculative_tokens = original_num_tokens
 
         if full_draft_token_ids.numel() == 0:
-            return [[] for _ in range(batch_size)]
+            current_width = 0
+            full_draft_token_ids = torch.empty(
+                (batch_size, 0), dtype=torch.int32, device=self.device
+            )
+        else:
+            current_width = full_draft_token_ids.shape[1]
 
-        # 4. Convert to ragged list directly (no rectangular padding needed).
-        #    This aligns with the n-gram proposer pattern where each sequence
-        #    can have a different number of draft tokens.
-        draft_lists = full_draft_token_ids.tolist()
-        ragged_drafts = [draft_lists[i][: per_sequence_k[i]] for i in range(batch_size)]
+        # 4. Pad with zeros if necessary to match the static max_spec_tokens.
+        # GPUModelRunner expects the tensor to have self.max_spec_tokens columns.
+        if current_width < self.max_spec_tokens:
+            pad_width = self.max_spec_tokens - current_width
+            padding = torch.zeros(
+                (batch_size, pad_width), dtype=torch.int32, device=self.device
+            )
+            full_draft_token_ids = torch.cat([full_draft_token_ids, padding], dim=1)
 
-        return ragged_drafts
+        return full_draft_token_ids
