@@ -96,11 +96,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
-from vllm.inputs.parse import (
-    get_prompt_components,
-    is_explicit_encoder_decoder_prompt,
-)
+from vllm.inputs.data import PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -108,6 +104,14 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.inputs import TokPrompt
+from vllm.renderers.inputs.preprocess import (
+    SingletonDictPrompt,
+    extract_prompt_components,
+    extract_prompt_len,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -203,7 +207,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[TokensPrompt | EmbedsPrompt] | None = None
+    engine_prompts: list[TokPrompt] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -247,7 +251,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: PromptType,
+        prompt: TokPrompt,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -271,20 +275,12 @@ class OpenAIServing:
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            raise NotImplementedError
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            raise NotImplementedError("Encoder-decoder prompt not supported")
 
-        prompt_text: str | None
-        prompt_token_ids: list[int]
-        multi_modal_data: MultiModalDataDict | None
-        if isinstance(prompt, str):
-            prompt_text = prompt
-            prompt_token_ids = []
-            multi_modal_data = None
-        else:
-            prompt_text = prompt.get("prompt")  # type: ignore
-            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
-            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+        prompt_text: str | None = prompt.get("prompt")  # type: ignore
+        prompt_token_ids: list[int] = prompt.get("prompt_token_ids", [])  # type: ignore
+        multi_modal_data: MultiModalDataDict | None = prompt.get("multi_modal_data")  # type: ignore
 
         mm_processor_kwargs: dict[str, Any] | None = None
 
@@ -963,22 +959,40 @@ class OpenAIServing:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[TokPrompt]:
         renderer = self.renderer
-        tok_params = request.build_tok_params(self.model_config)
+        model_config = self.model_config
 
-        in_prompts = await renderer.render_completions_async(
-            prompt_input, prompt_embeds
-        )
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
+        tok_params = request.build_tok_params(model_config)
+
+        prompts = list[SingletonPrompt | bytes]()
+        if prompt_embeds is not None:  # embeds take higher priority
+            prompts.extend(prompt_to_seq(prompt_embeds))
+        if prompt_input is not None:
+            prompts.extend(prompt_to_seq(prompt_input))
+
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(model_config, prompt)
+            )
+            for prompt in prompts
+        ]
+        in_prompts = await renderer.render_prompts_async(parsed_prompts)
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        for prompt in engine_prompts:
-            prompt.update(extra_items)  # type: ignore
+        for in_prompt in in_prompts:
+            target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
+                "encoder_prompt", in_prompt
+            )
+            target_prompt.update(extra_items)  # type: ignore
+
+        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         return engine_prompts
 
@@ -991,7 +1005,7 @@ class OpenAIServing:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
+    ) -> tuple[list[ConversationMessage], list[TokPrompt]]:
         from vllm.tokenizers.mistral import MistralTokenizer
 
         renderer = self.renderer
@@ -1009,17 +1023,21 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        conversation, prompt = await renderer.render_messages_async(
+        conversation, in_prompt = await renderer.render_messages_async(
             messages, chat_params
         )
-        engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
+        target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
+            "encoder_prompt", in_prompt
+        )
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        engine_prompt.update(extra_items)  # type: ignore
+        target_prompt.update(extra_items)  # type: ignore
+
+        engine_prompt = await renderer.tokenize_prompt_async(target_prompt, tok_params)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1039,6 +1057,15 @@ class OpenAIServing:
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
         return conversation, [engine_prompt]
+
+    def _extract_prompt_components(self, prompt: object):
+        return extract_prompt_components(self.model_config, prompt)
+
+    def _extract_prompt_text(self, prompt: object):
+        return self._extract_prompt_components(prompt).text
+
+    def _extract_prompt_len(self, prompt: object):
+        return extract_prompt_len(self.model_config, prompt)
 
     async def _render_next_turn(
         self,
@@ -1067,7 +1094,7 @@ class OpenAIServing:
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
         sampling_params: SamplingParams,
         tok_params: TokenizeParams,
         context: ConversationContext,
@@ -1075,7 +1102,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text = engine_prompt.get("prompt")
+        prompt_text = self._extract_prompt_text(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1145,12 +1172,12 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text = engine_prompt.get("prompt")
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
                     context.request,
-                    engine_prompt,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
                 )
 
@@ -1161,20 +1188,20 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType,
+        inputs: PromptType | TokPrompt,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = get_prompt_components(inputs)
+        components = self._extract_prompt_components(inputs)
 
         self.request_logger.log_inputs(
             request_id,
-            prompt,
-            prompt_token_ids,
-            prompt_embeds,
+            components.text,
+            components.token_ids,
+            components.embeds,
             params=params,
             lora_request=lora_request,
         )

@@ -20,7 +20,7 @@ from typing import (
 
 import numpy as np
 from PIL.Image import Image
-from typing_extensions import NotRequired, TypeVar
+from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -32,8 +32,12 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+
+    from vllm.inputs.data import _InputOptions
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    _InputOptions = dict
 
 _T = TypeVar("_T")
 
@@ -1059,7 +1063,7 @@ A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
-class MultiModalInputs(TypedDict):
+class MultiModalInputs(_InputOptions):
     """
     Represents the outputs of
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor],
@@ -1082,11 +1086,6 @@ class MultiModalInputs(TypedDict):
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
-    """
-
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
     """
 
 
