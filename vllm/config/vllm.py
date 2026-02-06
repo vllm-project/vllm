@@ -109,7 +109,6 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-        and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
 
