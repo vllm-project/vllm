@@ -224,13 +224,13 @@ If you prefer, you can use the Hugging Face CLI to [download a model](https://hu
 
 ```bash
 # Download a model
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta
+hf download HuggingFaceH4/zephyr-7b-beta
 
 # Specify a custom cache directory
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
+hf download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
 
 # Download a specific file from a model repo
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
+hf download HuggingFaceH4/zephyr-7b-beta eval_results.json
 ```
 
 #### List the downloaded models
@@ -239,13 +239,13 @@ Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingf
 
 ```bash
 # List cached models
-huggingface-cli scan-cache
+hf scan-cache
 
 # Show detailed (verbose) output
-huggingface-cli scan-cache -v
+hf scan-cache -v
 
 # Specify a custom cache directory
-huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
+hf scan-cache --dir ~/.cache/huggingface/hub
 ```
 
 #### Delete a cached model
@@ -260,7 +260,7 @@ Use the Hugging Face CLI to interactively [delete downloaded model](https://hugg
 # Please run `pip install huggingface_hub[cli]` to install them.
 
 # Launch the interactive TUI to select models to delete
-$ huggingface-cli delete-cache
+$ hf delete-cache
 ? Select revisions to delete: 1 revisions selected counting for 438.9M.
   ○ None of the following (if selected, nothing will be deleted).
 Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
@@ -297,7 +297,7 @@ export https_proxy=http://your.proxy.server:port
 - Set the proxy for just the current command:
 
 ```shell
-https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+https_proxy=http://your.proxy.server:port hf download <model_name>
 
 # or use vllm cmd directly
 https_proxy=http://your.proxy.server:port  vllm serve <model_name>

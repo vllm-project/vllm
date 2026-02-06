@@ -170,7 +170,7 @@ class LLM:
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
-            `huggingface-cli login` (stored in `~/.huggingface`).
+            `hf auth login` (stored in `~/.cache/huggingface/token`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
