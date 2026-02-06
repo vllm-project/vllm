@@ -323,11 +323,13 @@ class P2PAFDConnector(AFDConnectorBase):
     def update_state_from_dp_metadata(
         self,
         dp_metadata_list: dict[int, DPMetadata],
+        is_graph_capturing: bool = False,
     ) -> None:
         """Update the connector state based on the received DPMetadata list.
         This replaces the explicit metadata communication step.
         """
         self.dp_metadata_list = dp_metadata_list
+        self.is_graph_capturing = is_graph_capturing
         num_of_stages = len(dp_metadata_list)
         
         # Build tensor metadata list for each stage
@@ -420,15 +422,16 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         return hidden_states, metadata
 
-    def send_dp_metadata_list(self, data):
-        self.update_state_from_dp_metadata(data)
+    def send_dp_metadata_list(self, data, is_graph_capturing: bool = False):
+        self.update_state_from_dp_metadata(data, is_graph_capturing)
+        send_data = (data, is_graph_capturing)
         for dst in self.dst_list:
-            object_bytes = pickle.dumps(data)
+            object_bytes = pickle.dumps(send_data)
             # Use CPU tensor for Gloo backend
             object_tensor = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
             size_tensor = torch.tensor([object_tensor.numel()], dtype=torch.long)
             
-            logger.info(f"jcz send_dp_metadata_list dst:{dst} self.p2p_rank:{self.p2p_rank}")
+            logger.info(f"jcz send_dp_metadata_list dst:{dst} self.p2p_rank:{self.p2p_rank} is_graph_capturing:{is_graph_capturing}")
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor, dst=dst, group=self.p2p_pg)
     
@@ -445,8 +448,9 @@ class P2PAFDConnector(AFDConnectorBase):
 
         assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
 
-        data = pickle.loads(object_tensor.numpy().tobytes())
-        return data
+        data, is_graph_capturing = pickle.loads(object_tensor.numpy().tobytes())
+        logger.info(f"jcz recv_dp_metadata_list is_graph_capturing:{is_graph_capturing}")
+        return data, is_graph_capturing
 
     def is_vaild_rank_for_inequal_AF(self,rank):
         # Only support ffn rank < attn rank
