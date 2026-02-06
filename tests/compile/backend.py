@@ -112,6 +112,6 @@ class TestBackend:
 
     def print_graphs(self):
         print("=== Graph before custom passes ===")
-        print(self.graph_pre_pass.python_code(root_module="self").src)
+        print(self.graph_pre_pass.python_code(root_module="self", verbose=True).src)
         print("=== Graph after custom passes ===")
-        print(self.graph_post_pass.python_code(root_module="self").src)
+        print(self.graph_post_pass.python_code(root_module="self", verbose=True).src)
