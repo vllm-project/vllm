@@ -409,6 +409,8 @@ class RayDistributedExecutor(Executor):
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         ):
             self.shutdown()
+        elif self.vllm_config.afd_config and self.vllm_config.afd_config.is_ffn_server:
+            self.collective_rpc("load_model")
 
     def execute_model(  # type: ignore[override]
         self,

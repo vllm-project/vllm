@@ -208,7 +208,12 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            engine_manager.monitor_engine_process(
+                engine_down_callback=engine_manager.notify_engine_down
+            )
+        else:
+            engine_manager.join_first()
     finally:
         logger.info("Shutting down.")
         engine_manager.close()
@@ -244,7 +249,6 @@ def run_multi_api_server(args: argparse.Namespace):
     assert parallel_config.local_engines_only or dp_rank == 0
 
     api_server_manager: APIServerProcessManager | None = None
-
     with launch_core_engines(
         vllm_config, executor_class, log_stats, num_api_servers
     ) as (local_engine_manager, coordinator, addresses):

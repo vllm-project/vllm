@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.afd import AFDConfig
 from vllm.config.attention import AttentionConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
@@ -11,6 +12,7 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -69,6 +71,8 @@ __all__ = [
     "KVEventsConfig",
     # From vllm.config.kv_transfer
     "KVTransferConfig",
+    # AFD (Attention FFN Disaggregation) configuration
+    "AFDConfig",
     # From vllm.config.load
     "LoadConfig",
     # From vllm.config.lora
@@ -97,6 +101,8 @@ __all__ = [
     "StructuredOutputsConfig",
     # From vllm.config.profiler
     "ProfilerConfig",
+    # From vllm.config.fault_tolerance
+    "FaultToleranceConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",

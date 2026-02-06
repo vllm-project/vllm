@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
 import vllm.envs as envs
+from vllm.config import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -245,6 +246,11 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
+    multi_level_index: int = 0
+    """Offset to reuse dp port for data parallel messaging for scaling. 
+    Set it -1 to disable this feature.
+    """
+
     decode_context_parallel_size: int = 1
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
@@ -389,6 +395,15 @@ class ParallelConfig:
         initialize a new process group related to data parallelism.
         """
         if self._data_parallel_master_port_list:
+            # temp code for loop scaling
+            if self.multi_level_index >= 0:
+                level_offset = (self.data_parallel_size.bit_length() - 2) << 1
+                level_key = (level_offset + self.multi_level_index) % len(
+                    self._data_parallel_master_port_list
+                )
+                self.multi_level_index += 1
+                return self._data_parallel_master_port_list[level_key]
+
             answer = self._data_parallel_master_port_list.pop()
         else:
             answer = self.data_parallel_master_port
@@ -396,7 +411,11 @@ class ParallelConfig:
 
         return answer
 
-    def stateless_init_dp_group(self) -> ProcessGroup:
+    def stateless_init_dp_group(
+        self,
+        dp_init_port: int | None = None,
+        fault_tolerance_config: FaultToleranceConfig | None = None,
+    ) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first
@@ -412,21 +431,25 @@ class ParallelConfig:
 
         max_retries = 5
         last_exc: Exception | None = None
+        if dp_init_port is None:
+            dp_init_port = self.get_next_dp_init_port()
         for _ in range(max_retries):
             try:
                 # use gloo since the engine process might not have cuda device
                 return stateless_init_torch_distributed_process_group(
                     self.data_parallel_master_ip,
-                    self.get_next_dp_init_port(),
+                    dp_init_port,
                     self.data_parallel_rank,
                     self.data_parallel_size,
                     backend=current_platform.dist_backend,
+                    fault_tolerance_config=fault_tolerance_config,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):
                     logger.warning("Address already in use. Retrying with a new port.")
                     last_exc = e
+                    dp_init_port = self.get_next_dp_init_port()
                     continue  # try again with a new port
                 raise e
 

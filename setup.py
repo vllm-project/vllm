@@ -166,6 +166,10 @@ class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
 
+    def finalize_options(self):
+        super().finalize_options()
+        self.build_temp = os.path.join(os.getcwd(), "build")
+
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #

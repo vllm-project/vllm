@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -41,8 +42,17 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
+from torch.distributed.distributed_c10d import (
+    PrefixStore,
+    Store,
+    _new_process_group_helper,
+    _world,
+    default_pg_timeout,
+    rendezvous,
+)
 
 import vllm.envs as envs
+from vllm.config import FaultToleranceConfig
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
@@ -310,6 +320,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        fault_tolerance_config: FaultToleranceConfig | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -321,14 +332,31 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        gloo_comm_timeout = None
+        options = None
+        if torch_distributed_backend == "nccl":
+            options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
+            if (
+                fault_tolerance_config is not None
+                and fault_tolerance_config.enable_fault_tolerance
+            ):
+                gloo_comm_timeout = timedelta(
+                    seconds=fault_tolerance_config.gloo_comm_timeout
+                )
+                # need to set communicators as nonblocking to abort safely
+                options.config.blocking = 0
+                os.environ["NCCL_COMM_BLOCKING"] = "0"
+
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
+                ranks, backend=torch_distributed_backend, pg_options=options
             )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=gloo_comm_timeout
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1056,6 +1084,63 @@ _INNER_DP_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
 
+def init_afd_process_group(
+    backend: str | Backend = None,
+    init_method: str | None = None,
+    timeout: timedelta | None = None,
+    world_size: int = -1,
+    rank: int = -1,
+    store: Store | None = None,
+    group_name: str = None,
+    pg_options: Any | None = None,
+):
+    assert (store is None) or (init_method is None), (
+        "Cannot specify both init_method and store."
+    )
+
+    if store is not None:
+        assert world_size > 0, "world_size must be positive if using store"
+        assert rank >= 0, "rank must be non-negative if using store"
+    elif init_method is None:
+        init_method = "env://"
+
+    if backend:
+        backend = Backend(backend)
+    else:
+        backend = Backend("undefined")
+
+    if timeout is None:
+        timeout = default_pg_timeout
+
+    if store is None:
+        rendezvous_iterator = rendezvous(init_method, rank, world_size, timeout=timeout)
+        store, rank, world_size = next(rendezvous_iterator)
+        store.set_timeout(timeout)
+        store = PrefixStore(group_name, store)
+
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        store,
+        group_name=group_name,
+        **{pg_options_param_name: pg_options},
+        timeout=timeout,
+    )
+    global _AFD
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+    _AFD = pg
+    return pg
+
+
+_WORLD: GroupCoordinator | None = None
+_NODE_COUNT: int | None = None
+
+
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
@@ -1067,7 +1152,10 @@ def get_inner_dp_world_group() -> GroupCoordinator:
 
 
 def init_world_group(
-    ranks: list[int], local_rank: int, backend: str
+    ranks: list[int],
+    local_rank: int,
+    backend: str,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1075,6 +1163,7 @@ def init_world_group(
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
 
@@ -1085,6 +1174,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1093,6 +1183,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        fault_tolerance_config=fault_tolerance_config,
     )
 
 
@@ -1151,6 +1242,35 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def get_all_model_groups() -> list[GroupCoordinator]:
+    group_list = []
+    global _TP
+    if _TP:
+        group_list.append(_TP)
+
+    global _PP
+    if _PP:
+        group_list.append(_PP)
+
+    global _DCP
+    if _DCP:
+        group_list.append(_DCP)
+
+    global _DP
+    if _DP:
+        group_list.append(_DP)
+
+    global _EP
+    if _EP:
+        group_list.append(_EP)
+
+    global _PCP
+    if _PCP:
+        group_list.append(_PCP)
+
+    return group_list
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -1188,6 +1308,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1270,7 +1391,9 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        _WORLD = init_world_group(
+            ranks, local_rank, backend, fault_tolerance_config=fault_tolerance_config
+        )
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
@@ -1305,6 +1428,7 @@ def initialize_model_parallel(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1372,6 +1496,7 @@ def initialize_model_parallel(
         backend,
         use_message_queue_broadcaster=True,
         group_name="tp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     # Build the DCP model-parallel groups.
@@ -1389,6 +1514,7 @@ def initialize_model_parallel(
         backend,
         use_message_queue_broadcaster=True,
         group_name="dcp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _PCP
@@ -1411,7 +1537,11 @@ def initialize_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="pp"
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name="pp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _DP
@@ -1419,12 +1549,15 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="dp"
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name="dp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    # Don't create EP group for dense models.
     if config is None or config.model_config is None or config.model_config.is_moe:
         group_ranks = (
             all_ranks.transpose(1, 2)
@@ -1438,7 +1571,11 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
         _EP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="ep"
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="ep",
+            fault_tolerance_config=fault_tolerance_config,
         )
     # If no EP group needed, _EP remains None
 
@@ -1462,6 +1599,7 @@ def ensure_model_parallel_initialized(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -1475,6 +1613,7 @@ def ensure_model_parallel_initialized(
             prefill_context_model_parallel_size,
             decode_context_model_parallel_size,
             backend,
+            fault_tolerance_config=fault_tolerance_config,
         )
         return
 

@@ -1030,6 +1030,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
+        if engine_idx >= len(self.engine_indexes):
+            return
+
         """Log to prometheus."""
         if scheduler_stats is not None:
             self.gauge_scheduler_running[engine_idx].set(

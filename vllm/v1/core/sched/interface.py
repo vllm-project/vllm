@@ -65,6 +65,19 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def preempt_request(
+        self,
+        request: "Request",
+        timestamp: float,
+    ) -> None:
+        """Preempt a request and put it back to the waiting queue.
+
+        NOTE: The request should be popped from the running queue outside of this
+        method.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",

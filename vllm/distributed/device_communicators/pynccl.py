@@ -236,7 +236,7 @@ class PyNcclCommunicator:
                 cudaStream_t(stream.cuda_stream),
             )
             split_offset += split_size
-        self.nccl.ncclGroupEnd()
+        self.nccl.ncclGroupEnd(self.comm)
 
     def reduce_scatter(
         self,
@@ -301,7 +301,7 @@ class PyNcclCommunicator:
                 cudaStream_t(stream.cuda_stream),
             )
             split_offset += split_size
-        self.nccl.ncclGroupEnd()
+        self.nccl.ncclGroupEnd(self.comm)
 
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
@@ -369,7 +369,10 @@ class PyNcclCommunicator:
         self.nccl.ncclGroupStart()
 
     def group_end(self):
-        self.nccl.ncclGroupEnd()
+        self.nccl.ncclGroupEnd(self.comm)
+
+    def nccl_abort_comm(self):
+        self.nccl.ncclCommAbort(self.comm)
 
     def register_comm_window(self, tensor: torch.Tensor):
         return self.nccl.ncclCommWindowRegister(

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
-import multiprocessing
+import json
 import queue
 import sys
+import threading
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -13,24 +15,27 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar, cast
 
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
+from ray.util.state import get_actor
 
-from vllm.config import VllmConfig
+from vllm.config import FaultToleranceConfig, VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
+from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
+    recv_router_dealer_message,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -40,13 +45,15 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
 )
+from vllm.v1.engine.base_sentinel import BaseSentinel
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
-    CoreEngineActorManager,
     CoreEngineProcManager,
+    GlobalActorManager,
     launch_core_engines,
+    serialize_method_call,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -262,6 +269,12 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def handle_fault(self, instruction: str, timeout: int) -> bool:
+        raise NotImplementedError
+
+    async def fault_reporter(self):
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -353,6 +366,204 @@ class InprocClient(EngineCoreClient):
         return False
 
 
+class ClientSentinel(BaseSentinel):
+    def __init__(
+        self,
+        fault_receiver_addr: str,
+        cmd_addr: str,
+        engine_registry: dict[int, bytes],
+        engine_exception_q: queue.Queue[FaultInfo],
+        fault_pub_addr: str,
+        engine_status_dict: ThreadSafeDict[int, str],
+        fault_tolerance_config: FaultToleranceConfig,
+    ):
+        super().__init__(
+            upstream_cmd_addr=None,
+            downstream_cmd_addr=cmd_addr,
+            dealer_socket_identity=None,
+            sentinel_tag=None,
+            fault_tolerance_config=fault_tolerance_config,
+        )
+        self.is_faulted = threading.Event()
+        self.engine_running = threading.Event()
+        self.engine_running.set()
+        self.engine_registry = engine_registry
+        self.engine_exception_q: queue.Queue[FaultInfo] = engine_exception_q
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
+        self.engine_identity_to_index: dict[bytes, int] = {
+            identity: i for i, identity in self.engine_registry.items()
+        }
+
+        self.fault_receiver_socket = make_zmq_socket(
+            ctx=self.ctx,
+            path=fault_receiver_addr,
+            socket_type=zmq.ROUTER,
+            bind=True,
+        )
+        self.fault_pub_socket = make_zmq_socket(
+            ctx=self.ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
+        )
+
+        # All fault-tolerance related instructions (e.g. pause / retry) MUST be
+        # executed strictly sequentially.
+        # All instructions, regardless of which thread they originate from, are
+        # enqueued into this queue.
+        self._task_queue: asyncio.Queue = asyncio.Queue()
+        self._loop = asyncio.get_event_loop()
+        # The dispatcher runs in the event loop and dequeues tasks one by one,
+        # executing them in FIFO order
+        self._dispatcher_task = self._loop.create_task(self._dispatcher())
+
+        threading.Thread(
+            target=self.run, daemon=True, name="ClientSentinelMonitorThread"
+        ).start()
+
+    def run(self) -> None:
+        """
+        Block the current execution flow and listen for fault information:
+        1. Block the thread on the error message queue
+        2. Unblock only when fault is received
+        3. Execute the pause command immediately upon detecting an fault message
+        """
+        while not self.sentinel_dead:
+            try:
+                self.listen_and_publish_fault_status()
+                # Pause healthy engines on fault.
+                # Pause can be invoked again during fault-tolerance handling,
+                # so it's unnecessary to track whether all engines are currently
+                # paused.
+                if self.engine_running.is_set():
+                    self._submit_task(
+                        "pause", self.ft_config.gloo_comm_timeout, soft_pause=False
+                    )
+            except zmq.ZMQError:
+                # Socket is closed.
+                break
+
+    def _submit_task(self, instruction: str, timeout: int, **kwargs) -> None:
+        """
+        thread-safe fire-and-forget submission of a fault handling task.
+        This method can be called from **any thread**
+        """
+
+        def _enqueue():
+            fut = self._loop.create_future()
+            self._task_queue.put_nowait((instruction, timeout, kwargs, fut))
+
+        self._loop.call_soon_threadsafe(_enqueue)
+
+    async def _dispatcher(self):
+        while True:
+            # each elements in the queue contains:
+            # (instruction, timeout, kwargs, future)
+            instruction, timeout, kwargs, fut = await self._task_queue.get()
+            try:
+                kwargs["timeout"] = timeout
+                cmd_str = serialize_method_call(instruction, None, **kwargs)
+                success, _, _ = self._execute_cmd(cmd_str)
+                if fut:
+                    fut.set_result(success)
+            except Exception as e:
+                if fut:
+                    fut.set_exception(e)
+
+    def retry(
+        self, timeout: int = 1, new_stateless_dp_group_port: int = 8000, **kwargs
+    ) -> bool:
+        if "Dead" in self.engine_status_dict.values():
+            self.logger(
+                "Engine core is dead; retry won't work.",
+                level="warning",
+            )
+            return False
+
+        target_engines = set(self.engine_identity_to_index.keys())
+        new_stateless_dp_group_port = get_open_port()
+        success, _ = self._broadcast_command_to_downstream(
+            "retry",
+            target_engines,
+            response_timeout=timeout,
+            new_stateless_dp_group_port=new_stateless_dp_group_port,
+            timeout=timeout,
+        )
+
+        for engine_index, _ in self.engine_status_dict.items():
+            self.engine_status_dict[engine_index] = "Healthy"
+        while not self.engine_exception_q.empty():
+            try:
+                self.engine_exception_q.get_nowait()
+            except queue.Empty:
+                break
+
+        if success:
+            self.is_faulted.clear()
+            self.engine_running.set()
+        return success
+
+    def pause(self, timeout: int = 1, soft_pause: bool = True):
+        self.logger(
+            "Pause operation is best-effort only. Due to the complexity of "
+            "collective communications (e.g., timing dependencies and "
+            "synchronization barriers), pausing may not always succeed. If "
+            "the process remains unresponsive or collective operations "
+            "cannot be interrupted, consider shutting down and restarting "
+            "the instance.",
+            level="warning",
+        )
+        self.engine_running.clear()
+        alive_engines = {
+            identity
+            for identity, index in self.engine_identity_to_index.items()
+            if self.engine_status_dict.get(index) != "Dead"
+        }
+        success, _ = self._broadcast_command_to_downstream(
+            "pause",
+            alive_engines,
+            response_timeout=timeout,
+            timeout=timeout,
+            soft_pause=soft_pause,
+        )
+        return success
+
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
+        """
+        Executes fault tolerance methods based on the fault tolerance instructions
+         received from the api_server.
+        """
+        fut = self._loop.create_future()
+        await self._task_queue.put((instruction, timeout, kwargs, fut))
+        success = await fut
+        return success
+
+    def listen_and_publish_fault_status(self):
+        try:
+            _, sender_identity, message = recv_router_dealer_message(
+                self.fault_receiver_socket
+            )
+            assert message is not None, (
+                "message should not be None at fault tolerance scenario"
+            )
+
+            fault_info = FaultInfo.from_json(message)
+            self.engine_exception_q.put_nowait(fault_info)
+            engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
+            self.engine_status_dict[int(fault_info.engine_id)] = engine_status
+            self.fault_pub_socket.send_string(
+                f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
+            )
+            self.is_faulted.set()
+        except zmq.ZMQError:
+            # Socket was closed during polling, exit loop.
+            self.logger("Fault receiver socket closed, stopping thread.", level="info")
+            raise
+
+    def shutdown(self):
+        self.fault_receiver_socket.close()
+        self.fault_pub_socket.close()
+        super().shutdown()
+        self.logger("ClientSentinel is closed.", level="info")
+
+
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
@@ -360,8 +571,8 @@ class BackgroundResources:
 
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
-    # if CoreEngineActorManager, it manages all engines.
-    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None = None
+    # if GlobalActorManager, it manages all engines.
+    engine_manager: CoreEngineProcManager | GlobalActorManager | None = None
     coordinator: DPCoordinator | None = None
     output_socket: zmq.Socket | zmq.asyncio.Socket | None = None
     input_socket: zmq.Socket | zmq.asyncio.Socket | None = None
@@ -371,6 +582,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
+    client_sentinel: ClientSentinel | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -380,6 +592,8 @@ class BackgroundResources:
         """Clean up background resources."""
 
         self.engine_dead = True
+        if self.client_sentinel is not None:
+            self.client_sentinel.shutdown()
         if self.engine_manager is not None:
             self.engine_manager.close()
         if self.coordinator is not None:
@@ -475,6 +689,7 @@ class MPClient(EngineCoreClient):
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
+
         try:
             # State used for data parallel.
             self.engines_running = False
@@ -554,8 +769,39 @@ class MPClient(EngineCoreClient):
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
             # Start monitoring engine core processes for unexpected failures
-            self.start_engine_core_monitor()
+            if self.vllm_config.parallel_config.data_parallel_backend == "ray":
+                self.start_engine_core_actor_monitor()
+            else:
+                self.start_engine_core_monitor()
 
+            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                self.engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
+                assert addresses.engine_fault_socket_addr is not None, (
+                    "engine_fault_socket_addr should not be None at "
+                    "fault tolerance scenario"
+                )
+                assert addresses.client_cmd_addr is not None, (
+                    "client_cmd_addr should not be None at fault tolerance scenario"
+                )
+                self.engine_registry = addresses.engine_core_sentinel_identities
+                assert self.engine_registry is not None
+                assert addresses.fault_pub_socket_addr is not None, (
+                    "addresses.fault_pub_socket_addr should not be None at"
+                    "fault tolerance scenario"
+                )
+                self.engine_status_dict: ThreadSafeDict[int, str] = ThreadSafeDict()
+                for engine_id in range(vllm_config.parallel_config.data_parallel_size):
+                    self.engine_status_dict[engine_id] = "Healthy"
+                self.client_sentinel = ClientSentinel(
+                    fault_receiver_addr=addresses.engine_fault_socket_addr,
+                    cmd_addr=addresses.client_cmd_addr,
+                    engine_registry=self.engine_registry,
+                    engine_exception_q=self.engine_exception_q,
+                    fault_pub_addr=addresses.fault_pub_socket_addr,
+                    engine_status_dict=self.engine_status_dict,
+                    fault_tolerance_config=vllm_config.fault_tolerance_config,
+                )
+                self.resources.client_sentinel = self.client_sentinel
             success = True
         finally:
             if not success:
@@ -586,6 +832,51 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
+    def start_engine_core_actor_monitor(self):
+        engine_manager = self.resources.engine_manager
+        if (
+            not isinstance(engine_manager, CoreEngineActorManager)
+            or not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+        ):
+            return
+
+        def monitor_actors():
+            all_actors = (
+                engine_manager.local_engine_actors + engine_manager.remote_engine_actors
+            )
+            if not all_actors:
+                return
+            while True:
+                for actor in all_actors[:]:
+                    actor_id = actor._actor_id.hex()
+                    if actor in engine_manager.local_engine_actors:
+                        actor_index = engine_manager.local_engine_actors.index(actor)
+                    elif actor in engine_manager.remote_engine_actors:
+                        actor_index = engine_manager.remote_engine_actors.index(
+                            actor
+                        ) + len(engine_manager.local_engine_actors)
+                    else:
+                        logger.error("Unknown actor (ID: %s)", actor_id)
+                        continue
+
+                    actor_info = get_actor(actor_id)
+                    if actor_info.state == "DEAD":
+                        fault_info = FaultInfo(
+                            type="engine_actor dead",
+                            message=str(actor_info.death_cause),
+                            engine_id=str(actor_index),
+                            additional_info=None,
+                        )
+                        all_actors.remove(actor)
+                        engine_manager.engine_down_socket.send_multipart(
+                            [b"", fault_info.serialize().encode("utf-8")]
+                        )
+
+                time.sleep(3)
+                # Implements the "check once every 3 seconds" frequency control
+
+        Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
+
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
@@ -597,34 +888,51 @@ class MPClient(EngineCoreClient):
             # No engine processes to monitor
             return
 
-        engine_processes = engine_manager.processes
+        engine_manager = cast(CoreEngineProcManager, self.resources.engine_manager)
         self_ref = weakref.ref(self)
 
-        # Monitor engine core process liveness. If any die unexpectedly,
-        # logs an error, shuts down the client and invokes the failure
-        # callback to inform the engine.
-        def monitor_engine_cores():
-            sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
+        def shutdown_callback(engine_rank, died_proc):
+            """
+            Callback to shutdown the client.
+            """
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
-                return
-            _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
+            if not _self:
+                return True  # Stop monitoring anyway if self is gone
             logger.error(
                 "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
+                died_proc.name,
             )
+            engine_manager.shutdown_monitor = True
+            _self.resources.engine_dead = True
             _self.shutdown()
-            # Note: For MPClient, we don't have a failure callback mechanism
-            # like MultiprocExecutor, but we set engine_dead flag which will
-            # cause subsequent operations to raise EngineDeadError
+
+        engine_down_callback = (
+            shutdown_callback
+            if not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+            else engine_manager.notify_engine_down
+        )
 
         Thread(
-            target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
+            target=engine_manager.monitor_engine_process,
+            args=(engine_down_callback,),
+            daemon=True,
+            name="MPClientEngineMonitor",
         ).start()
+
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
+        """handle fault of current instance by instruction"""
+        success = await self.client_sentinel.handle_fault(
+            instruction, timeout, **kwargs
+        )
+        ft_config = self.vllm_config.fault_tolerance_config
+        if not success and ft_config.shutdown_on_fault_tolerance_failure:
+            logger.error("Fault tolerance failed. Shutting down the application.")
+            self.resources.engine_dead = True
+            self.shutdown()
+        return success
+
+    async def fault_reporter(self):
+        return self.engine_status_dict.to_dict()
 
 
 def _process_utility_output(
@@ -1130,6 +1438,11 @@ class DPAsyncMPClient(AsyncMPClient):
                                 ("SCALE_ELASTIC_EP", new_engine_count)
                             )
                             await socket.send(scale_msg)
+                            nonlocal count_slice
+                            count_slice = (
+                                self.engine_ranks_managed[0],
+                                self.engine_ranks_managed[-1] + 1,
+                            )
                             continue
 
                         # we're sending a request while the engines are
@@ -1324,14 +1637,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # for them to be sent
         reconfig_futures = []
         self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
+        reconfig_request = ReconfigureDistributedRequest(
+            new_data_parallel_size=new_data_parallel_size,
+            new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
+        )
         for engine in self.core_engines:
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
-                new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
-            )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
@@ -1339,10 +1652,23 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         logger.info("All reconfigure messages sent, starting engine creation")
 
+        ffn_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.resources.engine_manager.reinitialize_distributed,
+                reconfig_request=reconfig_request,
+            )
+        )
+        reconfig_futures.append(ffn_task)
+
+        await asyncio.sleep(0)
+        logger.info(
+            f"All reconfigure messages sent, starting engine creation, {len(self.core_engines)=}"
+        )
+
         # Phase 2: Create new engines now that reconfig messages have been sent
         # self.resources.engine_manager is guaranteed to be
-        # CoreEngineActorManager for RayDPClient
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        # GlobalActorManager for RayDPClient
+        assert isinstance(self.resources.engine_manager, GlobalActorManager)
         self.resources.engine_manager.scale_up_elastic_ep(
             self.vllm_config, new_data_parallel_size
         )
@@ -1353,6 +1679,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine = i.to_bytes(2, "little")
             self.core_engines.append(new_engine)
             new_engine_identities.add(new_engine)
+
+        # update engine_ranks_managed
+        self.engine_ranks_managed = list(range(new_data_parallel_size))
 
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
@@ -1394,16 +1723,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         cur_data_parallel_size = len(self.core_engines)
 
         self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
-
+        reconfig_request = ReconfigureDistributedRequest(
+            new_data_parallel_size=new_data_parallel_size,
+            new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
+        )
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
-                new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
-            )
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (
                     ReconfigureRankType.SHUTDOWN_CURRENT_RANK
@@ -1411,17 +1739,33 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
-            reconfig_futures.append(asyncio.create_task(coro))
+            task = asyncio.create_task(coro)
+            if cur_dp_rank < new_data_parallel_size:
+                reconfig_futures.append(task)
+
+        ffn_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.resources.engine_manager.reinitialize_distributed,
+                reconfig_request=reconfig_request,
+            )
+        )
+        reconfig_futures.append(ffn_task)
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
 
+        await asyncio.sleep(0)
+        logger.info(
+            f"All reconfigure messages sent, starting engine shutdown, {len(self.core_engines)=}"
+        )
         await asyncio.gather(*reconfig_futures)
 
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        assert isinstance(self.resources.engine_manager, GlobalActorManager)
         self.resources.engine_manager.scale_down_elastic_ep(
             cur_data_parallel_size, new_data_parallel_size
         )
+        # update engine_ranks_managed before _ensure_stats_update_task
+        self.engine_ranks_managed = list(range(new_data_parallel_size))
 
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(

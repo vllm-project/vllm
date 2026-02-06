@@ -6,6 +6,7 @@ Contains helpers that are applied to collections.
 This is similar in concept to the `collections` module.
 """
 
+import threading
 from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping, Sequence
 from typing import Generic, Literal, TypeVar
@@ -138,3 +139,211 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+# Define type variables for generic key and value types
+KT = TypeVar("KT")  # Key type variable
+VT = TypeVar("VT")  # Value type variable
+
+
+class ThreadSafeDict(Generic[KT, VT]):
+    """
+    A thread-safe generic dictionary implementation.
+    Supports all basic dictionary operations with proper synchronization
+    using a reentrant lock, and maintains type safety through generics.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty thread-safe dictionary with an internal lock."""
+        self._storage: dict[KT, VT] = {}  # Underlying storage structure
+        self._lock = threading.RLock()  # Reentrant lock for synchronization
+
+    def __setitem__(self, key: KT, value: VT) -> None:
+        """
+        Thread-safe implementation of dictionary item assignment.
+        Equivalent to dict[key] = value.
+
+        Args:
+            key: The key to associate with the value
+            value: The value to store
+        """
+        with self._lock:
+            self._storage[key] = value
+
+    def __getitem__(self, key: KT) -> VT:
+        """
+        Thread-safe implementation of dictionary item retrieval.
+        Equivalent to dict[key].
+
+        Args:
+            key: The key to look up
+
+        Returns:
+            The value associated with the key
+
+        Raises:
+            KeyError: If the key is not found
+        """
+        with self._lock:
+            return self._storage[key]
+
+    def __delitem__(self, key: KT) -> None:
+        """
+        Thread-safe implementation of dictionary item deletion.
+        Equivalent to del dict[key].
+
+        Args:
+            key: The key to remove
+
+        Raises:
+            KeyError: If the key is not found
+        """
+        with self._lock:
+            del self._storage[key]
+
+    def get(self, key: KT, default: VT | None = None) -> VT | None:
+        """
+        Thread-safe implementation of dict.get().
+
+        Args:
+            key: The key to look up
+            default: Value to return if key is not found (default: None)
+
+        Returns:
+            The value associated with the key, or default if not found
+        """
+        with self._lock:
+            return self._storage.get(key, default)
+
+    def setdefault(self, key: KT, default: VT) -> VT:
+        """
+        Thread-safe implementation of dict.setdefault().
+        Inserts key with default value if key is not present.
+
+        Args:
+            key: The key to check/insert
+            default: Value to insert if key is not found
+
+        Returns:
+            The existing value or the inserted default value
+        """
+        with self._lock:
+            return self._storage.setdefault(key, default)
+
+    def update(self, items: Iterable[tuple[KT, VT]]) -> None:
+        """
+        Thread-safe implementation of dict.update().
+        Updates dictionary with multiple key-value pairs.
+
+        Args:
+            items: Iterable of (key, value) tuples to add/update
+        """
+        with self._lock:
+            self._storage.update(items)
+
+    def pop(self, key: KT, default: VT | None = None) -> VT | None:
+        """
+        Thread-safe implementation of dict.pop().
+        Removes and returns value associated with key.
+
+        Args:
+            key: The key to remove
+            default: Value to return if key is not found (optional)
+
+        Returns:
+            The removed value or default if key not found
+
+        Raises:
+            KeyError: If key not found and no default provided
+        """
+        with self._lock:
+            return self._storage.pop(key, default)
+
+    def __contains__(self, key: KT) -> bool:
+        """
+        Thread-safe implementation of 'key in dict' check.
+
+        Args:
+            key: The key to check for existence
+
+        Returns:
+            True if key exists, False otherwise
+        """
+        with self._lock:
+            return key in self._storage
+
+    def __len__(self) -> int:
+        """
+        Thread-safe implementation of len(dict).
+
+        Returns:
+            Number of key-value pairs in the dictionary
+        """
+        with self._lock:
+            return len(self._storage)
+
+    def clear(self) -> None:
+        """Thread-safe implementation of dict.clear(). Removes all items."""
+        with self._lock:
+            self._storage.clear()
+
+    def keys(self) -> list[KT]:
+        """
+        Thread-safe implementation of dict.keys().
+        Returns a copy of all keys to prevent concurrent modification issues.
+
+        Returns:
+            List of all keys in the dictionary
+        """
+        with self._lock:
+            return list(self._storage.keys())
+
+    def values(self) -> list[VT]:
+        """
+        Thread-safe implementation of dict.values().
+        Returns a copy of all values to prevent concurrent modification issues.
+
+        Returns:
+            List of all values in the dictionary
+        """
+        with self._lock:
+            return list(self._storage.values())
+
+    def items(self) -> list[tuple[KT, VT]]:
+        """
+        Thread-safe implementation of dict.items().
+        Returns a copy of all key-value pairs to prevent concurrent modification issues.
+
+        Returns:
+            List of (key, value) tuples
+        """
+        with self._lock:
+            return list(self._storage.items())
+
+    def __str__(self) -> str:
+        """
+        Thread-safe string representation.
+
+        Returns:
+            String representation of the dictionary
+        """
+        with self._lock:
+            return str(self._storage)
+
+    def __repr__(self) -> str:
+        """
+        Thread-safe representation for debugging.
+
+        Returns:
+            Debug-friendly string representation
+        """
+        with self._lock:
+            return f"ThreadSafeDict({self._storage!r})"
+
+    # ------------------------------
+    # Critical: JSON serialization support
+    # ------------------------------
+    def to_dict(self) -> dict[KT, VT]:
+        """Convert ThreadSafeDict to a standard Python dict (thread-safe)."""
+        with self._lock:
+            return self._storage.copy()  # Return a copy of internal data
