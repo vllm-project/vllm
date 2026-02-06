@@ -7,10 +7,11 @@ import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+import time
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
 import torch
@@ -40,7 +41,7 @@ from vllm.distributed.parallel_state import (
     get_all_model_groups,
     get_pcp_group,
     get_pp_group,
-    get_tp_group,
+    get_tp_group, get_world_group,
 )
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
@@ -64,11 +65,14 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu_ffn_model_runner import GPUFFNModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from .utils import request_memory
+from ...distributed.afd_transfer import AFDConnectorFactory
 
 logger = init_logger(__name__)
 
@@ -406,8 +410,11 @@ class Worker(WorkerBase):
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(self.device, num_ubatches)
 
+        self.model_runner: GPUModelRunner | GPUFFNModelRunner | GPUModelRunnerV2
+        if self.vllm_config.afd_config and self.vllm_config.afd_config.is_ffn_server:
+            self.model_runner = GPUFFNModelRunner(self.vllm_config, self.device)
         # Construct the model runner
-        if self.use_v2_model_runner:
+        elif self.use_v2_model_runner:
             from vllm.v1.worker.gpu.model_runner import (
                 GPUModelRunner as GPUModelRunnerV2,
             )
@@ -455,6 +462,8 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+        if self.vllm_config.afd_config:
+            eep_scale_up = False
         with self._maybe_get_memory_pool_context(
             tag="weights"
         ) and set_current_vllm_config(self.vllm_config):
@@ -773,6 +782,11 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # FFN server mode: direct execution without pipeline parallelism
+        if self.vllm_config.afd_config and self.vllm_config.afd_config.is_ffn_server:
+            return self.model_runner.execute_model(scheduler_output)
+
+        # Normal inference mode
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -875,6 +889,54 @@ class Worker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def start_ffn_server_loop(self) -> None:
+        """Start FFN server loop for AFD FFN workers"""
+        if not (
+            self.vllm_config.afd_config and self.vllm_config.afd_config.is_ffn_server
+        ):
+            return
+
+        self.model_runner.capture_model()
+        self.model_runner.initialize_afd_connector()
+
+        if self.profiler:
+            self.profiler.start()
+            for _ in range(1000):  # FIXME: hardcoded profiler iterations
+                self.model_runner.execute_model(scheduler_output=None)
+            torch.cuda.synchronize()  # Ensure GPU operations complete
+            self.profiler.stop()
+            print(self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
+
+        import threading
+
+        self._ffn_shutdown_event = threading.Event()
+
+        def ffn_worker_loop():
+            # Set CUDA device for this thread (thread-local context)
+            torch.cuda.set_device(self.device)
+            logger.info("FFN worker loop started")
+
+            try:
+                while not self._ffn_shutdown_event.is_set():
+                    # Execute FFN computation
+                    if "Exit" == self.model_runner.execute_model(scheduler_output=None):
+                        break
+            except Exception as e:
+                logger.error("FFN worker loop error: %s", e)
+                raise
+
+        self._ffn_thread = threading.Thread(target=ffn_worker_loop, daemon=True)
+        self._ffn_thread.start()
+        logger.info("FFN server loop started in worker")
+
+    def stop_ffn_server_loop(self) -> None:
+        """Stop FFN server loop"""
+        if hasattr(self, "_ffn_shutdown_event"):
+            self._ffn_shutdown_event.set()
+            if hasattr(self, "_ffn_thread"):
+                self._ffn_thread.join(timeout=5)
+            logger.info("FFN server loop stopped")
 
     def _eplb_before_scale_down(self, old_ep_size: int, new_ep_size: int) -> None:
         from vllm.distributed.parallel_state import get_ep_group
@@ -1064,11 +1126,11 @@ class Worker(WorkerBase):
             * get_tp_group().world_size
             * get_pp_group().world_size
         )
-        if new_ep_size < old_ep_size:
+        if not self.vllm_config.afd_config and new_ep_size < old_ep_size:
             self._eplb_before_scale_down(old_ep_size, new_ep_size)
 
         cleanup_dist_env_and_memory()
-
+        time.sleep(10)
         if (
             reconfig_request.new_data_parallel_rank
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
@@ -1086,6 +1148,23 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
             )
+
+        if self.vllm_config.afd_config:
+            self.vllm_config.afd_config.afd_port += 1
+            afd_size = reconfig_request.new_data_parallel_size
+            self.vllm_config.afd_config.afd_extra_config["afd_size"] = f"{afd_size}A{afd_size}F"
+            self.model_runner.afd_config = self.vllm_config.afd_config
+
+            # init afd connector
+            self.model_runner.afd_connector = AFDConnectorFactory.create_connector(
+                get_world_group().rank, get_world_group().local_rank, self.vllm_config
+            )
+
+            if self.vllm_config.afd_config.is_ffn_server:
+                self.vllm_config.compilation_config.static_forward_context = dict()
+            else:
+                self.model_runner.afd_connector.init_afd_connector()
+            return
 
         global_expert_loads = self._reconfigure_moe(old_ep_size, new_ep_size)
 

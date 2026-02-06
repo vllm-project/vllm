@@ -382,6 +382,10 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
+        self.afd_config = vllm_config.afd_config
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            return
+
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
@@ -811,7 +815,8 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
+        if self.structured_output_manager:
+            self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -949,6 +954,11 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        executor_fail_callback = lambda: self.input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+        )
+        self.afd_config = vllm_config.afd_config
+
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
@@ -1304,6 +1314,23 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            logger.info("AFD FFN Server started, workers running...")
+            try:
+                # Tell workers to start FFN server loops (one-time call)
+                self.model_executor.collective_rpc("start_ffn_server_loop")
+
+                # Main thread waits without busy polling
+                shutdown_event = threading.Event()
+                shutdown_event.wait()  # Block until interrupted
+
+            except KeyboardInterrupt:
+                logger.info("Server shutting down...")
+                self.model_executor.collective_rpc("stop_ffn_server_loop")
+            except Exception as e:
+                logger.error("Server error: %s", e)
+                raise
+
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
@@ -1477,7 +1504,8 @@ class EngineCoreProc(EngineCore):
 
             if coord_socket is not None:
                 # Wait for ready message from coordinator.
-                assert coord_socket.recv() == b"READY"
+                if not os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+                   assert coord_socket.recv() == b"READY"
                 poller.register(coord_socket, zmq.POLLIN)
 
             ready_event.set()
@@ -1635,6 +1663,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.afd_config = vllm_config.afd_config
         super().__init__(
             vllm_config,
             local_client,
@@ -1709,6 +1738,22 @@ class DPEngineCoreProc(EngineCoreProc):
     @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            logger.info("AFD FFN Server started, workers running...")
+            try:
+                # Tell workers to start FFN server loops (one-time call)
+                self.model_executor.collective_rpc("start_ffn_server_loop")
+
+                # Main thread waits without busy polling
+                shutdown_event = threading.Event()
+                shutdown_event.wait()  # Block until interrupted
+
+            except KeyboardInterrupt:
+                logger.info("Server shutting down...")
+                self.model_executor.collective_rpc("stop_ffn_server_loop")
+            except Exception as e:
+                logger.error("Server error: %s", e)
+                raise
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
@@ -1778,11 +1823,13 @@ class DPEngineCoreProc(EngineCoreProc):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         stateless_destroy_torch_distributed_process_group(self.dp_group)
-        self.shutdown()
-
+        if not self.afd_config or self.afd_config.is_attention_server:
+            self.shutdown()
         parallel_config = self.vllm_config.parallel_config
         old_dp_size = parallel_config.data_parallel_size
         parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
+        if parallel_config.multi_level_index >= 0:           # temp code for loop scaling
+            parallel_config.multi_level_index = 0
         if reconfig_request.new_data_parallel_rank != -1:
             parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank
         # local rank specifies device visibility, it should not be changed
@@ -1804,6 +1851,9 @@ class DPEngineCoreProc(EngineCoreProc):
         )
 
         self.model_executor.reinitialize_distributed(reconfig_request)
+        if self.afd_config and self.afd_config.is_ffn_server:
+            return
+
         if reconfig_request.new_data_parallel_size > old_dp_size:
             assert self.available_gpu_memory_for_kv_cache > 0
             # pass available_gpu_memory_for_kv_cache from existing
@@ -1992,3 +2042,70 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
             log_stats,
             engine_index=dp_rank,
         )
+
+
+class FFNActor(DPMoEEngineCoreActor):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_client: bool,
+        addresses: EngineZmqAddresses,
+        executor_class: type[Executor],
+        log_stats: bool,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        self.is_active = True
+        import asyncio
+        self._reinitialize_distributed_event = asyncio.Event()
+
+        # FFN poll nothing
+        addresses.coordinator_input = None
+        addresses.inputs = []
+
+        super().__init__(vllm_config, local_client, addresses, executor_class, log_stats, dp_rank, local_dp_rank)
+
+    def run(self):
+        raise RuntimeError("use async_run instead")
+
+    async def async_run(self):
+        """
+        Run the busy loop.
+        """
+        """Start FFN workers and wait for completion"""
+        logger.info("AFD FFN Server started, workers running...")
+        try:
+            while self.is_active:
+                # run
+                logger.info("iwslog restart loop call...")
+                self.model_executor.collective_rpc("start_ffn_server_loop")
+                logger.info("iwslog signal waiting...")
+                await self._reinitialize_distributed_event.wait()
+                self._reinitialize_distributed_event.clear()
+                logger.info("iwslog signal call...")
+
+
+        except KeyboardInterrupt:
+            logger.info("Server shutting down...")
+            self.model_executor.collective_rpc("stop_ffn_server_loop")
+        except Exception as e:
+            logger.error("Server error: %s", e)
+            raise
+
+    async def ffn_reinitialize_distributed(
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
+        logger.info("iwslog actor reinitialize_distributed called...")
+        self.model_executor.collective_rpc("stop_ffn_server_loop")
+
+        logger.info("iwslog ffn reinitialize_distributed waiting...")
+        self.reinitialize_distributed(reconfig_request)
+        logger.info("iwslog ffn reinitialize_distributed end...")
+
+        to_shutdown = reconfig_request.new_data_parallel_rank == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        self.restart_running_loop(to_shutdown)
+
+    def restart_running_loop(self, to_shutdown = False):
+        if to_shutdown:
+            self.is_active = False
+        self._reinitialize_distributed_event.set()

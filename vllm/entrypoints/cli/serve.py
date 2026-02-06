@@ -249,7 +249,6 @@ def run_multi_api_server(args: argparse.Namespace):
     assert parallel_config.local_engines_only or dp_rank == 0
 
     api_server_manager: APIServerProcessManager | None = None
-
     with launch_core_engines(
         vllm_config, executor_class, log_stats, num_api_servers
     ) as (local_engine_manager, coordinator, addresses):

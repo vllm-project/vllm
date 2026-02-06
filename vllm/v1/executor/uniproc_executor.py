@@ -131,6 +131,8 @@ class UniProcExecutor(Executor):
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         ):
             self.shutdown()
+        elif self.vllm_config.afd_config and self.vllm_config.afd_config.is_ffn_server:
+            self.collective_rpc("load_model")
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:

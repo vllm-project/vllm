@@ -11,9 +11,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.distributed.afd_transfer import AFDConnectorBase
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -108,6 +110,46 @@ class DPMetadata:
     local_sizes: list[int] | None = None
 
     @staticmethod
+    def num_stage_tokens_across_dp(
+        num_stage_tokens: list[int], dp_size: int, dp_rank: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Gather the stage token counts across all DP ranks.
+        Args:
+            num_stage_tokens: list of token counts per stage for current rank
+            dp_size: number of DP ranks
+            dp_rank: current DP rank
+        Returns:
+            stage_tokens_across_dp_cpu: [num_stages, dp_size] tensor
+            max_stage_tokens_across_dp_cpu: [num_stages] tensor with max
+            tokens per stage
+        """
+        import torch.distributed as dist
+
+        from vllm.distributed.parallel_state import get_dp_group
+        from vllm.platforms import current_platform
+
+        device = current_platform.device_type
+        group = get_dp_group().device_group
+
+        num_stages = len(num_stage_tokens)
+        stage_tokens_across_dp = torch.zeros(
+            (num_stages, dp_size), device=device, dtype=torch.int32
+        )
+        stage_tokens_across_dp[:, dp_rank] = torch.tensor(
+            num_stage_tokens, device=device, dtype=torch.int32
+        )
+
+        # AllReduce to gather from all ranks
+        dist.all_reduce(stage_tokens_across_dp, group=group)
+        stage_tokens_across_dp_cpu = stage_tokens_across_dp.cpu()
+
+        # Compute max tokens per stage
+        max_stage_tokens_across_dp_cpu = torch.max(stage_tokens_across_dp_cpu, dim=1)[0]
+
+        return stage_tokens_across_dp_cpu, max_stage_tokens_across_dp_cpu
+
+    @staticmethod
     def make(
         parallel_config: ParallelConfig,
         num_tokens: int,
@@ -197,6 +239,23 @@ class DPMetadata:
 
 
 @dataclass
+class AFDMetadata:
+    afd_tokens_start_loc: list[int]
+    afd_reqs_start_loc: list[int]
+    afd_stage_idx: int
+    afd_connector: "AFDConnectorBase"
+    afd_tokens_lens: list[int]  # padded lengths for tensor slicing
+    num_of_stages: int
+
+    input_ids_list: list[torch.Tensor] = field(default_factory=list)
+    positions_list: list[torch.Tensor] = field(default_factory=list)
+    inputs_embeds_list: list[torch.Tensor] = field(default_factory=list)
+    intermediate_tensors_list: list[IntermediateTensors] = field(default_factory=list)
+    attn_metadata_list: list[AttentionMetadata] = field(default_factory=list)
+    dp_metadata_list: list[DPMetadata] = field(default_factory=list)
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -213,6 +272,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
+    afd_metadata: AFDMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
@@ -285,6 +345,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    afd_metadata: AFDMetadata | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         if vllm_config.speculative_config is None:
@@ -311,6 +372,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        afd_metadata=afd_metadata,
     )
 
 
@@ -341,6 +403,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    afd_metadata: AFDMetadata | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -403,6 +466,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        afd_metadata=afd_metadata,
     )
 
     try:

@@ -42,6 +42,14 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
+from torch.distributed.distributed_c10d import (
+    PrefixStore,
+    Store,
+    _new_process_group_helper,
+    _world,
+    default_pg_timeout,
+    rendezvous,
+)
 
 import vllm.envs as envs
 from vllm.config import FaultToleranceConfig
@@ -1073,6 +1081,63 @@ class GroupCoordinator:
 
 _WORLD: GroupCoordinator | None = None
 _INNER_DP_WORLD: GroupCoordinator | None = None
+_NODE_COUNT: int | None = None
+
+
+def init_afd_process_group(
+    backend: str | Backend = None,
+    init_method: str | None = None,
+    timeout: timedelta | None = None,
+    world_size: int = -1,
+    rank: int = -1,
+    store: Store | None = None,
+    group_name: str = None,
+    pg_options: Any | None = None,
+):
+    assert (store is None) or (init_method is None), (
+        "Cannot specify both init_method and store."
+    )
+
+    if store is not None:
+        assert world_size > 0, "world_size must be positive if using store"
+        assert rank >= 0, "rank must be non-negative if using store"
+    elif init_method is None:
+        init_method = "env://"
+
+    if backend:
+        backend = Backend(backend)
+    else:
+        backend = Backend("undefined")
+
+    if timeout is None:
+        timeout = default_pg_timeout
+
+    if store is None:
+        rendezvous_iterator = rendezvous(init_method, rank, world_size, timeout=timeout)
+        store, rank, world_size = next(rendezvous_iterator)
+        store.set_timeout(timeout)
+        store = PrefixStore(group_name, store)
+
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        store,
+        group_name=group_name,
+        **{pg_options_param_name: pg_options},
+        timeout=timeout,
+    )
+    global _AFD
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+    _AFD = pg
+    return pg
+
+
+_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
 

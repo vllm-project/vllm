@@ -50,7 +50,7 @@ from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
-    CoreEngineActorManager,
+    GlobalActorManager,
     CoreEngineProcManager,
     launch_core_engines,
     serialize_method_call,
@@ -571,8 +571,8 @@ class BackgroundResources:
 
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
-    # if CoreEngineActorManager, it manages all engines.
-    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None = None
+    # if GlobalActorManager, it manages all engines.
+    engine_manager: CoreEngineProcManager | GlobalActorManager | None = None
     coordinator: DPCoordinator | None = None
     output_socket: zmq.Socket | zmq.asyncio.Socket | None = None
     input_socket: zmq.Socket | zmq.asyncio.Socket | None = None
@@ -1438,6 +1438,10 @@ class DPAsyncMPClient(AsyncMPClient):
                                 ("SCALE_ELASTIC_EP", new_engine_count)
                             )
                             await socket.send(scale_msg)
+                            nonlocal count_slice
+                            count_slice = (
+                                self.engine_ranks_managed[0], self.engine_ranks_managed[-1] + 1
+                            )
                             continue
 
                         # we're sending a request while the engines are
@@ -1632,14 +1636,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # for them to be sent
         reconfig_futures = []
         self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
+        reconfig_request = ReconfigureDistributedRequest(
+            new_data_parallel_size=new_data_parallel_size,
+            new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
+        )
         for engine in self.core_engines:
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
-                new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
-            )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
@@ -1647,10 +1651,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         logger.info("All reconfigure messages sent, starting engine creation")
 
+        ffn_task = asyncio.create_task(
+            asyncio.to_thread(self.resources.engine_manager.reinitialize_distributed,
+                              reconfig_request=reconfig_request))
+        reconfig_futures.append(ffn_task)
+
+        await asyncio.sleep(0)
+        logger.info(f"All reconfigure messages sent, starting engine creation, {len(self.core_engines)=}")
+
         # Phase 2: Create new engines now that reconfig messages have been sent
         # self.resources.engine_manager is guaranteed to be
-        # CoreEngineActorManager for RayDPClient
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        # GlobalActorManager for RayDPClient
+        assert isinstance(self.resources.engine_manager, GlobalActorManager)
         self.resources.engine_manager.scale_up_elastic_ep(
             self.vllm_config, new_data_parallel_size
         )
@@ -1661,6 +1673,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine = i.to_bytes(2, "little")
             self.core_engines.append(new_engine)
             new_engine_identities.add(new_engine)
+
+        # update engine_ranks_managed
+        self.engine_ranks_managed = list(range(new_data_parallel_size))
 
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
@@ -1702,16 +1717,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         cur_data_parallel_size = len(self.core_engines)
 
         self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
-
+        reconfig_request = ReconfigureDistributedRequest(
+            new_data_parallel_size=new_data_parallel_size,
+            new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
+        )
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
-                new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
-            )
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (
                     ReconfigureRankType.SHUTDOWN_CURRENT_RANK
@@ -1719,17 +1733,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
-            reconfig_futures.append(asyncio.create_task(coro))
+            task = asyncio.create_task(coro)
+            if cur_dp_rank < new_data_parallel_size:
+                reconfig_futures.append(task)
+
+        ffn_task = asyncio.create_task(
+            asyncio.to_thread(self.resources.engine_manager.reinitialize_distributed,
+                              reconfig_request=reconfig_request))
+        reconfig_futures.append(ffn_task)
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
 
+        await asyncio.sleep(0)
+        logger.info(f"All reconfigure messages sent, starting engine shutdown, {len(self.core_engines)=}")
         await asyncio.gather(*reconfig_futures)
 
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        assert isinstance(self.resources.engine_manager, GlobalActorManager)
         self.resources.engine_manager.scale_down_elastic_ep(
             cur_data_parallel_size, new_data_parallel_size
         )
+        # update engine_ranks_managed before _ensure_stats_update_task
+        self.engine_ranks_managed = list(range(new_data_parallel_size))
 
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
