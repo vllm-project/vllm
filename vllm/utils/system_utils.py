@@ -212,9 +212,19 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 
 
 def decorate_logs(process_name: str | None = None) -> None:
-    """Decorate stdout/stderr with process name and PID prefix."""
+    """Decorate stdout/stderr with process name and PID prefix.
+
+    The decoration can be disabled by setting the environment variable
+    ``VLLM_DISABLE_LOG_PREFIX=1`` or by passing ``--disable-log-prefix``
+    to the CLI.  This is useful when using custom logging configurations
+    or log aggregation systems that already handle process identification.
+    """
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
+    # Allow users to opt out of the process/thread prefix
+    if envs.VLLM_DISABLE_LOG_PREFIX:
         return
 
     if process_name is None:

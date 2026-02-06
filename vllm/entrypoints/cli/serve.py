@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import signal
 
 import uvloop
@@ -49,6 +50,10 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
+
+        # Propagate CLI flag to env var so all child processes inherit it.
+        if getattr(args, "disable_log_prefix", False):
+            os.environ["VLLM_DISABLE_LOG_PREFIX"] = "1"
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:

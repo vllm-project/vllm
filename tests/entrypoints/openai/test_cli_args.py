@@ -241,3 +241,16 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         serve_parser.parse_args(
             args=["--default-chat-template-kwargs", "not valid json"]
         )
+
+
+### Tests for --disable-log-prefix flag
+def test_disable_log_prefix_default_false(serve_parser):
+    """Ensure --disable-log-prefix defaults to False."""
+    args = serve_parser.parse_args(args=[])
+    assert args.disable_log_prefix is False
+
+
+def test_disable_log_prefix_flag(serve_parser):
+    """Ensure --disable-log-prefix sets the attribute to True."""
+    args = serve_parser.parse_args(args=["--disable-log-prefix"])
+    assert args.disable_log_prefix is True

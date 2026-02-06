@@ -504,4 +504,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
+    # Propagate CLI flag to env var so all child processes inherit it.
+    if getattr(args, "disable_log_prefix", False):
+        os.environ["VLLM_DISABLE_LOG_PREFIX"] = "1"
+
     uvloop.run(run_server(args))
