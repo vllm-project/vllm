@@ -102,6 +102,12 @@ class BaseRenderer(ABC):
         prompts: Sequence[PromptType],
     ) -> list[DictPromptType]: ...
 
+    @overload
+    def render_completions(  # type: ignore[misc]
+        self,
+        prompts: Sequence[PromptType | bytes],
+    ) -> list[SingletonDictPrompt] | list[DictPromptType]: ...
+
     def render_completions(
         self,
         prompts: Sequence[PromptType | bytes],
@@ -122,6 +128,12 @@ class BaseRenderer(ABC):
         self,
         prompts: Sequence[PromptType],
     ) -> list[DictPromptType]: ...
+
+    @overload
+    async def render_completions_async(  # type: ignore[misc]
+        self,
+        prompts: Sequence[PromptType | bytes],
+    ) -> list[SingletonDictPrompt] | list[DictPromptType]: ...
 
     async def render_completions_async(
         self,

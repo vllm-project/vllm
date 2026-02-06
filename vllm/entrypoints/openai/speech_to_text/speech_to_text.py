@@ -299,15 +299,11 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                prompt = parse_enc_dec_prompt(prompt)
-
-                prompt = self._preprocess_verbose_prompt(prompt)
+                prompt = self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))
 
             prompts.append(prompt)
-        return prompts, duration
 
-    def _repl_verbose_text(self, text: str):
-        return text.replace("<|notimestamps|>", "<|0.00|>")
+        return prompts, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -319,7 +315,9 @@ class OpenAISpeechToText(OpenAIServing):
                 value=type(dec_prompt).__name__,
             )
 
-        dec_prompt["prompt"] = self._repl_verbose_text(dec_prompt["prompt"])
+        dec_prompt["prompt"] = dec_prompt["prompt"].replace(
+            "<|notimestamps|>", "<|0.00|>"
+        )
 
         return prompt
 

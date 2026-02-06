@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 @overload
-def prompt_to_seq(
+def prompt_to_seq(  # type: ignore[overload-overlap]
     prompt_or_prompts: str | list[int] | bytes | Sequence[str | list[int] | bytes],
 ) -> Sequence[str | list[int] | bytes]: ...
 
