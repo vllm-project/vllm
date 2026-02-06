@@ -8,6 +8,7 @@ import pytest
 
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 
 
 class _DummyDraftModelConfig:
@@ -143,7 +144,8 @@ def test_dflash_hash_differs_from_non_eagle3_method():
 
 def test_dflash_architecture_is_registered():
     assert "DFlashDraftModel" in ModelRegistry.get_supported_archs()
-    assert ModelRegistry._try_load_model_cls("DFlashDraftModel") is not None
+    model_cls = ModelRegistry._try_load_model_cls("DFlashDraftModel")
+    assert model_cls is DFlashQwen3ForCausalLM
 
 
 def test_use_eagle_returns_true_for_dflash():
@@ -159,3 +161,12 @@ def test_use_eagle_returns_true_for_dflash():
             target_parallel_config=ParallelConfig(),
         )
     assert config.use_eagle()
+
+
+def test_dflash_aux_layers_from_dflash_config():
+    model = DFlashQwen3ForCausalLM.__new__(DFlashQwen3ForCausalLM)
+    model.config = SimpleNamespace(
+        dflash_config={"layer_ids": [31, 33, 35]},
+        target_layer_count=36,
+    )
+    assert model.get_eagle3_aux_hidden_state_layers() == (31, 33, 35)
