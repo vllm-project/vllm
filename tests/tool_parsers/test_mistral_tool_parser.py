@@ -3,19 +3,32 @@
 
 import json
 from collections.abc import Generator
+from typing import Any, Literal
+from unittest.mock import MagicMock, Mock
 
 import partial_json_parser
 import pytest
 from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
+from mistral_common.tokens.tokenizers.base import TokenizerVersion
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+    FunctionDefinition,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+from vllm.tool_parsers.mistral_tool_parser import (
+    ChatCompletionToolsParam,
+    MistralGrammarFactory,
+    MistralToolCall,
+    MistralToolParser,
+    ToolsLarkConverter,
+)
 
 
 @pytest.fixture(scope="module")
@@ -426,20 +439,26 @@ def _test_extract_tool_calls_streaming(
 
     assert other_content == expected_content
 
-    actual_tool_calls = [
-        ToolCall(
-            id=tool_call_id,
-            function=FunctionCall(
-                name=function_name,
-                arguments=partial_json_parser.ensure_json(
-                    function_args_str, Allow.OBJ | Allow.STR
+    actual_tool_calls = []
+    for tool_call_id, function_name, function_args_str in zip(
+        tool_call_ids, function_names, function_args_strs
+    ):
+        actual_id: str = (
+            tool_call_id
+            if tool_call_id is not None
+            else MistralToolCall.generate_random_id()
+        )
+        actual_tool_calls.append(
+            ToolCall(
+                id=actual_id,
+                function=FunctionCall(
+                    name=function_name,
+                    arguments=partial_json_parser.ensure_json(
+                        function_args_str, Allow.OBJ | Allow.STR
+                    ),
                 ),
-            ),
+            )
         )
-        for tool_call_id, function_name, function_args_str in zip(
-            tool_call_ids, function_names, function_args_strs
-        )
-    ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
 
 
@@ -890,3 +909,1071 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer_one_chunk(
         assert expected_content == ""
     else:
         assert delta_message.content == expected_content
+
+
+def _create_tool(
+    name: str, parameters: dict[str, Any], strict: bool = False
+) -> ChatCompletionToolsParam:
+    """Helper function to create a tool with optional strict attribute"""
+    func = FunctionDefinition(
+        name=name,
+        description="test",
+        parameters=parameters,
+    )
+    if strict:
+        func.strict = True  # type: ignore[attr-defined]
+    return ChatCompletionToolsParam(function=func)
+
+
+class TestToolsLarkConverter:
+    @pytest.mark.parametrize(
+        ("tool", "expected"),
+        [
+            (
+                _create_tool("function", {"parameter": 1}, strict=True),
+                {"parameter": 1},
+            ),
+            (
+                _create_tool("function", {"parameter": 1}, strict=False),
+                {"type": "object"},
+            ),
+            (
+                _create_tool("function", {}, strict=True),
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+        ],
+    )
+    def test_get_args_json(
+        self, tool: ChatCompletionToolsParam, expected: dict[str, Any]
+    ) -> None:
+        assert ToolsLarkConverter().get_args_json(tool=tool) == expected
+
+    @pytest.mark.parametrize(
+        "tools,tokenizer_version,mode,parallel_tool_calls,expected",
+        [
+            # Test cases for mode="none" - should always return empty string
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "none",
+                True,
+                "",
+            ),
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                11,
+                "none",
+                False,
+                "",
+            ),
+            # Test cases for mode="auto" with tokenizer version 7 (pre-v11)
+            # Single non-strict tool
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',
+            ),
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "auto",
+                False,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n',
+            ),
+            # Single strict tool
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}}\n',
+            ),
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                7,
+                "auto",
+                False,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}, "maxItems": 1}\n',
+            ),
+            # Single strict tool with empty parameters
+            (
+                [_create_tool("empty_strict_func", {}, strict=True)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "empty_strict_func"}, "arguments": {"type": "object", "properties": {}, "additionalProperties": false}}}]}}\n',
+            ),
+            # Multiple non-strict tools
+            (
+                [
+                    _create_tool("func1", {"param1": "value"}, strict=False),
+                    _create_tool("func2", {"param2": "value"}, strict=False),
+                ],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',
+            ),
+            # Multiple mixed tools (some strict, some not)
+            (
+                [
+                    _create_tool("strict_func", {"param": "value"}, strict=True),
+                    _create_tool("non_strict_func", {"param": "value"}, strict=False),
+                ],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "non_strict_func"}, "arguments": {"type": "object"}}}]}}\n',
+            ),
+            # Test cases for mode="auto" with tokenizer version 11 (post-v11)
+            # Single non-strict tool
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                11,
+                "auto",
+                True,
+                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',
+            ),
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                11,
+                "auto",
+                False,
+                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',
+            ),
+            # Single strict tool
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?))+',
+            ),
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                11,
+                "auto",
+                False,
+                '(<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?)',
+            ),
+            # Single strict tool with empty parameters
+            (
+                [_create_tool("empty_strict_func", {}, strict=True)],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "empty_strict_func" <ARGS> SAFE_WS? %json {"type": "object", "properties": {}, "additionalProperties": false} SAFE_WS?))+',
+            ),
+            # Multiple non-strict tools
+            (
+                [
+                    _create_tool("func1", {"param1": "value"}, strict=False),
+                    _create_tool("func2", {"param2": "value"}, strict=False),
+                ],
+                11,
+                "auto",
+                True,
+                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',
+            ),
+            # Multiple mixed tools (some strict, some not)
+            (
+                [
+                    _create_tool("strict_func", {"param": "value"}, strict=True),
+                    _create_tool("non_strict_func", {"param": "value"}, strict=False),
+                ],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+',
+            ),
+            # Test cases for mode="required" - should be same as "auto" for grammar generation
+            # Just test a few representative cases to ensure mode is handled correctly
+            (
+                [_create_tool("test_func", {"param": "value"}, strict=True)],
+                7,
+                "required",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "test_func"}, "arguments": {"param": "value"}}}]}}\n',
+            ),
+            (
+                [_create_tool("test_func", {"param": "value"}, strict=False)],
+                11,
+                "required",
+                False,
+                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',
+            ),
+        ],
+        ids=[
+            # mode="none" cases
+            "none_v7_parallel",
+            "none_v11_no_parallel",
+            # mode="auto" v7 cases
+            "auto_v7_single_non_strict_parallel",
+            "auto_v7_single_non_strict_no_parallel",
+            "auto_v7_single_strict_parallel",
+            "auto_v7_single_strict_no_parallel",
+            "auto_v7_single_empty_strict_parallel",
+            "auto_v7_multiple_non_strict_parallel",
+            "auto_v7_multiple_mixed_parallel",
+            # mode="auto" v11 cases
+            "auto_v11_single_non_strict_parallel",
+            "auto_v11_single_non_strict_no_parallel",
+            "auto_v11_single_strict_parallel",
+            "auto_v11_single_strict_no_parallel",
+            "auto_v11_single_empty_strict_parallel",
+            "auto_v11_multiple_non_strict_parallel",
+            "auto_v11_multiple_mixed_parallel",
+            # mode="required" cases
+            "required_v7_single_strict_parallel",
+            "required_v11_single_non_strict_no_parallel",
+        ],
+    )
+    def test_convert(
+        self,
+        tools: list[ChatCompletionToolsParam] | None,
+        tokenizer_version: int,
+        mode: Literal["auto", "required", "none"],
+        parallel_tool_calls: bool,
+        expected: str,
+    ):
+        assert (
+            ToolsLarkConverter().convert(
+                tools=tools,
+                tokenizer_version=tokenizer_version,
+                mode=mode,
+                parallel_tool_calls=parallel_tool_calls,
+            )
+            == expected
+        )
+
+
+class TestMistralGrammarFactory:
+    """Test class for MistralGrammarFactory"""
+
+    @pytest.fixture
+    def mock_tokenizer_v7(self):
+        mock_tokenizer = Mock(spec=MistralTokenizer)
+        mock_tokenizer.tokenizer = MagicMock()
+        mock_tokenizer.tokenizer._version = TokenizerVersion.v7
+        return mock_tokenizer
+
+    @pytest.fixture
+    def mock_tokenizer_v11(self):
+        mock_tokenizer = Mock(spec=MistralTokenizer)
+        mock_tokenizer.tokenizer = MagicMock()
+        mock_tokenizer.tokenizer._version = TokenizerVersion.v11
+        return mock_tokenizer
+
+    @pytest.fixture
+    def mock_tokenizer_v13(self):
+        mock_tokenizer = Mock(spec=MistralTokenizer)
+        mock_tokenizer.tokenizer = MagicMock()
+        mock_tokenizer.tokenizer._version = TokenizerVersion.v13
+        return mock_tokenizer
+
+    @pytest.mark.parametrize(
+        "mode,reasoning,parallel_tool_calls,tokenizer_version,tools,expected",
+        [
+            (
+                "auto",
+                True,
+                True,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                True,
+                True,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: think? (content | fcalls)\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                True,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                True,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                True,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                7,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                11,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                13,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "auto",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                True,
+                True,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                True,
+                True,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: think? fcalls\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                True,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                True,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                True,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                7,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                11,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                13,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "required",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+            ),
+            (
+                "none",
+                False,
+                False,
+                7,
+                [_create_tool("tool1", {}, strict=False)],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+            (
+                "none",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+            (
+                "none",
+                False,
+                False,
+                11,
+                [_create_tool("tool1", {}, strict=False)],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+            (
+                "none",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+            (
+                "none",
+                False,
+                False,
+                13,
+                [_create_tool("tool1", {}, strict=False)],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+            (
+                "none",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+            ),
+        ],
+    )
+    def test_get_lark_from_jinja(
+        self,
+        mock_tokenizer_v7,
+        mock_tokenizer_v11,
+        mock_tokenizer_v13,
+        mode: str,
+        reasoning: bool,
+        parallel_tool_calls: bool,
+        tokenizer_version: int,
+        tools: list[str],
+        expected: str,
+    ):
+        # Create the grammar factory
+        match tokenizer_version:
+            case 7:
+                tokenizer = mock_tokenizer_v7
+            case 11:
+                tokenizer = mock_tokenizer_v11
+            case 13:
+                tokenizer = mock_tokenizer_v13
+            case _:
+                raise AssertionError(f"wrong {tokenizer_version=}")
+        factory = MistralGrammarFactory(tokenizer)
+
+        # Generate the grammar
+        grammar = factory.get_lark_from_jinja(
+            mode=mode,
+            tools=tools,
+            reasoning=reasoning,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+
+        # Verify that the grammar matches exactly
+        assert grammar == expected, (
+            f"Grammar mismatch:\nExpected:\n{expected}\n\nGot:\n{grammar}"
+        )

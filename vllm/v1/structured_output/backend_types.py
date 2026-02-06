@@ -21,6 +21,7 @@ class StructuredOutputOptions(enum.Enum):
     JSON_OBJECT = enum.auto()
     REGEX = enum.auto()
     GRAMMAR = enum.auto()
+    LARK = enum.auto()
     CHOICE = enum.auto()
     STRUCTURAL_TAG = enum.auto()
 
