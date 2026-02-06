@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config import LoadConfig
 import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -159,6 +160,10 @@ class SpeculativeConfig:
     """The minimum token probability for suffix decoding. Will only speculate
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
+
+    draft_load_config: LoadConfig | None = None
+    """Load config for the draft model. If not specified, will use the load
+    config from the target model."""
 
     def compute_hash(self) -> str:
         """

@@ -1283,9 +1283,11 @@ class SpecDecodeBaseProposer:
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("eagle_head"):
+            load_config = self.vllm_config.speculative_config.draft_load_config
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
+                load_config=load_config,
             )
         return model
 
