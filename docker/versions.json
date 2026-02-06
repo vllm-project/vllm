@@ -50,7 +50,7 @@
       "default": "cuda"
     },
     "DEEPGEMM_GIT_REF": {
-      "default": "0f5f2662027f0db05d4e3f6a94e56e2d8fc45c51"
+      "default": "477618cd51baffca09c4b0b87e97c03fe827ef03"
     },
     "PPLX_COMMIT_HASH": {
       "default": "12cecfd"
