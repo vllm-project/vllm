@@ -456,7 +456,7 @@ lightning-utilities==0.14.3
     #   lightning
     #   pytorch-lightning
     #   torchmetrics
-llvmlite==0.44.0
+llvmlite==0.46.0
     # via numba
 lm-eval==0.4.9.2
     # via -r requirements/test.in
@@ -527,7 +527,7 @@ nltk==3.9.1
     # via rouge-score
 num2words==0.5.14
     # via -r requirements/test.in
-numba==0.61.2
+numba==0.63.1
     # via
     #   -r requirements/test.in
     #   librosa
