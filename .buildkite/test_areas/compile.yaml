@@ -2,7 +2,7 @@ group: Compile
 depends_on: 
   - image-build
 steps:
-- label: Sequence Parallel Tests (2 GPUs)
+- label: Sequence Parallel Correctness Tests (2 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   num_devices: 2
@@ -11,12 +11,12 @@ steps:
   - vllm/compilation/
   - vllm/v1/worker/
   - vllm/v1/cudagraph_dispatcher.py
-  - tests/distributed/test_sequence_parallel.py
+  - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/distributed/test_sequence_parallel.py
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
-- label: Sequence Parallel Tests (2xH100)
+- label: Sequence Parallel Correctness Tests (2xH100)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
@@ -24,24 +24,30 @@ steps:
   num_devices: 2
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/distributed/test_sequence_parallel.py
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+
+- label: AsyncTP Correctness Tests (2xH100)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  num_devices: 2
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: Distributed Compile Unit Tests (2xH100)
-  timeout_in_minutes: 40
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
   - vllm/model_executor/layers
-  - tests/compile/distributed/test_fusion_all_reduce.py
-  - tests/compile/distributed/test_sequence_parallelism.py
-  - tests/compile/distributed/test_async_tp.py
+  - tests/compile/passes/distributed/
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-  - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
-  - pytest -v -s tests/compile/distributed/test_async_tp.py
+  - pytest -s -v tests/compile/passes/distributed
 
 - label: Fusion and Compile Unit Tests (B200)
   timeout_in_minutes: 20
@@ -55,17 +61,17 @@ steps:
   - vllm/model_executor/layers/attention/attention.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/compilation/ # TODO(luka) limit to vllm/compilation/passes
-  - tests/compile/test_fusion_attn.py
-  - tests/compile/test_silu_mul_quant_fusion.py
-  - tests/compile/distributed/test_fusion_all_reduce.py
+  - tests/compile/passes/test_fusion_attn.py
+  - tests/compile/passes/test_silu_mul_quant_fusion.py
+  - tests/compile/passes/distributed/test_fusion_all_reduce.py
   - tests/compile/fullgraph/test_full_graph.py
   commands:
     # b200 runners are limited, so we limit the tests to the minimum set only supported on Blackwell
     - nvidia-smi
-    - pytest -v -s tests/compile/test_fusion_attn.py -k FLASHINFER
-    - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+    - pytest -v -s tests/compile/passes/test_fusion_attn.py -k FLASHINFER
+    - pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_devices=2 is not set
-    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
+    - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
     # TODO(luka) move to H100 once pass tests run on H100
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
