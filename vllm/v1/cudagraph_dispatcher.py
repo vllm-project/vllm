@@ -131,7 +131,7 @@ class CudagraphDispatcher:
         num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
-            num_reqs = num_tokens_padded // uniform_decode_query_len
+            num_reqs = min(num_tokens_padded // uniform_decode_query_len, max_num_seqs)
             assert num_tokens_padded % uniform_decode_query_len == 0
         else:
             uniform_decode = False
