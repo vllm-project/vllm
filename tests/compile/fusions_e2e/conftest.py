@@ -110,8 +110,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # AR+RMS fusion applies to small batch ranges only, SP applies to
             # large batch ranges only. With 2 compile ranges, each activates
             # on exactly 1 range.
-            # Note: async_tp shares the same log pattern as ar_rms_fusion
-            # (collective_fusion.py), so they get the same matches.
             num_ranges_activated = (
                 1
                 if match_name in ("ar_rms_fusion", "sequence_parallel")
