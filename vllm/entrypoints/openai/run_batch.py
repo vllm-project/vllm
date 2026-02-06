@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.translations.protocol import (
+from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranscriptionResponseVerbose,
@@ -42,7 +42,7 @@ from vllm.entrypoints.openai.translations.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.entrypoints.openai.translations.serving import (
+from vllm.entrypoints.openai.speech_to_text.serving import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
