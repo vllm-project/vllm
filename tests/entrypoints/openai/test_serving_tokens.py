@@ -7,6 +7,7 @@ import pytest_asyncio
 from transformers import AutoTokenizer
 
 from vllm.config import ModelConfig
+from vllm.config.utils import getattr_iter
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 from ...utils import RemoteOpenAIServer
@@ -131,7 +132,14 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             # Post-EOS generation is undefined and may differ
             eos_tokens = {
                 tokenizer.eos_token_id,
-                *tokenizer.additional_special_tokens_ids,
+                *getattr_iter(
+                    tokenizer,
+                    [
+                        "extra_special_tokens_ids",  # Transformers v5
+                        "additional_special_tokens_ids",  # Transformers v4
+                    ],
+                    [],
+                ),
             }
             # Find first EOS in generated tokens
             eos_pos = None
