@@ -207,6 +207,53 @@ def test_block_drafting_rejects_batch_size_gt1():
         )
 
 
+def _make_block_drafting_proposer_for_errors() -> DFlashProposer:
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.mask_token_id = 0
+    proposer.num_speculative_tokens = 3
+    proposer.uses_mrope = False
+    proposer.uses_xdrope_dim = 0
+    proposer.draft_uses_xdrope_dim = 0
+    proposer.indexer_layer_names = []
+    return proposer
+
+
+def test_block_drafting_raises_when_query_positions_exceed_max_model_len():
+    proposer = _make_block_drafting_proposer_for_errors()
+    proposer.max_model_len = 4
+
+    with pytest.raises(RuntimeError, match="query positions exceed max_model_len"):
+        proposer._propose_block_drafting(
+            target_positions=torch.tensor([3], dtype=torch.int64),
+            target_hidden_states=torch.zeros(1, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1], dtype=torch.int32),
+            common_attn_metadata=SimpleNamespace(batch_size=lambda: 1),
+        )
+
+
+def test_block_drafting_raises_when_block_table_is_too_small():
+    proposer = _make_block_drafting_proposer_for_errors()
+    proposer.max_model_len = 128
+    proposer.runner = object()
+    proposer.attn_metadata_builder = None
+    builder = SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4))
+    common_attn_metadata = SimpleNamespace(
+        batch_size=lambda: 1,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int64),
+    )
+
+    with (
+        patch.object(proposer, "_get_attention_metadata_builder", return_value=builder),
+        pytest.raises(RuntimeError, match="needs more block_table entries"),
+    ):
+        proposer._propose_block_drafting(
+            target_positions=torch.tensor([0], dtype=torch.int64),
+            target_hidden_states=torch.zeros(1, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1], dtype=torch.int32),
+            common_attn_metadata=common_attn_metadata,
+        )
+
+
 def test_dflash_get_slot_mapping_pads_with_padding_slot_id():
     proposer = DFlashProposer.__new__(DFlashProposer)
     proposer._slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)

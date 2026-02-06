@@ -167,6 +167,16 @@ class DFlashProposer(EagleProposer):
                 "DFlash block_drafting does not support indexer layers in this release."
             )
 
+        num_query_tokens = 1 + self.num_speculative_tokens
+        last_position = int(target_positions[-1].item())
+        if last_position + num_query_tokens >= self.max_model_len:
+            raise RuntimeError(
+                "DFlash block_drafting query positions exceed max_model_len. "
+                f"last_position={last_position}, "
+                f"num_query_tokens={num_query_tokens}, "
+                f"max_model_len={self.max_model_len}."
+            )
+
         assert self.runner is not None
         if self.attn_metadata_builder is None:
             attn_metadata_builder = self._get_attention_metadata_builder()
@@ -174,10 +184,8 @@ class DFlashProposer(EagleProposer):
             attn_metadata_builder = self.attn_metadata_builder
 
         num_context_tokens = target_hidden_states.shape[0]
-        num_query_tokens = 1 + self.num_speculative_tokens
         num_kv_tokens = num_context_tokens + num_query_tokens
 
-        last_position = int(target_positions[-1].item())
         query_positions = (
             torch.arange(
                 num_query_tokens,
@@ -190,8 +198,20 @@ class DFlashProposer(EagleProposer):
         position_ids = torch.cat([target_positions, query_positions], dim=0)
 
         block_size = attn_metadata_builder.kv_cache_spec.block_size
+        block_table_tensor = getattr(common_attn_metadata, "block_table_tensor", None)
+        if block_table_tensor is None:
+            raise RuntimeError(
+                "DFlash block_drafting requires block_table_tensor in attention "
+                "metadata."
+            )
+        max_block_number = int((query_positions[-1] // block_size).item())
+        if max_block_number >= block_table_tensor.shape[1]:
+            raise RuntimeError(
+                "DFlash block_drafting needs more block_table entries than "
+                f"available ({max_block_number + 1} > {block_table_tensor.shape[1]})."
+            )
         block_numbers = query_positions // block_size
-        block_ids = common_attn_metadata.block_table_tensor.gather(
+        block_ids = block_table_tensor.gather(
             dim=1, index=block_numbers.view(1, -1)
         ).view(-1)
         slot_mapping = block_ids * block_size + (query_positions % block_size)
