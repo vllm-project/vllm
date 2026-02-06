@@ -7,7 +7,6 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
-from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -834,6 +833,8 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+# TODO (Rohan138): maybe move this customop to rocm_aiter_fusion
+# considering how large it's gotten?
 def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -852,6 +853,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     """
     from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
+    from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.ops.paged_attn import PagedAttention

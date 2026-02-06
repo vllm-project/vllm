@@ -130,6 +130,11 @@ class PassConfig:
     fuse_rope_kvcache: bool = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
 
+    aiter_rope_kvcache_fusion_max_token_num: int = 256
+    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    """
+
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a

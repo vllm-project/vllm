@@ -12,6 +12,7 @@ import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -522,8 +523,6 @@ class RopeReshapeKVCachePattern:
       )
     """
 
-    # TODO (Rohan138): maybe move the customop to this file, it's fairly
-    # large and specific for it to be in vllm/_aiter_ops.py
     FUSED_OP = rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()
 
     def __init__(
@@ -633,6 +632,9 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
         )
 
+        cc = config.compilation_config
+        self.max_token_num = cc.pass_config.aiter_rope_kvcache_fusion_max_token_num
+
         attn_layers = get_layers_from_vllm_config(config, Attention)
         for _, layer in attn_layers.items():
             for is_neox in [True, False]:
@@ -658,6 +660,12 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         # drawer.get_dot_graph().write_svg(
         #     "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass.svg"
         # )
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        # This pass works best for the small-batch decode setting.
+        # For large-batch e.g. prefill, it is better to use two separate kernels
+        # since they are compute bound and the fused kernels require further tuning.
+        return compile_range.end <= self.max_token_num
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)
