@@ -215,6 +215,12 @@ class FrontendArgs:
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    shutdown_mode: Literal["immediate", "drain"] = "immediate"
+    """Shutdown mode: 'immediate' exits immediately on SIGTERM (default),
+    'drain' waits for in-flight requests to complete."""
+    shutdown_drain_timeout: int = 120
+    """Seconds to wait for in-flight requests to complete during drain
+    shutdown mode."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -323,6 +329,20 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    # drain shutdown only supported in single-process mode
+    shutdown_mode = getattr(args, "shutdown_mode", "immediate")
+    if shutdown_mode == "drain":
+        if args.headless:
+            raise ValueError("--shutdown-mode=drain is not supported in headless mode")
+        if args.api_server_count is not None and args.api_server_count > 1:
+            raise ValueError(
+                "--shutdown-mode=drain is not supported with --api-server-count > 1"
+            )
+        if args.data_parallel_size > 1:
+            raise ValueError(
+                "--shutdown-mode=drain is not supported with --data-parallel-size > 1"
+            )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

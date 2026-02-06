@@ -4,6 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
+- [Drain Shutdown](#drain-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -385,6 +386,86 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Drain Shutdown
+
+For production deployments, vLLM supports a draining shutdown mode to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+
+**Note:** A second SIGTERM will skip the drain timeout, causing immediate exit. Useful if testing via a tty (like Ctrl+C).
+
+### How It Works
+
+When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
+
+1. The server stops accepting new requests (returns `503 Service Unavailable`)
+1. The frontend process sends a drain notification to the engine
+1. In-flight requests continue processing until completion or timeout
+1. The `/live` and `/metrics` endpoints remain accessible during drain
+
+### Configuration
+
+Enable drain shutdown with the following CLI arguments:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--shutdown-mode` | `immediate` | Shutdown mode: `immediate` exits immediately on SIGTERM, `drain` waits for in-flight requests |
+| `--shutdown-drain-timeout` | `120` | Seconds to wait for in-flight requests to complete during drain |
+
+### Example Deployment
+
+<details>
+<summary>Yaml</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # should be >= shutdown-drain-timeout to allow drain
+      terminationGracePeriodSeconds: 150
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --shutdown-mode drain --shutdown-drain-timeout 120"
+        ]
+        ports:
+        - containerPort: 8000
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+```
+
+</details>
+
+### Key Considerations
+
+- **`terminationGracePeriodSeconds`**: Set this to at least `drain-timeout` plus a buffer (e.g., 30 seconds) to ensure Kubernetes doesn't force-kill the pod before draining completes.
+
+- **Readiness vs Liveness**: The `/health` endpoint returns `503` during drain (good for readiness probes to remove the pod from service), while `/live` remains accessible (good for liveness probes to avoid restarts during drain).
 
 ## Troubleshooting
 

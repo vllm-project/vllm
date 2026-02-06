@@ -36,9 +36,7 @@ from vllm.entrypoints.openai.server_utils import (
     validation_exception_handler,
 )
 from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
-)
+from vllm.entrypoints.serve.middleware import ServiceUnavailableMiddleware
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -232,8 +230,8 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
         app.add_middleware(XRequestIdMiddleware)
 
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
+    # returns 503 when server is draining or otherwise unavailable
+    app.add_middleware(ServiceUnavailableMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(
