@@ -674,12 +674,12 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_device_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    Get a DEVICE view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    return torch.ops._C.get_device_view_from_cpu_tensor(cpu_tensor)
 
 
 # Helper function used in testing.

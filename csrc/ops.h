@@ -184,7 +184,7 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
+torch::Tensor get_device_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
 
