@@ -221,9 +221,15 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self.sampled_token_ids_cpu = self._sampled_token_ids.to(
-                "cpu", non_blocking=True
+            # Use a pinned CPU tensor + .copy_() instead of .to("cpu")
+            # to avoid DtoD staging overhead in PyTorch's _to_copy path.
+            self.sampled_token_ids_cpu = torch.empty(
+                self._sampled_token_ids.shape,
+                dtype=self._sampled_token_ids.dtype,
+                device="cpu",
+                pin_memory=True,
             )
+            self.sampled_token_ids_cpu.copy_(self._sampled_token_ids, non_blocking=True)
             self._logprobs_tensors_cpu = (
                 self._logprobs_tensors.to_cpu_nonblocking()
                 if self._logprobs_tensors
