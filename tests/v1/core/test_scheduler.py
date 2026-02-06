@@ -2564,10 +2564,13 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
-    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
-    # Resumed tokens include 30 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 32
-    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][31] == 100
+    # `all_token_ids` is only propagated in async scheduling mode
+    if scheduler.scheduler_config.async_scheduling:
+        assert request_low.request_id in scheduled_cached_reqs.all_token_ids
+        # request_low produced two decode tokens before being preempted.
+        assert scheduled_cached_reqs.all_token_ids[request_low.request_id] == [100, 100]
+    else:
+        assert len(scheduled_cached_reqs.all_token_ids) == 0
 
 
 @pytest.mark.parametrize(
@@ -3409,10 +3412,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
-    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
-    ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 96
-    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][95] == 100
+    # `all_token_ids` is only propagated in async scheduling mode
+    if scheduler.scheduler_config.async_scheduling:
+        assert request_low.request_id in scheduled_cached_reqs.all_token_ids
+        # request_low produced two decode tokens before being preempted.
+        assert scheduled_cached_reqs.all_token_ids[request_low.request_id] == [100, 100]
+    else:
+        assert len(scheduled_cached_reqs.all_token_ids) == 0
     assert scheduler.running[0].request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
 
