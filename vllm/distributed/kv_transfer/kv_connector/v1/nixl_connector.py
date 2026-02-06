@@ -30,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
-    reserve_numa_cores_for_kv_start_load,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -54,6 +53,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -927,8 +927,8 @@ class NixlConnectorWorker:
         else:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
-        if self.device_type == "cpu":
-            self.flag_for_cpu_core_binding = 0
+        # do cpu core binding for start_load_kv() once.
+        self.flag_for_cpu_core_binding = 0
 
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
@@ -2106,7 +2106,12 @@ class NixlConnectorWorker:
         if self.device_type == "cpu" and self.flag_for_cpu_core_binding == 0:
             self.flag_for_cpu_core_binding = 1
 
-            rsv_cores_for_kv = reserve_numa_cores_for_kv_start_load()
+            numa_core_list = CpuPlatform.discover_numa_topology()
+            # setup one last core in each numa for kv transfer.
+            rsv_cores_for_kv = [
+                max(each_numa_core_list) for each_numa_core_list in numa_core_list
+            ]
+
             if rsv_cores_for_kv:
                 os.sched_setaffinity(0, rsv_cores_for_kv)
 
