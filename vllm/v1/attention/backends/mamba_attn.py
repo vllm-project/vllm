@@ -285,8 +285,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             [num_decodes, num_prefills],
             dim=0,
         )
-        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
-        state_indices_tensor_p = state_indices_tensor_p[:, 0]
+        if self.vllm_config.cache_config.mamba_cache_mode != "all":
+            state_indices_tensor_d = state_indices_tensor_d[
+                :, : 1 + self.num_spec_tokens
+            ]
+            state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         if num_decodes > 0 and self.use_spec_decode:
             assert num_accepted_tokens is not None
@@ -442,8 +445,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             [metadata.num_decodes, metadata.num_prefills],
             dim=0,
         )
-        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
-        state_indices_tensor_p = state_indices_tensor_p[:, 0]
+        if self.vllm_config.cache_config.mamba_cache_mode != "all":
+            state_indices_tensor_d = state_indices_tensor_d[
+                :, : 1 + self.num_spec_tokens
+            ]
+            state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         new_metadata = replace(
             metadata,
