@@ -60,7 +60,7 @@ class BagelProcessor(ProcessorMixin):
             else {}
         )
 
-        return BatchFeature(**pixel_values, **text_inputs)
+        return BatchFeature(data={**pixel_values, **text_inputs})
 
     def batch_decode(self, *args, **kwargs):
         """
