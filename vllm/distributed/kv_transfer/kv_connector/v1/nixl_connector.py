@@ -26,7 +26,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
     TpKVTopology,
-    get_blocks_in_fa_kv_group,
     get_current_attn_backend,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
@@ -1355,10 +1354,8 @@ class NixlConnectorWorker:
                     meta=meta,
                 )
                 if req_meta := self._recving_metadata.get(req_id):
-                    local_block_ids = get_blocks_in_fa_kv_group(
-                        req_meta.local_block_ids, self.kv_cache_config
-                    )
-                    self._invalid_block_ids.update(local_block_ids)
+                    for group_block_ids in req_meta.local_block_ids:
+                        self._invalid_block_ids.update(group_block_ids)
                 self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
@@ -2157,12 +2154,8 @@ class NixlConnectorWorker:
         """
         # Use .get() here as the metadata cleanup is handled by get_finished()
         if meta := self._recving_metadata.get(req_id):
-            # For the purpose of marking blocks as invalid, only report FA ones to
-            # handle blocks<>tokens mapping consistently.
-            local_block_ids = get_blocks_in_fa_kv_group(
-                meta.local_block_ids, self.kv_cache_config
-            )
-            self._invalid_block_ids.update(local_block_ids)
+            for group_block_ids in meta.local_block_ids:
+                self._invalid_block_ids.update(group_block_ids)
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
@@ -2418,10 +2411,8 @@ class NixlConnectorWorker:
                 remote_rank=remote_rank,
             )
             if meta := self._recving_metadata.get(request_id):
-                fa_local_block_ids = get_blocks_in_fa_kv_group(
-                    meta.local_block_ids, self.kv_cache_config
-                )
-                self._invalid_block_ids.update(fa_local_block_ids)
+                for group_block_ids in meta.local_block_ids:
+                    self._invalid_block_ids.update(group_block_ids)
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
