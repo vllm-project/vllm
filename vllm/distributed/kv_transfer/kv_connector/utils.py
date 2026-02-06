@@ -336,28 +336,6 @@ def get_full_attention_group_idx(
     return fa_group_idx
 
 
-def get_blocks_in_fa_kv_group(
-    block_ids: BlockIds,
-    kv_cache_config: "KVCacheConfig",
-) -> list[int]:
-    """
-    Get blocks in the full attention KV group using KVCacheConfig to determine
-    the correct group index.
-
-    Args:
-        block_ids: Block IDs organized by KV cache group
-        kv_cache_config: The KV cache configuration used to identify the FA group
-
-    Returns:
-        The block IDs for the full attention KV cache group
-    """
-    if not block_ids:
-        # Full prefix cache hit case
-        return []
-    fa_group_idx = get_full_attention_group_idx(kv_cache_config)
-    return block_ids[fa_group_idx]
-
-
 @dataclass
 class TpKVTopology:
     """
