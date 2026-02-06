@@ -102,15 +102,18 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
     def execute(self) -> None:
         if not self._p2p_ops:
             return
-        if self._cuda_stream is not None:
-            with torch.cuda.stream(self._cuda_stream):
+        try:
+            if self._cuda_stream is not None:
+                with torch.cuda.stream(self._cuda_stream):
+                    reqs = batch_isend_irecv(self._p2p_ops)
+                    for req in reqs:
+                        req.wait()
+            else:
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
-        else:
-            reqs = batch_isend_irecv(self._p2p_ops)
-            for req in reqs:
-                req.wait()
+        finally:
+            self._p2p_ops.clear()
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
