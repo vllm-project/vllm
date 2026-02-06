@@ -251,7 +251,8 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
-        # Check helix_mode - guard against torch.compile tracing where config may not be set
+        # Check helix_mode - guard against torch.compile tracing
+        # where config may not be set
         try:
             helix_mode = get_current_vllm_config().parallel_config.helix_mode
         except AssertionError:
@@ -262,6 +263,7 @@ class BatchDCPPrefillWrapper:
         if helix_mode:
             # Helix MLA (TPA=1): Use All-to-All + LSE reduction
             from vllm.distributed.parallel_state import get_helix_kvp_group
+
             output_context, lse_context = helix_alltoall_lse_reduce(
                 output_context_tmp,
                 lse_context_tmp,
@@ -1560,6 +1562,7 @@ class FlashInferImpl(AttentionImpl):
                     if self.helix_mode:
                         # Helix MLA: Use All-to-All + LSE reduction
                         from vllm.distributed.parallel_state import get_helix_kvp_group
+
                         output[:num_decode_tokens] = helix_alltoall_lse_reduce(
                             output_tmp,
                             lse,

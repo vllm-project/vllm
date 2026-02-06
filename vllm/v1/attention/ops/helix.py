@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Helix parallelism operations for attention.
 
@@ -29,10 +31,10 @@ def _lse_weighted_combine(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     CPU reference implementation for LSE-weighted combination.
-    
+
     This is a pure PyTorch implementation for testing purposes.
     For GPU execution, use helix_lse_combine_triton instead.
-    
+
     Args:
         outputs: Partial attention outputs [N, B, H, D]
                  N = number of KV shards (ranks)
@@ -42,44 +44,44 @@ def _lse_weighted_combine(
         lses: Log-sum-exp values [N, B, H]
         return_lse: If True, also return the global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
-    
+
     Returns:
         Combined output [B, H, D], and optionally global LSE [B, H]
     """
     N, B, H, D = outputs.shape
-    
+
     # Handle NaN and inf in LSEs
     lses = torch.where(
         torch.isnan(lses) | torch.isinf(lses),
-        torch.tensor(float('-inf'), device=lses.device, dtype=lses.dtype),
+        torch.tensor(float("-inf"), device=lses.device, dtype=lses.dtype),
         lses,
     )
-    
+
     # Compute max LSE for numerical stability
     lse_max, _ = lses.max(dim=0)  # [B, H]
     lse_max = torch.where(
-        lse_max == float('-inf'),
+        lse_max == float("-inf"),
         torch.zeros_like(lse_max),
         lse_max,
     )
-    
+
     # Compute weights: softmax over the N dimension
     if is_lse_base_on_e:
         weights = torch.exp(lses - lse_max.unsqueeze(0))  # [N, B, H]
     else:
         weights = torch.pow(2.0, lses - lse_max.unsqueeze(0))  # [N, B, H]
-    
+
     # Handle NaN weights
     weights = torch.where(torch.isnan(weights), torch.zeros_like(weights), weights)
-    
+
     # Normalize weights
     weight_sum = weights.sum(dim=0, keepdim=True)  # [1, B, H]
     weights = weights / weight_sum.clamp(min=1e-10)  # [N, B, H]
-    
+
     # Weighted combination: sum over N dimension
     # outputs: [N, B, H, D], weights: [N, B, H] -> need to expand weights
     result = (outputs * weights.unsqueeze(-1)).sum(dim=0)  # [B, H, D]
-    
+
     if return_lse:
         # Compute global LSE: logsumexp over N dimension
         if is_lse_base_on_e:
@@ -87,7 +89,7 @@ def _lse_weighted_combine(
         else:
             global_lse = torch.log2(weight_sum.squeeze(0)) + lse_max  # [B, H]
         return result, global_lse
-    
+
     return result
 
 
@@ -169,8 +171,8 @@ def _helix_lse_combine_kernel(
         else:
             lse_sum += tl.exp2(lse_val - lse_max)
 
-    # Compute global LSE
-    if IS_BASE_E:
+    # Compute global LSE (Triton kernel - keep if/else for clarity)
+    if IS_BASE_E:  # noqa: SIM108
         global_lse = tl.log(lse_sum) + lse_max
     else:
         global_lse = tl.log2(lse_sum) + lse_max
@@ -203,7 +205,9 @@ def _helix_lse_combine_kernel(
         acc += out_vals.to(tl.float32) * weight
 
     # Store result
-    final_offsets = batch_idx * o_stride_B + head_idx * o_stride_H + d_offsets * o_stride_D
+    final_offsets = (
+        batch_idx * o_stride_B + head_idx * o_stride_H + d_offsets * o_stride_D
+    )
     tl.store(out_ptr + final_offsets, acc)
 
     # Optional: store global LSE
@@ -233,7 +237,9 @@ def helix_lse_combine_triton(
     N, B, H_local, D = recv_output.shape
 
     # Allocate output tensors
-    out = torch.empty((B, H_local, D), device=recv_output.device, dtype=recv_output.dtype)
+    out = torch.empty(
+        (B, H_local, D), device=recv_output.device, dtype=recv_output.dtype
+    )
 
     if return_lse:
         out_lse = torch.empty(

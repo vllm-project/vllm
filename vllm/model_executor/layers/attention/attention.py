@@ -259,9 +259,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # In Helix GQA mode, input Q has TPA-based heads but output has TP-based heads
         # after All-to-All scatter. num_output_heads is used for output allocation.
         from vllm.distributed.parallel_state import is_helix_gqa_mode
+
         if is_helix_gqa_mode():
             # Output heads = input heads / KVP size
             from vllm.distributed.parallel_state import _HELIX_KVP_SIZE
+
             self.num_output_heads = num_heads // _HELIX_KVP_SIZE
         else:
             self.num_output_heads = num_heads
@@ -418,7 +420,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 # Handle both 2D [num_tokens, hidden] and
                 # 3D [num_tokens, heads, head_dim] query
                 num_tokens = query.shape[0]
-                # Use num_output_heads for output allocation (may differ from num_heads in Helix GQA)
+                # Use num_output_heads for output allocation
+                # (may differ from num_heads in Helix GQA)
                 output_shape = torch.Size(
                     (num_tokens, self.num_output_heads * self.head_size_v)
                 )
@@ -427,7 +430,8 @@ class Attention(nn.Module, AttentionLayerBase):
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
-            # Query uses num_heads (TPA-based in Helix GQA), output uses num_output_heads (TP-based)
+            # Query uses num_heads (TPA-based in Helix GQA),
+            # output uses num_output_heads (TP-based)
             query = query.view(-1, self.num_heads, self.head_size)
             output = output.view(-1, self.num_output_heads, self.head_size_v)
             if key is not None:

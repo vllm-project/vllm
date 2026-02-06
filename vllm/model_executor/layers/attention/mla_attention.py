@@ -1978,9 +1978,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
-        self.helix_mode: bool = (
-            get_current_vllm_config().parallel_config.helix_mode
-        )
+        self.helix_mode: bool = get_current_vllm_config().parallel_config.helix_mode
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs

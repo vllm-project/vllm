@@ -1106,11 +1106,12 @@ class ModelConfig:
                     # - Each GPU has different KV heads (standard TP distribution)
                     # - AllGather Q gives all Q heads to each GPU
                     # - But Q heads would be computed against wrong KV heads
+                    max_dcp = tensor_parallel_size // 2
                     assert self.use_mla, (
                         f"Helix with TPA=1 (TP={tensor_parallel_size}, "
                         f"DCP={decode_context_parallel_size}) is only supported for "
                         f"MLA models. For GQA models, use TPA > 1 by reducing "
-                        f"decode_context_parallel_size (e.g., DCP <= {tensor_parallel_size // 2})."
+                        f"decode_context_parallel_size (e.g., DCP <= {max_dcp})."
                     )
                     logger.info(
                         "Helix mode enabled for MLA model: KVP=%d "
@@ -1123,7 +1124,8 @@ class ModelConfig:
                     logger.info(
                         "Helix mode enabled for GQA model: TPA=%d, KVP=%d, "
                         "Q_heads_per_TPA=%d, KV_heads_per_TPA=%d",
-                        tpa, kvp,
+                        tpa,
+                        kvp,
                         total_num_attention_heads // tpa,
                         total_num_kv_heads // tpa,
                     )

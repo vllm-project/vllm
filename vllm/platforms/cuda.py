@@ -262,7 +262,10 @@ class CudaPlatformBase(Platform):
         # Check for FlashInfer + Helix GQA incompatibility
         # FlashInfer produces gibberish output with Helix GQA mode (TPA > 1).
         # Root cause is under investigation. For now, prevent this combination.
-        if parallel_config.helix_mode and parallel_config.decode_context_parallel_size > 1:
+        if (
+            parallel_config.helix_mode
+            and parallel_config.decode_context_parallel_size > 1
+        ):
             # Check if this is GQA (TPA > 1) by checking if TP/DCP > 1
             tp_size = parallel_config.tensor_parallel_size
             dcp_size = parallel_config.decode_context_parallel_size
@@ -284,9 +287,11 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Helix GQA mode detected (TPA=%d). Forcing FLASH_ATTN backend "
                         "(FlashInfer produces incorrect output in this configuration).",
-                        tpa_size
+                        tpa_size,
                     )
-                    vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.FLASH_ATTN
+                    )
 
         # DCP->PIECEWISE check for CUDA graph compatibility.
         # DCP is incompatible with FULL CUDA graphs for GQA models because
@@ -298,6 +303,7 @@ class CudaPlatformBase(Platform):
         # pre-allocated buffers with fixed addresses, making them compatible
         # with FULL CUDA graphs.
         from vllm.config import CUDAGraphMode
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             if parallel_config.decode_context_parallel_size > 1:

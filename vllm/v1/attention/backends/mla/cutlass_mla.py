@@ -119,7 +119,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         **mla_args,
     ) -> None:
         # Remove q_pad_num_heads from mla_args if present - we always use MAX_HEADS
-        mla_args.pop('q_pad_num_heads', None)
+        mla_args.pop("q_pad_num_heads", None)
         super().__init__(
             num_heads,
             head_size,

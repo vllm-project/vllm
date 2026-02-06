@@ -337,9 +337,7 @@ class ParallelConfig:
         # Helix validation
         if self.helix_mode:
             if self.decode_context_parallel_size <= 1:
-                raise ValueError(
-                    "helix_mode requires decode_context_parallel_size > 1"
-                )
+                raise ValueError("helix_mode requires decode_context_parallel_size > 1")
             if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
                 raise ValueError(
                     f"tensor_parallel_size ({self.tensor_parallel_size}) must be "

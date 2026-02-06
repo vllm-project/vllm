@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_attention_tp_world_size,
     get_pp_group,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (

@@ -833,6 +833,7 @@ class FlashAttentionImpl(AttentionImpl):
         # In Helix GQA mode, GPUs in the same KVP group have the same Q and KV heads
         # so we don't need to AllGather Q - each GPU computes with its local Q and KV
         from vllm.distributed.parallel_state import is_helix_gqa_mode
+
         helix_gqa_mode = is_helix_gqa_mode()
 
         if helix_gqa_mode:
@@ -864,6 +865,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Combines partial outputs from different sequence shards
             # and scatters along head dim: [B, H_tpa, D] -> [B, H_tp, D]
             from vllm.distributed.parallel_state import get_helix_kvp_group
+
             context_attn_out_cor, context_lse_cor = helix_alltoall_lse_reduce(
                 context_attn_out,
                 context_lse.transpose(0, 1),
@@ -899,6 +901,7 @@ class FlashAttentionImpl(AttentionImpl):
             if self.helix_mode:
                 # Helix MLA (TPA=1): Use All-to-All + LSE reduction
                 from vllm.distributed.parallel_state import get_helix_kvp_group
+
                 context_attn_out_cor, context_lse_cor = helix_alltoall_lse_reduce(
                     context_attn_out,
                     context_lse.transpose(0, 1),
@@ -941,6 +944,7 @@ class FlashAttentionImpl(AttentionImpl):
         # We need to scatter query attention output to match.
         if helix_gqa_mode:
             from vllm.distributed.parallel_state import get_helix_kvp_group
+
             kvp_group = get_helix_kvp_group()
             kvp_rank = kvp_group.rank_in_group
             kvp_size = kvp_group.world_size

@@ -1448,8 +1448,10 @@ def initialize_model_parallel(
             # (same heads, different sequence shards)
             kvp_group_ranks = []
             for tpa_rank in range(helix_tpa_size):
-                group = [tpa_rank * helix_kvp_size + kvp_rank
-                         for kvp_rank in range(helix_kvp_size)]
+                group = [
+                    tpa_rank * helix_kvp_size + kvp_rank
+                    for kvp_rank in range(helix_kvp_size)
+                ]
                 kvp_group_ranks.append(group)
 
             _HELIX_KVP = init_model_parallel_group(

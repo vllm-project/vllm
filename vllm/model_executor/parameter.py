@@ -180,7 +180,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = kwargs.get("shard_size")
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
-        # Use tp_rank from kwargs if provided (for Helix GQA), else fall back to self.tp_rank
+        # Use tp_rank from kwargs if provided (for Helix GQA),
+        # else fall back to self.tp_rank
         tp_rank = kwargs.get("tp_rank", self.tp_rank)
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
