@@ -931,6 +931,16 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             for item in videos:
                 video_array, metadata = item
 
+                # Qwen3-VL requires at least 2 frames; duplicate single frame if needed
+                if video_array.shape[0] == 1:
+                    video_array = np.concatenate([video_array, video_array], axis=0)
+                    # Also duplicate frame indices in metadata if present
+                    if "frames_indices" in metadata:
+                        metadata = dict(metadata)
+                        metadata["frames_indices"] = (
+                            metadata["frames_indices"] + metadata["frames_indices"]
+                        )
+
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
@@ -1029,6 +1039,19 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
+
+            # If single frame was duplicated in _call_hf_processor,
+            # we need to reflect that in metadata for timestamp calculation
+            if video.shape[0] == 1:
+                metadata = dict(metadata)
+                if "frames_indices" in metadata:
+                    metadata["frames_indices"] = (
+                        metadata["frames_indices"] + metadata["frames_indices"]
+                    )
+                else:
+                    # Fallback: assume single frame at index 0
+                    metadata["frames_indices"] = [0, 0]
+
             do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
             sampled_fps = hf_processor_mm_kwargs.get("fps")
             if is_list_of(sampled_fps, float):
