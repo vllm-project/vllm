@@ -42,7 +42,8 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+DFlashModelTypes = Literal["dflash"]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes, DFlashModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -389,7 +390,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "dflash"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -399,6 +400,11 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "dflash" in self.draft_model_config.model.lower() or any(
+                    isinstance(arch, str) and "dflash" in arch.lower()
+                    for arch in (self.draft_model_config.architectures or [])
+                ):
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -696,7 +702,7 @@ class SpeculativeConfig:
             "afmoe",
         ]
         if (
-            self.method == "eagle3"
+            self.method in ("eagle3", "dflash")
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
@@ -704,7 +710,8 @@ class SpeculativeConfig:
             )
         ):
             raise ValueError(
-                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
+                f"{self.method} is only supported for "
+                f"{eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
