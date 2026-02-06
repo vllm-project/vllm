@@ -273,8 +273,10 @@ class CudaPlatformBase(Platform):
             is_helix_gqa = tpa_size > 1  # GQA has TPA > 1, MLA has TPA = 1
 
             if is_helix_gqa:
-                backend = vllm_config.attention_config.backend
-                if backend == AttentionBackendEnum.FLASHINFER:
+                helix_backend: AttentionBackendEnum | None = (
+                    vllm_config.attention_config.backend
+                )
+                if helix_backend == AttentionBackendEnum.FLASHINFER:
                     # User explicitly requested FlashInfer - block it
                     raise ValueError(
                         "FlashInfer backend is not supported with Helix GQA mode "
@@ -282,7 +284,7 @@ class CudaPlatformBase(Platform):
                         "FlashInfer produces incorrect output in this configuration. "
                         "Please use FlashAttn instead: --attention-backend FLASH_ATTN"
                     )
-                elif backend is None:
+                elif helix_backend is None:
                     # Auto-selection: force FlashAttn to avoid FlashInfer
                     logger.info(
                         "Helix GQA mode detected (TPA=%d). Forcing FLASH_ATTN backend "

@@ -5,6 +5,7 @@ Helix parallelism is an advanced decode context parallelism strategy that uses A
 ## Overview
 
 Helix decouples attention parallelism (TPA) from FFN parallelism (TP):
+
 - **TPA (Tensor Parallel for Attention)**: How attention heads are distributed
 - **KVP (KV Parallel)**: How sequence is sharded for decode context parallelism
 - **TP**: Standard tensor parallelism for FFN layers
@@ -38,7 +39,7 @@ Helix decouples attention parallelism (TPA) from FFN parallelism (TP):
 
 Standard decode context parallelism using AllGather Q followed by AllGather+ReduceScatter for output combination.
 
-```
+```text
 Communication: AllGather Q → Compute → AllGather+ReduceScatter
 ```
 
@@ -46,7 +47,7 @@ Communication: AllGather Q → Compute → AllGather+ReduceScatter
 
 For MLA (Multi-head Latent Attention) models like DeepSeek-V2, TPA=1 because there's effectively one KV head (latent).
 
-```
+```text
 TPA = TP / DCP = 1 (when DCP = TP)
 KVP = DCP
 
@@ -57,7 +58,7 @@ Communication: AllGather Q → Compute → All-to-All + LSE Reduce
 
 For GQA (Grouped Query Attention) models like Llama and Qwen, TPA > 1 allows head sharding.
 
-```
+```text
 TPA = TP / DCP > 1
 KVP = DCP
 
