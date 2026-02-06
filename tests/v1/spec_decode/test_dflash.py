@@ -8,23 +8,201 @@ import pytest
 import torch
 
 from vllm.v1.spec_decode.dflash import DFlashProposer
-from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 
-def test_dflash_proposer_rejects_batch_size_gt_one():
+def test_dflash_runtime_mode_defaults_to_shared_eagle():
     proposer = DFlashProposer.__new__(DFlashProposer)
-    common_attn_metadata = SimpleNamespace(batch_size=lambda: 2)
-    with pytest.raises(NotImplementedError, match="batch size 1 only"):
-        proposer.propose(common_attn_metadata=common_attn_metadata)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(dflash_config={})
+    )
+    assert proposer._get_dflash_runtime_mode_from_config() == "shared_eagle"
 
 
-def test_dflash_proposer_delegates_to_eagle_for_bs1():
+def test_dflash_runtime_mode_accepts_block_drafting():
     proposer = DFlashProposer.__new__(DFlashProposer)
-    common_attn_metadata = SimpleNamespace(batch_size=lambda: 1)
-    sentinel = torch.tensor([[1]], dtype=torch.int32)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(dflash_config={"runtime_mode": "block_drafting"})
+    )
+    assert proposer._get_dflash_runtime_mode_from_config() == "block_drafting"
 
-    with patch.object(EagleProposer, "propose", return_value=sentinel) as mock_propose:
-        out = proposer.propose(common_attn_metadata=common_attn_metadata)
 
-    mock_propose.assert_called_once()
+def test_dflash_runtime_mode_rejects_invalid_value():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(dflash_config={"runtime_mode": "invalid"})
+    )
+    with pytest.raises(ValueError, match="Expected one of"):
+        proposer._get_dflash_runtime_mode_from_config()
+
+
+def test_resolve_mask_token_id_prefers_dflash_config():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            vocab_size=1000,
+            mask_token_id=3,
+            dflash_config={"mask_token_id": 17},
+        )
+    )
+    assert proposer._resolve_mask_token_id_from_config() == 17
+
+
+def test_resolve_mask_token_id_uses_hf_fallbacks():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(vocab_size=1000, pad_token_id=9, dflash_config={})
+    )
+    assert proposer._resolve_mask_token_id_from_config() == 9
+
+
+def test_resolve_mask_token_id_raises_out_of_vocab():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(vocab_size=10, dflash_config={"mask_token_id": 11})
+    )
+    with pytest.raises(ValueError, match="out of vocab bounds"):
+        proposer._resolve_mask_token_id_from_config()
+
+
+def _make_propose_inputs(batch_size: int):
+    num_tokens = 2 * batch_size
+    return {
+        "target_token_ids": torch.zeros(num_tokens, dtype=torch.int32),
+        "target_positions": torch.arange(num_tokens, dtype=torch.int64),
+        "target_hidden_states": torch.zeros(num_tokens, 4, dtype=torch.float32),
+        "next_token_ids": torch.zeros(batch_size, dtype=torch.int32),
+        "token_indices_to_sample": None,
+        "common_attn_metadata": SimpleNamespace(batch_size=lambda: batch_size),
+        "sampling_metadata": SimpleNamespace(),
+    }
+
+
+def test_dflash_proposer_dispatches_to_shared_eagle():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.runtime_mode = "shared_eagle"
+    proposer.model = SimpleNamespace()
+    proposer.num_speculative_tokens = 2
+    inputs = _make_propose_inputs(batch_size=2)
+    sentinel = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+
+    with patch.object(
+        DFlashProposer, "_propose_shared_eagle", return_value=sentinel
+    ) as mock_shared:
+        out = proposer.propose(**inputs)
+
+    mock_shared.assert_called_once()
     assert torch.equal(out, sentinel)
+
+
+def test_dflash_proposer_dispatches_to_block_drafting_for_bs1():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.runtime_mode = "block_drafting"
+    proposer.model = SimpleNamespace()
+    proposer.num_speculative_tokens = 2
+    inputs = _make_propose_inputs(batch_size=1)
+    sentinel = torch.tensor([[7, 8]], dtype=torch.int32)
+
+    with patch.object(
+        DFlashProposer, "_propose_block_drafting", return_value=sentinel
+    ) as mock_block:
+        out = proposer.propose(**inputs)
+
+    mock_block.assert_called_once()
+    assert torch.equal(out, sentinel)
+
+
+def test_dflash_proposer_block_drafting_falls_back_to_shared_for_bs_gt1():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.runtime_mode = "block_drafting"
+    proposer.model = SimpleNamespace()
+    proposer.num_speculative_tokens = 2
+    inputs = _make_propose_inputs(batch_size=2)
+    sentinel = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+
+    with (
+        patch.object(
+            DFlashProposer, "_propose_shared_eagle", return_value=sentinel
+        ) as mock_shared,
+        patch.object(DFlashProposer, "_propose_block_drafting") as mock_block,
+    ):
+        out = proposer.propose(**inputs)
+
+    mock_block.assert_not_called()
+    mock_shared.assert_called_once()
+    assert torch.equal(out, sentinel)
+
+
+def test_dflash_proposer_raises_on_invalid_draft_shape():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.runtime_mode = "shared_eagle"
+    proposer.model = SimpleNamespace()
+    proposer.num_speculative_tokens = 2
+    inputs = _make_propose_inputs(batch_size=2)
+    invalid = torch.tensor([[1], [2]], dtype=torch.int32)
+
+    with (
+        patch.object(DFlashProposer, "_propose_shared_eagle", return_value=invalid),
+        pytest.raises(RuntimeError, match="unexpected draft token shape"),
+    ):
+        proposer.propose(**inputs)
+
+
+def test_dflash_get_slot_mapping_pads_with_padding_slot_id():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer._slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+    proposer.attn_layer_names = ["layer_a", "layer_b"]
+    proposer.indexer_layer_names = ["indexer_layer"]
+
+    result = proposer._get_slot_mapping(
+        num_tokens=6,
+        slot_mapping=torch.tensor([10, 11, 12], dtype=torch.int64),
+    )
+
+    expected = torch.tensor(
+        [10, 11, 12, PADDING_SLOT_ID, PADDING_SLOT_ID, PADDING_SLOT_ID],
+        dtype=torch.int64,
+    )
+    assert set(result.keys()) == {"layer_a", "layer_b", "indexer_layer"}
+    for view in result.values():
+        assert torch.equal(view, expected)
+
+
+def test_dflash_set_inputs_first_pass_bs_gt1_updates_positions_and_indices():
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.needs_extra_input_slots = False
+    proposer.uses_mrope = False
+    proposer.uses_xdrope_dim = 0
+    proposer.draft_uses_xdrope_dim = 0
+    proposer.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(uses_mrope=False)
+    )
+    proposer.input_ids = torch.zeros(16, dtype=torch.int32)
+    proposer.positions = torch.zeros(16, dtype=torch.int64)
+    proposer.hidden_states = torch.zeros(16, 4, dtype=torch.float32)
+
+    cad = SimpleNamespace(query_start_loc=torch.tensor([0, 3, 5], dtype=torch.int32))
+    target_token_ids = torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32)
+    target_positions = torch.tensor([7, 8, 9, 6, 7], dtype=torch.int64)
+    target_hidden_states = torch.arange(20, dtype=torch.float32).view(5, 4)
+    next_token_ids = torch.tensor([100, 200], dtype=torch.int32)
+
+    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
+        target_token_ids=target_token_ids,
+        next_token_ids=next_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        token_indices_to_sample=None,
+        cad=cad,
+        num_rejected_tokens_gpu=None,
+    )
+
+    assert num_tokens == 5
+    assert output_cad is cad
+    assert torch.equal(token_indices_to_sample, torch.tensor([2, 4], dtype=torch.int32))
+    assert torch.equal(
+        proposer.input_ids[:5],
+        torch.tensor([11, 12, 100, 21, 200], dtype=torch.int32),
+    )
+    assert torch.equal(proposer.positions[:5], target_positions)
+    assert torch.equal(proposer.hidden_states[:5], target_hidden_states)
