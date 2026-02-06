@@ -88,7 +88,7 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("logprobs_value", [0, 1])
+@pytest.mark.parametrize("logprobs_value", [0, 1, 5])
 async def test_generate_logprobs(client, logprobs_value):
     payload = {
         "model": MODEL_NAME,
