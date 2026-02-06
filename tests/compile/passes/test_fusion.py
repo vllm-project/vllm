@@ -7,12 +7,18 @@ import torch
 
 import vllm.config
 import vllm.plugins
+from tests.compile.backend import TestBackend
+from tests.utils import TestBlockFP8Layer, TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
-from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
-from vllm.compilation.fx_utils import find_op_nodes
-from vllm.compilation.matcher_utils import QUANT_OPS
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
+from vllm.compilation.passes.fusion.rms_quant_fusion import (
+    FUSED_OPS,
+    FusedRMSQuantKey,
+    RMSNormQuantFusionPass,
+)
+from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -50,9 +56,6 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
-
-from ..utils import TestBlockFP8Layer, TestFP8Layer
-from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -223,7 +226,7 @@ class TestModel(torch.nn.Module):
         if self.use_aiter_fusion:
             if self.group_shape.is_per_group():
                 # Blockwise aiter fusion
-                from vllm.compilation.rocm_aiter_fusion import (
+                from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                     AiterFusedAddRMSFp8GroupQuantPattern,
                     AiterRMSFp8GroupQuantPattern,
                 )
@@ -234,7 +237,7 @@ class TestModel(torch.nn.Module):
                 ]
             else:
                 # Per-token aiter fusion
-                from vllm.compilation.rocm_aiter_fusion import (
+                from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                     AiterFusedAddRMSNormDynamicQuantPattern,
                     AiterRMSNormDynamicQuantPattern,
                 )
@@ -410,7 +413,9 @@ def test_aiter_fusion_rmsnorm_quant(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormQuantFusionPass
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
 
         m.setenv("VLLM_ROCM_USE_AITER", "1")
 
