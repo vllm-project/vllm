@@ -189,7 +189,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
@@ -309,8 +309,12 @@ def test_rope_kvcache_fusion(
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
+        # Cannot compare fp8_* directly here, cast to model dtype instead
         torch.testing.assert_close(
-            kv_cache_unfused, kv_cache_fused, atol=ATOL, rtol=RTOL
+            kv_cache_unfused.view(dtype),
+            kv_cache_fused.view(dtype),
+            atol=ATOL,
+            rtol=RTOL,
         )
 
         assert fusion_pass.matched_count == 1
