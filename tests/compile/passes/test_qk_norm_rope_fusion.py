@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import operator
-
 import pytest
 import torch
 
@@ -18,6 +16,7 @@ from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
 )
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -36,44 +35,6 @@ RSQRT_OP = torch.ops.aten.rsqrt.default
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 
 
-class DuplicateSplitWithSizesPass:
-    """
-    Test helper pass that rewrites one split_with_sizes node with q/k/v
-    getitem users into three equivalent split_with_sizes nodes with one user
-    each, matching the B200+FP8 graph form.
-    """
-
-    def __init__(self) -> None:
-        self.applied = False
-
-    def __call__(self, graph: torch.fx.Graph) -> None:
-        for split in graph.find_nodes(
-            op="call_function", target=torch.ops.aten.split_with_sizes.default
-        ):
-            getitem_users = [
-                user
-                for user in list(split.users)
-                if user.op == "call_function"
-                and user.target == operator.getitem
-                and isinstance(user.args[1], int)
-            ]
-            idxs = {user.args[1] for user in getitem_users}
-            if not {0, 1, 2}.issubset(idxs):
-                continue
-
-            for user in getitem_users:
-                with graph.inserting_before(user):
-                    split_clone = graph.call_function(
-                        torch.ops.aten.split_with_sizes.default,
-                        args=split.args,
-                        kwargs=split.kwargs,
-                    )
-                user.replace_input_with(split, split_clone)
-
-            self.applied = True
-            return
-
-
 class QKNormRoPETestModel(torch.nn.Module):
     def __init__(
         self,
@@ -85,6 +46,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         is_neox: bool,
         vllm_config: VllmConfig,
         dtype: torch.dtype,
+        test_scattered_split: bool = False,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         super().__init__()
@@ -118,11 +80,17 @@ class QKNormRoPETestModel(torch.nn.Module):
             is_neox_style=is_neox,
             dtype=self.dtype,
         )
+        self.test_scattered_split = test_scattered_split
         self.enable_rms_norm_custom_op = self.q_norm.enabled()
         self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.test_scattered_split:
+            q, _, _ = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            _, k, _ = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            _, _, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
@@ -152,6 +120,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         return [FUSED_QK_ROPE_OP]
 
 
+@pytest.mark.parametrize("scattered_split", [True, False])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
@@ -162,7 +131,12 @@ class QKNormRoPETestModel(torch.nn.Module):
     reason="Only test on cuda and rocm platform",
 )
 def test_qk_norm_rope_fusion(
-    eps, is_neox, enable_rms_norm_custom_op, enable_rope_custom_op, dtype
+    eps,
+    is_neox,
+    enable_rms_norm_custom_op,
+    enable_rope_custom_op,
+    dtype,
+    scattered_split,
 ):
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
@@ -201,13 +175,15 @@ def test_qk_norm_rope_fusion(
             is_neox=is_neox,
             vllm_config=vllm_config,
             dtype=dtype,
+            test_scattered_split=scattered_split,
         )
 
         noop_pass = NoOpEliminationPass(vllm_config)
+        coalesce_pass = SplitCoalescingPass(vllm_config)
         fusion_pass = QKNormRoPEFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
-        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend = TestBackend(noop_pass, coalesce_pass, fusion_pass, cleanup_pass)
         backend_baseline = TestBackend(noop_pass, cleanup_pass)
 
         qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
@@ -234,84 +210,6 @@ def test_qk_norm_rope_fusion(
         torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
 
-        assert fusion_pass.matched_count == 1
-
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
-)
-def test_qk_norm_rope_fusion_duplicate_split_with_sizes():
-    if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
-        pytest.skip("fused_qk_norm_rope custom op not available")
-
-    dtype = torch.bfloat16
-    torch.set_default_device("cuda")
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(0)
-
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rms_norm", "+rotary_embedding"],
-            pass_config=PassConfig(
-                enable_qk_norm_rope_fusion=True,
-                eliminate_noops=True,
-            ),
-        ),
-    )
-
-    num_heads, num_kv_heads, head_dim = 16, 4, 128
-    T = 5
-
-    with set_current_vllm_config(vllm_config):
-        model = QKNormRoPETestModel(
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            eps=1e-6,
-            is_neox=True,
-            vllm_config=vllm_config,
-            dtype=dtype,
-        )
-
-        noop_pass = NoOpEliminationPass(vllm_config)
-        duplicate_split_pass = DuplicateSplitWithSizesPass()
-        fusion_pass = QKNormRoPEFusionPass(vllm_config)
-        cleanup_pass = PostCleanupPass(vllm_config)
-
-        backend = TestBackend(
-            noop_pass,
-            duplicate_split_pass,
-            fusion_pass,
-            cleanup_pass,
-        )
-        backend_baseline = TestBackend(noop_pass, cleanup_pass)
-
-        qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
-        pos = torch.arange(T, dtype=torch.long, device=qkv.device)
-        qkv_unfused = qkv.clone()
-        pos_unfused = pos.clone()
-
-        torch._dynamo.mark_dynamic(qkv, 0)
-        torch._dynamo.mark_dynamic(pos, 0)
-        model_fused = torch.compile(model, backend=backend)
-        q_fused, k_fused, v_fused = model_fused(qkv, pos)
-
-        torch._dynamo.mark_dynamic(qkv_unfused, 0)
-        torch._dynamo.mark_dynamic(pos_unfused, 0)
-        model_unfused = torch.compile(model, backend=backend_baseline)
-        q_unfused, k_unfused, v_unfused = model_unfused(qkv_unfused, pos_unfused)
-
-        torch.testing.assert_close(q_unfused, q_fused, atol=1e-2, rtol=1e-2)
-        torch.testing.assert_close(k_unfused, k_fused, atol=1e-2, rtol=1e-2)
-        torch.testing.assert_close(v_unfused, v_fused, atol=1e-2, rtol=1e-2)
-
-        assert duplicate_split_pass.applied
         assert fusion_pass.matched_count == 1
 
         backend.check_before_ops(model.ops_in_model_before())
