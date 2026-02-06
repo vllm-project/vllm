@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs.data import (
@@ -12,13 +11,13 @@ from vllm.inputs.data import (
     TextPrompt,
     TokensPrompt,
 )
-from vllm.renderer.inputs import DictPromptType, SingletonDictPrompt
-from vllm.renderer.inputs.parse import parse_dec_only_prompt, parse_enc_dec_prompt
+from vllm.renderers.inputs import DictPromptType, SingletonDictPrompt
+from vllm.renderers.inputs.parse import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
-from vllm.utils.collection_utils import is_list_of
 
 from .embed_utils import safe_load_prompt_embeds
+from .inputs.parse import prompt_to_seq
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -67,35 +66,6 @@ class BaseRenderer(ABC):
 
     # Step 1: Convert raw inputs to prompts
     @overload
-    def prompt_to_seq(
-        self,
-        prompt_or_prompts: SingletonPrompt | Sequence[SingletonPrompt],
-    ) -> Sequence[SingletonPrompt]: ...
-
-    @overload
-    def prompt_to_seq(  # type: ignore[misc]
-        self,
-        prompt_or_prompts: PromptType | Sequence[PromptType],
-    ) -> Sequence[PromptType]: ...
-
-    @overload
-    def prompt_to_seq(
-        self,
-        prompt_or_prompts: bytes | Sequence[bytes],
-    ) -> Sequence[bytes]: ...
-
-    def prompt_to_seq(
-        self,
-        prompt_or_prompts: PromptType | bytes | Sequence[PromptType | bytes],
-    ) -> Sequence[PromptType | bytes]:
-        if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
-            len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
-        ):
-            return [prompt_or_prompts]  # type: ignore[list-item]
-
-        return prompt_or_prompts  # type: ignore[return-value]
-
-    @overload
     def render_completion(
         self,
         prompt: SingletonPrompt | bytes,
@@ -128,10 +98,10 @@ class BaseRenderer(ABC):
         prompts_raw = list[SingletonPrompt | bytes]()
 
         if prompt_embeds is not None:  # embeds take higher priority
-            prompts_raw.extend(self.prompt_to_seq(prompt_embeds))
+            prompts_raw.extend(prompt_to_seq(prompt_embeds))
 
         if prompt_input is not None:
-            prompts_raw.extend(self.prompt_to_seq(prompt_input))
+            prompts_raw.extend(prompt_to_seq(prompt_input))
 
         if len(prompts_raw) == 0:
             raise ValueError("You must pass at least one prompt")
@@ -144,18 +114,6 @@ class BaseRenderer(ABC):
         prompt_embeds: bytes | list[bytes] | None = None,
     ) -> list[SingletonDictPrompt]:
         return self.render_completions(prompt_input, prompt_embeds)
-
-    def conversation_to_seq(
-        self,
-        conversation_or_conversations: Sequence["ChatCompletionMessageParam"]
-        | Sequence[list["ChatCompletionMessageParam"]],
-    ) -> Sequence[list["ChatCompletionMessageParam"]]:
-        if len(conversation_or_conversations) > 0 and is_list_of(
-            conversation_or_conversations, dict
-        ):
-            return [conversation_or_conversations]  # type: ignore[list-item]
-
-        return conversation_or_conversations  # type: ignore[return-value]
 
     @abstractmethod
     def render_messages(

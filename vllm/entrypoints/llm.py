@@ -74,7 +74,11 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import DecoderOnlyDictPrompt, DictPromptType
-from vllm.renderers.inputs.parse import get_prompt_components
+from vllm.renderers.inputs.parse import (
+    conversation_to_seq,
+    get_prompt_components,
+    prompt_to_seq,
+)
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
@@ -441,7 +445,7 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        prompts_seq = self.llm_engine.renderer.prompt_to_seq(prompts)
+        prompts_seq = prompt_to_seq(prompts)
 
         self._validate_and_add_requests(
             prompts=prompts_seq,
@@ -965,10 +969,8 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
-        renderer = self.llm_engine.renderer
-
         prompts = self._preprocess_chat(
-            renderer.conversation_to_seq(messages),
+            conversation_to_seq(messages),
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=chat_template_kwargs,
@@ -1064,8 +1066,6 @@ class LLM:
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
-        renderer = self.llm_engine.renderer
-
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
             io_processor_prompt = True
@@ -1110,7 +1110,7 @@ class LLM:
                 raise ValueError(msg)
 
         self._validate_and_add_requests(
-            prompts=renderer.prompt_to_seq(prompts),
+            prompts=prompt_to_seq(prompts),
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,

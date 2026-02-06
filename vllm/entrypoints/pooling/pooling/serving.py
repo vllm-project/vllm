@@ -35,6 +35,7 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.renderers.inputs.parse import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -105,7 +106,7 @@ class OpenAIServingPooling(OpenAIServing):
                 engine_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                engine_prompts = self.renderer.prompt_to_seq(engine_prompts)
+                engine_prompts = prompt_to_seq(engine_prompts)
 
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(

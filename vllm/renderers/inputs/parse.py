@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, NamedTuple
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, NamedTuple, overload
 
 from vllm.inputs import (
     PromptType,
@@ -20,6 +21,49 @@ from .protocol import (
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+
+@overload
+def prompt_to_seq(
+    prompt_or_prompts: SingletonPrompt | Sequence[SingletonPrompt],
+) -> Sequence[SingletonPrompt]: ...
+
+
+@overload
+def prompt_to_seq(  # type: ignore[misc]
+    prompt_or_prompts: PromptType | Sequence[PromptType],
+) -> Sequence[PromptType]: ...
+
+
+@overload
+def prompt_to_seq(
+    prompt_or_prompts: bytes | Sequence[bytes],
+) -> Sequence[bytes]: ...
+
+
+def prompt_to_seq(
+    prompt_or_prompts: PromptType | bytes | Sequence[PromptType | bytes],
+) -> Sequence[PromptType | bytes]:
+    if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
+        len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
+    ):
+        return [prompt_or_prompts]  # type: ignore[list-item]
+
+    return prompt_or_prompts  # type: ignore[return-value]
+
+
+def conversation_to_seq(
+    conversation_or_conversations: Sequence["ChatCompletionMessageParam"]
+    | Sequence[list["ChatCompletionMessageParam"]],
+) -> Sequence[list["ChatCompletionMessageParam"]]:
+    if len(conversation_or_conversations) > 0 and is_list_of(
+        conversation_or_conversations, dict
+    ):
+        return [conversation_or_conversations]  # type: ignore[list-item]
+
+    return conversation_or_conversations  # type: ignore[return-value]
 
 
 def parse_dec_only_prompt(prompt: PromptType | DictPromptType) -> DecoderOnlyDictPrompt:
