@@ -137,7 +137,6 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         # Process some request with length exceeding the sliding window
         outputs = llm.generate(["hi" * 1401], sampling_params)
         kv_params = outputs[0].kv_transfer_params
-        print("kv_params", kv_params)
 
         expected_num_remote_blocks = sw_size // block_size
         remote_block_ids = kv_params["remote_block_ids"]
