@@ -139,11 +139,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # For speculative decoding, we need to store the following buffers
         # for CUDA graph capture during decode
         if self.num_spec_tokens > 0:
-            self.decode_query_start_loc = torch.empty(
-                (self.decode_cudagraph_max_bs + 1,),
-                dtype=torch.int32,
-                device=device,
-            )
             self.decode_num_accepted_tokens = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -373,32 +368,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
+            padded_bs = metadata.num_reqs
             self.state_indices_tensor_d[: metadata.num_decodes].copy_(
                 state_indices_tensor_d, non_blocking=True
             )
-            state_indices_tensor_d = self.state_indices_tensor_d[
-                : metadata.num_decode_tokens
-            ]
+            state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
 
             if self.use_spec_decode:
                 assert query_start_loc_d is not None
                 assert num_accepted_tokens is not None
-                self.decode_query_start_loc[: metadata.num_decodes + 1].copy_(
-                    query_start_loc_d, non_blocking=True
-                )
-                query_start_loc_d = self.decode_query_start_loc[
-                    : metadata.num_decode_tokens + 1
-                ]  # TODO(ben): is this too large? How to handle padding here?
-                query_start_loc_d[metadata.num_decodes + 1 :] = query_start_loc_d[
-                    metadata.num_decodes
-                ]  # pad with last value
+                query_start_loc_d = query_start_loc_d[: padded_bs + 1]
                 self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
                 )
-                num_accepted_tokens = self.decode_num_accepted_tokens[
-                    : metadata.num_decode_tokens
-                ]
+                num_accepted_tokens = self.decode_num_accepted_tokens[:padded_bs]
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index
                 )
@@ -410,14 +394,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     block_idx_last_scheduled_token, non_blocking=True
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
 
                 self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
 
         return replace(
