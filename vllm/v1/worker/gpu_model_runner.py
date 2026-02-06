@@ -1260,9 +1260,6 @@ class GPUModelRunner(
         mm_budget = self.mm_budget
         assert mm_budget is not None
 
-        if not mm_budget.mm_max_toks_per_item:
-            return {}  # No tower modalities (embed-only mode)
-
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
