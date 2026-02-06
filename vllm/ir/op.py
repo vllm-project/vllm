@@ -177,6 +177,15 @@ class IrOp:
             if impl.supports_args is None or impl.supports_args(*args, **kwargs):
                 return impl
 
+            logger.debug(
+                "Skipping provider %s because it does not support "
+                "%s with args=%s kwargs=%s",
+                impl.provider,
+                self.name,
+                args,
+                kwargs,
+            )
+
         raise RuntimeError(
             "Priority set incorrectly: the last implementation must "
             "support all args (can be native). This is likely an internal bug"
