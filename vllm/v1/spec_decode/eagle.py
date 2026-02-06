@@ -26,6 +26,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
@@ -385,7 +386,7 @@ class SpecDecodeBaseProposer:
         token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
@@ -454,12 +455,20 @@ class SpecDecodeBaseProposer:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
         if self.supports_mm_inputs:
-            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+            mm_embeds, is_mm_embed, mm_modalities = (
+                mm_embed_inputs or (None, None, None))
 
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_ids[:num_tokens],
+            embed_kwargs: dict[str, object] = dict(
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
+            )
+            if mm_modalities is not None and supports_kw(
+                self.model.embed_input_ids, "modality_types"
+            ):
+                embed_kwargs["modality_types"] = mm_modalities
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
+                self.input_ids[:num_tokens],
+                **embed_kwargs,
             )
 
             input_ids = None

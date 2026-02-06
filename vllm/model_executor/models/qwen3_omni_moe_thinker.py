@@ -1800,6 +1800,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        modality_types: list[str] | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
@@ -1826,10 +1827,16 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
-        has_vision_embeddings = [
-            embeddings.shape[-1] != self.config.text_config.hidden_size
-            for embeddings in multimodal_embeddings
-        ]
+        if modality_types is not None:
+            has_vision_embeddings = [
+                m in ("image", "video") for m in modality_types
+            ]
+        else:
+            # Fallback for backwards compatibility
+            has_vision_embeddings = [
+                embeddings.shape[-1] != self.config.text_config.hidden_size
+                for embeddings in multimodal_embeddings
+            ]
         if self.visual.deepstack_visual_indexes is not None and any(
             has_vision_embeddings
         ):
@@ -1849,7 +1856,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 num_tokens = embeddings.shape[0]
 
                 # Vision embeddings
-                if embeddings.shape[-1] != self.config.text_config.hidden_size:
+                if has_vision_embeddings[index]:
                     visual_dim = embeddings.shape[-1] // (multiscale_len + 1)
                     multi_dim = visual_dim * multiscale_len
                     embeddings_main, embeddings_multiscale = torch.split(
