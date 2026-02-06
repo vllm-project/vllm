@@ -113,8 +113,10 @@ class DeepSeekV32ToolParser(ToolParser):
     def adjust_request(self, request):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
-            # Ensure tool call tokens (<tool_call>, </tool_call>) are not skipped
-            # during decoding. Even though they are not marked as special tokens,
+            # Ensure tool call tokens 
+            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # are not skippedduring decoding. 
+            # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in
             # transformers 5.x where decoding behavior may have changed.
             request.skip_special_tokens = False
