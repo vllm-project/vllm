@@ -2488,4 +2488,3 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
-
