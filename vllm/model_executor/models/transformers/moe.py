@@ -118,7 +118,7 @@ direct_register_custom_op(
 
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("5.0.1.dev0", "MoE models support")
+        self.check_version("5.2.0.dev0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
