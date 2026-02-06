@@ -7,7 +7,7 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Literal, TypeAlias, TypeVar, cast
+from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -37,7 +37,8 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationStreamResponse,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType
+from vllm.inputs.data import PromptType
+from vllm.inputs.parse import EncoderDecoderDictPrompt, parse_enc_dec_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
@@ -93,7 +94,7 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        self.task_type = task_type
+        self.task_type: Final = task_type
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
@@ -297,14 +298,9 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                if not (isinstance(prompt, dict) and "encoder_prompt" in prompt):
-                    raise VLLMValidationError(
-                        "Expected prompt to be an encoder-decoder prompt",
-                        parameter="prompt",
-                        value=type(prompt).__name__,
-                    )
+                prompt = parse_enc_dec_prompt(prompt)
 
-                prompt = self._preprocess_verbose_prompt(prompt)  # type: ignore[arg-type]
+                prompt = self._preprocess_verbose_prompt(prompt)
 
             prompts.append(prompt)
         return prompts, duration
@@ -312,19 +308,17 @@ class OpenAISpeechToText(OpenAIServing):
     def _repl_verbose_text(self, text: str):
         return text.replace("<|notimestamps|>", "<|0.00|>")
 
-    def _preprocess_verbose_prompt(self, prompt: ExplicitEncoderDecoderPrompt):
+    def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
 
-        if isinstance(dec_prompt, str):
-            prompt["decoder_prompt"] = self._repl_verbose_text(dec_prompt)
-        elif isinstance(dec_prompt, dict) and "prompt" in dec_prompt:
-            dec_prompt["prompt"] = self._repl_verbose_text(dec_prompt["prompt"])
-        else:
+        if not (isinstance(dec_prompt, dict) and "prompt" in dec_prompt):
             raise VLLMValidationError(
                 "Expected decoder_prompt to contain text",
                 parameter="decoder_prompt",
                 value=type(dec_prompt).__name__,
             )
+
+        dec_prompt["prompt"] = self._repl_verbose_text(dec_prompt["prompt"])
 
         return prompt
 
