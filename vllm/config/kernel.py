@@ -13,7 +13,7 @@ from vllm.utils.hashing import safe_hash
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
-    enable_flashinfer_autotune: bool | None = Field(default=None)
+    enable_flashinfer_autotune: bool = Field(default=None)
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     def compute_hash(self) -> str:

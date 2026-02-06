@@ -538,7 +538,7 @@ class EngineArgs:
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
-    enable_flashinfer_autotune: bool | None = get_field(
+    enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
     worker_cls: str = ParallelConfig.worker_cls
