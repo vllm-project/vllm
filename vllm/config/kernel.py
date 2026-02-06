@@ -33,3 +33,12 @@ class KernelConfig:
         factors: list[Any] = []
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator("enable_flashinfer_autotune", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialization is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
