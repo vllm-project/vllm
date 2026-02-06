@@ -39,7 +39,6 @@ struct KernelVecType<c10::BFloat16> {
   using v_load_vec_type = vec_op::BF16Vec16;
 };
 
-
 #elif defined(__powerpc64__)
 template <>
 struct KernelVecType<c10::BFloat16> {
