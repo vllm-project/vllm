@@ -12,7 +12,6 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
-from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -85,10 +84,6 @@ async def test_load(
     if async_scheduling and data_parallel_backend == "ray":
         # TODO(NickLucche) Re-enable when async scheduling is supported
         pytest.skip("Async scheduling is not supported with ray")
-    elif data_parallel_backend == "ray" and current_platform.is_rocm():
-        pytest.skip(
-            "Ray as the distributed executor backend is not supported with ROCm."
-        )
     stats_loggers = {}
 
     @dataclass
