@@ -1098,7 +1098,7 @@ class MultiModalEncDecInputs(MultiModalInputs):
 
     Note: Even text-only encoder-decoder models are currently implemented
     as multi-modal models for convenience.
-    (Example: https://github.com/neuralmagic/bart-plugin)
+    (Example: https://github.com/vllm-project/bart-plugin)
     """
 
     encoder_prompt_token_ids: list[int]
