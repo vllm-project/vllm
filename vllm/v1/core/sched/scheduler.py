@@ -1482,7 +1482,6 @@ class Scheduler(SchedulerInterface):
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
         If failed_kv is True, omits stop_reason (not available for failed KV loads).
-        Only valid EngineCoreOutput fields are included, with correct types.
         """
         output = EngineCoreOutput(
             request_id=request.request_id,
@@ -1491,7 +1490,7 @@ class Scheduler(SchedulerInterface):
             events=request.take_events(),
             trace_headers=request.trace_headers,
         )
-        if not failed_kv:
+        if failed_kv:
             output.num_cached_tokens = request.num_cached_tokens
         else:
             output.stop_reason = request.stop_reason
