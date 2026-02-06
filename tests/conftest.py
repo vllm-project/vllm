@@ -87,9 +87,6 @@ def use_aiter_if_available():
 
 use_aiter_if_available()
 
-
-# This environment variable must be set so ops will be registered.
-
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     from transformers.generation.utils import GenerateOutput
