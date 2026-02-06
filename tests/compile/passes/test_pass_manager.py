@@ -5,12 +5,12 @@ import copy
 import pytest
 import torch
 
-from vllm.compilation.inductor_pass import (
+from vllm.compilation.passes.inductor_pass import (
     CallableInductorPass,
     InductorPass,
     pass_context,
 )
-from vllm.compilation.pass_manager import PostGradPassManager
+from vllm.compilation.passes.pass_manager import PostGradPassManager
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.utils import Range
 

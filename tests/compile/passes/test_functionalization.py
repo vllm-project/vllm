@@ -5,12 +5,18 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import RMSNormQuantFusionPass
-from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from tests.compile.backend import TestBackend
+from tests.utils import TestFP8Layer
+from vllm.compilation.passes.fusion.act_quant_fusion import (
+    ActivationQuantFusionPass,
+)
+from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
@@ -25,9 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-
-from ..utils import TestFP8Layer
-from .backend import TestBackend
 
 TEST_FP8 = current_platform.supports_fp8()
 FP8_DTYPE = current_platform.fp8_dtype()

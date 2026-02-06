@@ -6,17 +6,19 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
+from tests.utils import TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.activation_quant_fusion import (
+from vllm.compilation.passes.fusion.act_quant_fusion import (
     FUSED_OPS,
     SILU_MUL_OP,
     ActivationQuantFusionPass,
 )
-from vllm.compilation.fusion import QUANT_OPS
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.fusion.rms_quant_fusion import QUANT_OPS
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -47,9 +49,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
-
-from ..utils import TestFP8Layer
-from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -100,7 +99,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, x: torch.Tensor, **kwargs):
         super().__init__()
-        from vllm.compilation.activation_quant_fusion import (
+        from vllm.compilation.passes.fusion.act_quant_fusion import (
             silu_and_mul_nvfp4_quant_supported,
         )
 
@@ -239,7 +238,7 @@ def test_fusion_silu_and_mul_quant(
     with set_current_vllm_config(config):
         fusion_passes = [ActivationQuantFusionPass(config)]
         if IS_AITER_FOUND:
-            from vllm.compilation.rocm_aiter_fusion import (
+            from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 

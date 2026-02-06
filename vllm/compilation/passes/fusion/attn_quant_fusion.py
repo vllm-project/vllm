@@ -22,11 +22,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
-from .fx_utils import is_func
-from .inductor_pass import enable_fake_mode
+from ..fx_utils import is_func
+from ..inductor_pass import enable_fake_mode
+from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherQuantFP8
-from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
 P = ParamSpec("P")

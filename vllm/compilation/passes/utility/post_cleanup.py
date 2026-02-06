@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from torch import fx
 
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from ..vllm_inductor_pass import VllmInductorPass
 
 
 class PostCleanupPass(VllmInductorPass):

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
@@ -170,7 +170,9 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
+        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():

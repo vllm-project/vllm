@@ -20,10 +20,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from .inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode
+from ..utility.noop_elimination import NoOpEliminationPass
+from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
-from .noop_elimination import NoOpEliminationPass
-from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 

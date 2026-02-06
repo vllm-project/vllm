@@ -6,14 +6,14 @@ import pytest
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
-from tests.utils import flat_product
+from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
-from vllm.compilation.fx_utils import find_op_nodes
-from vllm.compilation.matcher_utils import QUANT_OPS
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.fusion.attn_quant_fusion import ATTN_OP, AttnFusionPass
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
+from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -37,8 +37,6 @@ from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-from ..utils import TestFP8Layer
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8

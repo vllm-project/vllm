@@ -5,13 +5,17 @@ import pytest
 import torch
 
 from tests.compile.backend import TestBackend
-from vllm.compilation.matcher_utils import FLASHINFER_ROTARY_OP, RMS_OP, ROTARY_OP
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.qk_norm_rope_fusion import (
+from vllm.compilation.passes.fusion.matcher_utils import (
+    FLASHINFER_ROTARY_OP,
+    RMS_OP,
+    ROTARY_OP,
+)
+from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
     FUSED_QK_ROPE_OP,
     QKNormRoPEFusionPass,
 )
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,

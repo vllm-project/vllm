@@ -8,38 +8,39 @@ from torch import fx as fx
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
-from .post_cleanup import PostCleanupPass
 from .vllm_inductor_pass import VllmInductorPass
 
 if rocm_aiter_ops.is_enabled():
-    from vllm.compilation.rocm_aiter_fusion import (
+    from .fusion.rocm_aiter_fusion import (
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
     )
 
 if current_platform.is_cuda_alike():
-    from .activation_quant_fusion import ActivationQuantFusionPass
-    from .fusion import RMSNormQuantFusionPass
-    from .fusion_attn import AttnFusionPass
-    from .qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .sequence_parallelism import SequenceParallelismPass
+    from .fusion.act_quant_fusion import ActivationQuantFusionPass
+    from .fusion.attn_quant_fusion import AttnFusionPass
+    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
+    from .fusion.sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
-    from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+    from .fusion.collective_fusion import AsyncTPPass
 
-from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import (
     CustomGraphPass,
     InductorPass,
     get_pass_context,
 )
-from .noop_elimination import NoOpEliminationPass
+from .utility.fix_functionalization import FixFunctionalizationPass
+from .utility.noop_elimination import NoOpEliminationPass
 
 logger = init_logger(__name__)
 

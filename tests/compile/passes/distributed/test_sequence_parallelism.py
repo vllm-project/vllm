@@ -5,12 +5,14 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.fusion import RMSNormQuantFusionPass
-from vllm.compilation.fx_utils import find_auto_fn
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.sequence_parallelism import SequenceParallelismPass
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from tests.compile.backend import TestBackend
+from tests.utils import TestFP8Layer, multi_gpu_test
+from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
+from vllm.compilation.passes.fx_utils import find_auto_fn
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -33,9 +35,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-
-from ...utils import TestFP8Layer, multi_gpu_test
-from ..backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
