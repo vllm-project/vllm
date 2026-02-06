@@ -580,6 +580,7 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+    stream_interval_ms: int = SchedulerConfig.stream_interval_ms
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1159,6 +1160,9 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--stream-interval-ms", **scheduler_kwargs["stream_interval_ms"]
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1682,6 +1686,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            stream_interval_ms=self.stream_interval_ms,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

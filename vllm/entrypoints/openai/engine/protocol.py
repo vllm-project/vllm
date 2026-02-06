@@ -160,6 +160,8 @@ AnyResponseFormat: TypeAlias = (
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = True
     continuous_usage_stats: bool | None = False
+    stream_interval: int | None = None
+    stream_interval_ms: int | None = None
 
 
 class FunctionDefinition(OpenAIBaseModel):

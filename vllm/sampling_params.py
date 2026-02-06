@@ -243,6 +243,14 @@ class SamplingParams(
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
 
+    # Per-request stream interval overrides
+    stream_interval: int | None = None
+    """Per-request token-count stream interval override. Overrides the
+    global --stream-interval when set."""
+    stream_interval_ms: int | None = None
+    """Per-request time-based stream interval in milliseconds. Overrides
+    the global --stream-interval-ms when set."""
+
     # Fields used for bad words
     bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the

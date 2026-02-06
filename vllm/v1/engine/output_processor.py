@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -145,6 +146,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        stream_interval_ms: int = 0,
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
@@ -177,7 +179,9 @@ class RequestState:
 
         # Stream Interval
         self.stream_interval = stream_interval
+        self.stream_interval_ms = stream_interval_ms
         self.sent_tokens_offset = 0  # Offset of sent tokens
+        self.last_emit_time: float = 0.0
 
         # Streaming input queue
         self.streaming_input = stream_input
@@ -215,7 +219,11 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        stream_interval_ms: int = 0,
     ) -> "RequestState":
+        # Per-request overrides (from SamplingParams) with global fallback
+        effective_stream_interval = stream_interval
+        effective_stream_interval_ms = stream_interval_ms
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
                 tokenizer = None
@@ -232,6 +240,10 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
+            if sampling_params.stream_interval is not None:
+                effective_stream_interval = sampling_params.stream_interval
+            if sampling_params.stream_interval_ms is not None:
+                effective_stream_interval_ms = sampling_params.stream_interval_ms
         else:
             logprobs_processor = None
             detokenizer = None
@@ -262,7 +274,8 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
-            stream_interval=stream_interval,
+            stream_interval=effective_stream_interval,
+            stream_interval_ms=effective_stream_interval_ms,
             stream_input=request.resumable,
         )
 
@@ -282,20 +295,39 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        if self.stream_interval > 1:
+        has_token_interval = self.stream_interval > 1
+        has_time_interval = self.stream_interval_ms > 0
+
+        if has_token_interval or has_time_interval:
             assert self.detokenizer is not None
 
-            # Send output request only when
-            # 1. It has finished, or
-            # 2. It is the first token, or
-            # 3. It has reached the stream interval number of tokens
-            if not (
-                finished
-                or self.sent_tokens_offset == 0
-                or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
-                >= self.stream_interval
-            ):
-                return None
+            if finished or self.sent_tokens_offset == 0:
+                # Always emit on finish or first token
+                self.last_emit_time = time.monotonic()
+            else:
+                token_ok = (
+                    has_token_interval
+                    and len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+                    >= self.stream_interval
+                )
+                time_ok = (
+                    has_time_interval
+                    and (time.monotonic() - self.last_emit_time) * 1000
+                    >= self.stream_interval_ms
+                )
+
+                # When both are configured, emit on whichever comes first.
+                # When only one is configured, wait for that one.
+                if has_token_interval and has_time_interval:
+                    should_emit = token_ok or time_ok
+                elif has_token_interval:
+                    should_emit = token_ok
+                else:
+                    should_emit = time_ok
+
+                if not should_emit:
+                    return None
+                self.last_emit_time = time.monotonic()
 
             if self.output_kind == RequestOutputKind.DELTA:
                 # Send tokens from the offset in DELTA mode, otherwise all
@@ -419,10 +451,12 @@ class OutputProcessor:
         tokenizer: TokenizerLike | None,
         log_stats: bool,
         stream_interval: int = 1,
+        stream_interval_ms: int = 0,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
+        self.stream_interval_ms = stream_interval_ms
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
@@ -536,6 +570,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
+            stream_interval_ms=self.stream_interval_ms,
         )
         if self._requests_drained.is_set():
             self._requests_drained.clear()

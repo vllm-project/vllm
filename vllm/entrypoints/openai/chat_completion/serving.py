@@ -411,6 +411,16 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
+                    if request.stream and request.stream_options:
+                        if request.stream_options.stream_interval is not None:
+                            sampling_params.stream_interval = (
+                                request.stream_options.stream_interval
+                            )
+                        if request.stream_options.stream_interval_ms is not None:
+                            sampling_params.stream_interval_ms = (
+                                request.stream_options.stream_interval_ms
+                            )
+
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
