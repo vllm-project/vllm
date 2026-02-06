@@ -83,15 +83,17 @@ class ExllamaLinearKernel(MPLinearKernel):
             out_features = c.partition_weight_shape[1]
 
             if c.weight_type.has_bias():
-                # if the type has a bias we have to create a zeros tensor that
-                # contains the bias values repeated for each group (-1 due to
-                # a bug in the original GPTQ checkpoint format leading to
-                # exllama kernel adding 1 to the zero points during inference)
-                # Documentation of the bug can be found here:
-                #  https://garden.danieldk.eu/GPTQ-Checkpoint-Format
+                # GPTQv1: the exllama kernel adds 1 to zero points during
+                # inference (a bug in the original format), so we subtract 1
+                # here to compensate. GPTQv2 fixed this, so no offset needed.
+                # See: https://garden.danieldk.eu/GPTQ-Checkpoint-Format
+                zero_point_value = c.weight_type.bias
+                if c.checkpoint_format != "gptq_v2":
+                    zero_point_value -= 1
+
                 zeros = torch.full(
                     (groups, out_features),
-                    c.weight_type.bias - 1,
+                    zero_point_value,
                     dtype=torch.int32,
                     device=device,
                 )
