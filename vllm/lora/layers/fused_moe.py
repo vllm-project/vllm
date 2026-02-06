@@ -8,10 +8,6 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
@@ -47,11 +43,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
@@ -195,7 +188,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     curr_topk_ids,
                     num_tokens,
                     shrink_config["BLOCK_SIZE_M"],
-                    self.base_layer.local_num_experts,
+                    self.base_layer.global_num_experts,
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
@@ -794,11 +787,8 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
         BaseLayerWithLoRA.__init__(self)
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()

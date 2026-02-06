@@ -32,7 +32,10 @@ def mock_base_layer():
     """Create a mock FusedMoE base layer."""
     base_layer = MagicMock()
     base_layer.use_ep = False
+    base_layer.tp_size = 1
+    base_layer.tp_rank = 0
     base_layer.local_num_experts = 8
+    base_layer.global_num_experts = 8
     base_layer.hidden_size = 256
     base_layer.intermediate_size_per_partition = 512
     return base_layer
@@ -53,11 +56,6 @@ def mock_lora_config():
 def shared_outer_lora_layer(mock_base_layer, mock_lora_config):
     """Create a FusedMoEWithSharedOuterLoRA layer with weights initialized."""
     with patch(
-        "vllm.lora.layers.fused_moe.get_tensor_model_parallel_world_size",
-        return_value=1,
-    ), patch(
-        "vllm.lora.layers.fused_moe.get_tensor_model_parallel_rank", return_value=0
-    ), patch(
         "vllm.lora.layers.fused_moe._get_lora_device",
         return_value=torch.device(DEVICE),
     ), patch.object(
@@ -140,12 +138,6 @@ class TestLayerSelection:
         mock_base_layer.__class__ = FusedMoE
 
         with patch(
-            "vllm.lora.layers.fused_moe.get_tensor_model_parallel_world_size",
-            return_value=1,
-        ), patch(
-            "vllm.lora.layers.fused_moe.get_tensor_model_parallel_rank",
-            return_value=0,
-        ), patch(
             "vllm.lora.layers.fused_moe._get_lora_device",
             return_value=torch.device(DEVICE),
         ), patch.object(
@@ -349,3 +341,75 @@ class TestStrideZeroEquivalence:
         # All experts should see the same updated value
         for expert_id in range(16):
             assert torch.allclose(expanded[0, expert_id], storage[0, 0])
+
+
+class TestExpertParallel:
+    """Tests for Expert Parallel (EP) support in MoE LoRA layers."""
+
+    @pytest.fixture
+    def mock_ep_base_layer(self):
+        """Create a mock FusedMoE base layer configured for EP."""
+        base_layer = MagicMock()
+        base_layer.use_ep = True
+        base_layer.tp_size = 1
+        base_layer.tp_rank = 0
+        base_layer.local_num_experts = 8
+        base_layer.global_num_experts = 64
+        base_layer.hidden_size = 256
+        base_layer.intermediate_size_per_partition = 512
+        return base_layer
+
+    def test_fused_moe_with_lora_init_succeeds_with_ep(
+        self, mock_ep_base_layer
+    ):
+        """Test that FusedMoEWithLoRA initializes successfully with EP."""
+        with patch(
+            "vllm.lora.layers.fused_moe._get_lora_device",
+            return_value=torch.device(DEVICE),
+        ), patch.object(FusedMoEWithLoRA, "_inject_lora_into_fused_moe"):
+            layer = FusedMoEWithLoRA(mock_ep_base_layer)
+
+        assert layer.tp_size == 1
+        assert layer.tp_rank == 0
+
+    def test_shared_outer_lora_init_succeeds_with_ep(
+        self, mock_ep_base_layer
+    ):
+        """Test that FusedMoEWithSharedOuterLoRA initializes successfully with EP."""
+        with patch(
+            "vllm.lora.layers.fused_moe._get_lora_device",
+            return_value=torch.device(DEVICE),
+        ), patch.object(
+            FusedMoEWithSharedOuterLoRA, "_inject_lora_into_fused_moe"
+        ):
+            layer = FusedMoEWithSharedOuterLoRA(mock_ep_base_layer)
+
+        assert layer.tp_size == 1
+        assert layer.tp_rank == 0
+
+    def test_ep_weight_shapes_use_local_num_experts(
+        self, mock_ep_base_layer, mock_lora_config
+    ):
+        """Test that LoRA weight shapes use local_num_experts under EP."""
+        with patch(
+            "vllm.lora.layers.fused_moe._get_lora_device",
+            return_value=torch.device(DEVICE),
+        ), patch.object(
+            FusedMoEWithSharedOuterLoRA, "_inject_lora_into_fused_moe"
+        ):
+            layer = FusedMoEWithSharedOuterLoRA(mock_ep_base_layer)
+            layer.create_lora_weights(
+                mock_lora_config.max_loras, mock_lora_config, None
+            )
+
+        # Per-expert weights should use local_num_experts (8, not 64)
+        local_experts = mock_ep_base_layer.local_num_experts
+        w13_b_shape = layer.w13_lora_b_stacked[0].shape
+        assert w13_b_shape[1] == local_experts, (
+            f"Expected {local_experts} local experts, got {w13_b_shape[1]}"
+        )
+
+        w2_a_shape = layer.w2_lora_a_stacked[0].shape
+        assert w2_a_shape[1] == local_experts, (
+            f"Expected {local_experts} local experts, got {w2_a_shape[1]}"
+        )

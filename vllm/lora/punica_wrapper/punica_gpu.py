@@ -350,9 +350,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             num_tokens_post_pad,
             adapter_enabled,
             lora_ids,
+            expert_map,
         )
-        if expert_map is not None:
-            expert_ids = expert_map[expert_ids]
 
         return sorted_ids, expert_ids, num_tokens_post_pad
 
