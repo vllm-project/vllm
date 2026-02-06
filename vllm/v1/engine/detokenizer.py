@@ -115,18 +115,29 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        # accumulate pieces and join once.
         stop_check_offset = len(self.output_text)
-        pieces: list[str] = []
-        for new_token_id in new_token_ids:
+        if not new_token_ids:
+            # case like stop-terminated
+            pass
+        elif len(new_token_ids) == 1:
+            # common decode path
+            new_token_id = new_token_ids[0]
             self.token_ids.append(new_token_id)
             piece = self.decode_next(new_token_id)
-            pieces.append(piece)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset += len(piece)
+            self.output_text += piece
+        else:
+            # cases like speculative decoding, accumulate pieces and join once.
+            pieces: list[str] = []
+            for new_token_id in new_token_ids:
+                self.token_ids.append(new_token_id)
+                piece = self.decode_next(new_token_id)
+                pieces.append(piece)
+                if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
+                    stop_check_offset += len(piece)
 
-        if pieces:
             self.output_text += "".join(pieces)
 
         if skipped_stop_token_id is not None:
