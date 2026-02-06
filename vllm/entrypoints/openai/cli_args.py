@@ -333,13 +333,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     # drain shutdown only supported in single-process mode
     shutdown_mode = getattr(args, "shutdown_mode", "immediate")
     if shutdown_mode == "drain":
-        if getattr(args, "headless", False):
+        if args.headless:
             raise ValueError("--shutdown-mode=drain is not supported in headless mode")
-        if getattr(args, "api_server_count", 1) > 1:
+        if args.api_server_count is not None and args.api_server_count > 1:
             raise ValueError(
                 "--shutdown-mode=drain is not supported with --api-server-count > 1"
             )
-        if getattr(args, "data_parallel_size", 1) > 1:
+        if args.data_parallel_size > 1:
             raise ValueError(
                 "--shutdown-mode=drain is not supported with --data-parallel-size > 1"
             )
