@@ -534,6 +534,7 @@ steps:
   - tests/cuda
   commands:
     - pytest -v -s cuda/test_cuda_context.py
+    - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: Samplers Test # 56min
   timeout_in_minutes: 75

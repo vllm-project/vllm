@@ -87,33 +87,67 @@ def with_amdsmi_context(fn):
     return wrapper
 
 
+@with_amdsmi_context
+def _query_gcn_arch_from_amdsmi() -> str:
+    """Query GCN arch from amdsmi. Raises if not available."""
+    handles = amdsmi_get_processor_handles()
+    if handles:
+        asic_info = amdsmi_get_gpu_asic_info(handles[0])
+        # Use target_graphics_version which contains the gfx name
+        # e.g., 'gfx942' for MI300X/MI325X
+        target_gfx = asic_info.get("target_graphics_version", "")
+        if target_gfx:
+            return target_gfx
+    raise RuntimeError("amdsmi did not return valid GCN arch")
+
+
+@cache
+def _get_gcn_arch_via_amdsmi() -> str:
+    """
+    Get the GCN architecture name using amdsmi instead of torch.cuda.
+    This avoids initializing CUDA, which is important for Ray workers
+    that need to set CUDA_VISIBLE_DEVICES after importing vLLM.
+    """
+    try:
+        return _query_gcn_arch_from_amdsmi()
+    except Exception as e:
+        logger.debug("Failed to get GCN arch via amdsmi: %s", e)
+        logger.warning_once(
+            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
+            "This will initialize CUDA and may cause "
+            "issues if CUDA_VISIBLE_DEVICES is not set yet."
+        )
+    # Ultimate fallback: use torch.cuda (will initialize CUDA)
+    return torch.cuda.get_device_properties("cuda").gcnArchName
+
+
 @cache
 def on_gfx1x() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
 def on_mi3xx() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
 
 
 @cache
 def on_gfx9() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
 @cache
 def on_gfx942() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx942"])
 
 
 @cache
 def on_gfx950() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx950"])
 
 
@@ -129,7 +163,7 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
