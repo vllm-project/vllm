@@ -82,6 +82,13 @@ SPEC_DECODE_CONFIGS = [
         2,
         id="eagle-mla-deepseek",
     ),
+    pytest.param(
+        "Qwen/Qwen3-8B",
+        "z-lab/Qwen3-8B-DFlash-b16",
+        "dflash",
+        2,
+        id="dflash-qwen3",
+    ),
 ]
 
 

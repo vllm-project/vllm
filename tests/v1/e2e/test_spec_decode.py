@@ -554,10 +554,78 @@ def test_eagle_correctness(
 
         if method == "dflash":
             name2metric = {metric.name: metric for metric in spec_llm.get_metrics()}
+            n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
             n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
             n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+            assert n_drafts > 0
             assert n_draft_toks > 0
-            assert n_accepted_toks >= 0
+            assert 0 <= n_accepted_toks <= n_draft_toks
+
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
+def test_dflash_bs_gt1_correctness_and_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    attn_backend: str,
+):
+    if attn_backend == "TREE_ATTN":
+        pytest.skip("DFlash requires a non-TREE attention backend.")
+
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=32)
+    attention_config = {"backend": attn_backend}
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_MLA_DISABLE", "1")
+        if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+
+        ref_llm = LLM(
+            model="Qwen/Qwen3-8B",
+            max_model_len=2048,
+            attention_config=attention_config,
+        )
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+        spec_llm = LLM(
+            model="Qwen/Qwen3-8B",
+            speculative_config={
+                "method": "dflash",
+                "model": "z-lab/Qwen3-8B-DFlash-b16",
+                "num_speculative_tokens": 3,
+                "max_model_len": 2048,
+            },
+            max_model_len=2048,
+            max_num_seqs=8,  # Explicitly exercise batched drafting.
+            attention_config=attention_config,
+            disable_log_stats=False,
+        )
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+
+        matches = sum(
+            1
+            for ref_output, spec_output in zip(ref_outputs, spec_outputs)
+            if ref_output.outputs[0].text == spec_output.outputs[0].text
+        )
+        assert matches > int(0.6 * len(ref_outputs))
+
+        name2metric = {metric.name: metric for metric in spec_llm.get_metrics()}
+        n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
+        n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
+        n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+
+        assert n_drafts > 0
+        assert n_draft_toks > 0
+        assert n_draft_toks >= n_drafts
+        assert 0 <= n_accepted_toks <= n_draft_toks
+        assert 0.0 <= (n_accepted_toks / n_draft_toks) <= 1.0
+        assert (1.0 + (n_accepted_toks / n_drafts)) >= 1.0
 
         del spec_llm
         torch.cuda.empty_cache()

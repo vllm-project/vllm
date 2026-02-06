@@ -217,16 +217,7 @@ class DFlashProposer(EagleProposer):
             block_ids * block_size + (query_positions % block_size)
         ).reshape(-1)
 
-        original_slot_mapping = common_attn_metadata.slot_mapping
-        original_num_actual_tokens = common_attn_metadata.num_actual_tokens
-        original_max_query_len = common_attn_metadata.max_query_len
-        original_query_start_loc = common_attn_metadata.query_start_loc
-        original_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        original_max_seq_len = common_attn_metadata.max_seq_len
-        original_seq_lens = common_attn_metadata.seq_lens.clone()
-        original_seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-        original_num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
-        original_causal = common_attn_metadata.causal
+        metadata_snapshot = self._snapshot_common_attn_metadata(common_attn_metadata)
         try:
             # Build non-causal metadata for query tokens only.
             common_attn_metadata.slot_mapping = slot_mapping
@@ -284,18 +275,7 @@ class DFlashProposer(EagleProposer):
                 else:
                     last_hidden_states, _ = ret_hidden_states
         finally:
-            common_attn_metadata.slot_mapping = original_slot_mapping
-            common_attn_metadata.num_actual_tokens = original_num_actual_tokens
-            common_attn_metadata.max_query_len = original_max_query_len
-            common_attn_metadata.query_start_loc = original_query_start_loc
-            common_attn_metadata.query_start_loc_cpu = original_query_start_loc_cpu
-            common_attn_metadata.max_seq_len = original_max_seq_len
-            common_attn_metadata.seq_lens.copy_(original_seq_lens)
-            common_attn_metadata._seq_lens_cpu = original_seq_lens_cpu
-            common_attn_metadata._num_computed_tokens_cpu = (
-                original_num_computed_tokens_cpu
-            )
-            common_attn_metadata.causal = original_causal
+            self._restore_common_attn_metadata(common_attn_metadata, metadata_snapshot)
 
         # Skip the first query token (the sampled next token), and use mask slots.
         sample_hidden_states = last_hidden_states.view(
@@ -306,6 +286,43 @@ class DFlashProposer(EagleProposer):
         )
         logits = self.model.compute_logits(sample_hidden_states)
         return logits.argmax(dim=-1).view(batch_size, self.num_speculative_tokens)
+
+    @staticmethod
+    def _snapshot_common_attn_metadata(
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> dict[str, object]:
+        return {
+            "slot_mapping": common_attn_metadata.slot_mapping,
+            "num_actual_tokens": common_attn_metadata.num_actual_tokens,
+            "max_query_len": common_attn_metadata.max_query_len,
+            "query_start_loc": common_attn_metadata.query_start_loc,
+            "query_start_loc_cpu": common_attn_metadata.query_start_loc_cpu,
+            "max_seq_len": common_attn_metadata.max_seq_len,
+            "seq_lens": common_attn_metadata.seq_lens.clone(),
+            "seq_lens_cpu": common_attn_metadata._seq_lens_cpu,
+            "num_computed_tokens_cpu": common_attn_metadata._num_computed_tokens_cpu,
+            "causal": common_attn_metadata.causal,
+        }
+
+    @staticmethod
+    def _restore_common_attn_metadata(
+        common_attn_metadata: CommonAttentionMetadata,
+        metadata_snapshot: dict[str, object],
+    ) -> None:
+        common_attn_metadata.slot_mapping = metadata_snapshot["slot_mapping"]  # type: ignore[assignment]
+        common_attn_metadata.num_actual_tokens = metadata_snapshot["num_actual_tokens"]  # type: ignore[assignment]
+        common_attn_metadata.max_query_len = metadata_snapshot["max_query_len"]  # type: ignore[assignment]
+        common_attn_metadata.query_start_loc = metadata_snapshot["query_start_loc"]  # type: ignore[assignment]
+        common_attn_metadata.query_start_loc_cpu = metadata_snapshot[
+            "query_start_loc_cpu"
+        ]  # type: ignore[assignment]
+        common_attn_metadata.max_seq_len = metadata_snapshot["max_seq_len"]  # type: ignore[assignment]
+        common_attn_metadata.seq_lens.copy_(metadata_snapshot["seq_lens"])  # type: ignore[arg-type]
+        common_attn_metadata._seq_lens_cpu = metadata_snapshot["seq_lens_cpu"]  # type: ignore[assignment]
+        common_attn_metadata._num_computed_tokens_cpu = metadata_snapshot[
+            "num_computed_tokens_cpu"
+        ]  # type: ignore[assignment]
+        common_attn_metadata.causal = metadata_snapshot["causal"]  # type: ignore[assignment]
 
     def propose(
         self,
