@@ -110,10 +110,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             # Speculative decoding not supported with prefix caching,
             # so keep shape consistent with prefill buffer
+            # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,
-                    max_num_blocks,  # TODO(ben): why is this needed at all?
+                    max_num_blocks,
                 ),
                 dtype=torch.int32,
                 device=device,
