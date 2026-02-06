@@ -134,6 +134,47 @@ class ConfigSet:
 
         return config_set
 
+    def set_config(
+        self, platform: str, config_key: str, config: "helion.Config"
+    ) -> None:
+        """
+        Set a config for a specific platform and config key.
+
+        This is useful for autotuning where we want to add configs one at a time.
+
+        Args:
+            platform: GPU platform identifier (e.g., "h100", "a100")
+            config_key: Configuration key (e.g., "batch_32_hidden_4096")
+            config: Helion config to store
+        """
+        platform = platform.lower()
+        if platform not in self._configs:
+            self._configs[platform] = {}
+        self._configs[platform][config_key] = config
+        logger.debug(
+            "Set config for kernel '%s': platform='%s', key='%s'",
+            self._kernel_name,
+            platform,
+            config_key,
+        )
+
+    def has_config(self, platform: str, config_key: str) -> bool:
+        """
+        Check if a config exists for the given platform and config key.
+
+        Args:
+            platform: GPU platform identifier
+            config_key: Configuration key
+
+        Returns:
+            True if the config exists, False otherwise
+        """
+        platform = platform.lower()
+        platform_dict = self._configs.get(platform)
+        if platform_dict is None:
+            return False
+        return config_key in platform_dict
+
 
 class ConfigManager:
     """File-level configuration management for Helion kernels (global singleton)."""
@@ -196,6 +237,23 @@ class ConfigManager:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         return self._base_dir
 
+    def ensure_base_dir_writable(self) -> None:
+        """
+        Ensure the base directory exists and is writable.
+
+        Raises:
+            OSError: If the directory cannot be created or is not writable
+        """
+        self.ensure_base_dir_exists()
+        test_file = self._base_dir / ".write_test"
+        try:
+            test_file.write_text("test")
+            test_file.unlink()
+        except OSError as e:
+            raise OSError(
+                f"Config directory '{self._base_dir}' is not writable: {e}"
+            ) from e
+
     def load_config_set(self, kernel_name: str) -> ConfigSet:
         config_path = self.get_config_file_path(kernel_name)
         if not config_path.exists():
@@ -229,3 +287,45 @@ class ConfigManager:
 
         logger.info("Saved config to: %s", config_path)
         return config_path
+
+    def save_configs(
+        self,
+        kernel_name: str,
+        platform: str,
+        configs: dict[str, "helion.Config"],
+    ) -> Path:
+        """
+        Save multiple configs for a kernel and platform.
+
+        Args:
+            kernel_name: Name of the kernel
+            platform: GPU platform identifier (e.g., "h100", "a100")
+            configs: Dictionary mapping config keys to Helion configs
+
+        Returns:
+            Path to the saved config file
+        """
+        # Load existing config set or create new one
+        config_set = self.load_config_set(kernel_name)
+
+        # Add all configs
+        for config_key, config in configs.items():
+            config_set.set_config(platform, config_key, config)
+
+        # Save the updated config set
+        return self.save_config_set(config_set)
+
+    def config_exists(self, kernel_name: str, platform: str, config_key: str) -> bool:
+        """
+        Check if a config exists for the given kernel, platform, and config key.
+
+        Args:
+            kernel_name: Name of the kernel
+            platform: GPU platform identifier
+            config_key: Configuration key
+
+        Returns:
+            True if the config exists, False otherwise
+        """
+        config_set = self.load_config_set(kernel_name)
+        return config_set.has_config(platform, config_key)
