@@ -107,6 +107,7 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
+    extract_prompt_len,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -249,7 +250,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: PromptType,
+        prompt: TokPrompt,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -276,17 +277,9 @@ class OpenAIServing:
         if isinstance(prompt, dict) and "encoder_prompt" in prompt:
             raise NotImplementedError("Encoder-decoder prompt not supported")
 
-        prompt_text: str | None
-        prompt_token_ids: list[int]
-        multi_modal_data: MultiModalDataDict | None
-        if isinstance(prompt, str):
-            prompt_text = prompt
-            prompt_token_ids = []
-            multi_modal_data = None
-        else:
-            prompt_text = prompt.get("prompt")  # type: ignore
-            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
-            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+        prompt_text: str | None = prompt.get("prompt")  # type: ignore
+        prompt_token_ids: list[int] = prompt.get("prompt_token_ids", [])  # type: ignore
+        multi_modal_data: MultiModalDataDict | None = prompt.get("multi_modal_data")  # type: ignore
 
         mm_processor_kwargs: dict[str, Any] | None = None
 
@@ -1062,11 +1055,14 @@ class OpenAIServing:
 
         return conversation, [engine_prompt]
 
-    def _extract_prompt_components(self, prompt: TokPrompt):
+    def _extract_prompt_components(self, prompt: object):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: TokPrompt):
+    def _extract_prompt_text(self, prompt: object):
         return self._extract_prompt_components(prompt).text
+
+    def _extract_prompt_len(self, prompt: object):
+        return extract_prompt_len(self.model_config, prompt)
 
     async def _render_next_turn(
         self,
@@ -1178,7 +1174,7 @@ class OpenAIServing:
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
                     context.request,
-                    engine_prompt,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
                 )
 
@@ -1200,9 +1196,9 @@ class OpenAIServing:
 
         self.request_logger.log_inputs(
             request_id,
-            components.prompt,
-            components.prompt_token_ids,
-            components.prompt_embeds,
+            components.text,
+            components.token_ids,
+            components.embeds,
             params=params,
             lora_request=lora_request,
         )

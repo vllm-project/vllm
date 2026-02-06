@@ -117,7 +117,6 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
-from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -296,7 +295,7 @@ class OpenAIServingResponses(OpenAIServing):
         engine_prompt: TokPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = get_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_prompt)
         if self.max_model_len <= prompt_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
@@ -443,7 +442,7 @@ class OpenAIServingResponses(OpenAIServing):
                 default_max_tokens = get_max_tokens(
                     self.max_model_len,
                     request,
-                    engine_prompt,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
                 )
 

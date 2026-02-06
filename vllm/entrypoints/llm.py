@@ -446,20 +446,15 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        prompts_seq = prompt_to_seq(prompts)
-
-        self._validate_and_add_requests(
-            prompts=prompts_seq,
+        outputs = self._validate_and_run_requests(
+            prompts=prompt_to_seq(prompts),
             params=sampling_params,
             use_tqdm=use_tqdm,
-            lora_request=self._get_modality_specific_lora_reqs(
-                prompts_seq, lora_request
-            ),
+            lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
@@ -969,6 +964,15 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError(
+                "LLM.chat() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model."
+            )
+
         prompts = self._preprocess_chat(
             conversation_to_seq(messages),
             chat_template=chat_template,
@@ -981,13 +985,18 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-        return self.generate(
-            prompts,
-            sampling_params=sampling_params,
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        outputs = self._validate_and_run_requests(
+            prompts=prompts,
+            params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
         )
+
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def encode(
         self,
@@ -1109,15 +1118,13 @@ class LLM:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise ValueError(msg)
 
-        self._validate_and_add_requests(
+        outputs = self._validate_and_run_requests(
             prompts=prompt_to_seq(prompts),
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
         )
-
-        outputs = self._run_engine(use_tqdm=use_tqdm)
 
         model_outputs = self.engine_class.validate_outputs(
             outputs, PoolingRequestOutput
@@ -1469,14 +1476,13 @@ class LLM:
 
             prompts.append(engine_prompt)
 
-        self._validate_and_add_requests(
+        outputs = self._validate_and_run_requests(
             prompts=prompts,
             params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
         items = self.engine_class.validate_outputs(outputs, PoolingRequestOutput)
 
         return [ScoringRequestOutput.from_base(item) for item in items]
@@ -1672,6 +1678,30 @@ class LLM:
             This method is only available with the V1 LLM engine.
         """
         return self.llm_engine.get_metrics()
+
+    def _validate_and_run_requests(
+        self,
+        prompts: Sequence[PromptType],
+        params: SamplingParams
+        | Sequence[SamplingParams]
+        | PoolingParams
+        | Sequence[PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ):
+        self._validate_and_add_requests(
+            prompts=prompts,
+            params=params,
+            use_tqdm=use_tqdm,
+            lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+        )
+
+        return self._run_engine(use_tqdm=use_tqdm)
 
     def _validate_and_add_requests(
         self,

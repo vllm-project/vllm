@@ -14,6 +14,7 @@ from vllm.inputs import (
     TextPrompt,
     TokensPrompt,
 )
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import is_list_of
 
 if TYPE_CHECKING:
@@ -230,4 +231,17 @@ def extract_prompt_components(
         text=target_prompt.get("prompt"),
         token_ids=target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
         embeds=target_prompt.get("prompt_embeds"),
+    )
+
+
+def extract_prompt_len(model_config: "ModelConfig", prompt: object):
+    target_prompt = (
+        parse_enc_dec_prompt(prompt)["encoder_prompt"]
+        if model_config.is_encoder_decoder
+        else parse_dec_only_prompt(prompt)
+    )
+
+    return length_from_prompt_token_ids_or_embeds(
+        target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        target_prompt.get("prompt_embeds"),
     )

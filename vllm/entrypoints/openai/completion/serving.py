@@ -163,10 +163,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = self._extract_prompt_text(engine_prompt)
 
                 max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    prompt=engine_prompt,
-                    default_sampling_params=self.default_sampling_params,
+                    self.max_model_len,
+                    request,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams

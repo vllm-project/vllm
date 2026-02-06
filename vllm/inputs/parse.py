@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 
-from .data import EmbedsPrompt, ProcessorInputs, SingletonInputs, TokensPrompt
+from .data import ProcessorInputs, SingletonInputs
 
 
 def split_enc_dec_inputs(
@@ -16,10 +15,3 @@ def split_enc_dec_inputs(
         )
 
     return None, inputs
-
-
-def get_prompt_len(prompt: TokensPrompt | EmbedsPrompt):
-    return length_from_prompt_token_ids_or_embeds(
-        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
-        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
-    )
