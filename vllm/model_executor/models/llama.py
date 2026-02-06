@@ -54,6 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    kv_cache_scale_loader,
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
@@ -456,17 +457,15 @@ class LlamaModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
+            load_kv_cache_scale_completed, loaded_params = kv_cache_scale_loader(
+                self.quant_config,
+                name,
+                params_dict,
+                loaded_weight,
+                default_weight_loader,
+                loaded_params,
+            )
+            if load_kv_cache_scale_completed:
                 continue
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.
