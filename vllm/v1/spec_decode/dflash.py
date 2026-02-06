@@ -22,6 +22,11 @@ class DFlashProposer(EagleProposer):
         super().__init__(vllm_config=vllm_config, device=device, runner=runner)
         self.runtime_mode = self._get_dflash_runtime_mode_from_config()
         self.mask_token_id = self._resolve_mask_token_id_from_config()
+        # Reused in block_drafting to avoid per-step tiny allocations.
+        self._block_drafting_query_offsets: torch.Tensor | None = None
+        self._query_start_loc_buffer: torch.Tensor | None = None
+        self._query_start_loc_cpu_arange: torch.Tensor | None = None
+        self._query_start_loc_cpu_buffer: torch.Tensor | None = None
 
     def _get_dflash_runtime_mode_from_config(self) -> str:
         dflash_config = getattr(self.draft_model_config.hf_config, "dflash_config", {})
@@ -187,16 +192,15 @@ class DFlashProposer(EagleProposer):
         num_kv_tokens = num_context_tokens + num_query_tokens_total
 
         query_positions = (
-            torch.arange(
-                num_query_tokens,
+            self._get_block_drafting_query_offsets(
+                num_query_tokens=num_query_tokens,
                 device=target_positions.device,
                 dtype=target_positions.dtype,
-            ).view(1, -1)
+            )
             + last_positions.view(-1, 1)
             + 1
         )
         query_positions_flat = query_positions.reshape(-1)
-        position_ids = torch.cat([target_positions, query_positions_flat], dim=0)
 
         block_size = attn_metadata_builder.kv_cache_spec.block_size
         block_table_tensor = getattr(common_attn_metadata, "block_table_tensor", None)
@@ -217,21 +221,32 @@ class DFlashProposer(EagleProposer):
             block_ids * block_size + (query_positions % block_size)
         ).reshape(-1)
 
-        metadata_snapshot = self._snapshot_common_attn_metadata(common_attn_metadata)
+        original_slot_mapping = common_attn_metadata.slot_mapping
+        original_num_actual_tokens = common_attn_metadata.num_actual_tokens
+        original_max_query_len = common_attn_metadata.max_query_len
+        original_query_start_loc = common_attn_metadata.query_start_loc
+        original_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        original_max_seq_len = common_attn_metadata.max_seq_len
+        original_seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        original_num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+        original_causal = common_attn_metadata.causal
+        seq_lens_updated = False
         try:
             # Build non-causal metadata for query tokens only.
             common_attn_metadata.slot_mapping = slot_mapping
             common_attn_metadata.num_actual_tokens = num_query_tokens_total
             common_attn_metadata.max_query_len = num_query_tokens
-            common_attn_metadata.query_start_loc = (
-                self.arange[: batch_size + 1] * num_query_tokens
+            common_attn_metadata.query_start_loc = self._get_query_start_loc(
+                batch_size=batch_size,
+                num_query_tokens=num_query_tokens,
             )
-            common_attn_metadata.query_start_loc_cpu = (
-                torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
-                * num_query_tokens
+            common_attn_metadata.query_start_loc_cpu = self._get_query_start_loc_cpu(
+                batch_size=batch_size,
+                num_query_tokens=num_query_tokens,
             )
-            common_attn_metadata.max_seq_len += num_query_tokens
-            common_attn_metadata.seq_lens += num_query_tokens
+            common_attn_metadata.max_seq_len = original_max_seq_len + num_query_tokens
+            common_attn_metadata.seq_lens.add_(num_query_tokens)
+            seq_lens_updated = True
             common_attn_metadata._seq_lens_cpu = None
             common_attn_metadata._num_computed_tokens_cpu = None
             common_attn_metadata.causal = False
@@ -243,14 +258,16 @@ class DFlashProposer(EagleProposer):
                 raise NotImplementedError(
                     "DFlash block_drafting requires non-causal attention metadata."
                 )
-            per_layer_attn_metadata = {
-                layer_name: attn_metadata for layer_name in self.attn_layer_names
-            }
+            per_layer_attn_metadata = dict.fromkeys(
+                self.attn_layer_names, attn_metadata
+            )
 
             # Query input is [next_token, mask, mask, ...].
             self.input_ids[:num_query_tokens_total].fill_(self.mask_token_id)
             self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
-            self._set_positions(num_kv_tokens, position_ids)
+            positions = self._get_positions(num_kv_tokens)
+            positions[:num_context_tokens] = target_positions
+            positions[num_context_tokens:num_kv_tokens] = query_positions_flat
             self.hidden_states[:num_context_tokens] = target_hidden_states
 
             # NOTE: block_drafting currently runs in eager mode to avoid
@@ -266,7 +283,7 @@ class DFlashProposer(EagleProposer):
             ):
                 ret_hidden_states = self.model(
                     input_ids=self.input_ids[:num_query_tokens_total],
-                    positions=self._get_positions(num_kv_tokens),
+                    positions=positions,
                     hidden_states=self.hidden_states[:num_context_tokens],
                     inputs_embeds=None,
                 )
@@ -275,7 +292,19 @@ class DFlashProposer(EagleProposer):
                 else:
                     last_hidden_states, _ = ret_hidden_states
         finally:
-            self._restore_common_attn_metadata(common_attn_metadata, metadata_snapshot)
+            common_attn_metadata.slot_mapping = original_slot_mapping
+            common_attn_metadata.num_actual_tokens = original_num_actual_tokens
+            common_attn_metadata.max_query_len = original_max_query_len
+            common_attn_metadata.query_start_loc = original_query_start_loc
+            common_attn_metadata.query_start_loc_cpu = original_query_start_loc_cpu
+            common_attn_metadata.max_seq_len = original_max_seq_len
+            if seq_lens_updated:
+                common_attn_metadata.seq_lens.sub_(num_query_tokens)
+            common_attn_metadata._seq_lens_cpu = original_seq_lens_cpu
+            common_attn_metadata._num_computed_tokens_cpu = (
+                original_num_computed_tokens_cpu
+            )
+            common_attn_metadata.causal = original_causal
 
         # Skip the first query token (the sampled next token), and use mask slots.
         sample_hidden_states = last_hidden_states.view(
@@ -287,42 +316,67 @@ class DFlashProposer(EagleProposer):
         logits = self.model.compute_logits(sample_hidden_states)
         return logits.argmax(dim=-1).view(batch_size, self.num_speculative_tokens)
 
-    @staticmethod
-    def _snapshot_common_attn_metadata(
-        common_attn_metadata: CommonAttentionMetadata,
-    ) -> dict[str, object]:
-        return {
-            "slot_mapping": common_attn_metadata.slot_mapping,
-            "num_actual_tokens": common_attn_metadata.num_actual_tokens,
-            "max_query_len": common_attn_metadata.max_query_len,
-            "query_start_loc": common_attn_metadata.query_start_loc,
-            "query_start_loc_cpu": common_attn_metadata.query_start_loc_cpu,
-            "max_seq_len": common_attn_metadata.max_seq_len,
-            "seq_lens": common_attn_metadata.seq_lens.clone(),
-            "seq_lens_cpu": common_attn_metadata._seq_lens_cpu,
-            "num_computed_tokens_cpu": common_attn_metadata._num_computed_tokens_cpu,
-            "causal": common_attn_metadata.causal,
-        }
+    def _get_block_drafting_query_offsets(
+        self,
+        num_query_tokens: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        query_offsets = getattr(self, "_block_drafting_query_offsets", None)
+        if (
+            query_offsets is None
+            or query_offsets.shape[1] != num_query_tokens
+            or query_offsets.device != device
+            or query_offsets.dtype != dtype
+        ):
+            query_offsets = torch.arange(
+                num_query_tokens,
+                device=device,
+                dtype=dtype,
+            ).view(1, -1)
+            self._block_drafting_query_offsets = query_offsets
+        return query_offsets
 
-    @staticmethod
-    def _restore_common_attn_metadata(
-        common_attn_metadata: CommonAttentionMetadata,
-        metadata_snapshot: dict[str, object],
-    ) -> None:
-        common_attn_metadata.slot_mapping = metadata_snapshot["slot_mapping"]  # type: ignore[assignment]
-        common_attn_metadata.num_actual_tokens = metadata_snapshot["num_actual_tokens"]  # type: ignore[assignment]
-        common_attn_metadata.max_query_len = metadata_snapshot["max_query_len"]  # type: ignore[assignment]
-        common_attn_metadata.query_start_loc = metadata_snapshot["query_start_loc"]  # type: ignore[assignment]
-        common_attn_metadata.query_start_loc_cpu = metadata_snapshot[
-            "query_start_loc_cpu"
-        ]  # type: ignore[assignment]
-        common_attn_metadata.max_seq_len = metadata_snapshot["max_seq_len"]  # type: ignore[assignment]
-        common_attn_metadata.seq_lens.copy_(metadata_snapshot["seq_lens"])  # type: ignore[arg-type]
-        common_attn_metadata._seq_lens_cpu = metadata_snapshot["seq_lens_cpu"]  # type: ignore[assignment]
-        common_attn_metadata._num_computed_tokens_cpu = metadata_snapshot[
-            "num_computed_tokens_cpu"
-        ]  # type: ignore[assignment]
-        common_attn_metadata.causal = metadata_snapshot["causal"]  # type: ignore[assignment]
+    def _get_query_start_loc(
+        self,
+        batch_size: int,
+        num_query_tokens: int,
+    ) -> torch.Tensor:
+        query_start_loc_buffer = getattr(self, "_query_start_loc_buffer", None)
+        if query_start_loc_buffer is None:
+            query_start_loc_buffer = torch.empty_like(self.arange)
+            self._query_start_loc_buffer = query_start_loc_buffer
+        query_start_loc = query_start_loc_buffer[: batch_size + 1]
+        query_start_loc.copy_(self.arange[: batch_size + 1])
+        query_start_loc.mul_(num_query_tokens)
+        return query_start_loc
+
+    def _get_query_start_loc_cpu(
+        self,
+        batch_size: int,
+        num_query_tokens: int,
+    ) -> torch.Tensor:
+        query_start_loc_cpu_arange = getattr(self, "_query_start_loc_cpu_arange", None)
+        if (
+            query_start_loc_cpu_arange is None
+            or query_start_loc_cpu_arange.shape[0] < batch_size + 1
+        ):
+            query_start_loc_cpu_arange = torch.from_numpy(self.token_arange_np)
+            self._query_start_loc_cpu_arange = query_start_loc_cpu_arange
+
+        query_start_loc_cpu_buffer = getattr(self, "_query_start_loc_cpu_buffer", None)
+        if (
+            query_start_loc_cpu_buffer is None
+            or query_start_loc_cpu_buffer.shape[0] < batch_size + 1
+            or query_start_loc_cpu_buffer.dtype != query_start_loc_cpu_arange.dtype
+        ):
+            query_start_loc_cpu_buffer = torch.empty_like(query_start_loc_cpu_arange)
+            self._query_start_loc_cpu_buffer = query_start_loc_cpu_buffer
+
+        query_start_loc_cpu = query_start_loc_cpu_buffer[: batch_size + 1]
+        query_start_loc_cpu.copy_(query_start_loc_cpu_arange[: batch_size + 1])
+        query_start_loc_cpu.mul_(num_query_tokens)
+        return query_start_loc_cpu
 
     def propose(
         self,
