@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: E501
 """
 This example shows how to use vLLM for running offline inference with
 vision language reranker models for multimodal scoring tasks.
@@ -24,8 +23,9 @@ TEMPLATE_HOME = Path(__file__).parent / "template"
 
 query = "A woman playing with her dog on a beach at sunset."
 document = (
-    "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
-    "as the dog offers its paw in a heartwarming display of companionship and trust."
+    "A woman shares a joyful moment with her golden retriever on a sun-drenched "
+    "beach at sunset, as the dog offers its paw in a heartwarming display of "
+    "companionship and trust."
 )
 image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
 video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
