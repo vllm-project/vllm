@@ -24,9 +24,12 @@ class Model(nn.Module):
         x1 = x + 2.0
         x2 = ops.rms_norm(x1, self.weight, 1e-5)
         x3 = x2 * 5.0
+        # no weight
+        x4 = ops.rms_norm(x3, None, 1e-5)
+        x5 = x4 - 1.0
         # dispatch to native due to variance_size parameter
-        x4 = ops.rms_norm(x3, self.weight, 1e-5, self.hidden_size // 2)
-        return x4 + 3.0
+        x6 = ops.rms_norm(x5, self.weight, 1e-5, self.hidden_size // 2)
+        return x6 + 3.0
 
 
 @pytest.mark.parametrize("rms_provider", ops.rms_norm.supported_providers())
@@ -48,9 +51,10 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
         output_unlowered = compiled_unlowered_model(x)
 
     selected = lowering_pass.selected_impls["rms_norm"]
-    assert len(selected) == 2
+    assert len(selected) == 3
     assert selected["rms_norm"] == rms_provider
-    assert selected["rms_norm_1"] == "native"
+    assert selected["rms_norm_1"] == rms_provider
+    assert selected["rms_norm_2"] == "native"
 
     # TODO remove print
     backend.print_graphs()
