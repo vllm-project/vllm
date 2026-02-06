@@ -783,7 +783,6 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
     "openai-audio": async_request_openai_audio,
-    "vllm-pooling": async_request_vllm_pooling,
     "openai-embeddings": async_request_openai_embeddings,
     "openai-embeddings-chat": async_request_openai_embeddings_chat,
     "openai-embeddings-clip": async_request_openai_embeddings_clip,
@@ -793,6 +792,7 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
     # (Infinity embedding server does not support vlm2vec)
     "vllm-rerank": async_request_vllm_rerank,
+    "vllm-pooling": async_request_vllm_pooling,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

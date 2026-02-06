@@ -1520,7 +1520,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--skip-tokenizer-init",
-        type=bool,
+        action="store_true",
         default=False,
         help="Skip initialization of tokenizer and detokenizer",
     )
