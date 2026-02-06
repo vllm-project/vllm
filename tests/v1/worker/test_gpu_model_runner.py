@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup
@@ -1237,3 +1238,33 @@ def test_is_supported_dflash_metadata_builder():
     assert not GPUModelRunner._is_supported_dflash_metadata_builder(
         "GDNAttentionMetadataBuilder"
     )
+
+
+def test_raise_if_unsupported_dflash_backend_noop_for_non_dflash():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(method="eagle3")
+    runner._raise_if_unsupported_dflash_backend()
+
+
+def test_raise_if_unsupported_dflash_backend_accepts_supported_builder():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(method="dflash")
+    runner.drafter = DFlashProposer.__new__(DFlashProposer)
+    builder = type("FlashAttentionMetadataBuilder", (), {})()
+    runner.drafter._get_attention_metadata_builder = lambda: builder  # type: ignore[attr-defined]
+
+    runner._raise_if_unsupported_dflash_backend()
+
+
+def test_raise_if_unsupported_dflash_backend_rejects_unsupported_builder():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(method="dflash")
+    runner.drafter = DFlashProposer.__new__(DFlashProposer)
+    builder = type("GDNAttentionMetadataBuilder", (), {})()
+    runner.drafter._get_attention_metadata_builder = lambda: builder  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        NotImplementedError,
+        match="non-causal drafting support",
+    ):
+        runner._raise_if_unsupported_dflash_backend()
