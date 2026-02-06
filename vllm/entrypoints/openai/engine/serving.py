@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-import sys
 import time
-import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -38,7 +36,6 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
@@ -62,6 +59,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranslationRequest,
 )
+from vllm.entrypoints.openai.utils import create_error_response
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -94,7 +92,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
@@ -645,56 +643,16 @@ class OpenAIServing:
     def create_error_response(
         self,
         message: str | Exception,
-        err_type: str = "BadRequestError",
+        err_type: str | None = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
-                status_code = HTTPStatus.NOT_IMPLEMENTED
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
-
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=sanitize_message(message),
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
+        return create_error_response(
+            message=message,
+            err_type=err_type,
+            status_code=status_code,
+            param=param,
+            log_error_stack=self.log_error_stack,
         )
 
     def create_streaming_error_response(

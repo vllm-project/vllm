@@ -60,10 +60,13 @@ def get_invocation_types(supported_tasks: tuple["SupportedTask", ...]):
 
     if "classify" in supported_tasks:
         from vllm.entrypoints.pooling.classify.api_router import (
-            classify,
             create_classify,
         )
         from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+        from vllm.entrypoints.pooling.classify.serving import ServingClassification
+
+        def classify(request: Request) -> ServingClassification | None:
+            return request.app.state.openai_serving_classification
 
         INVOCATION_TYPES += [
             (ClassificationRequest, (classify, create_classify)),
