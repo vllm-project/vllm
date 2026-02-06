@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -37,6 +38,7 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
+    @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:

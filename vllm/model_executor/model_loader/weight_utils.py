@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
 )
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -443,6 +444,7 @@ def download_gguf(
     return local_files[0]
 
 
+@instrument(span_name="Download weights - HF")
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,
