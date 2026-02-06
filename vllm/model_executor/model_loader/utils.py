@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
@@ -162,7 +162,7 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
                 cpu_data = p.data.to(device="cpu")
                 if use_pin_memory:
                     cpu_data = cpu_data.pin_memory()
-                p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+                p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 
 
