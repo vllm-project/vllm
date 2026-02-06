@@ -19,11 +19,12 @@ import pytest
 import pytest_asyncio
 
 from vllm import SamplingParams
+from vllm.inputs import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
+from vllm.v1.engine.async_llm import AsyncLLM
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
