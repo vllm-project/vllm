@@ -107,8 +107,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # Now check the matches
         for match_name in matches_check:
+            # AR+RMS fusion applies to small batch ranges only, SP applies to
+            # large batch ranges only. With 2 compile ranges, each activates
+            # on exactly 1 range.
+            # Note: async_tp shares the same log pattern as ar_rms_fusion
+            # (collective_fusion.py), so they get the same matches.
             num_ranges_activated = (
-                1 if match_name == "ar_rms_fusion" else num_compile_ranges
+                1
+                if match_name in ("ar_rms_fusion", "sequence_parallel")
+                and num_compile_ranges == 2
+                else num_compile_ranges
             )
             n_expected = tp_size * num_ranges_activated
 
@@ -135,6 +143,22 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting at least {expected_matches - matches.ar_rms_fusion} "
                     f"where ar+rms+quant was activated"
                 )
+            elif (
+                match_name == "async_tp"
+                and "sequence_parallel" in matches_check
+                and num_compile_ranges == 2
+            ):
+                # AsyncTP is applied on top of SP's transformation, so it
+                # only finds patterns on the large-batch range (where SP ran).
+                # On the small-batch range (no SP), it finds 0 patterns.
+                assert sum(m == expected_matches for m in log_matches) == tp_size, (
+                    f"Expecting {expected_matches} async_tp on "
+                    f"{tp_size} large-range entries, found: {log_matches}"
+                )
+                assert sum(m == 0 for m in log_matches) == tp_size, (
+                    f"Expecting 0 async_tp on {tp_size} small-range entries "
+                    f"(no SP), found: {log_matches}"
+                )
             else:
                 expected_matches_list = [expected_matches] * n_expected
                 assert sorted(log_matches) == expected_matches_list, (
@@ -142,7 +166,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"found: {sorted(log_matches)}"
                 )
 
-            if match_name == "ar_rms_fusion":
+            if match_name == "ar_rms_fusion" and num_compile_ranges == 2:
                 log_matches = re.findall(
                     r"pass_manager.py:\d+] Skipping "
                     r".*AllReduceFusionPass.* with compile range",
@@ -152,6 +176,19 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 n_expected = tp_size * (num_compile_ranges - num_ranges_activated)
                 assert len(log_matches) == n_expected, (
                     f'Could not find {n_expected} "Skipping AllReduceFusionPass" '
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
+                )
+
+            if match_name == "sequence_parallel" and num_compile_ranges == 2:
+                log_matches = re.findall(
+                    r"pass_manager.py:\d+] Skipping "
+                    r".*SequenceParallelismPass.* with compile range",
+                    log_holder.text,
+                )
+
+                n_expected = tp_size * (num_compile_ranges - num_ranges_activated)
+                assert len(log_matches) == n_expected, (
+                    f'Could not find {n_expected} "Skipping SequenceParallelismPass" '
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
                 )
 
