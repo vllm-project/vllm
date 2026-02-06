@@ -420,7 +420,7 @@ def calculate_metrics(
 
             if not output_len:
                 if tokenizer is None:
-                    output_len = len(input_requests)
+                    output_len = 1
                 else:
                     # We use the tokenizer to count the number of output tokens
                     # for some serving backends instead of looking at
