@@ -18,8 +18,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionMetadata,
@@ -27,6 +25,8 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
 )
 from vllm.attention.layer import Attention, MLAAttention
+
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled

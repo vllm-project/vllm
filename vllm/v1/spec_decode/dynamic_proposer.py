@@ -39,6 +39,7 @@ class DynamicProposer(EagleProposer):
     """
 
     num_speculative_tokens: int
+    method: str
 
     def __init__(
         self,
@@ -50,14 +51,11 @@ class DynamicProposer(EagleProposer):
 
         self.seq_states: dict[str, SequenceState] = {}
         self.last_proposed_k_per_seq: dict[str, int] = {}
-        self._initial_spec_tokens = max(
-            MIN_SPEC_TOKENS, min(self.num_speculative_tokens, MAX_SPEC_TOKENS)
-        )
 
         self.acceptance_rate_threshold = (
             vllm_config.speculative_config.acceptance_rate_threshold
         )
-        
+
         # Upper bound is determined by the user configuration
         self.max_spec_tokens = self.num_speculative_tokens
         # Ensure initial tokens do not exceed the configured max

@@ -7,8 +7,8 @@ from importlib.util import find_spec
 import numpy as np
 import torch
 import torch.nn as nn
-
 from vllm.attention.backends.registry import AttentionBackendEnum
+
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,

@@ -1338,7 +1338,7 @@ class EngineArgs:
         """
         if self.speculative_config is None and self.acceptance_rate_threshold is None:
             return None
-        
+
         if self.speculative_config is None:
             self.speculative_config = {}
 
@@ -1351,11 +1351,11 @@ class EngineArgs:
                 "target_parallel_config": target_parallel_config,
             }
         )
-        
+
         if self.acceptance_rate_threshold is not None:
-             self.speculative_config["acceptance_rate_threshold"] = (
-                 self.acceptance_rate_threshold
-             )
+            self.speculative_config["acceptance_rate_threshold"] = (
+                self.acceptance_rate_threshold
+            )
 
         return SpeculativeConfig(**self.speculative_config)
 
