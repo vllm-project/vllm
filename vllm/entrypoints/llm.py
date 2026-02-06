@@ -1900,7 +1900,7 @@ class LLM:
         lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: list[int] | None = None,
-    ) -> None:
+    ) -> list[str]:
         num_requests = len(prompts)
         seq_params = self._params_to_seq(params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
