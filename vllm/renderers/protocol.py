@@ -200,7 +200,7 @@ class BaseRenderer(ABC):
         params: TokenizeParams,
     ) -> TokPrompt:
         if "encoder_prompt" in prompt:
-            return self._tokenize_enc_dec_prompt(prompt, params)
+            return self._tokenize_enc_dec_prompt(prompt, params)  # type: ignore[arg-type]
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
@@ -210,7 +210,7 @@ class BaseRenderer(ABC):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            prompt = self._detokenize_prompt(prompt)
+            prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
@@ -241,7 +241,7 @@ class BaseRenderer(ABC):
         params: TokenizeParams,
     ) -> TokPrompt:
         if "encoder_prompt" in prompt:
-            return await self._tokenize_enc_dec_prompt_async(prompt, params)
+            return await self._tokenize_enc_dec_prompt_async(prompt, params)  # type: ignore[arg-type]
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
@@ -251,7 +251,7 @@ class BaseRenderer(ABC):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            prompt = await self._detokenize_prompt_async(prompt)
+            prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 

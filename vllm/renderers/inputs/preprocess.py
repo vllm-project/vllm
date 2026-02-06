@@ -217,7 +217,8 @@ class PromptComponents(NamedTuple):
 
 
 def extract_prompt_components(
-    model_config: "ModelConfig", prompt: object
+    model_config: "ModelConfig",
+    prompt: object,
 ) -> PromptComponents:
     target_prompt = (
         parse_enc_dec_prompt(prompt)["encoder_prompt"]
@@ -227,6 +228,6 @@ def extract_prompt_components(
 
     return PromptComponents(
         text=target_prompt.get("prompt"),
-        token_ids=target_prompt.get("prompt_token_ids"),
+        token_ids=target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
         embeds=target_prompt.get("prompt_embeds"),
     )
