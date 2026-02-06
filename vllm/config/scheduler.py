@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -66,9 +67,14 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_waiting_queue_length: int | None = Field(default=None, ge=1)
-    """The maximum number of requests allowed in the waiting queue.
-    If None, there is no limit on the waiting queue length."""
+    max_waiting_queue_length: int = Field(default=sys.maxsize, ge=1)
+    """
+    The maximum number of requests allowed in the waiting queue.
+    If the waiting queue is full, new incoming requests will be rejected.
+
+    [Experimental] This parameter is an experimental feature and
+    may change or be removed in future releases.
+    """
 
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
