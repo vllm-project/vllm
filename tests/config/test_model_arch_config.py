@@ -52,6 +52,7 @@ SPECULATIVE_MODELS = [
     ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
     ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
     ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    ("Qwen/Qwen3-8B", "z-lab/Qwen3-8B-DFlash-b16", False),
 ]
 
 

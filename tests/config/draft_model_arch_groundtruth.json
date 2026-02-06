@@ -83,5 +83,22 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "float16"
+    },
+    "z-lab/Qwen3-8B-DFlash-b16": {
+        "architectures": [
+            "DFlashDraftModel"
+        ],
+        "model_type": "qwen3",
+        "text_model_type": "qwen3",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 5,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 151936,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
     }
 }
