@@ -28,7 +28,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
     kFp8DynamicTokenSym,
-    kFp8StaticTokenSym,
+    kFp8StaticChannelSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -96,7 +96,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         self.out_dtype = torch.get_default_dtype()
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
+            weight_quant_key=kFp8StaticChannelSym,
             out_dtype=torch.get_default_dtype(),
             module_name=self.__class__.__name__,
         )
