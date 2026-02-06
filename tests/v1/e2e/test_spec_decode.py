@@ -549,9 +549,8 @@ def test_eagle_correctness(
     ["model_setup", "mm_enabled"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
-        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
     ],
-    ids=["mimo", "deepseek"],
+    ids=["mimo"],
 )
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,

@@ -106,6 +106,14 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
+
+        # Check if num_experts is greater than or equal to num_expert_group
+        # and is divisible by num_expert_group
+        assert (
+            global_num_experts > num_expert_group
+            and global_num_experts % num_expert_group == 0
+        )
+
         return GroupedTopKRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,

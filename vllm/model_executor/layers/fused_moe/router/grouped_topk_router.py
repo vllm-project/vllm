@@ -18,10 +18,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -38,6 +34,7 @@ def fused_grouped_topk(
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+    assert num_expert_group < gating_output.size(1)
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
@@ -89,6 +86,8 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert num_expert_group < gating_output.size(1)
+
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
         and current_platform.is_cuda()
@@ -296,34 +295,10 @@ class GroupedTopKRouter(BaseRouter):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 
-        def valid_grouping() -> bool:
-            # Check if num_experts is greater than num_expert_group
-            # and is divisible by num_expert_group
-            num_experts = router_logits.shape[-1]
-            if num_experts <= self.num_expert_group:
-                return False
-            return num_experts % self.num_expert_group == 0
-
-        if not valid_grouping():
-            if self.e_score_correction_bias is not None:
-                topk_weights, topk_ids = fused_topk_bias(
-                    hidden_states=hidden_states,
-                    gating_output=router_logits,
-                    e_score_correction_bias=self.e_score_correction_bias.data,
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                )
-                if self.routed_scaling_factor != 1.0:
-                    topk_weights *= self.routed_scaling_factor
-            else:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    hidden_states=hidden_states,
-                    gating_output=router_logits,
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                    indices_type=indices_type,
-                )
-            return topk_weights, topk_ids
+        assert self.global_num_experts == router_logits.shape[-1], (
+            f"{self.global_num_experts} == {router_logits.shape[-1]}"
+        )
+        assert self.global_num_experts % self.num_expert_group == 0
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
