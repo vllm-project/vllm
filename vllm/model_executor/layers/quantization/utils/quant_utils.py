@@ -74,6 +74,7 @@ class ScaleDesc:
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
+    col_major: col_major if True, row_major if False
     """
 
     dtype: torch.dtype
@@ -86,6 +87,7 @@ class ScaleDesc:
             GroupShape.PER_TOKEN: "per_token",
             GroupShape.PER_CHANNEL: "per_channel",
         }
+
         group_shape = d.get(self.group_shape, str(self.group_shape))
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"

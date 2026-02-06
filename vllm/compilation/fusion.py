@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from itertools import product
 from typing import Any, NamedTuple
 
 import torch
@@ -62,11 +63,27 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
+
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS.update(
+        dict.fromkeys(
+            [kFp8Dynamic128Sym, kFp8Dynamic64Sym],
+            torch.ops._C.per_token_group_fp8_quant.default,
+        )
+    )
+
+if current_platform.is_rocm():
+    # Import to trigger custom op registrations via direct_register_custom_op
+    from vllm.model_executor.layers.quantization.utils import fp8_utils  # noqa: F401
+
+    QUANT_OPS.update(
+        dict.fromkeys(
+            [kFp8Dynamic128Sym, kFp8Dynamic64Sym],
+            torch.ops.vllm.per_token_group_quant_fp8.default,
+        )
+    )
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -119,8 +136,8 @@ class RMSNormQuantPattern:
         self,
         epsilon: float,
         key: FusedRMSQuantKey,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
+        has_col_major_scales: bool = False,
     ) -> None:
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
@@ -136,7 +153,7 @@ class RMSNormQuantPattern:
             else MatcherFusedAddRMSNorm(epsilon)
         )
         self.quant_matcher = MatcherQuantFP8(
-            key.quant, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            key.quant, is_e8m0=is_e8m0, has_col_major_scales=has_col_major_scales
         )
 
 
@@ -262,8 +279,8 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         symmetric: bool = True,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
+        has_col_major_scales: bool = False,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(
@@ -271,10 +288,10 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
+
         self.is_e8m0 = is_e8m0
         super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            epsilon, key, is_e8m0=is_e8m0, has_col_major_scales=has_col_major_scales
         )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -293,7 +310,9 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = self.quant_matcher.make_scale(input, self.has_col_major_scales)
+            scale = self.quant_matcher.make_scale(
+                input, self.quant_matcher.has_col_major_scales
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
@@ -304,7 +323,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=residual,
                 group_size=self.group_shape[1],
-                is_scale_transposed=self.has_col_major_scales,
+                is_scale_transposed=self.quant_matcher.has_col_major_scales,
             )
 
             # result, residual, scale
@@ -336,7 +355,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         )
         self.group_shape = group_shape
         super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            epsilon, key, is_e8m0=is_e8m0, has_col_major_scales=has_col_major_scales
         )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -350,8 +369,11 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            # In case we're matching native rms-norm, conversions might be
-            # optimized out. We convert here just to be safe.
+            # Return the same pattern if input is not contiguous.
+            # This has the same effect as skipping replacement.
+            if not input.is_contiguous():
+                return pattern(input, weight)
+
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
@@ -527,28 +549,26 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-            # Only register group quant patterns on CUDA where the C++ op exists
-            if current_platform.is_cuda():
-                for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                    for has_col_major_scales in [True, False]:
-                        for is_e8m0 in [True, False]:
-                            # Fuse fused_add_rms_norm + fp8 group quant
-                            FusedAddRMSNormGroupQuantPattern(
-                                epsilon,
-                                FP8_DTYPE,
-                                group_shape=group_shape,
-                                has_col_major_scales=has_col_major_scales,
-                                is_e8m0=is_e8m0,
-                            ).register(self.patterns)
+            for group_shape, has_col_major_scales, is_e8m0 in product(
+                [GroupShape(1, 128), GroupShape(1, 64)], [True, False], [True, False]
+            ):
+                # Fuse fused_add_rms_norm + fp8 group quant
+                FusedAddRMSNormGroupQuantPattern(
+                    epsilon,
+                    FP8_DTYPE,
+                    group_shape=group_shape,
+                    has_col_major_scales=has_col_major_scales,
+                    is_e8m0=is_e8m0,
+                ).register(self.patterns)
 
-                            # Fuse rms_norm + fp8 group quant
-                            RMSNormGroupQuantPattern(
-                                epsilon,
-                                FP8_DTYPE,
-                                group_shape=group_shape,
-                                has_col_major_scales=has_col_major_scales,
-                                is_e8m0=is_e8m0,
-                            ).register(self.patterns)
+                # Fuse rms_norm + fp8 group quant
+                RMSNormGroupQuantPattern(
+                    epsilon,
+                    FP8_DTYPE,
+                    group_shape=group_shape,
+                    has_col_major_scales=has_col_major_scales,
+                    is_e8m0=is_e8m0,
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
