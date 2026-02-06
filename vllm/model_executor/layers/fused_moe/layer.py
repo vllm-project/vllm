@@ -41,7 +41,6 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -325,12 +324,14 @@ class FusedMoE(CustomOp):
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
+        shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         has_shared_experts: bool = False,
     ):
         super().__init__()
 
         self._gate = gate
+        self._shared_experts = shared_experts
         self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
@@ -543,7 +544,7 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or has_shared_experts,
+            disable_inplace=disable_inplace() or self._shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -608,20 +609,28 @@ class FusedMoE(CustomOp):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self._runner: MoERunner | None = None
+        # Disable shared expert overlap if:
+        #   - we are using eplb with non-default backend, because of correctness issues
+        #   - we are using flashinfer with DP, since there nothing to gain
+        #   - we are using marlin kernels
+        backend = self.moe_parallel_config.all2all_backend
+        self.use_overlapped = (
+            not (
+                (self.enable_eplb and backend != "allgather_reducescatter")
+                or self.moe_parallel_config.use_fi_all2allv_kernels
+            )
+            and self._shared_experts is not None
+        )
 
-    def init_runner(self, reconstruct=False):
-        if not reconstruct and self._runner is not None:
-            return
+        self.runner = self._init_runner()
 
-        self.ensure_moe_quant_config_init()
+    def _init_runner(self, reconstruct=False):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self._runner = DefaultMoERunner(
+        return DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
-            moe_quant_config=self.moe_quant_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
             gate=self.gate,
@@ -631,12 +640,6 @@ class FusedMoE(CustomOp):
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
 
-    @property
-    def runner(self) -> MoERunner:
-        self.init_runner()
-        assert self._runner is not None
-        return self._runner
-
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
@@ -645,7 +648,6 @@ class FusedMoE(CustomOp):
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
         if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
-            self.init_runner()
             return None
 
         self.ensure_moe_quant_config_init()
@@ -669,13 +671,11 @@ class FusedMoE(CustomOp):
             # We need to force reconstruction of runner because we're swapping out
             # the quant_method with a FusedMoEModularMethod. This logic can go
             # away once the FusedMoEModularMethod is eliminated.
-            self.init_runner(reconstruct=True)
-        else:
-            self.init_runner()
+            self.runner = self._init_runner()
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
-        return None
+        return self._shared_experts if self.use_overlapped else None
 
     @property
     def layer_id(self):

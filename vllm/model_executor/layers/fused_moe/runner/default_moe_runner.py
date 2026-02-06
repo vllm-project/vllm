@@ -15,7 +15,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -62,7 +61,6 @@ class DefaultMoERunner(MoERunner):
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        moe_quant_config: FusedMoEQuantConfig | None,
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
@@ -73,7 +71,6 @@ class DefaultMoERunner(MoERunner):
     ):
         super().__init__()
         self.moe_config = moe_config
-        self.moe_quant_config = moe_quant_config
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.gate = gate
@@ -559,7 +556,7 @@ class DefaultMoERunner(MoERunner):
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
                         self.quant_method.prepare_dp_allgather_tensor(
-                            self, hidden_states, router_logits
+                            layer, hidden_states, router_logits
                         )
                     )
                 else:
