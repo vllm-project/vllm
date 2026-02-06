@@ -530,7 +530,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 scale=self._k_scale,
             )
 
-        if fp8_attention:
+        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
@@ -614,7 +614,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention:
+            if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -919,10 +919,20 @@ try:
 
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
+    flash_attn_varlen_func = None  # type: ignore[assignment]
+    # On ROCm, vllm_flash_attn is not available, try upstream flash_attn instead.
+    # On CUDA, vllm_flash_attn should always be available (built with vLLM),
+    # so we don't attempt the fallback there.
+    if current_platform.is_rocm():
+        try:
+            from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+        except ImportError:
+            logger.debug(
+                "flash_attn not available on ROCm; "
+                "MLA models using TRITON_MLA will require flash_attn. "
+                "AITER_MLA backends use aiter kernels instead."
+            )
 
 
 def dynamic_per_batched_tensor_quant(
@@ -1885,6 +1895,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
 
+        self.supports_quant_query_input = True
+
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
         # num_heads=128, nope_dim=128, rope_dim=64
@@ -1915,6 +1927,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
+            if flash_attn_varlen_func is None:
+                raise RuntimeError(
+                    "MLA attention requires FlashAttention but it is not "
+                    "available. Please install flash_attn or use "
+                    "--attention-backend ROCM_AITER_MLA."
+                )
             logger.info_once("Using FlashAttention prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
