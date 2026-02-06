@@ -10,7 +10,6 @@ Reference: https://arxiv.org/abs/2507.07120
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -20,101 +19,6 @@ from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-
-# Use packed single-A2A optimization (reduces NCCL call overhead)
-# Set VLLM_HELIX_PACKED_A2A=1 to enable
-_USE_PACKED_A2A = os.environ.get("VLLM_HELIX_PACKED_A2A", "0") == "1"
-
-
-class HelixContext:
-    """
-    Persistent context for Helix All-to-All operations.
-    
-    Pre-allocates and reuses buffers to avoid allocation overhead
-    at high concurrency.
-    """
-    
-    def __init__(self):
-        # Buffer cache keyed by (B, H, D, world_size, dtype, device)
-        self._output_buffers: dict = {}
-        self._lse_buffers: dict = {}
-        # Packed buffer cache for single-A2A optimization
-        self._packed_buffers: dict = {}
-        # Compiled Triton kernel cache
-        self._compiled_kernel = None
-        self._kernel_key = None
-    
-    def get_buffers(
-        self,
-        B: int,
-        H_per_rank: int,
-        D: int,
-        world_size: int,
-        dtype: torch.dtype,
-        lse_dtype: torch.dtype,
-        device: torch.device,
-    ):
-        """Get or allocate send/recv buffers."""
-        key = (B, H_per_rank, D, world_size, dtype, device)
-        lse_key = (B, H_per_rank, world_size, lse_dtype, device)
-        
-        # Check if we can reuse existing buffers
-        if key in self._output_buffers:
-            send_output, recv_output = self._output_buffers[key]
-        else:
-            # Allocate new buffers
-            shape = (world_size, B, H_per_rank, D)
-            send_output = torch.empty(shape, dtype=dtype, device=device)
-            recv_output = torch.empty(shape, dtype=dtype, device=device)
-            self._output_buffers[key] = (send_output, recv_output)
-        
-        if lse_key in self._lse_buffers:
-            send_lse, recv_lse = self._lse_buffers[lse_key]
-        else:
-            lse_shape = (world_size, B, H_per_rank)
-            send_lse = torch.empty(lse_shape, dtype=lse_dtype, device=device)
-            recv_lse = torch.empty(lse_shape, dtype=lse_dtype, device=device)
-            self._lse_buffers[lse_key] = (send_lse, recv_lse)
-        
-        return send_output, recv_output, send_lse, recv_lse
-    
-    def get_packed_buffers(
-        self,
-        B: int,
-        H_per_rank: int,
-        D: int,
-        world_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        """Get or allocate packed send/recv buffers for single-A2A optimization.
-        
-        Packs output [N, B, H/N, D] and LSE [N, B, H/N] into [N, B, H/N, D+1].
-        """
-        key = (B, H_per_rank, D, world_size, dtype, device)
-        
-        if key in self._packed_buffers:
-            return self._packed_buffers[key]
-        
-        # Packed shape: [N, B, H/N, D+1] where last element is LSE
-        packed_shape = (world_size, B, H_per_rank, D + 1)
-        send_packed = torch.empty(packed_shape, dtype=dtype, device=device)
-        recv_packed = torch.empty(packed_shape, dtype=dtype, device=device)
-        self._packed_buffers[key] = (send_packed, recv_packed)
-        
-        return send_packed, recv_packed
-
-
-# Global context for stateless function calls
-_global_helix_ctx: HelixContext | None = None
-
-
-def get_helix_context() -> HelixContext:
-    """Get or create the global Helix context."""
-    global _global_helix_ctx
-    if _global_helix_ctx is None:
-        _global_helix_ctx = HelixContext()
-    return _global_helix_ctx
 
 
 @triton.jit
@@ -309,7 +213,6 @@ def helix_alltoall_lse_reduce(
     kvp_group: GroupCoordinator,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
-    ctx: HelixContext | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Perform Helix-style attention output combination using All-to-All.
@@ -339,103 +242,9 @@ def helix_alltoall_lse_reduce(
         kvp_group: GroupCoordinator for KV parallel communication
         return_lse: If True, also return the local portion of global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
-        ctx: Optional HelixContext for buffer reuse. If None, uses global context.
 
     Returns:
         Combined attention output [B, H/N, D] (scattered along head dimension)
-        If return_lse=True, also returns local_lse [B, H/N]
-    """
-    world_size = kvp_group.world_size
-
-    if world_size == 1:
-        if return_lse:
-            return local_output, local_lse
-        return local_output
-
-    # Ensure inputs are contiguous for view() to work correctly
-    local_output = local_output.contiguous()
-    local_lse = local_lse.contiguous()
-
-    B, H, D = local_output.shape
-    H_per_rank = H // world_size
-
-    # Get or create context for buffer reuse
-    if ctx is None:
-        ctx = get_helix_context()
-
-    # Get pre-allocated buffers (avoids allocation overhead at high concurrency)
-    send_output, recv_output, send_lse, recv_lse = ctx.get_buffers(
-        B, H_per_rank, D, world_size,
-        local_output.dtype, local_lse.dtype, local_output.device
-    )
-
-    # Step 1: Reshape and transpose into send buffers
-    # [B, H, D] -> [B, N, H/N, D] -> [N, B, H/N, D]
-    # Use copy_ into pre-allocated buffer instead of creating new tensor
-    local_output_view = local_output.view(B, world_size, H_per_rank, D)
-    send_output.copy_(local_output_view.permute(1, 0, 2, 3))
-
-    # [B, H] -> [B, N, H/N] -> [N, B, H/N]
-    local_lse_view = local_lse.view(B, world_size, H_per_rank)
-    send_lse.copy_(local_lse_view.permute(1, 0, 2))
-
-    # Step 2: All-to-All exchange
-    # After A2A: recv[i] contains rank i's partial output for MY local heads
-    # Use async_op=True to overlap the two all-to-all operations
-    work_output = dist.all_to_all_single(
-        recv_output.view(-1),
-        send_output.view(-1),
-        group=kvp_group.device_group,
-        async_op=True,
-    )
-    work_lse = dist.all_to_all_single(
-        recv_lse.view(-1),
-        send_lse.view(-1),
-        group=kvp_group.device_group,
-        async_op=True,
-    )
-
-    # Wait for both all-to-all operations to complete
-    work_output.wait()
-    work_lse.wait()
-
-    # recv_output shape: [N, B, H/N, D]
-    # recv_output[i] = rank i's partial output for my local heads
-
-    # Step 3: LSE-weighted combination via Triton kernel (LOCAL, no communication)
-    return helix_lse_combine_triton(
-        recv_output,
-        recv_lse,
-        return_lse=return_lse,
-        is_lse_base_on_e=is_lse_base_on_e,
-    )
-
-
-def helix_alltoall_lse_reduce_packed(
-    local_output: torch.Tensor,
-    local_lse: torch.Tensor,
-    kvp_group: GroupCoordinator,
-    return_lse: bool = False,
-    is_lse_base_on_e: bool = True,
-    ctx: HelixContext | None = None,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Optimized Helix All-to-All with packed output+LSE (single A2A call).
-    
-    Instead of two separate A2A calls for output and LSE, this version
-    packs them into a single tensor [N, B, H/N, D+1] where the last
-    element contains the LSE. This reduces NCCL call overhead.
-    
-    Args:
-        local_output: Local attention output [B, H, D]
-        local_lse: Local log-sum-exp values [B, H]
-        kvp_group: GroupCoordinator for KV parallel communication
-        return_lse: If True, also return the local portion of global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
-        ctx: Optional HelixContext for buffer reuse.
-    
-    Returns:
-        Combined attention output [B, H/N, D]
         If return_lse=True, also returns local_lse [B, H/N]
     """
     world_size = kvp_group.world_size
@@ -452,73 +261,51 @@ def helix_alltoall_lse_reduce_packed(
     B, H, D = local_output.shape
     H_per_rank = H // world_size
 
-    # Get or create context for buffer reuse
-    if ctx is None:
-        ctx = get_helix_context()
-
-    # Get packed buffers [N, B, H/N, D+1]
-    send_packed, recv_packed = ctx.get_packed_buffers(
-        B, H_per_rank, D, world_size,
-        local_output.dtype, local_output.device
-    )
-
-    # Step 1: Pack output and LSE into single tensor
+    # Step 1: Reshape for All-to-All
     # [B, H, D] -> [B, N, H/N, D] -> [N, B, H/N, D]
-    local_output_view = local_output.view(B, world_size, H_per_rank, D)
-    send_packed[:, :, :, :D].copy_(local_output_view.permute(1, 0, 2, 3))
-    
-    # [B, H] -> [B, N, H/N] -> [N, B, H/N] -> [N, B, H/N, 1]
-    local_lse_view = local_lse.view(B, world_size, H_per_rank)
-    # Cast LSE to output dtype and pack into last dimension
-    send_packed[:, :, :, D].copy_(
-        local_lse_view.permute(1, 0, 2).to(local_output.dtype)
-    )
+    send_output = local_output.view(B, world_size, H_per_rank, D)
+    send_output = send_output.permute(1, 0, 2, 3).contiguous()  # [N, B, H/N, D]
 
-    # Step 2: Single All-to-All exchange (instead of two)
-    dist.all_to_all_single(
-        recv_packed.view(-1),
-        send_packed.view(-1),
+    # [B, H] -> [B, N, H/N] -> [N, B, H/N]
+    send_lse = local_lse.view(B, world_size, H_per_rank)
+    send_lse = send_lse.permute(1, 0, 2).contiguous()  # [N, B, H/N]
+
+    # Step 2: All-to-All exchange
+    # After A2A: recv[i] contains rank i's partial output for MY local heads
+    recv_output = torch.empty_like(send_output)
+    recv_lse = torch.empty_like(send_lse)
+
+    # Use async_op=True to overlap the two all-to-all operations,
+    # then explicitly wait for completion before the Triton kernel.
+    # This fixes a race condition where the Triton kernel could start
+    # reading recv_output/recv_lse before NCCL finishes writing to them.
+    # (NCCL uses a separate stream from the compute stream)
+    work_output = dist.all_to_all_single(
+        recv_output.view(-1),
+        send_output.view(-1),
         group=kvp_group.device_group,
+        async_op=True,
+    )
+    work_lse = dist.all_to_all_single(
+        recv_lse.view(-1),
+        send_lse.view(-1),
+        group=kvp_group.device_group,
+        async_op=True,
     )
 
-    # Step 3: Unpack output and LSE
-    recv_output = recv_packed[:, :, :, :D].contiguous()
-    recv_lse = recv_packed[:, :, :, D].to(local_lse.dtype).contiguous()
+    # Wait for both all-to-all operations to complete.
+    # This ensures recv_output and recv_lse are fully populated
+    # before the Triton kernel reads from them.
+    work_output.wait()
+    work_lse.wait()
 
-    # Step 4: LSE-weighted combination via Triton kernel
+    # recv_output shape: [N, B, H/N, D]
+    # recv_output[i] = rank i's partial output for my local heads
+
+    # Step 3: LSE-weighted combination via Triton kernel (LOCAL, no communication)
     return helix_lse_combine_triton(
         recv_output,
         recv_lse,
         return_lse=return_lse,
         is_lse_base_on_e=is_lse_base_on_e,
     )
-
-
-def helix_alltoall_lse_reduce_auto(
-    local_output: torch.Tensor,
-    local_lse: torch.Tensor,
-    kvp_group: GroupCoordinator,
-    return_lse: bool = False,
-    is_lse_base_on_e: bool = True,
-    ctx: HelixContext | None = None,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Auto-select Helix implementation based on environment variable.
-    
-    Set VLLM_HELIX_PACKED_A2A=1 to use single-A2A packed optimization.
-    Default uses standard two-A2A implementation.
-    """
-    if _USE_PACKED_A2A:
-        return helix_alltoall_lse_reduce_packed(
-            local_output, local_lse, kvp_group,
-            return_lse=return_lse,
-            is_lse_base_on_e=is_lse_base_on_e,
-            ctx=ctx,
-        )
-    else:
-        return helix_alltoall_lse_reduce(
-            local_output, local_lse, kvp_group,
-            return_lse=return_lse,
-            is_lse_base_on_e=is_lse_base_on_e,
-            ctx=ctx,
-        )
