@@ -1436,9 +1436,15 @@ _ROLES_TEXT_ONLY = frozenset({"system", "developer"})
 """Roles whose ``content`` field must only contain text parts,
 per the OpenAI Chat Completion API specification."""
 
-_TEXT_CONTENT_TYPES = frozenset({
-    "text", "input_text", "output_text", "thinking", "refusal",
-})
+_TEXT_CONTENT_TYPES = frozenset(
+    {
+        "text",
+        "input_text",
+        "output_text",
+        "thinking",
+        "refusal",
+    }
+)
 """Content part types that are considered text-only."""
 
 
