@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 
 @overload
 def prompt_to_seq(
+    prompt_or_prompts: str | list[int] | bytes | Sequence[str | list[int] | bytes],
+) -> Sequence[str | list[int] | bytes]: ...
+
+
+@overload
+def prompt_to_seq(
     prompt_or_prompts: SingletonPrompt | Sequence[SingletonPrompt],
 ) -> Sequence[SingletonPrompt]: ...
 
@@ -35,12 +41,6 @@ def prompt_to_seq(
 def prompt_to_seq(  # type: ignore[misc]
     prompt_or_prompts: PromptType | Sequence[PromptType],
 ) -> Sequence[PromptType]: ...
-
-
-@overload
-def prompt_to_seq(
-    prompt_or_prompts: bytes | Sequence[bytes],
-) -> Sequence[bytes]: ...
 
 
 def prompt_to_seq(

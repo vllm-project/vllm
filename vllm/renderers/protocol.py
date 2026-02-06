@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs.data import (
@@ -17,7 +18,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 from .embed_utils import safe_load_prompt_embeds
-from .inputs.parse import prompt_to_seq
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -92,28 +92,18 @@ class BaseRenderer(ABC):
 
     def render_completions(
         self,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
-        prompt_embeds: bytes | list[bytes] | None = None,
+        prompts: Sequence[PromptType | bytes],
     ) -> list[SingletonDictPrompt]:
-        prompts_raw = list[SingletonPrompt | bytes]()
-
-        if prompt_embeds is not None:  # embeds take higher priority
-            prompts_raw.extend(prompt_to_seq(prompt_embeds))
-
-        if prompt_input is not None:
-            prompts_raw.extend(prompt_to_seq(prompt_input))
-
-        if len(prompts_raw) == 0:
+        if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        return [self.render_completion(prompt) for prompt in prompts_raw]
+        return [self.render_completion(prompt) for prompt in prompts]
 
     async def render_completions_async(
         self,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
-        prompt_embeds: bytes | list[bytes] | None = None,
+        prompts: Sequence[PromptType | bytes],
     ) -> list[SingletonDictPrompt]:
-        return self.render_completions(prompt_input, prompt_embeds)
+        return self.render_completions(prompts)
 
     @abstractmethod
     def render_messages(
@@ -159,7 +149,7 @@ class BaseRenderer(ABC):
 
     def tokenize_prompts(
         self,
-        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        prompts: Sequence[TextPrompt | TokensPrompt | EmbedsPrompt],
         params: TokenizeParams,
     ) -> list[TokensPrompt | EmbedsPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
@@ -192,7 +182,7 @@ class BaseRenderer(ABC):
 
     async def tokenize_prompts_async(
         self,
-        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        prompts: Sequence[TextPrompt | TokensPrompt | EmbedsPrompt],
         params: TokenizeParams,
     ) -> list[TokensPrompt | EmbedsPrompt]:
         return await asyncio.gather(

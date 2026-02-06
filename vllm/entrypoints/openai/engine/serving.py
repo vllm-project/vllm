@@ -104,7 +104,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs.parse import get_prompt_components
+from vllm.renderers.inputs.parse import get_prompt_components, prompt_to_seq
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -964,9 +964,13 @@ class OpenAIServing:
         renderer = self.renderer
         tok_params = request.build_tok_params(self.model_config)
 
-        in_prompts = await renderer.render_completions_async(
-            prompt_input, prompt_embeds
-        )
+        prompts = list[str | list[int] | bytes]()
+        if prompt_embeds is not None:  # embeds take higher priority
+            prompts.extend(prompt_to_seq(prompt_embeds))
+        if prompt_input is not None:
+            prompts.extend(prompt_to_seq(prompt_input))
+
+        in_prompts = await renderer.render_completions_async(prompts)
         engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         extra_items = {

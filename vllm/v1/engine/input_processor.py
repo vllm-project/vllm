@@ -13,7 +13,7 @@ from vllm.inputs.data import (
     SingletonInputs,
     SingletonPrompt,
 )
-from vllm.inputs.parse import DictPromptType, split_enc_dec_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -29,6 +29,7 @@ from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPromptType
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
