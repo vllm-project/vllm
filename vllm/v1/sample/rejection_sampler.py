@@ -103,13 +103,13 @@ class RejectionSampler(nn.Module):
             sampling_metadata=replace(
                 sampling_metadata,
                 max_num_logprobs=-1,
+                # Override the logprobs mode to return logits because they are
+                # needed later to compute the accepted token logprobs.
+                logprobs_mode_override="processed_logits"
+                if self.is_processed_logprobs_mode
+                else "raw_logits",
             ),
             predict_bonus_token=True,
-            # Override the logprobs mode to return logits because they are
-            # needed later to compute the accepted token logprobs.
-            logprobs_mode_override="processed_logits"
-            if self.is_processed_logprobs_mode
-            else "raw_logits",
         )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
 
