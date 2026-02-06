@@ -48,6 +48,19 @@ def test_registration_overloads():
     assert custom_div is IrOp.registry["_custom_div"]
 
 
+def test_no_kw_only_args():
+    # kw-only args not supported
+    with pytest.raises(ValueError, match="keyword-only arguments"):
+
+        @vllm.ir.register_op
+        def _custom_kwarg_op(
+            x: torch.Tensor, y: torch.Tensor, *, kwarg: int = 0
+        ) -> torch.Tensor:
+            return x + y + kwarg
+
+    assert "_custom_kwarg_op" not in IrOp.registry
+
+
 class TestIrOpCustomAdd:
     # Registration invariants
     def test_decorated_object(self):
@@ -158,6 +171,11 @@ class TestIrOpImplDispatch:
 
         # Check the original impl is still intact
         assert _custom_add.impls["impl_a"] is impl_a
+
+        # Check support all args
+        assert impl_a.supports_all_args
+        assert impl_b.supports_all_args
+        assert not impl_even.supports_all_args
 
     def test_reserved_provider_rejected(self):
         for provider in RESERVED_PROVIDERS:
@@ -282,3 +300,98 @@ class TestIrOpImplDispatch:
         message = caplog_vllm.records[0].message.lower()
         assert "_custom_add" in message
         assert "priority not set" in message
+
+
+@vllm.ir.register_op
+def _custom_mm(
+    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    tmp = x @ y
+    return tmp if bias is None else tmp + bias
+
+
+def test_default_args():
+    # Test that default args are properly applied when dispatching and calling
+    @_custom_mm.register_impl("impl_mm", supports_args=lambda x, y, b: True)
+    def impl_mm(
+        x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        tmp = x @ y
+        return tmp + 50 if bias is None else tmp + bias + 100
+
+    x1 = torch.tensor([1, 2], dtype=torch.int32)
+    x2 = torch.tensor([3, 4], dtype=torch.int32)
+
+    assert _custom_mm.apply_arg_defaults(x1, x2) == ((x1, x2, None), {})
+    assert _custom_mm.apply_arg_defaults(x1, x2, None) == ((x1, x2, None), {})
+
+    # Test that supports_args receives the defaulted args
+    assert impl_mm.supports_args(x1, x2)
+    with _custom_mm.set_priority(["impl_mm", "native"]):
+        assert _custom_mm.dispatch(x1, x2) is impl_mm
+
+
+def test_bad_impl_registrations():
+    # Check bad schema
+    with pytest.raises(ValueError, match="does not match native schema"):
+
+        @_custom_mm.register_impl("impl_mm_bad_schema")
+        def impl_mm_bad_schema(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return x @ y - 1
+
+    assert "impl_mm_bad_schema" not in _custom_mm.impls
+
+    with pytest.raises(ValueError, match="does not match native schema"):
+
+        @_custom_mm.register_impl("impl_mm_bad_schema_2")
+        def impl_mm_bad_schema_2(
+            x: torch.Tensor, y: torch.Tensor, b: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            return x @ y + b - 2
+
+    assert "impl_mm_bad_schema_2" not in _custom_mm.impls
+
+    with pytest.raises(ValueError, match="does not match native schema"):
+
+        @_custom_mm.register_impl("impl_mm_bad_schema_3")
+        def impl_mm_bad_schema_3(
+            x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor
+        ) -> torch.Tensor:
+            return x @ y + bias - 5
+
+    assert "impl_mm_bad_schema_3" not in _custom_mm.impls
+
+    # check supports_args with incorrect params
+    with pytest.raises(ValueError, match="supports_args must be a callable"):
+
+        @_custom_mm.register_impl("impl_mm_bad_supports_args", supports_args=True)
+        def impl_mm_bad_supports_args(
+            x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            return x @ y + 10
+
+    assert "impl_mm_bad_supports_args" not in _custom_mm.impls
+
+    with pytest.raises(ValueError, match="number of parameters"):
+
+        @_custom_mm.register_impl(
+            "impl_mm_bad_supports_args_2", supports_args=lambda x, y: True
+        )
+        def impl_mm_bad_supports_args(
+            x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            return x @ y + 10
+
+    assert "impl_mm_bad_supports_args_2" not in _custom_mm.impls
+
+    with pytest.raises(ValueError, match="keyword-only parameters"):
+
+        @_custom_mm.register_impl(
+            "impl_mm_bad_supports_args_3", supports_args=lambda x, y, *, b: True
+        )
+        def impl_mm_bad_supports_args_2(
+            x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            return x @ y + 20
+
+    assert "impl_mm_bad_supports_args_3" not in _custom_mm.impls

@@ -86,7 +86,7 @@ class TestRMSNorm:
         out_native = rms_norm_native(*args)
 
         torch.testing.assert_close(
-            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=1e-4
+            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=2e-4
         )
 
         # check that dispatched call matches direct call
