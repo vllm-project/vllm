@@ -167,7 +167,7 @@ def get_moriio_mode() -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
+def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int) -> int:
     return (dp_rank) * tp_size + tp_rank
 
 
@@ -208,7 +208,7 @@ class MoRIIOConfig:
         base_notify_port = int(extra_config["notify_port"])
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
 
         return cls(
             local_ip=get_ip(),
