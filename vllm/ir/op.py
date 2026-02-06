@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import inspect
 from collections.abc import Callable
 from typing import Any, ClassVar, overload
 
@@ -73,6 +74,16 @@ class IrOp:
     def __init__(
         self, name: str, native_impl: Callable, tags: tuple[torch.Tag, ...] = ()
     ):
+        signature = inspect.signature(native_impl)
+        if any(
+            p.kind == inspect.Parameter.KEYWORD_ONLY
+            for p in signature.parameters.values()
+        ):
+            raise ValueError(
+                f"Op {name} has keyword-only arguments which are not currently "
+                f"supported. That's because kwargs are not allowed during lowering."
+            )
+
         self.name = name
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[IrOpImpl] = []
@@ -85,6 +96,7 @@ class IrOp:
         )
 
         self._fake_fn = native_impl
+        self._signature = signature
 
         # torch registration
         vllm_ir_lib.define(self.name + self._schema_str, tags=tags)
@@ -160,6 +172,15 @@ class IrOp:
         impl = self.dispatch(*args, **kwargs)
         return impl.impl_fn(*args, **kwargs)
 
+    def apply_arg_defaults(self, *args, **kwargs) -> tuple[tuple, dict]:
+        """
+        Return (args, kwargs) with default values applied.
+        Defaults are taken from the native implementation signature.
+        """
+        bound_args = self._signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        return bound_args.args, bound_args.kwargs
+
     def dispatch(self, *args, **kwargs) -> "IrOpImpl":
         """
         Dispatch to the appropriate implementation based on current priority
@@ -171,11 +192,12 @@ class IrOp:
             )
             return self.impls["native"]
 
+        args, kwargs = self.apply_arg_defaults(*args, **kwargs)
         for impl in self._priority_impls:
             assert impl.supported, (
                 "All implementations in priority list must be supported."
             )
-            if impl.supports_args is None or impl.supports_args(*args, **kwargs):
+            if impl.supports_args(*args, **kwargs):
                 return impl
 
             logger.debug(
@@ -219,7 +241,7 @@ class IrOp:
                 filtered_impls.append(impl)
 
                 # If all args are supported, skip other implementations
-                if impl.supports_args is None:
+                if impl.supports_all_args:
                     return filtered_impls
 
             logger.warning_once(
@@ -258,11 +280,41 @@ class IrOpImpl:
         # Native also uses this path, so we allow it here.
         assert provider == "native" or provider not in RESERVED_PROVIDERS
 
+        # check schema matches native impl
+        schema = infer_schema(impl_fn, mutates_args=[])
+        if schema != op._schema_str:
+            raise ValueError(
+                f"Implementation for provider {provider} has schema '{schema}' which "
+                f"does not match native schema '{op._schema_str}' for op {op.name}."
+            )
+
+        if supports_args is not None:
+            if not callable(supports_args):
+                raise ValueError(
+                    f"supports_args for provider {provider} must be a callable"
+                )
+            # Check that supports_args does not have keyword-only parameters
+            supports_args_signature = inspect.signature(supports_args)
+            params = supports_args_signature.parameters
+            if any(p.kind == inspect.Parameter.KEYWORD_ONLY for p in params.values()):
+                raise ValueError(
+                    f"supports_args for provider {provider} "
+                    f"cannot have keyword-only parameters"
+                )
+
+            # Check that supports_args has the same total number of parameters
+            if len(params) != len(op._signature.parameters):
+                raise ValueError(
+                    f"supports_args for provider {provider} must have the same number "
+                    f"of parameters ({len(params)}) as the native implementation "
+                    f"({len(op._signature.parameters)})"
+                )
+
         self.op = op
         self.provider = provider
         self.impl_fn = impl_fn
         self.supported = supported
-        self.supports_args = supports_args
+        self._supports_args = supports_args
 
         op.impls[provider] = self
 
@@ -272,3 +324,15 @@ class IrOpImpl:
                 provider,
                 op.name,
             )
+
+    @property
+    def supports_all_args(self) -> bool:
+        """Check if this implementation supports all args unconditionally."""
+        return self._supports_args is None
+
+    def supports_args(self, *args, **kwargs) -> bool:
+        if self._supports_args is None:
+            return True
+
+        args, kwargs = self.op.apply_arg_defaults(*args, **kwargs)
+        return self._supports_args(*args, **kwargs)
