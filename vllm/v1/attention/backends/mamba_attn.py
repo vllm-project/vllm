@@ -171,7 +171,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
-        m.max_query_len = 1 + self.num_spec_tokens  # decode-only
+        assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
 
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
