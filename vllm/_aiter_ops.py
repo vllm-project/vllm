@@ -8,11 +8,8 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -854,6 +851,10 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
 
     forward_context = get_forward_context()
     attn_layer: Attention = forward_context.no_compile_layers[layer_name]

@@ -12,6 +12,7 @@ from vllm.compilation.matcher_utils import ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     CompilationMode,
     ModelConfig,
@@ -21,6 +22,7 @@ from vllm.config import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -30,6 +32,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class QKRoPEKVCacheTestModel(torch.nn.Module):
@@ -40,10 +43,8 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         num_heads: int,
         num_kv_heads: int,
         head_size: int,
-        block_size: int,
         is_neox: bool,
         dtype: torch.dtype,
-        kv_cache_dtype: torch.dtype,
         device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
     ):
@@ -51,12 +52,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
-        self.block_size = block_size
+        self.block_size = vllm_config.cache_config.block_size
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
         self.is_neox = is_neox
         self.dtype = dtype
-        self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.layer_name = prefix
 
@@ -96,7 +96,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=head_size,
-                dtype=self.kv_cache_dtype,
+                dtype=self.dtype,
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
@@ -129,9 +129,13 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        if self.attn.impl.kv_cache_dtype.startswith("fp8"):  # type: ignore[attr-defined]
+            kv_cache_dtype = FP8_DTYPE
+        else:
+            kv_cache_dtype = self.dtype
         kv_cache = torch.empty(
             *kv_cache_shape,
-            dtype=self.kv_cache_dtype,
+            dtype=kv_cache_dtype,
             device=self.device,
         ).permute(kv_cache_stride_order)
         self.attn.kv_cache = [kv_cache]
@@ -173,15 +177,22 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return [rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()]
 
 
-@pytest.mark.parametrize("attn_backend", [AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+    ],
+)
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [128])
-@pytest.mark.parametrize("is_neox", [True])
+@pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
@@ -195,7 +206,7 @@ def test_rope_kvcache_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: torch.dtype,
+    kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -208,6 +219,10 @@ def test_rope_kvcache_fusion(
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
+        cache_config=CacheConfig(
+            block_size=block_size,
+            cache_dtype=kv_cache_dtype,
+        ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
@@ -232,10 +247,8 @@ def test_rope_kvcache_fusion(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
-            block_size=block_size,
             is_neox=is_neox,
             dtype=dtype,
-            kv_cache_dtype=kv_cache_dtype,
             device=torch.get_default_device(),
         )
 
