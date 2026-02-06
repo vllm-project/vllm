@@ -38,14 +38,12 @@ class BaseMambaAttentionMetadata:
     has_initial_states_p: torch.Tensor | None
     query_start_loc_p: torch.Tensor | None
     num_computed_tokens_p: torch.Tensor | None
-    prefill_state_indices_tensor: torch.Tensor | None  # shape: [num_prefills,]
+    state_indices_tensor_p: torch.Tensor | None
 
     # The following tensors are used for decode requests and
     # speculative decoding compatibility, and will be None if the batch
     # has no decode requests.
-    decode_state_indices_tensor: (
-        torch.Tensor | None
-    )  # shape: [num_decodes, 1 + num_spec]
+    state_indices_tensor_d: torch.Tensor | None
     query_start_loc_d: torch.Tensor | None  # shape: [num_decodes + 1,]
 
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
@@ -112,7 +110,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             # Speculative decoding not supported with prefix caching,
             # so keep shape consistent with prefill buffer
-            self.decode_state_indices_tensor = torch.empty(
+            self.state_indices_tensor_d = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,
                     max_num_blocks,  # TODO(ben): why is this needed at all?
@@ -131,7 +129,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
         else:
-            self.decode_state_indices_tensor = torch.empty(
+            self.state_indices_tensor_d = torch.empty(
                 (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
                 dtype=torch.int32,
                 device=device,
@@ -286,17 +284,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
-        decode_state_indices_tensor, prefill_state_indices_tensor = torch.split(
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
             state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
         )
-        decode_state_indices_tensor = decode_state_indices_tensor[
-            :, : 1 + self.num_spec_tokens
-        ]  # shape: [num_decodes, 1 + num_spec]
-        prefill_state_indices_tensor = prefill_state_indices_tensor[
-            :, 0
-        ]  # shape: [num_prefills,]
+        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
+        state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         if num_decodes > 0 and self.use_spec_decode:
             assert num_accepted_tokens is not None
@@ -343,8 +337,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
-            prefill_state_indices_tensor=prefill_state_indices_tensor,
-            decode_state_indices_tensor=decode_state_indices_tensor,
+            state_indices_tensor_p=state_indices_tensor_p,
+            state_indices_tensor_d=state_indices_tensor_d,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -368,7 +362,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Update the metadata for cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
-        decode_state_indices_tensor = metadata.decode_state_indices_tensor
+        state_indices_tensor_d = metadata.state_indices_tensor_d
         query_start_loc_d = metadata.query_start_loc_d
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
@@ -378,13 +372,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            self.decode_state_indices_tensor[: metadata.num_decodes].copy_(
-                decode_state_indices_tensor, non_blocking=True
+            self.state_indices_tensor_d[: metadata.num_decodes].copy_(
+                state_indices_tensor_d, non_blocking=True
             )
-            decode_state_indices_tensor = self.decode_state_indices_tensor[
+            state_indices_tensor_d = self.state_indices_tensor_d[
                 : metadata.num_decode_tokens
             ]
-            decode_state_indices_tensor[metadata.num_decodes :] = PAD_SLOT_ID
+            state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
 
             if self.use_spec_decode:
                 assert query_start_loc_d is not None
@@ -427,7 +421,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return replace(
             metadata,
-            decode_state_indices_tensor=decode_state_indices_tensor,
+            state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -458,22 +452,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             f"got {state_indices_tensor.shape[0]}."
         )
 
-        decode_state_indices_tensor, prefill_state_indices_tensor = torch.split(
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
             state_indices_tensor,
             [metadata.num_decodes, metadata.num_prefills],
             dim=0,
         )
-        decode_state_indices_tensor = decode_state_indices_tensor[
-            :, : 1 + self.num_spec_tokens
-        ]  # shape: [num_decodes, 1 + num_spec]
-        prefill_state_indices_tensor = prefill_state_indices_tensor[
-            :, 0
-        ]  # shape: [num_prefills,]
+        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
+        state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         new_metadata = replace(
             metadata,
-            decode_state_indices_tensor=decode_state_indices_tensor,
-            prefill_state_indices_tensor=prefill_state_indices_tensor,
+            state_indices_tensor_d=state_indices_tensor_d,
+            state_indices_tensor_p=state_indices_tensor_p,
         )
 
         return self._update_metadata_for_cudagraph_capture(new_metadata)

@@ -565,8 +565,8 @@ class MambaMixer2(MambaBase, CustomOp):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
-            prefill_state_indices_tensor = attn_metadata.prefill_state_indices_tensor
-            decode_state_indices_tensor = attn_metadata.decode_state_indices_tensor
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             num_accepted_tokens = attn_metadata.num_accepted_tokens
             decode_query_start_loc = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
@@ -661,7 +661,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=prefill_state_indices_tensor,
+                cache_indices=state_indices_tensor_p,
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
@@ -679,9 +679,9 @@ class MambaMixer2(MambaBase, CustomOp):
             # 3. State Space Model sequence transformation
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
-                kernel_ssm_indices = prefill_state_indices_tensor
+                kernel_ssm_indices = state_indices_tensor_p
                 if is_mamba_cache_all:
-                    kernel_ssm_indices = prefill_state_indices_tensor.gather(
+                    kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, block_idx_last_computed_token_p.unsqueeze(1)
                     ).squeeze(1)
                 initial_states = torch.where(
@@ -744,7 +744,7 @@ class MambaMixer2(MambaBase, CustomOp):
                         continue
 
                     # Look up the state indices
-                    cache_blocks_to_fill = prefill_state_indices_tensor[
+                    cache_blocks_to_fill = state_indices_tensor_p[
                         seq_idx,
                         block_idx_first_scheduled_token:block_idx_last_scheduled_token,
                     ]
@@ -782,7 +782,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
                 # For all seqs, store the last state (note: might be partial):
                 ssm_state[
-                    prefill_state_indices_tensor.gather(
+                    state_indices_tensor_p.gather(
                         1, block_idx_last_scheduled_token_p.unsqueeze(1)
                     ).squeeze(1)
                 ] = varlen_states[last_chunk_indices_p]
@@ -791,15 +791,15 @@ class MambaMixer2(MambaBase, CustomOp):
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
-                ssm_state[prefill_state_indices_tensor] = varlen_states
+                ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
         if has_decode:
             if is_mamba_cache_all:
-                decode_state_indices_tensor_input = decode_state_indices_tensor.gather(
+                state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
-                decode_state_indices_tensor_output = decode_state_indices_tensor.gather(
+                state_indices_tensor_d_output = state_indices_tensor_d.gather(
                     1, block_idx_last_scheduled_token_d.unsqueeze(1)
                 ).squeeze(1)
                 # for decode:
@@ -810,8 +810,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 #       block_idx_last_computed_token_d
             else:
                 # Without caching, read and write in-place to the same blocks:
-                decode_state_indices_tensor_input = decode_state_indices_tensor
-                decode_state_indices_tensor_output = decode_state_indices_tensor
+                state_indices_tensor_d_input = state_indices_tensor_d
+                state_indices_tensor_d_output = state_indices_tensor_d
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
@@ -820,10 +820,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=decode_state_indices_tensor,
+                conv_state_indices=state_indices_tensor_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=decode_query_start_loc,
-                max_query_len=decode_state_indices_tensor.size(-1),
+                max_query_len=state_indices_tensor_d.size(-1),
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -849,7 +849,7 @@ class MambaMixer2(MambaBase, CustomOp):
             assert preallocated_ssm_out_d is not None
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
-            #   using decode_state_indices_tensor
+            #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
             selective_state_update(
                 ssm_state,
@@ -862,8 +862,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=decode_state_indices_tensor_input,
-                dst_state_batch_indices=decode_state_indices_tensor_output,
+                state_batch_indices=state_indices_tensor_d_input,
+                dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=decode_query_start_loc,
