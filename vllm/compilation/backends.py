@@ -22,17 +22,13 @@ from torch._dispatch.python import enable_python_dispatcher
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
+from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .compiler_interface import (
@@ -43,8 +39,12 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+from .partition_rules import (
+    inductor_partition_rule_context,
+    should_split,
+)
+from .passes.inductor_pass import InductorPass, pass_context
+from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
@@ -121,7 +121,7 @@ class CompilerManager:
     and compiling the graph.
 
     The cache is a dict mapping
-    `(runtime_shape, graph_hash, backend_name)`
+    `(runtime_shape, graph_index, backend_name)`
     to `any_data` returned from the compiler.
 
     When serializing the cache, we save it to a Python file
@@ -130,7 +130,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig) -> None:
-        self.cache: dict[tuple[Range, str, str], Any] = dict()
+        self.cache: dict[tuple[Range, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -173,7 +173,6 @@ class CompilerManager:
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
-        self.loaded_cache_entries: dict[tuple[Range, str, str], Any] = {}
 
         if not disable_cache and os.path.exists(self.cache_file_path):
             # load the cache from the file
@@ -187,9 +186,9 @@ class CompilerManager:
                 if not isinstance(value, ty):
                     raise TypeError(f"Expected {ty} but got {type(value)} for {value}")
 
-            def parse_key(key: Any) -> tuple[Range, str, str]:
-                range_tuple, graph_hash, compiler_name = key
-                check_type(graph_hash, str)
+            def parse_key(key: Any) -> tuple[Range, int, str]:
+                range_tuple, graph_index, compiler_name = key
+                check_type(graph_index, int)
                 check_type(compiler_name, str)
                 if isinstance(range_tuple, tuple):
                     start, end = range_tuple
@@ -197,7 +196,7 @@ class CompilerManager:
                     check_type(end, int)
                     range_tuple = Range(start=start, end=end)
                 check_type(range_tuple, Range)
-                return range_tuple, graph_hash, compiler_name
+                return range_tuple, graph_index, compiler_name
 
             self.cache = {parse_key(key): value for key, value in cache.items()}
 
@@ -217,31 +216,25 @@ class CompilerManager:
         self,
         graph: fx.GraphModule,
         example_inputs: list[Any],
-        graph_hash: str,
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any] | None:
-        key = (compile_range, graph_hash, self.compiler.name)
-        # See if we've already loaded this cache entry
-        if key in self.loaded_cache_entries:
-            return self.loaded_cache_entries[key]
-        # Otherwise, go load it from disk
-        if key not in self.cache:
+        if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
-        handle = self.cache[key]
+        handle = self.cache[(compile_range, graph_index, self.compiler.name)]
         compiled_graph = self.compiler.load(
-            handle, graph, example_inputs, compile_range
+            handle, graph, example_inputs, graph_index, compile_range
         )
-        self.loaded_cache_entries[key] = compiled_graph
         logger.debug(
-            "Directly load the graph (hash %s) for compile range "
-            "%sfrom %s via handle %s",
-            graph_hash,
+            "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
+            graph_index,
             str(compile_range),
             self.compiler.name,
             handle,
         )
         return compiled_graph
 
+    @instrument(span_name="Compile graph")
     def compile(
         self,
         graph: fx.GraphModule,
@@ -257,22 +250,12 @@ class CompilerManager:
             global compilation_start_time
             compilation_start_time = time.time()
 
-        from torch._functorch._aot_autograd.autograd_cache import (
-            AOTAutogradCachePickler,
-            sanitize_gm_for_cache,
-        )
-
-        with sanitize_gm_for_cache(graph):
-            pickler = AOTAutogradCachePickler(graph)
-            dumped_graph = pickler.dumps(graph)
-            graph_hash = hashlib.sha256(dumped_graph).hexdigest()
-
         compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
 
         # try to load from the cache
-        compiled_graph = self.load(graph, example_inputs, graph_hash, compile_range)
+        compiled_graph = self.load(graph, example_inputs, graph_index, compile_range)
         if compiled_graph is not None:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
@@ -308,13 +291,9 @@ class CompilerManager:
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
-        self.loaded_cache_entries[(compile_range, graph_hash, self.compiler.name)] = (
-            compiled_graph
-        )
-
         # store the artifact in the cache
         if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
-            self.cache[(compile_range, graph_hash, self.compiler.name)] = handle
+            self.cache[(compile_range, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
@@ -519,6 +498,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
+    @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
         # maybe instead just assert inputs are fake?
         fake_args = [
@@ -943,6 +923,11 @@ class VllmBackend:
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
         self.compilation_config.compilation_time += dynamo_time
+
+        # Record Dynamo time in tracing if available
+        start_time = int(torch_compile_start_time * 1e9)
+        attributes = {"dynamo.time_seconds": dynamo_time}
+        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
 
         # we control the compilation process, each instance can only be
         # called once

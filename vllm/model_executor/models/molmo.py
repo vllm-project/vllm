@@ -235,7 +235,7 @@ class MultiHeadDotProductAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(

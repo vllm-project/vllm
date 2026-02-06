@@ -22,6 +22,8 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -32,7 +34,6 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.utils import get_prompt_text
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
@@ -100,8 +101,8 @@ class LLMEngine:
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
+            init_tracer("vllm.llm_engine", endpoint)
+            self.output_processor.tracing_enabled = True
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -201,7 +202,11 @@ class LLMEngine:
         return outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.engine_core.get_supported_tasks()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = self.engine_core.get_supported_tasks()
+
+        return self._supported_tasks
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
@@ -212,7 +217,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -245,8 +250,9 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                supported_tasks=self.get_supported_tasks(),
             )
-            prompt_text = get_prompt_text(prompt)
+            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         self.input_processor.assign_request_id(request)
 
