@@ -21,6 +21,9 @@ rms_no_var_size = lambda x, w, e, variance_size=None: variance_size is None
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
+    if weight is None:
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
