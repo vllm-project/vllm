@@ -1152,7 +1152,7 @@ def test_eplb_num_redundant_experts_default():
         )
 
     # Test validation for negative value (validated in ParallelConfig)
-    with pytest.raises(ValidationError, match="non-negative"):
+    with pytest.raises(ValidationError, match="greater than or equal to"):
         ParallelConfig(
             enable_eplb=False,
             enable_expert_parallel=False,
@@ -1182,12 +1182,13 @@ def test_eplb_num_redundant_experts_auto_computation(
     """
     from vllm.config.parallel import ParallelConfig
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=tp_size,
-        data_parallel_size=dp_size,
-        enable_expert_parallel=True,
-        enable_eplb=True,
-    )
+    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            data_parallel_size=dp_size,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        )
     # num_redundant_experts should be None before computation
     assert parallel_config.eplb_config.num_redundant_experts is None
 
@@ -1233,13 +1234,14 @@ def test_eplb_num_redundant_experts_explicit_value_preserved():
     """Test that explicitly set num_redundant_experts is not overwritten."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=4,
-        data_parallel_size=2,
-        enable_expert_parallel=True,
-        enable_eplb=True,
-        eplb_config=EPLBConfig(num_redundant_experts=10),
-    )
+    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=4,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(num_redundant_experts=10),
+        )
     # num_redundant_experts is explicitly set
     assert parallel_config.eplb_config.num_redundant_experts == 10
 

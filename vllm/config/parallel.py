@@ -3,6 +3,7 @@
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -61,10 +62,12 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int | None = None
+    num_redundant_experts: int | None = Field(default=None, ge=0)
     """Number of redundant experts to use for expert parallelism.
     If None (default), the minimum valid value will be computed automatically
-    based on the number of logical experts and the expert parallel size."""
+    based on the number of logical experts and the expert parallel size.
+    The value will be rounded to the nearest multiple of the expert parallel size.
+    """
 
     log_balancedness: bool = False
     """
@@ -93,6 +96,7 @@ class EPLBConfig:
 
 
 @config
+@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -337,15 +341,6 @@ class ParallelConfig:
                     f"to be greater than 1, but got "
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
-        # Validate num_redundant_experts is non-negative if explicitly set
-        if (
-            self.eplb_config.num_redundant_experts is not None
-            and self.eplb_config.num_redundant_experts < 0
-        ):
-            raise ValueError(
-                f"num_redundant_experts must be non-negative, "
-                f"got {self.eplb_config.num_redundant_experts}"
-            )
 
         # When EPLB is disabled, num_redundant_experts must be None or 0
         if (
