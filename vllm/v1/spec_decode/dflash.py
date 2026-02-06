@@ -5,12 +5,9 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
-
-logger = init_logger(__name__)
 
 
 class DFlashProposer(EagleProposer):
@@ -145,11 +142,6 @@ class DFlashProposer(EagleProposer):
             )
 
         batch_size = common_attn_metadata.batch_size()
-        if batch_size != 1:
-            raise NotImplementedError(
-                "DFlash block_drafting currently supports batch size 1 only. "
-                "Use runtime_mode='shared_eagle' for larger batches."
-            )
         if (
             self.uses_mrope
             or self.uses_xdrope_dim > 0
@@ -168,11 +160,18 @@ class DFlashProposer(EagleProposer):
             )
 
         num_query_tokens = 1 + self.num_speculative_tokens
-        last_position = int(target_positions[-1].item())
-        if last_position + num_query_tokens >= self.max_model_len:
+        if next_token_ids.shape[0] != batch_size:
+            raise ValueError(
+                "DFlash block_drafting expects one next token per sequence. "
+                f"got next_token_ids.shape[0]={next_token_ids.shape[0]}, "
+                f"batch_size={batch_size}."
+            )
+        last_positions = common_attn_metadata.seq_lens.to(torch.long) - 1
+        max_last_position = int(last_positions.max().item())
+        if max_last_position + num_query_tokens >= self.max_model_len:
             raise RuntimeError(
                 "DFlash block_drafting query positions exceed max_model_len. "
-                f"last_position={last_position}, "
+                f"max_last_position={max_last_position}, "
                 f"num_query_tokens={num_query_tokens}, "
                 f"max_model_len={self.max_model_len}."
             )
@@ -184,18 +183,20 @@ class DFlashProposer(EagleProposer):
             attn_metadata_builder = self.attn_metadata_builder
 
         num_context_tokens = target_hidden_states.shape[0]
-        num_kv_tokens = num_context_tokens + num_query_tokens
+        num_query_tokens_total = batch_size * num_query_tokens
+        num_kv_tokens = num_context_tokens + num_query_tokens_total
 
         query_positions = (
             torch.arange(
                 num_query_tokens,
                 device=target_positions.device,
                 dtype=target_positions.dtype,
-            )
-            + last_position
+            ).view(1, -1)
+            + last_positions.view(-1, 1)
             + 1
         )
-        position_ids = torch.cat([target_positions, query_positions], dim=0)
+        query_positions_flat = query_positions.reshape(-1)
+        position_ids = torch.cat([target_positions, query_positions_flat], dim=0)
 
         block_size = attn_metadata_builder.kv_cache_spec.block_size
         block_table_tensor = getattr(common_attn_metadata, "block_table_tensor", None)
@@ -204,17 +205,17 @@ class DFlashProposer(EagleProposer):
                 "DFlash block_drafting requires block_table_tensor in attention "
                 "metadata."
             )
-        max_block_number = int((query_positions[-1] // block_size).item())
+        max_block_number = int((query_positions_flat.max() // block_size).item())
         if max_block_number >= block_table_tensor.shape[1]:
             raise RuntimeError(
                 "DFlash block_drafting needs more block_table entries than "
                 f"available ({max_block_number + 1} > {block_table_tensor.shape[1]})."
             )
         block_numbers = query_positions // block_size
-        block_ids = block_table_tensor.gather(
-            dim=1, index=block_numbers.view(1, -1)
-        ).view(-1)
-        slot_mapping = block_ids * block_size + (query_positions % block_size)
+        block_ids = block_table_tensor.gather(dim=1, index=block_numbers)
+        slot_mapping = (
+            block_ids * block_size + (query_positions % block_size)
+        ).reshape(-1)
 
         original_slot_mapping = common_attn_metadata.slot_mapping
         original_num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -229,7 +230,7 @@ class DFlashProposer(EagleProposer):
         try:
             # Build non-causal metadata for query tokens only.
             common_attn_metadata.slot_mapping = slot_mapping
-            common_attn_metadata.num_actual_tokens = num_query_tokens
+            common_attn_metadata.num_actual_tokens = num_query_tokens_total
             common_attn_metadata.max_query_len = num_query_tokens
             common_attn_metadata.query_start_loc = (
                 self.arange[: batch_size + 1] * num_query_tokens
@@ -256,8 +257,8 @@ class DFlashProposer(EagleProposer):
             }
 
             # Query input is [next_token, mask, mask, ...].
-            self.input_ids[:num_query_tokens].fill_(self.mask_token_id)
-            self.input_ids[0] = next_token_ids[0]
+            self.input_ids[:num_query_tokens_total].fill_(self.mask_token_id)
+            self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
             self._set_positions(num_kv_tokens, position_ids)
             self.hidden_states[:num_context_tokens] = target_hidden_states
 
@@ -266,14 +267,14 @@ class DFlashProposer(EagleProposer):
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
-                num_tokens=num_query_tokens,
+                num_tokens=num_query_tokens_total,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 slot_mapping=self._get_slot_mapping(
-                    num_query_tokens, common_attn_metadata.slot_mapping
+                    num_query_tokens_total, common_attn_metadata.slot_mapping
                 ),
             ):
                 ret_hidden_states = self.model(
-                    input_ids=self.input_ids[:num_query_tokens],
+                    input_ids=self.input_ids[:num_query_tokens_total],
                     positions=self._get_positions(num_kv_tokens),
                     hidden_states=self.hidden_states[:num_context_tokens],
                     inputs_embeds=None,
@@ -297,9 +298,14 @@ class DFlashProposer(EagleProposer):
             common_attn_metadata.causal = original_causal
 
         # Skip the first query token (the sampled next token), and use mask slots.
-        sample_hidden_states = last_hidden_states[1:num_query_tokens]
+        sample_hidden_states = last_hidden_states.view(
+            batch_size, num_query_tokens, -1
+        )[:, 1:, :].reshape(
+            batch_size * self.num_speculative_tokens,
+            -1,
+        )
         logits = self.model.compute_logits(sample_hidden_states)
-        return logits.argmax(dim=-1).view(1, self.num_speculative_tokens)
+        return logits.argmax(dim=-1).view(batch_size, self.num_speculative_tokens)
 
     def propose(
         self,
@@ -334,30 +340,12 @@ class DFlashProposer(EagleProposer):
                 slot_mappings=slot_mappings,
             )
         else:
-            if common_attn_metadata.batch_size() > 1:
-                logger.warning_once(
-                    "DFlash block_drafting does not yet support batch_size>1; "
-                    "falling back to shared_eagle path for this batch."
-                )
-                draft_token_ids = self._propose_shared_eagle(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    next_token_ids=next_token_ids,
-                    token_indices_to_sample=token_indices_to_sample,
-                    common_attn_metadata=common_attn_metadata,
-                    sampling_metadata=sampling_metadata,
-                    mm_embed_inputs=mm_embed_inputs,
-                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-                    slot_mappings=slot_mappings,
-                )
-            else:
-                draft_token_ids = self._propose_block_drafting(
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    next_token_ids=next_token_ids,
-                    common_attn_metadata=common_attn_metadata,
-                )
+            draft_token_ids = self._propose_block_drafting(
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                common_attn_metadata=common_attn_metadata,
+            )
 
         expected_shape = (
             common_attn_metadata.batch_size(),
