@@ -43,7 +43,7 @@ from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import EncoderDecoderDictPrompt
-from vllm.renderers.inputs.parse import parse_enc_dec_prompt
+from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 

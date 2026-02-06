@@ -35,7 +35,7 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers.inputs.parse import prompt_to_seq
+from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 

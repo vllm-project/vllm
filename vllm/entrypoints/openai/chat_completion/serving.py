@@ -67,12 +67,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -218,10 +219,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> (
-        tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]
-        | ErrorResponse
-    ):
+    ) -> tuple[list[ConversationMessage], list[TokPrompt]] | ErrorResponse:
         """
         render chat request by validating and preprocessing inputs.
 

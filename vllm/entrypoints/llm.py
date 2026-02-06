@@ -73,10 +73,11 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import DecoderOnlyDictPrompt, DictPromptType
-from vllm.renderers.inputs.parse import (
+from vllm.renderers.inputs import DecoderOnlyDictPrompt, DictPrompt
+from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     get_prompt_components,
+    parse_model_prompt,
     prompt_to_seq,
 )
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
@@ -496,7 +497,7 @@ class LLM:
 
     def _resolve_single_prompt_mm_lora(
         self,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
         lora_request: LoRARequest | None,
         default_mm_loras: dict[str, str] | None,
     ):
@@ -811,7 +812,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPromptType]:
+    ) -> list[DictPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -832,9 +833,10 @@ class LLM:
         )
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPromptType]()
+        engine_prompts = list[DictPrompt]()
         for prompt in prompts:
-            in_prompt = renderer.render_completion(prompt)
+            parsed_prompt = parse_model_prompt(model_config, prompt)
+            in_prompt = renderer.render_completion(parsed_prompt)
 
             engine_prompts.append(
                 renderer.tokenize_prompt(in_prompt, tok_params)
@@ -1770,7 +1772,7 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,

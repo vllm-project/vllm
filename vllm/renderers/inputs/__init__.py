@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .protocol import (
+from .preprocess import (
     DecoderDictPrompt,
     DecoderOnlyDictPrompt,
-    DictPromptType,
+    DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDictPrompt,
     SingletonDictPrompt,
+)
+from .tokenize import (
+    DecoderOnlyTokPrompt,
+    DecoderTokPrompt,
+    EncoderDecoderTokPrompt,
+    EncoderTokPrompt,
+    SingletonTokPrompt,
+    TokPrompt,
 )
 
 __all__ = [
@@ -15,5 +23,11 @@ __all__ = [
     "DecoderDictPrompt",
     "EncoderDecoderDictPrompt",
     "SingletonDictPrompt",
-    "DictPromptType",
+    "DictPrompt",
+    "DecoderOnlyTokPrompt",
+    "EncoderTokPrompt",
+    "DecoderTokPrompt",
+    "EncoderDecoderTokPrompt",
+    "SingletonTokPrompt",
+    "TokPrompt",
 ]

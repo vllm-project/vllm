@@ -34,10 +34,10 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
@@ -78,7 +78,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[TokensPrompt | EmbedsPrompt] | ErrorResponse:
+    ) -> list[TokPrompt] | ErrorResponse:
         """
         render completion request by validating and preprocessing inputs.
 
@@ -313,7 +313,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[TokensPrompt | EmbedsPrompt],
+        engine_prompts: list[TokPrompt],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,

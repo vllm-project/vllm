@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
-    from vllm.renderers.inputs.parse import DictPromptType
+    from vllm.renderers.inputs.preprocess import DictPrompt
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -566,7 +566,7 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: "PromptType | DictPromptType",
+        prompt: "PromptType | DictPrompt",
         params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
     ) -> None:

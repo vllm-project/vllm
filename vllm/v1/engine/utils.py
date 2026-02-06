@@ -21,7 +21,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.renderers.inputs.parse import get_prompt_components
+from vllm.renderers.inputs.preprocess import get_prompt_components
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator

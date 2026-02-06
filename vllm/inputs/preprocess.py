@@ -20,12 +20,12 @@ from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
     DecoderOnlyDictPrompt,
-    DictPromptType,
+    DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDictPrompt,
     SingletonDictPrompt,
 )
-from vllm.renderers.inputs.parse import parse_dec_only_prompt, parse_enc_dec_prompt
+from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -527,7 +527,7 @@ class InputPreprocessor:
 
     def _preprocess(
         self,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -549,7 +549,7 @@ class InputPreprocessor:
 
     def preprocess(
         self,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,

@@ -29,7 +29,7 @@ from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
-from vllm.renderers.inputs import DictPromptType
+from vllm.renderers.inputs import DictPrompt
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -297,7 +297,7 @@ class InputProcessor:
                         f"multi_modal_uuids[{modality!r}] is missing."
                     )
 
-    def _validate_mm_uuids(self, prompt: PromptType | DictPromptType) -> None:
+    def _validate_mm_uuids(self, prompt: PromptType | DictPrompt) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
         multi_modal_data in the incoming request prompt(s).
@@ -455,7 +455,7 @@ class InputProcessor:
         return prompt.get("multi_modal_data")
 
     def _extract_mm_data(
-        self, prompt: PromptType | DictPromptType
+        self, prompt: PromptType | DictPrompt
     ) -> MultiModalDataDict | None:
         if isinstance(prompt, dict) and "encoder_prompt" in prompt:
             return self._extract_singleton_mm_data(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
@@ -465,7 +465,7 @@ class InputProcessor:
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
     ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
@@ -521,7 +521,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType | DictPromptType,
+        prompt: PromptType | DictPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,

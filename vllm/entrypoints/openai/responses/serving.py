@@ -116,13 +116,14 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -292,7 +293,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = get_prompt_len(engine_prompt)
