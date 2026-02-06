@@ -79,7 +79,7 @@ def use_aiter_if_available():
     from importlib.util import find_spec
 
     # NOTE: it's not possible to use vllm._aiter_ops.is_aiter_found
-    # because the aiter ops will get loaded and all tests that want
+    # because the aiter ops won't loaded and all tests that want
     # to use aiter will fail because no aiter ops will be loaded.
     if current_platform.is_rocm() and find_spec("aiter") is not None:
         os.environ["VLLM_ROCM_USE_AITER"] = "1"
