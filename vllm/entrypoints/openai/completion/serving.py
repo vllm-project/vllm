@@ -34,8 +34,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
-from vllm.inputs.parse import get_prompt_components
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -161,7 +160,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = engine_prompt.get("prompt")
 
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
@@ -278,11 +277,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     engine_prompt = engine_prompts[i]
-                    final_res.prompt = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    final_res.prompt = engine_prompt.get("prompt")
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -352,11 +347,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
                 if prompt_text is None:
                     engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    prompt_text = engine_prompt.get("prompt")
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:

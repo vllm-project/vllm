@@ -170,6 +170,7 @@ class InternSdpaAttention(nn.Module):
         config: PretrainedConfig,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -215,7 +216,12 @@ class InternSdpaAttention(nn.Module):
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
         # Use unified MMEncoderAttention with automatic backend selection
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x shape: (B, N, C)"""
@@ -313,7 +319,11 @@ class InternS1VisionLayer(nn.Module):
         num_dummy_heads: int,
         prefix: str = "",
     ):
-        return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
+        return InternSdpaAttention(
+            config,
+            num_dummy_heads=num_dummy_heads,
+            prefix=prefix,
+        )
 
     def forward(
         self,

@@ -4,7 +4,7 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Mapping
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -218,6 +218,9 @@ class VoxtralRealtimeBuffer:
 @support_torch_compile
 class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    # transformers' currently has limited support for MistralCommon backend
+    # and cached_get_processor. Let's skip until fixed
+    skip_warmup_audio_preprocessing = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -453,7 +456,10 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
-        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio}}
-        prompts_dict["prompt_token_ids"] = tokenized.tokens
-        return cast(PromptType, prompts_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=tokenized.tokens,
+            multi_modal_data={
+                "audio": (tokenized.audios[0].audio_array, stt_config.sample_rate)
+            },
+        )
