@@ -3,6 +3,7 @@
 
 """Custom exceptions for vLLM."""
 
+from http import HTTPStatus
 from typing import Any
 
 
@@ -34,3 +35,32 @@ class VLLMValidationError(ValueError):
         if self.value is not None:
             extras.append(f"value={self.value}")
         return f"{base} ({', '.join(extras)})" if extras else base
+
+
+class GenerationError(Exception):
+    """Raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(
+        self,
+        message: str = "Internal server error",
+        err_type: str = "InternalServerError",
+        status_code: HTTPStatus = HTTPStatus.INTERNAL_SERVER_ERROR,
+    ):
+        super().__init__(message)
+        self.err_type = err_type
+        self.status_code = status_code
+
+
+class RequestRejectedError(Exception):
+    """Raised when finish_reason indicates the request was rejected
+    (e.g., queue full, rate-limited, etc)."""
+
+    def __init__(
+        self,
+        message: str = "Request was rejected",
+        err_type: str = "ServiceUnavailableError",
+        status_code: HTTPStatus = HTTPStatus.SERVICE_UNAVAILABLE,
+    ):
+        super().__init__(message)
+        self.err_type = err_type
+        self.status_code = status_code
