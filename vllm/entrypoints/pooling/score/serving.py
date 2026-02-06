@@ -118,12 +118,7 @@ class ServingScores(OpenAIServing):
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        pooling_params = request.to_pooling_params()
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -223,19 +218,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        # Use token_embed task for late interaction models
-        from vllm import PoolingParams
-
-        pooling_params = PoolingParams(
-            task="token_embed",
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            use_activation=request.use_activation,
-        )
-
-        try:
-            pooling_params.verify("token_embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("token_embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -358,12 +341,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params()
-
-        try:
-            default_pooling_params.verify("score", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        default_pooling_params = request.to_pooling_params("score")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -497,8 +475,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -542,8 +519,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,

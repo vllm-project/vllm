@@ -22,7 +22,6 @@ from vllm.entrypoints.pooling.classify.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
-from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
 
@@ -159,18 +158,3 @@ class ServingClassification(OpenAIServing):
         )
 
         return await self.handle(ctx)  # type: ignore[return-value]
-
-    def _create_pooling_params(
-        self,
-        ctx: ClassificationServeContext,
-    ) -> PoolingParams | ErrorResponse:
-        pooling_params = super()._create_pooling_params(ctx)
-        if isinstance(pooling_params, ErrorResponse):
-            return pooling_params
-
-        try:
-            pooling_params.verify("classify", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-        return pooling_params

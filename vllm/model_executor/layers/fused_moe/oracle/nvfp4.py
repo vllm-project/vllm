@@ -437,6 +437,7 @@ def make_nvfp4_moe_kernel(
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=False,
     )
 
     # TODO(rob): update inplace logic to be part of the kernel.

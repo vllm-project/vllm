@@ -25,8 +25,8 @@ from vllm.tracing import (
     TOKEN_LEVEL_TRACE,
     SpanAttributes,
     SpanKind,
-    Tracer,
     extract_trace_context,
+    instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import (
@@ -438,7 +438,7 @@ class OutputProcessor:
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
-        self.tracer: Tracer | None = None
+        self.tracing_enabled: bool = False
         self._requests_drained = asyncio.Event()
         self._requests_drained.set()
 
@@ -698,7 +698,7 @@ class OutputProcessor:
                     self._update_stats_from_finished(
                         req_state, finish_reason, iteration_stats
                     )
-                    if self.tracer:
+                    if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
         return OutputProcessorOutput(
@@ -734,91 +734,90 @@ class OutputProcessor:
     ) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
-        assert self.tracer is not None
 
-        arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
+        metrics = req_state.stats
+        arrival_time_ns = int(metrics.arrival_time * 1e9)
         trace_context = extract_trace_context(engine_core_output.trace_headers)
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
-        with self.tracer.start_as_current_span(
-            "llm_request",
-            kind=SpanKind.SERVER,
+
+        # Calculate timing metrics
+        e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
+        queued_time = metrics.scheduled_ts - metrics.queued_ts
+        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
+        decode_time = metrics.last_token_ts - metrics.first_token_ts
+        inference_time = metrics.last_token_ts - metrics.scheduled_ts
+
+        # Build attributes dict
+        attributes: dict[str, Any] = {
+            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN: (
+                metrics.first_token_latency
+            ),
+            SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
+            SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
+            SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
+            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
+                metrics.num_generation_tokens
+            ),
+            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
+            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
+            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
+            SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
+        }
+
+        # Add optional request parameters
+        if req_state.top_p:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TOP_P] = req_state.top_p
+        if req_state.max_tokens_param:
+            attributes[SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS] = (
+                req_state.max_tokens_param
+            )
+        if req_state.temperature:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TEMPERATURE] = (
+                req_state.temperature
+            )
+        if req_state.n:
+            attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
+
+        # Build events list for token level tracing
+        events: list[dict[str, Any]] = []
+        if req_state.observable_context and req_state.observable_context.not_empty:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
+            ob_context = req_state.observable_context
+            if ob_context.num_cached_tokens is not None:
+                attributes[SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS] = (
+                    ob_context.num_cached_tokens
+                )
+
+            for event in ob_context.engine_core_events:
+                events.append(
+                    {
+                        "name": get_event_name(event.type),
+                        "timestamp": int(event.wall_clock_timestamp * 1e9),
+                        "attributes": event.attributes,
+                    }
+                )
+
+            for event_ in ob_context.token_related_events:
+                events.append(
+                    {
+                        "name": event_.name,
+                        "timestamp": int(event_.timestamp * 1e9),
+                        "attributes": event_.attributes,
+                    }
+                )
+        else:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE
+
+        instrument_manual(
+            span_name="llm_request",
+            start_time=arrival_time_ns,
+            attributes=attributes,
             context=trace_context,
-            start_time=arrival_time_nano_seconds,
-        ) as span:
-            metrics = req_state.stats
-            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-            queued_time = metrics.scheduled_ts - metrics.queued_ts
-            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-            decode_time = metrics.last_token_ts - metrics.first_token_ts
-            inference_time = metrics.last_token_ts - metrics.scheduled_ts
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN,
-                metrics.first_token_latency,
-            )
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, queued_time)
-            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, prompt_length)
-            span.set_attribute(
-                SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
-                metrics.num_generation_tokens,
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time
-            )
-
-            # meta
-            span.set_attribute(
-                SpanAttributes.GEN_AI_REQUEST_ID, req_state.external_req_id
-            )
-            if req_state.top_p:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
-            if req_state.max_tokens_param:
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, req_state.max_tokens_param
-                )
-            if req_state.temperature:
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_TEMPERATURE, req_state.temperature
-                )
-            if req_state.n:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
-
-            if req_state.observable_context and req_state.observable_context.not_empty:
-                ob_context = req_state.observable_context
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL, TOKEN_LEVEL_TRACE
-                )
-                if ob_context.num_cached_tokens is not None:
-                    span.set_attribute(
-                        SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS,
-                        ob_context.num_cached_tokens,
-                    )
-
-                for event in ob_context.engine_core_events:
-                    span.add_event(
-                        name=get_event_name(event.type),
-                        timestamp=int(event.wall_clock_timestamp * 1e9),
-                        attributes=event.attributes,
-                    )
-
-                for event_ in ob_context.token_related_events:
-                    span.add_event(
-                        name=event_.name,
-                        timestamp=int(event_.timestamp * 1e9),
-                        attributes=event_.attributes,
-                    )
-            else:
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL, NORMAL_TRACE
-                )
+            kind=SpanKind.SERVER,
+            events=events if events else None,
+        )
 
     def _update_stats_from_output(
         self,

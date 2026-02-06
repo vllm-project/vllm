@@ -134,9 +134,12 @@ Please note that prefix caching is not yet supported for any of the above models
 
 #### Encoder-Decoder Models
 
-Whisper is supported. Other models requiring cross-attention between separate
-encoder and decoder (e.g., `BartForConditionalGeneration`,
-`MllamaForConditionalGeneration`) are no longer supported.
+Whisper is supported natively. Other encoder-decoder models are supported via the plugin system:
+
+- **BART**: `BartForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+
+For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
+following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).
 
 ### Features
 
