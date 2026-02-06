@@ -480,6 +480,69 @@ def rms_norm_per_block_quant(
     return output, scales
 
 
+# fused silu_and_mul + block quant
+def silu_and_mul_per_block_quant(
+    input: torch.Tensor,
+    group_size: int,  # Changed from list[int]
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
+    assert input.shape[-1] % 2 == 0, (
+        f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
+    )
+
+    # Output is half the width of input (after silu_and_mul)
+    num_tokens = input.shape[0]
+    hidden_size = input.shape[-1] // 2  # Divide by 2 because input is [gate || up]
+
+    # Allocate output tensor (FP8 or INT8)
+    output = torch.empty(
+        (num_tokens, hidden_size), device=input.device, dtype=quant_dtype
+    )
+
+    # Allocate scales tensor
+    num_groups = hidden_size // group_size  # Directly use group_size
+    if is_scale_transposed:
+        scales = torch.empty(
+            (num_groups, num_tokens),
+            device=input.device,
+            dtype=torch.float32,
+        )
+    else:
+        scales = torch.empty(
+            (num_tokens, num_groups),
+            device=input.device,
+            dtype=torch.float32,
+        )
+
+    if envs.VLLM_USE_TRITON_SILU_MUL_QUANT:
+        from vllm.model_executor.layers.quantization.triton_quantization import (
+            silu_and_mul_per_block_quant_triton,
+        )
+
+        return silu_and_mul_per_block_quant_triton(
+            input,
+            group_size,
+            quant_dtype,
+            scale_ub,
+            is_scale_transposed,
+        )
+
+    # Call the C++ kernel
+    torch.ops._C.silu_and_mul_per_block_quant(
+        output,
+        input,
+        scales,
+        group_size,  # Pass directly as int
+        scale_ub,
+        is_scale_transposed,
+    )
+
+    return output, scales
+
+
 # quantization ops
 # awq
 def awq_dequantize(
