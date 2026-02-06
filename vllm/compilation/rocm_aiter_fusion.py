@@ -522,6 +522,8 @@ class RopeReshapeKVCachePattern:
       )
     """
 
+    # TODO (Rohan138): maybe move the customop to this file, it's fairly
+    # large and specific for it to be in vllm/_aiter_ops.py
     FUSED_OP = rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()
 
     def __init__(

@@ -8,8 +8,11 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -853,8 +856,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
     forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[layer_name]
-    self = attn_layer.impl
+    attn_layer: Attention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
@@ -866,16 +868,31 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
-        cos, sin = cos_sin_cache.chunk(2, dim=-1)
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
-        key_cache, value_cache = kv_cache.unbind(0)
+
+        if attn_layer.backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(0)
+        elif attn_layer.backend == AttentionBackendEnum.TRITON_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(1)
+        elif attn_layer.backend == AttentionBackendEnum.ROCM_ATTN:
+            flash_layout = False
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, attn_layer.num_kv_heads, attn_layer.head_size
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backend for RoPE+KVCache fusion: {attn_layer.backend}"
+            )
+
+        is_fp8_kv_cache = attn_layer.impl.kv_cache_dtype.startswith("fp8")
         if is_fp8_kv_cache:
             key_cache_og_dtype = key_cache.dtype
             value_cache_og_dtype = value_cache.dtype
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-        # TODO (Rohan138): Allow flash_layout False for ROCM_ATTN backend
-        flash_layout = True
+            key_cache = key_cache.view(attn_layer.impl.fp8_dtype)
+            value_cache = value_cache.view(attn_layer.impl.fp8_dtype)
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+
         query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
             query,
             key,
