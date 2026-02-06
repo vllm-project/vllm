@@ -1107,7 +1107,8 @@ class AttentionMainLoop {
           if (sliding_window_left != -1) {
             pos = std::max(pos, curr_token_pos - sliding_window_left);
           }
-          return pos;
+          // Clamp to tile end to avoid OOB when window starts past the tile
+          return std::min(pos, kv_tile_end_pos);
         }();
 
         int32_t right_kv_pos = [&]() {
