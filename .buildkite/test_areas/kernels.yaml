@@ -87,6 +87,19 @@ steps:
     - pip install git+https://github.com/Dao-AILab/sonic-moe.git@11c3c7d0f075390ff711c5bdf0c6d8188b7b89dc
     - pytest -v -s kernels/moe/test_sonic_moe.py
 
+- label: Kernels Sonic MoE Benchmark (H100)
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - benchmarks/kernels/benchmark_sonic_moe.py
+  commands:
+    # sonicmoe not on PyPI, pin to commit. See: https://github.com/Dao-AILab/sonic-moe/issues/17
+    - pip install git+https://github.com/Dao-AILab/sonic-moe.git@11c3c7d0f075390ff711c5bdf0c6d8188b7b89dc
+    - python3 benchmarks/kernels/benchmark_sonic_moe.py --output-json benchmark_sonic_moe.json
+
 - label: Kernels (B200)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
