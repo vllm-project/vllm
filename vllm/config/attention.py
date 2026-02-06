@@ -16,8 +16,8 @@ class AttentionConfig:
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. If None, will be selected automatically."""
 
-    flash_attn_version: Literal[2, 3] | None = None
-    """Force vllm to use a specific flash-attention version (2 or 3).
+    flash_attn_version: Literal[2, 3, 4] | None = None
+    """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
     use_prefill_decode_attention: bool = False

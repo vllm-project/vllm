@@ -88,10 +88,136 @@ def get_file_from_class_path(class_path: str) -> Path | None:
     return py_file if py_file.exists() else None
 
 
-def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
-    """Parse fa_utils.py to detect FA2 vs FA3 feature differences.
+def _find_function(tree: ast.AST, name: str) -> ast.FunctionDef | None:
+    """Find a function definition by name in an AST."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
 
-    Returns a dict with 'fa2' and 'fa3' keys containing their respective
+
+def _function_checks_fa_version(func: ast.FunctionDef | None) -> bool:
+    """Check if a function compares get_flash_attn_version() to a value."""
+    if func is None:
+        return False
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Call)
+            and isinstance(node.left.func, ast.Name)
+            and node.left.func.id == "get_flash_attn_version"
+        ):
+            return True
+    return False
+
+
+def _extract_major_check(compare: ast.Compare) -> tuple[str, int] | None:
+    """Extract (op, value) from `device_capability.major <op> <value>`.
+
+    Returns ("==", 9) for `major == 9`, (">=", 10) for `major >= 10`, etc.
+    """
+    if not (
+        isinstance(compare.left, ast.Attribute)
+        and compare.left.attr == "major"
+        and compare.comparators
+        and isinstance(compare.comparators[0], ast.Constant)
+    ):
+        return None
+
+    op = compare.ops[0]
+    val = compare.comparators[0].value
+    if not isinstance(val, int):
+        return None
+    if isinstance(op, ast.Eq):
+        return ("==", val)
+    if isinstance(op, ast.GtE):
+        return (">=", val)
+    return None
+
+
+def _parse_fa_compute_caps(func: ast.FunctionDef | None) -> dict[str, str]:
+    """Parse get_flash_attn_version() to find FA3/FA4 compute capability checks.
+
+    Looks for patterns like:
+      - `if device_capability.major == 9 and ...:`  -> FA3
+      - `elif device_capability.major >= 10 and ...:`  -> FA4
+    """
+    result: dict[str, str] = {}
+    if func is None:
+        return result
+
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+
+        # Extract comparisons from either BoolOp (and/or) or direct Compare
+        test = node.test
+        comparisons = (
+            [v for v in test.values if isinstance(v, ast.Compare)]
+            if isinstance(test, ast.BoolOp)
+            else [test]
+            if isinstance(test, ast.Compare)
+            else []
+        )
+
+        for comp in comparisons:
+            check = _extract_major_check(comp)
+            if check is None:
+                continue
+            op, val = check
+            if op == "==" and "fa3" not in result:
+                result["fa3"] = f"{val}.x"
+            elif op == ">=" and "fa4" not in result:
+                result["fa4"] = f"≥{val}.0"
+
+    return result
+
+
+def _parse_fa4_supported_caps() -> str | None:
+    """Parse flash_attn_interface.py for FA4 supported compute capabilities.
+
+    Looks for `cc not in [9, 10, 11]` pattern in _is_fa4_supported().
+    """
+    fa_interface_file = (
+        REPO_ROOT / "vllm" / "vllm_flash_attn" / "flash_attn_interface.py"
+    )
+    if not fa_interface_file.exists():
+        return None
+
+    try:
+        tree = ast.parse(fa_interface_file.read_text())
+    except Exception:
+        return None
+
+    func = _find_function(tree, "_is_fa4_supported")
+    if func is None:
+        return None
+
+    for node in ast.walk(func):
+        if not (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.NotIn)
+            and isinstance(node.comparators[0], ast.List)
+        ):
+            continue
+
+        caps: list[int] = [
+            e.value
+            for e in node.comparators[0].elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, int)
+        ]
+        if caps:
+            caps.sort()
+            return f"{caps[0]}.x-{caps[-1]}.x"
+
+    return None
+
+
+def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
+    """Parse fa_utils.py to detect FA2 vs FA3 vs FA4 feature differences.
+
+    Returns a dict with 'fa2', 'fa3', and 'fa4' keys containing their respective
     feature overrides for compute capability, KV cache dtypes, and sink support.
     """
     if not FA_UTILS_FILE.exists():
@@ -102,68 +228,29 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    # Analyze the functions to determine FA3-specific features
-    fa3_supports_fp8 = False
-    fa3_supports_sinks = False
-    fa3_compute_cap: str | None = None
+    # Check which features are gated by FA version checks
+    fp8_func = _find_function(tree, "flash_attn_supports_fp8")
+    sinks_func = _find_function(tree, "flash_attn_supports_sinks")
+    fa3_supports_fp8 = _function_checks_fa_version(fp8_func)
+    fa3_supports_sinks = _function_checks_fa_version(sinks_func)
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-
-        # Check flash_attn_supports_fp8 - looks for `get_flash_attn_version() == 3`
-        if node.name == "flash_attn_supports_fp8":
-            for n in ast.walk(node):
-                if (
-                    isinstance(n, ast.Compare)
-                    and isinstance(n.left, ast.Call)
-                    and isinstance(n.left.func, ast.Name)
-                    and n.left.func.id == "get_flash_attn_version"
-                ):
-                    fa3_supports_fp8 = True
-                    break
-
-        # Check flash_attn_supports_sinks - looks for `get_flash_attn_version() == 3`
-        if node.name == "flash_attn_supports_sinks":
-            for n in ast.walk(node):
-                if (
-                    isinstance(n, ast.Compare)
-                    and isinstance(n.left, ast.Call)
-                    and isinstance(n.left.func, ast.Name)
-                    and n.left.func.id == "get_flash_attn_version"
-                ):
-                    fa3_supports_sinks = True
-                    break
-
-        # Check get_flash_attn_version for FA3 compute capability
-        # Look for the ternary: 3 if (device_capability.major == 9 ...) else 2
-        if node.name == "get_flash_attn_version":
-            for n in ast.walk(node):
-                # Look for IfExp (ternary) with `device_capability.major == 9`
-                if isinstance(n, ast.IfExp):
-                    test = n.test
-                    # Check if test is a BoolOp (and) containing the major check
-                    if isinstance(test, ast.BoolOp):
-                        for val in test.values:
-                            if (
-                                isinstance(val, ast.Compare)
-                                and isinstance(val.left, ast.Attribute)
-                                and val.left.attr == "major"
-                                and val.comparators
-                                and isinstance(val.comparators[0], ast.Constant)
-                            ):
-                                fa3_compute_cap = f"{val.comparators[0].value}.x"
-                                break
+    # Parse compute capability requirements from get_flash_attn_version()
+    version_func = _find_function(tree, "get_flash_attn_version")
+    compute_caps = _parse_fa_compute_caps(version_func)
+    fa3_compute_cap = compute_caps.get("fa3")
+    fa4_compute_cap = compute_caps.get("fa4") or _parse_fa4_supported_caps()
 
     return {
-        "fa2": {
-            "supports_fp8": False,
-            "supports_sink": False,
-        },
+        "fa2": {"supports_fp8": False, "supports_sink": False},
         "fa3": {
             "compute_capability": fa3_compute_cap,
             "supports_fp8": fa3_supports_fp8,
             "supports_sink": fa3_supports_sinks,
+        },
+        "fa4": {
+            "compute_capability": fa4_compute_cap,
+            "supports_fp8": False,
+            "supports_sink": False,
         },
     }
 
@@ -1077,7 +1164,7 @@ def generate_docs() -> str:
         if info:
             all_backends.append(info)
 
-    # Expand FLASH_ATTN into FA2 and FA3 variants with different capabilities
+    # Expand FLASH_ATTN into FA2, FA3, and FA4 variants with different capabilities
     if fa_features:
         expanded_backends = []
         for backend in all_backends:
@@ -1106,9 +1193,21 @@ def generate_docs() -> str:
                     new_dtypes = [d for d in fp8_dtypes if d not in base_dtypes]
                     fa3["kv_cache_dtypes"] = ", ".join(base_dtypes + new_dtypes)
 
-                # Add FA2 first, then FA3
+                # Create FA4 entry
+                fa4 = backend.copy()
+                fa4["name"] = "FLASH_ATTN"
+                fa4["version"] = "FA4*"
+                fa4["_sort_key"] = "FLASH_ATTN"
+                fa4["_sort_order"] = 2
+                if fa_features["fa4"]["compute_capability"]:
+                    fa4["compute_capability"] = fa_features["fa4"]["compute_capability"]
+                fa4["supports_sink"] = fa_features["fa4"]["supports_sink"]
+                # FA4 does not support FP8 KV cache (same as FA2)
+
+                # Add FA2, FA3, then FA4
                 expanded_backends.append(fa2)
                 expanded_backends.append(fa3)
+                expanded_backends.append(fa4)
             else:
                 backend["_sort_key"] = backend["name"]
                 backend["_sort_order"] = 0
@@ -1196,7 +1295,8 @@ def generate_docs() -> str:
     if fa_features:
         footnotes.append(
             "> **\\*** Specify the FlashAttention version via "
-            "`--attention-config.flash_attn_version=2` or `3`. Default is FA3 on SM90, "
+            "`--attention-config.flash_attn_version=2`, `3`, or `4`. "
+            "Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), "
             "FA2 otherwise."
         )
     if footnotes:
