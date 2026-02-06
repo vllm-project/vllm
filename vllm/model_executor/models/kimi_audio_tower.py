@@ -201,16 +201,3 @@ class KimiAudioTower(nn.Module):
     def device(self):
         """Return the device of the module parameters."""
         return next(self.parameters()).device
-
-
-def create_kimi_audio_tower(config):
-    """
-    Factory function to create a KimiAudioTower instance.
-
-    Args:
-        config: Model configuration object
-
-    Returns:
-        KimiAudioTower instance
-    """
-    return KimiAudioTower(config)

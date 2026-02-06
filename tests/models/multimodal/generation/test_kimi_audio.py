@@ -3,6 +3,7 @@
 
 from pathlib import Path
 
+import kimia_infer.api.prompt_manager  # noqa: F401
 import librosa
 import pytest
 import torch
@@ -120,13 +121,6 @@ def test_kimi_audio_hf_outputs_match_vllm(
 
     # Avoid fork-based engine startup issues in multi-threaded pytest runs.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-    # Kimi-Audio native prompt construction currently depends on kimia_infer.
-    # Since kimia_infer is not a vLLM dependency, skip if it is not installed.
-    try:
-        import kimia_infer.api.prompt_manager  # noqa: F401
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"kimia_infer not available: {e}")
 
     # Use HuggingFace model path.
     model = "moonshotai/Kimi-Audio-7B-Instruct"

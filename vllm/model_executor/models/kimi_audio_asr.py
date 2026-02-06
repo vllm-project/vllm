@@ -162,7 +162,6 @@ class KimiAudioASRProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # One audio clip per request for now.
-
         return {"audio": 1}
 
     def get_mm_max_tokens_per_item(
@@ -182,9 +181,7 @@ class KimiAudioASRDummyInputsBuilder(
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         # Dummy text is tokenized by our processor override to a single
-
         # placeholder token id.
-
         return ""
 
     def get_dummy_mm_data(
