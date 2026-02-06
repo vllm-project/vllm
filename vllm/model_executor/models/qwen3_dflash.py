@@ -46,6 +46,26 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _resolve_dflash_layer_ids(config: Qwen3Config) -> tuple[int, ...] | None:
+    dflash_config = getattr(config, "dflash_config", None)
+    if isinstance(dflash_config, dict):
+        layer_ids = dflash_config.get("layer_ids")
+        if isinstance(layer_ids, (list, tuple)) and len(layer_ids) > 0:
+            return tuple(int(layer_id) for layer_id in layer_ids)
+
+    layer_ids = getattr(config, "eagle_aux_hidden_state_layer_ids", None)
+    if isinstance(layer_ids, (list, tuple)) and len(layer_ids) > 0:
+        return tuple(int(layer_id) for layer_id in layer_ids)
+
+    return None
+
+
+def _default_aux_layer_ids(num_layers: int) -> tuple[int, ...]:
+    if num_layers < 3:
+        return tuple(range(num_layers))
+    return (2, num_layers // 2, num_layers - 3)
+
+
 class DFlashQwen3Attention(nn.Module):
     def __init__(
         self,
@@ -240,6 +260,7 @@ class DFlashQwen3Model(nn.Module):
             drafter_config.update(dflash_config)
 
         self.use_aux_hidden_state = drafter_config.get("use_aux_hidden_state", True)
+        self.layer_ids = _resolve_dflash_layer_ids(self.config)
 
         current_vllm_config = get_current_vllm_config()
 
@@ -262,11 +283,18 @@ class DFlashQwen3Model(nn.Module):
         )
 
         if self.use_aux_hidden_state:
-            layer_ids = drafter_config.get("layer_ids")
-            if isinstance(layer_ids, (list, tuple)) and len(layer_ids) > 0:
-                num_features_to_use = len(layer_ids)
+            if self.layer_ids is not None:
+                num_features_to_use = len(self.layer_ids)
             else:
-                num_features_to_use = 3
+                target_layer_count = getattr(self.config, "target_layer_count", None)
+                if isinstance(target_layer_count, int):
+                    num_features_to_use = len(
+                        _default_aux_layer_ids(target_layer_count)
+                    )
+                else:
+                    num_features_to_use = len(
+                        _default_aux_layer_ids(self.config.num_hidden_layers)
+                    )
 
             if hasattr(self.config, "target_hidden_size"):
                 fc_input_size = self.config.target_hidden_size * num_features_to_use
@@ -401,18 +429,20 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        del layers
+        dflash_config = getattr(self.config, "dflash_config", None)
+        if not isinstance(dflash_config, dict):
+            dflash_config = {}
+            self.config.dflash_config = dflash_config
+        dflash_config["layer_ids"] = list(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        dflash_config = getattr(self.config, "dflash_config", None)
-        if isinstance(dflash_config, dict):
-            layer_ids = dflash_config.get("layer_ids")
-            if isinstance(layer_ids, (list, tuple)) and len(layer_ids) > 0:
-                return tuple(int(layer_id) for layer_id in layer_ids)
+        layer_ids = _resolve_dflash_layer_ids(self.config)
+        if layer_ids is not None:
+            return layer_ids
 
         target_layer_count = getattr(self.config, "target_layer_count", None)
-        if isinstance(target_layer_count, int) and target_layer_count >= 3:
-            return (2, target_layer_count // 2, target_layer_count - 3)
+        if isinstance(target_layer_count, int):
+            return _default_aux_layer_ids(target_layer_count)
 
         return super().get_eagle3_aux_hidden_state_layers()
 

@@ -1592,18 +1592,28 @@ class SpecDecodeBaseProposer:
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
-        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
-        hidden states and directly uses the last layer output just like eagle1.
-        They might indicate this by setting "use_aux_hidden_state" to False
-        inside the "eagle_config" dict of their hf_config.
+        Some eagle3/dflash heads do not use auxiliary hidden states and
+        directly use the last layer output like eagle1.
+
+        Config precedence:
+        1) dflash_config.use_aux_hidden_state (for method=dflash)
+        2) eagle_config.use_aux_hidden_state
+        3) default True
         """
-        if self.method != "eagle3":
+        if self.method not in ("eagle3", "dflash"):
             return False
-        # Assume that eagle3 heads use aux hidden states by default
+
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
-        if eagle_config is not None:
+        if isinstance(eagle_config, dict):
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
+        if isinstance(dflash_config, dict):
+            use_aux_hidden_state = dflash_config.get(
+                "use_aux_hidden_state", use_aux_hidden_state
+            )
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

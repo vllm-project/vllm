@@ -170,3 +170,25 @@ def test_dflash_aux_layers_from_dflash_config():
         target_layer_count=36,
     )
     assert model.get_eagle3_aux_hidden_state_layers() == (31, 33, 35)
+
+
+def test_dflash_aux_layers_fallback_to_eagle_aux_layer_ids():
+    model = DFlashQwen3ForCausalLM.__new__(DFlashQwen3ForCausalLM)
+    model.config = SimpleNamespace(
+        eagle_aux_hidden_state_layer_ids=[7, 11, 15],
+        target_layer_count=36,
+    )
+    assert model.get_eagle3_aux_hidden_state_layers() == (7, 11, 15)
+
+
+def test_dflash_aux_layers_fallback_to_target_layer_count_default():
+    model = DFlashQwen3ForCausalLM.__new__(DFlashQwen3ForCausalLM)
+    model.config = SimpleNamespace(target_layer_count=8)
+    assert model.get_eagle3_aux_hidden_state_layers() == (2, 4, 5)
+
+
+def test_set_dflash_aux_layers_updates_dflash_config():
+    model = DFlashQwen3ForCausalLM.__new__(DFlashQwen3ForCausalLM)
+    model.config = SimpleNamespace(dflash_config={})
+    model.set_aux_hidden_state_layers((1, 3, 5))
+    assert model.config.dflash_config["layer_ids"] == [1, 3, 5]

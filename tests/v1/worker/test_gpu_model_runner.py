@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -1196,3 +1198,30 @@ def test_is_uniform_decode() -> None:
         num_reqs=15,
         force_uniform_decode=False,
     )
+
+
+def test_get_eagle3_aux_layers_from_config_prefers_dflash_layers():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(
+        method="dflash",
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                dflash_config={"layer_ids": [31, 33, 35]},
+                eagle_aux_hidden_state_layer_ids=[1, 2, 3],
+            )
+        ),
+    )
+
+    assert runner._get_eagle3_aux_layers_from_config() == (31, 33, 35)
+
+
+def test_get_eagle3_aux_layers_from_config_uses_eagle_field_for_eagle3():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(
+        method="eagle3",
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=[2, 16, 29])
+        ),
+    )
+
+    assert runner._get_eagle3_aux_layers_from_config() == (2, 16, 29)

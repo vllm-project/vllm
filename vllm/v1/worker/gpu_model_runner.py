@@ -465,7 +465,7 @@ class GPUModelRunner(
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
-                if self.speculative_config.method == "eagle3":
+                if self.speculative_config.method in ("eagle3", "dflash"):
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )
@@ -4300,12 +4300,23 @@ class GPUModelRunner(
             return None
 
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
+
+        def _to_layer_tuple(value: object) -> tuple[int, ...] | None:
+            if value and isinstance(value, (list, tuple)):
+                return tuple(int(layer_id) for layer_id in value)
             return None
 
-        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
-        if layer_ids and isinstance(layer_ids, (list, tuple)):
-            return tuple(layer_ids)
+        # DFlash-specific config takes precedence for dflash method.
+        if self.speculative_config.method == "dflash":
+            dflash_config = getattr(hf_config, "dflash_config", None)
+            if isinstance(dflash_config, dict) and (
+                layer_ids := _to_layer_tuple(dflash_config.get("layer_ids"))
+            ):
+                return layer_ids
+
+        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if layer_ids := _to_layer_tuple(layer_ids):
+            return layer_ids
 
         return None
 
