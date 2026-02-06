@@ -216,61 +216,85 @@ class DFlashProposer(EagleProposer):
         ).view(-1)
         slot_mapping = block_ids * block_size + (query_positions % block_size)
 
-        # Build non-causal metadata for query tokens only.
-        common_attn_metadata.slot_mapping = slot_mapping
-        common_attn_metadata.num_actual_tokens = num_query_tokens
-        common_attn_metadata.max_query_len = num_query_tokens
-        common_attn_metadata.query_start_loc = (
-            self.arange[: batch_size + 1] * num_query_tokens
-        )
-        common_attn_metadata.query_start_loc_cpu = (
-            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
-            * num_query_tokens
-        )
-        common_attn_metadata.max_seq_len += num_query_tokens
-        common_attn_metadata.seq_lens += num_query_tokens
-        common_attn_metadata._seq_lens_cpu = None
-        common_attn_metadata._num_computed_tokens_cpu = None
-        common_attn_metadata.causal = False
-
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0
-        )
-        if hasattr(attn_metadata, "causal") and attn_metadata.causal:
-            raise NotImplementedError(
-                "DFlash block_drafting requires non-causal attention metadata."
+        original_slot_mapping = common_attn_metadata.slot_mapping
+        original_num_actual_tokens = common_attn_metadata.num_actual_tokens
+        original_max_query_len = common_attn_metadata.max_query_len
+        original_query_start_loc = common_attn_metadata.query_start_loc
+        original_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        original_max_seq_len = common_attn_metadata.max_seq_len
+        original_seq_lens = common_attn_metadata.seq_lens.clone()
+        original_seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        original_num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+        original_causal = common_attn_metadata.causal
+        try:
+            # Build non-causal metadata for query tokens only.
+            common_attn_metadata.slot_mapping = slot_mapping
+            common_attn_metadata.num_actual_tokens = num_query_tokens
+            common_attn_metadata.max_query_len = num_query_tokens
+            common_attn_metadata.query_start_loc = (
+                self.arange[: batch_size + 1] * num_query_tokens
             )
-        per_layer_attn_metadata = {
-            layer_name: attn_metadata for layer_name in self.attn_layer_names
-        }
-
-        # Query input is [next_token, mask, mask, ...].
-        self.input_ids[:num_query_tokens].fill_(self.mask_token_id)
-        self.input_ids[0] = next_token_ids[0]
-        self._set_positions(num_kv_tokens, position_ids)
-        self.hidden_states[:num_context_tokens] = target_hidden_states
-
-        # NOTE: block_drafting currently runs in eager mode to avoid
-        # cudagraph/padding complexity while we stabilize correctness.
-        with set_forward_context(
-            per_layer_attn_metadata,
-            self.vllm_config,
-            num_tokens=num_query_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            slot_mapping=self._get_slot_mapping(
-                num_query_tokens, common_attn_metadata.slot_mapping
-            ),
-        ):
-            ret_hidden_states = self.model(
-                input_ids=self.input_ids[:num_query_tokens],
-                positions=self._get_positions(num_kv_tokens),
-                hidden_states=self.hidden_states[:num_context_tokens],
-                inputs_embeds=None,
+            common_attn_metadata.query_start_loc_cpu = (
+                torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
+                * num_query_tokens
             )
-            if not self.model_returns_tuple():
-                last_hidden_states = ret_hidden_states
-            else:
-                last_hidden_states, _ = ret_hidden_states
+            common_attn_metadata.max_seq_len += num_query_tokens
+            common_attn_metadata.seq_lens += num_query_tokens
+            common_attn_metadata._seq_lens_cpu = None
+            common_attn_metadata._num_computed_tokens_cpu = None
+            common_attn_metadata.causal = False
+
+            attn_metadata = attn_metadata_builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata, draft_index=0
+            )
+            if hasattr(attn_metadata, "causal") and attn_metadata.causal:
+                raise NotImplementedError(
+                    "DFlash block_drafting requires non-causal attention metadata."
+                )
+            per_layer_attn_metadata = {
+                layer_name: attn_metadata for layer_name in self.attn_layer_names
+            }
+
+            # Query input is [next_token, mask, mask, ...].
+            self.input_ids[:num_query_tokens].fill_(self.mask_token_id)
+            self.input_ids[0] = next_token_ids[0]
+            self._set_positions(num_kv_tokens, position_ids)
+            self.hidden_states[:num_context_tokens] = target_hidden_states
+
+            # NOTE: block_drafting currently runs in eager mode to avoid
+            # cudagraph/padding complexity while we stabilize correctness.
+            with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_query_tokens,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                slot_mapping=self._get_slot_mapping(
+                    num_query_tokens, common_attn_metadata.slot_mapping
+                ),
+            ):
+                ret_hidden_states = self.model(
+                    input_ids=self.input_ids[:num_query_tokens],
+                    positions=self._get_positions(num_kv_tokens),
+                    hidden_states=self.hidden_states[:num_context_tokens],
+                    inputs_embeds=None,
+                )
+                if not self.model_returns_tuple():
+                    last_hidden_states = ret_hidden_states
+                else:
+                    last_hidden_states, _ = ret_hidden_states
+        finally:
+            common_attn_metadata.slot_mapping = original_slot_mapping
+            common_attn_metadata.num_actual_tokens = original_num_actual_tokens
+            common_attn_metadata.max_query_len = original_max_query_len
+            common_attn_metadata.query_start_loc = original_query_start_loc
+            common_attn_metadata.query_start_loc_cpu = original_query_start_loc_cpu
+            common_attn_metadata.max_seq_len = original_max_seq_len
+            common_attn_metadata.seq_lens.copy_(original_seq_lens)
+            common_attn_metadata._seq_lens_cpu = original_seq_lens_cpu
+            common_attn_metadata._num_computed_tokens_cpu = (
+                original_num_computed_tokens_cpu
+            )
+            common_attn_metadata.causal = original_causal
 
         # Skip the first query token (the sampled next token), and use mask slots.
         sample_hidden_states = last_hidden_states[1:num_query_tokens]

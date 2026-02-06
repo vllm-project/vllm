@@ -4,6 +4,7 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -1140,3 +1141,84 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def _make_fake_target_model_config_for_spec() -> SimpleNamespace:
+    return SimpleNamespace(
+        model="fake-target",
+        tokenizer="fake-tokenizer",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        dtype="float16",
+        seed=0,
+        tokenizer_revision=None,
+        max_model_len=8192,
+        quantization=None,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="hf",
+        hf_text_config=SimpleNamespace(model_type="qwen3"),
+    )
+
+
+def _make_fake_draft_model_config(
+    model: str,
+    architectures: list[str] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        model=model,
+        architectures=architectures,
+        hf_config=SimpleNamespace(model_type="qwen3"),
+        max_model_len=8192,
+        verify_with_parallel_config=lambda _parallel_config: None,
+    )
+
+
+def test_dflash_speculative_method_auto_detected_from_model_name():
+    target_model_config = _make_fake_target_model_config_for_spec()
+    draft_model_config = _make_fake_draft_model_config(
+        model="org/Qwen3-8B-DFlash-b16",
+        architectures=[],
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        speculative_config = SpeculativeConfig(
+            model="org/Qwen3-8B-DFlash-b16",
+            num_speculative_tokens=2,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+    assert speculative_config.method == "dflash"
+
+
+def test_dflash_speculative_method_auto_detected_from_architecture():
+    target_model_config = _make_fake_target_model_config_for_spec()
+    draft_model_config = _make_fake_draft_model_config(
+        model="org/Qwen3-8B-speculator",
+        architectures=["DFlashDraftModel"],
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        speculative_config = SpeculativeConfig(
+            model="org/Qwen3-8B-speculator",
+            num_speculative_tokens=2,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+    assert speculative_config.method == "dflash"
+
+
+def test_dflash_compute_hash_matches_eagle3_path():
+    dflash_config = SpeculativeConfig.__new__(SpeculativeConfig)
+    dflash_config.method = "dflash"
+    eagle3_config = SpeculativeConfig.__new__(SpeculativeConfig)
+    eagle3_config.method = "eagle3"
+    eagle_config = SpeculativeConfig.__new__(SpeculativeConfig)
+    eagle_config.method = "eagle"
+
+    assert dflash_config.compute_hash() == eagle3_config.compute_hash()
+    assert dflash_config.compute_hash() != eagle_config.compute_hash()

@@ -254,6 +254,69 @@ def test_block_drafting_raises_when_block_table_is_too_small():
         )
 
 
+def test_block_drafting_restores_common_attn_metadata_after_error():
+    proposer = _make_block_drafting_proposer_for_errors()
+    proposer.max_model_len = 128
+    proposer.runner = object()
+    proposer.attn_metadata_builder = None
+    proposer.arange = torch.arange(8, dtype=torch.int32)
+    proposer.token_arange_np = torch.arange(8, dtype=torch.int32).cpu().numpy()
+    builder = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=4),
+        build_for_drafting=lambda **_kwargs: SimpleNamespace(causal=True),
+    )
+    common_attn_metadata = SimpleNamespace(
+        batch_size=lambda: 1,
+        block_table_tensor=torch.zeros((1, 2), dtype=torch.int64),
+        slot_mapping=torch.tensor([9], dtype=torch.int64),
+        num_actual_tokens=1,
+        max_query_len=1,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_seq_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([1], dtype=torch.int32),
+        _num_computed_tokens_cpu=torch.tensor([1], dtype=torch.int32),
+        causal=True,
+    )
+
+    original_slot_mapping = common_attn_metadata.slot_mapping
+    original_num_actual_tokens = common_attn_metadata.num_actual_tokens
+    original_max_query_len = common_attn_metadata.max_query_len
+    original_query_start_loc = common_attn_metadata.query_start_loc
+    original_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    original_max_seq_len = common_attn_metadata.max_seq_len
+    original_seq_lens = common_attn_metadata.seq_lens.clone()
+    original_seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+    original_num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+    original_causal = common_attn_metadata.causal
+
+    with (
+        patch.object(proposer, "_get_attention_metadata_builder", return_value=builder),
+        pytest.raises(NotImplementedError, match="requires non-causal attention"),
+    ):
+        proposer._propose_block_drafting(
+            target_positions=torch.tensor([0], dtype=torch.int64),
+            target_hidden_states=torch.zeros(1, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1], dtype=torch.int32),
+            common_attn_metadata=common_attn_metadata,
+        )
+
+    assert common_attn_metadata.slot_mapping is original_slot_mapping
+    assert common_attn_metadata.num_actual_tokens == original_num_actual_tokens
+    assert common_attn_metadata.max_query_len == original_max_query_len
+    assert common_attn_metadata.query_start_loc is original_query_start_loc
+    assert common_attn_metadata.query_start_loc_cpu is original_query_start_loc_cpu
+    assert common_attn_metadata.max_seq_len == original_max_seq_len
+    assert torch.equal(common_attn_metadata.seq_lens, original_seq_lens)
+    assert common_attn_metadata._seq_lens_cpu is original_seq_lens_cpu
+    assert (
+        common_attn_metadata._num_computed_tokens_cpu
+        is original_num_computed_tokens_cpu
+    )
+    assert common_attn_metadata.causal is original_causal
+
+
 def test_dflash_get_slot_mapping_pads_with_padding_slot_id():
     proposer = DFlashProposer.__new__(DFlashProposer)
     proposer._slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)

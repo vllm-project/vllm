@@ -332,6 +332,12 @@ def test_speculators_model_integration(
             False,
             "transformers",
         ),
+        (
+            ("dflash", "Qwen/Qwen3-8B", "z-lab/Qwen3-8B-DFlash-b16", 1),
+            False,
+            False,
+            "auto",
+        ),
         pytest.param(
             (
                 "eagle3",
@@ -422,6 +428,7 @@ def test_speculators_model_integration(
     ids=[
         "qwen3_eagle3",
         "qwen3_eagle3-transformers",
+        "qwen3_dflash",
         "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
