@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 
+from vllm.logger import init_logger
 from vllm.v1.request import Request, RequestStatus
+
+logger = init_logger(__name__)
 
 
 def remove_all(lst: list, items_to_remove: set) -> list:
@@ -48,6 +51,20 @@ def check_stop(request: Request, max_model_len: int) -> bool:
 
     last_token_id = request.output_token_ids[-1]
     if not sampling_params.ignore_eos and last_token_id == request.eos_token_id:
+        # Warn if the model immediately generated EOS as the first token.
+        # This often indicates the model expects a specific prompt format
+        # (e.g., chat template) that was not applied.
+        if request.num_output_tokens == 1:
+            logger.warning_once(
+                "Model generated EOS token as the first output token for "
+                "request '%s'. This may indicate the model expects a specific "
+                "prompt format (e.g., chat template) that was not applied. "
+                "Consider using the chat API or applying the chat template "
+                "to your prompts. You can also set min_tokens > 0 to force "
+                "the model to generate at least that many tokens before "
+                "stopping.",
+                request.request_id,
+            )
         request.status = RequestStatus.FINISHED_STOPPED
         return True
 
