@@ -8,6 +8,7 @@ import aiohttp
 import requests
 from urllib3.util import parse_url
 
+import vllm.envs as envs
 from vllm.version import __version__ as VLLM_VERSION
 
 
@@ -32,7 +33,12 @@ class HTTPConnection:
     # required, so that the client is only accessible inside async event loop
     async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
-            self._async_client = aiohttp.ClientSession(trust_env=True)
+            # Use a large enough HTTP stream buffer in aiohttp to avoid
+            # ContentLengthError when downloading image/video/audio.
+            self._async_client = aiohttp.ClientSession(
+                trust_env=True,
+                read_bufsize=envs.VLLM_AIOHTTP_READ_BUFSIZE_MB * 1024 * 1024,
+            )
 
         return self._async_client
 
