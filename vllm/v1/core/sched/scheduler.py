@@ -1443,7 +1443,11 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
-                self._append_failed_or_rejected_output(outputs, request, failed_kv=True)
+                self._append_failed_or_rejected_output(
+                    outputs,
+                    request,
+                    failed_kv=True,
+                )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1453,7 +1457,8 @@ class Scheduler(SchedulerInterface):
             # Create EngineCoreOutputs for all rejected requests.
             for request in self.rejected:
                 self._append_failed_or_rejected_output(
-                    outputs, request, failed_kv=False
+                    outputs,
+                    request,
                 )
             self.rejected.clear()
         # collect KV cache events from KV cache manager
@@ -1511,25 +1516,27 @@ class Scheduler(SchedulerInterface):
     def _append_failed_or_rejected_output(
         self,
         outputs: dict[int, list[EngineCoreOutput]],
-        request: Request,
+        request: "Request",
         failed_kv: bool = False,
     ) -> None:
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
         If failed_kv is True, omits stop_reason (not available for failed KV loads).
+        Only valid EngineCoreOutput fields are included, with correct types.
         """
-        output_kwargs = dict(
+        output = EngineCoreOutput(
             request_id=request.request_id,
             new_token_ids=[],
             finish_reason=request.get_finished_reason(),
             events=request.take_events(),
             trace_headers=request.trace_headers,
         )
-        if failed_kv:
-            output_kwargs["num_cached_tokens"] = request.num_cached_tokens
+        if not failed_kv:
+            output.num_cached_tokens = request.num_cached_tokens
         else:
-            output_kwargs["stop_reason"] = request.stop_reason
-        outputs[request.client_index].append(EngineCoreOutput(**output_kwargs))
+            output.stop_reason = request.stop_reason
+
+        outputs[request.client_index].append(output)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
