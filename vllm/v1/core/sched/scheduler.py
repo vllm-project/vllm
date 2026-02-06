@@ -193,7 +193,13 @@ class Scheduler(SchedulerInterface):
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience
-        # Example: https://github.com/neuralmagic/bart-plugin
+        # Example: https://github.com/vllm-project/bart-plugin
+        if self.is_encoder_decoder:
+            assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
+                "Encoder-decoder models are expected to implement the "
+                "multimodal interface with at most one modality."
+            )
+
         self.max_num_encoder_input_tokens = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
@@ -208,7 +214,7 @@ class Scheduler(SchedulerInterface):
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
         self._num_encoder_max_input_tokens = (
             mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
-            if mm_budget
+            if mm_budget and mm_budget.mm_max_toks_per_item
             else 0
         )
 
@@ -594,6 +600,7 @@ class Scheduler(SchedulerInterface):
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
+                connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -620,6 +627,11 @@ class Scheduler(SchedulerInterface):
 
                         request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
+
+                        connector_prefix_cache_queries = (
+                            request.num_tokens - num_new_local_computed_tokens
+                        )
+                        connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -736,6 +748,15 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_blocks(request_id),
                         num_external_computed_tokens,
                     )
+                    if (
+                        self.connector_prefix_cache_stats is not None
+                        and connector_prefix_cache_queries != 0
+                    ):
+                        self.connector_prefix_cache_stats.record(
+                            num_tokens=connector_prefix_cache_queries,
+                            num_hits=connector_prefix_cache_hits,
+                            preempted=request.num_preemptions > 0,
+                        )
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -746,8 +767,6 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
-
-                self._update_connector_prefix_cache_stats(request)
 
                 self.running.append(request)
                 if self.log_stats:
@@ -1842,7 +1861,10 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
+        connector_prefix_cache_stats: PrefixCacheStats | None = None
+        if self.connector_prefix_cache_stats is not None:
+            connector_prefix_cache_stats = self.connector_prefix_cache_stats
+            self.connector_prefix_cache_stats = PrefixCacheStats()
         eviction_events = (
             self.kv_metrics_collector.drain_events()
             if self.kv_metrics_collector is not None
@@ -1902,23 +1924,6 @@ class Scheduler(SchedulerInterface):
     ########################################################################
     # KV Connector Related Methods
     ########################################################################
-
-    def _update_connector_prefix_cache_stats(self, request: Request) -> None:
-        if self.connector_prefix_cache_stats is None:
-            return
-
-        self.connector_prefix_cache_stats.record(
-            num_tokens=request.num_tokens,
-            num_hits=request.num_external_computed_tokens,
-            preempted=request.num_preemptions > 0,
-        )
-
-    def _make_connector_prefix_cache_stats(self) -> PrefixCacheStats | None:
-        if self.connector_prefix_cache_stats is None:
-            return None
-        stats = self.connector_prefix_cache_stats
-        self.connector_prefix_cache_stats = PrefixCacheStats()
-        return stats
 
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
