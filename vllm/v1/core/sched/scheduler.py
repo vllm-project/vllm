@@ -1509,7 +1509,10 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _append_failed_or_rejected_output(
-        self, outputs: dict[int, list], request: Request, failed_kv: bool = False
+        self,
+        outputs: dict[int, list[EngineCoreOutput]],
+        request: Request,
+        failed_kv: bool = False,
     ) -> None:
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
