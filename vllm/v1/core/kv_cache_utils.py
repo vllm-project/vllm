@@ -27,8 +27,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
-from typing import List, Optional
-
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from `bytes` helps
@@ -258,25 +256,19 @@ class FreeKVCacheBlockQueue:
         assert self.num_free_blocks >= n
         self.num_free_blocks -= n
 
-        curr_block: Optional[KVCacheBlock] = (
-            self.fake_free_list_head.next_free_block
-        )
+        curr_block: KVCacheBlock | None = self.fake_free_list_head.next_free_block
 
-      
-        ret: List[KVCacheBlock] = []
+        ret: list[KVCacheBlock] = []
 
         for _ in range(n):
-            
             assert curr_block is not None
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
 
-       
         self.fake_free_list_head.next_free_block = curr_block
         if curr_block is not None:
             curr_block.prev_free_block = self.fake_free_list_head
 
-      
         ret[0].prev_free_block = None
         ret[-1].next_free_block = None
 
