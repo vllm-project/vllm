@@ -172,12 +172,6 @@ VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = False
 VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
 """(ROCm only) Shuffle key-value cache layout for better memory access patterns."""
 
-VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
-"""Use separate attention implementations for prefill and decode phases in V1."""
-
-VLLM_FLASH_ATTN_VERSION: int | None = None
-"""FlashAttention version to use. If None, auto-detected."""
-
 LOCAL_RANK: int = 0
 """Local rank of the process in the distributed setting, 
 used to determine the GPU device id."""
@@ -243,9 +237,6 @@ VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
 
 VLLM_NO_USAGE_STATS: bool = False
 """If set to 1, vllm will not send usage stats."""
-
-VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
-"""Disable FlashInfer for prefill operations."""
 
 
 def _get_dnt_value() -> bool:
@@ -316,37 +307,6 @@ VLLM_TRACE_FUNCTION: int = 0
 """
 If set to 1, vllm will trace function calls.
 Useful for debugging.
-"""
-
-# ================== Attention Backend ==================
-
-
-def _get_attention_backend_choices() -> list[str]:
-    """Get available attention backend choices dynamically."""
-    try:
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-        return list(AttentionBackendEnum.__members__.keys())
-    except ImportError:
-        # Fallback list if the module is not available
-        return [
-            "TORCH_SDPA",
-            "FLASH_ATTN",
-            "FLASHINFER",
-            "FLASHMLA",
-            "FLASH_ATTN_MLA",
-            "FLASHINFER_MLA",
-            "CUTLASS_MLA",
-        ]
-
-
-VLLM_ATTENTION_BACKEND: str | None = env_with_choices(
-    "VLLM_ATTENTION_BACKEND", None, _get_attention_backend_choices
-)
-"""
-Backend for attention computation.
-Example options: "TORCH_SDPA", "FLASH_ATTN", "FLASHINFER", etc.
-All possible options are loaded dynamically from AttentionBackendEnum.
 """
 
 
@@ -568,43 +528,6 @@ If the server_label of your MCP tool is not in this list, it will be completely 
 VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
 """Cache directory for LoRA resolver."""
 
-# ================== Deprecated Profiling Env Vars ==================
-# Deprecated env variables for profiling, kept for backward compatibility
-# See also vllm/config/profiler.py and `--profiler-config` argument
-
-VLLM_TORCH_CUDA_PROFILE: str | None = None
-"""(Deprecated) Torch CUDA profiling configuration."""
-
-VLLM_TORCH_PROFILER_DIR: str | None = None
-"""(Deprecated) Directory for torch profiler output."""
-
-VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
-"""(Deprecated) Record tensor shapes in profiler."""
-
-VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
-"""(Deprecated) Profile memory usage."""
-
-VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: str | None = None
-"""(Deprecated) Disable async LLM during profiling."""
-
-VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
-"""(Deprecated) Include stack traces in profiler."""
-
-VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
-"""(Deprecated) Profile FLOPs."""
-
-VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
-"""(Deprecated) Control whether torch profiler gzip-compresses profiling files."""
-
-VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
-"""(Deprecated) Control whether torch profiler dumps the self_cuda_time_total table."""
-
-VLLM_PROFILER_DELAY_ITERS: str | None = None
-"""(Deprecated) Delay number of iterations before starting profiling."""
-
-VLLM_PROFILER_MAX_ITERS: str | None = None
-"""(Deprecated) Maximum number of iterations to profile."""
-
 # ================== Compilation and Build Flags ==================
 
 VLLM_USE_AOT_COMPILE: bool = env_default_factory(lambda: use_aot_compile())
@@ -623,6 +546,9 @@ Force vllm to always load AOT compiled models from disk.
 Failure to load will result in a hard error when enabled.
 Ignored when VLLM_USE_AOT_COMPILE is disabled.
 """
+
+VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
+"""Use mega AOT artifact for AOT compilation."""
 
 VLLM_USE_STANDALONE_COMPILE: bool = True
 """
@@ -692,20 +618,8 @@ VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal["FP", "INT8", "INT6", "INT4", "NONE
 Recommended for large models.
 """
 
-VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
-"""Flash Attention MLA max number splits for CUDA graph decode."""
-
 VLLM_ENABLE_CUDAGRAPH_GC: bool = False
 """Enable CUDA graph garbage collection."""
-
-VLLM_USE_CUDNN_PREFILL: bool = False
-"""Use cuDNN for prefill operations."""
-
-VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
-"""Use TensorRT-LLM ragged prefill for DeepSeek models."""
-
-VLLM_USE_TRTLLM_ATTENTION: str | None = None
-"""Use TensorRT-LLM attention implementation."""
 
 VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
 """
@@ -730,23 +644,6 @@ VLLM_TPU_USING_PATHWAYS: bool = env_default_factory(
 """Whether using Pathways for TPU."""
 
 # ================== Additional Distributed Settings ==================
-
-VLLM_ALL2ALL_BACKEND: (
-    Literal[
-        "naive",
-        "pplx",
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "allgather_reducescatter",
-        "flashinfer_all2allv",
-    ]
-    | None
-) = None
-"""
-All2all backend for vllm's expert parallel communication.
-Options: naive, pplx, deepep_high_throughput, deepep_low_latency,
-allgather_reducescatter, flashinfer_all2allv.
-"""
 
 VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
 """Whether to use PyTorch symmetric memory for allreduce."""
@@ -829,6 +726,9 @@ VLLM_MOE_USE_DEEP_GEMM: bool = True
 VLLM_USE_DEEP_GEMM_E8M0: bool = True
 """Use E8M0 scaling when DeepGEMM is used on Blackwell GPUs."""
 
+VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+"""Create TMA-aligned scale tensor when DeepGEMM is used."""
+
 VLLM_DEEP_GEMM_WARMUP: Literal["skip", "full", "relax"] = "relax"
 """
 DeepGemm warmup strategy. Warmup JITs required kernels before model execution
@@ -856,6 +756,9 @@ VLLM_USE_FLASHINFER_MOE_FP8: bool = False
 VLLM_USE_FLASHINFER_MOE_FP4: bool = False
 """Allow use of FlashInfer CUTLASS kernels for FP4 fused moe ops."""
 
+VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+"""Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops."""
+
 VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
 """Use FlashInfer MXFP8 (activation) x MXFP4 (weight) MoE backend."""
 
@@ -873,9 +776,6 @@ VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = "
 
 VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
 """Workspace buffer size for the FlashInfer backend (in bytes)."""
-
-VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
-"""Disable query quantization in FlashInfer."""
 
 VLLM_HAS_FLASHINFER_CUBIN: bool = False
 """Whether FlashInfer CUBIN kernels are available."""
@@ -914,6 +814,9 @@ VLLM_DEBUG_MFU_METRICS: bool = False
 
 VLLM_GC_DEBUG: str = ""
 """Garbage collection debug settings."""
+
+VLLM_DISABLE_LOG_LOGO: bool = False
+"""Disable logging of vLLM logo at server startup."""
 
 VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
 """Add optional custom scopes for profiling. Disable to avoid overheads."""
@@ -1005,6 +908,12 @@ VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
 
 VLLM_CI_USE_S3: bool = False
 """Use S3 path for model loading in CI via RunAI Streamer."""
+
+VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
+"""Comma-separated Hugging Face repo IDs for LoRA resolver."""
+
+VLLM_LORA_DISABLE_PDL: bool = False
+"""Disable PDL for LoRA."""
 
 VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
 """
