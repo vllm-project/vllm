@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
@@ -99,6 +99,44 @@ class BaseRenderer(ABC):
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        prompt_token_ids = tokenizer.encode(
+            prompt["prompt"],
+            **params.get_encode_kwargs(),
+        )
+
+        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
+    async def _tokenize_prompt_async(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        tokenizer = self.get_async_tokenizer()
+        prompt_token_ids = await tokenizer.encode(
+            prompt["prompt"],
+            **params.get_encode_kwargs(),
+        )
+
+        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
+
+        return prompt
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_async_tokenizer()
+        prompt["prompt"] = await tokenizer.decode(prompt["prompt_token_ids"])
+
+        return prompt
+
     def tokenize_prompt(
         self,
         prompt: DictPrompt,
@@ -121,22 +159,13 @@ class BaseRenderer(ABC):
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-
-            tokenizer = self.get_tokenizer()
-            prompt_token_ids = tokenizer.encode(
-                prompt["prompt"],  # type: ignore[typeddict-item]
-                **params.get_encode_kwargs(),
-            )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)  # type: ignore[typeddict-unknown-key]
+            prompt = self._tokenize_prompt(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            tokenizer = self.get_tokenizer()
-            prompt_text = tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
-            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
+            prompt = self._detokenize_prompt(prompt)
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
@@ -169,22 +198,13 @@ class BaseRenderer(ABC):
 
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-
-            tokenizer = self.get_async_tokenizer()
-            prompt_token_ids = await tokenizer.encode(
-                prompt["prompt"],  # type: ignore[typeddict-item]
-                **params.get_encode_kwargs(),
-            )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)  # type: ignore[typeddict-unknown-key]
+            prompt = await self._tokenize_prompt_async(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            tokenizer = self.get_async_tokenizer()
-            prompt_text = await tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
-            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
+            prompt = await self._detokenize_prompt_async(prompt)
 
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
