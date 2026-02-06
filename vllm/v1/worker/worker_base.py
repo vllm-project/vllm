@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -12,6 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -221,13 +221,9 @@ class WorkerWrapperBase:
         envs_list: list[dict[str, str]],
     ) -> None:
         envs = envs_list[self.rpc_rank]
-        key = "CUDA_VISIBLE_DEVICES"
-        if key in envs and key in os.environ:
-            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
-            # suppress the warning in `update_environment_variables`
-            del os.environ[key]
         update_environment_variables(envs)
 
+    @instrument(span_name="Worker init")
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
