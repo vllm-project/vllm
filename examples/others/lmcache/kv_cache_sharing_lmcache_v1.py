@@ -12,10 +12,10 @@ Note that lmcache needs to be installed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
 
+import multiprocessing
 import os
 import subprocess
 import time
-from multiprocessing import Event, Process
 
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
@@ -111,9 +111,16 @@ def run_lmcache_server(port):
 
 
 def main():
-    store_done = Event()
-    store_process = Process(target=run_store, args=(store_done, prompts))
-    retrieve_process = Process(target=run_retrieve, args=(store_done, prompts))
+    # Set multiprocessing start method to 'spawn' for CUDA compatibility
+    # This is required when using CUDA with multiprocessing
+    if multiprocessing.get_start_method(allow_none=True) != "spawn":
+        multiprocessing.set_start_method("spawn", force=True)
+
+    # Use spawn context to create processes
+    ctx = multiprocessing.get_context("spawn")
+    store_done = ctx.Event()
+    store_process = ctx.Process(target=run_store, args=(store_done, prompts))
+    retrieve_process = ctx.Process(target=run_retrieve, args=(store_done, prompts))
     lmcache_server_process = run_lmcache_server(port)
 
     # Start KV cache store process
