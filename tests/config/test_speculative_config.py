@@ -119,3 +119,22 @@ def test_dflash_target_model_validation():
             target_model_config=_make_target_model_config(model_type="opt"),
             target_parallel_config=ParallelConfig(),
         )
+
+
+def test_dflash_hash_differs_from_non_eagle3_method():
+    ngram_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    with patch(
+        "vllm.config.speculative.ModelConfig",
+        new=_model_config_factory(),
+    ):
+        dflash_config = SpeculativeConfig(
+            method="dflash",
+            model="org/dflash-draft",
+            num_speculative_tokens=1,
+            target_model_config=_make_target_model_config(),
+            target_parallel_config=ParallelConfig(),
+        )
+    assert dflash_config.compute_hash() != ngram_config.compute_hash()

@@ -173,9 +173,9 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
+        # Eagle3 and DFlash affect the computation graph because they return
+        # intermediate hidden states in addition to the final hidden state.
+        factors.append(self.method in ("eagle3", "dflash"))
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
