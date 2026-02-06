@@ -262,9 +262,11 @@ async def init_app_state(
     engine_client: EngineClient,
     state: State,
     args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...],
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+    if supported_tasks is None:
+        supported_tasks = await engine_client.get_supported_tasks()
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
