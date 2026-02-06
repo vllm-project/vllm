@@ -324,8 +324,9 @@ vLLM also supports speculative decoding with DFlash draft models via
 Important constraints for DFlash:
 
 1. DFlash draft models are currently intended for Qwen3-based checkpoints.
-2. `runtime_mode="block_drafting"` is currently BS1-only. For batch size > 1,
-   vLLM falls back to the shared EAGLE-style draft path.
+2. `runtime_mode="block_drafting"` supports batched requests in vLLM V1, but
+   this path is still under active hardening and should be validated for your
+   workload/backends before production rollout.
 3. DFlash requires an attention backend with non-causal drafting support.
    If backend validation fails, use FlashAttention or Triton attention backend.
 

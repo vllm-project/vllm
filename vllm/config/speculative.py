@@ -719,7 +719,7 @@ class SpeculativeConfig:
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.method == "draft_model"
+            self.method in ("draft_model", "dflash")
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):

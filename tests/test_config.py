@@ -1143,7 +1143,10 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
-def _make_fake_target_model_config_for_spec() -> SimpleNamespace:
+def _make_fake_target_model_config_for_spec(
+    model_type: str = "qwen3",
+    vocab_size: int = 151936,
+) -> SimpleNamespace:
     return SimpleNamespace(
         model="fake-target",
         tokenizer="fake-tokenizer",
@@ -1159,13 +1162,15 @@ def _make_fake_target_model_config_for_spec() -> SimpleNamespace:
         enforce_eager=False,
         max_logprobs=20,
         config_format="hf",
-        hf_text_config=SimpleNamespace(model_type="qwen3"),
+        hf_text_config=SimpleNamespace(model_type=model_type),
+        get_vocab_size=lambda: vocab_size,
     )
 
 
 def _make_fake_draft_model_config(
     model: str,
     architectures: list[str] | None = None,
+    vocab_size: int = 151936,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model=model,
@@ -1173,6 +1178,7 @@ def _make_fake_draft_model_config(
         hf_config=SimpleNamespace(model_type="qwen3"),
         max_model_len=8192,
         verify_with_parallel_config=lambda _parallel_config: None,
+        get_vocab_size=lambda: vocab_size,
     )
 
 
@@ -1222,3 +1228,44 @@ def test_dflash_compute_hash_matches_eagle3_path():
 
     assert dflash_config.compute_hash() == eagle3_config.compute_hash()
     assert dflash_config.compute_hash() != eagle_config.compute_hash()
+
+
+def test_dflash_rejects_unsupported_target_model_family():
+    target_model_config = _make_fake_target_model_config_for_spec(model_type="mamba")
+    draft_model_config = _make_fake_draft_model_config(
+        model="org/Qwen3-8B-DFlash-b16",
+        architectures=["DFlashDraftModel"],
+    )
+
+    with (
+        patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config),
+        pytest.raises(ValueError, match="dflash is only supported for"),
+    ):
+        SpeculativeConfig(
+            model="org/Qwen3-8B-DFlash-b16",
+            method="dflash",
+            num_speculative_tokens=2,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+def test_dflash_rejects_mismatched_target_draft_vocab_sizes():
+    target_model_config = _make_fake_target_model_config_for_spec(vocab_size=1000)
+    draft_model_config = _make_fake_draft_model_config(
+        model="org/Qwen3-8B-DFlash-b16",
+        architectures=["DFlashDraftModel"],
+        vocab_size=999,
+    )
+
+    with (
+        patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config),
+        pytest.raises(ValueError, match="same vocabulary size"),
+    ):
+        SpeculativeConfig(
+            model="org/Qwen3-8B-DFlash-b16",
+            method="dflash",
+            num_speculative_tokens=2,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )

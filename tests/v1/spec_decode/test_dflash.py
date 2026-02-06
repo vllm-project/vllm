@@ -394,6 +394,94 @@ def test_block_drafting_bs_gt1_returns_expected_shape():
     assert torch.equal(out, torch.full((2, proposer.num_speculative_tokens), 3))
 
 
+def test_block_drafting_bs_gt1_metadata_invariants_and_restore_on_success():
+    proposer = _make_block_drafting_proposer_for_errors()
+    proposer.max_model_len = 128
+    proposer.runner = object()
+    proposer.attn_metadata_builder = None
+    proposer.arange = torch.arange(8, dtype=torch.int32)
+    proposer.token_arange_np = torch.arange(8, dtype=torch.int32).cpu().numpy()
+    proposer.attn_layer_names = ["layer_0"]
+    proposer.vllm_config = SimpleNamespace()
+    proposer.input_ids = torch.zeros(32, dtype=torch.int32)
+    proposer.positions = torch.zeros(32, dtype=torch.int64)
+    proposer.hidden_states = torch.zeros(32, 4, dtype=torch.float32)
+    proposer._set_positions = lambda n, p: proposer.positions[:n].copy_(p)
+    proposer._get_positions = lambda n: proposer.positions[:n]
+    proposer._get_slot_mapping = lambda _n, sm: sm
+    proposer.model_returns_tuple = lambda: False
+
+    class _MockModel:
+        def __call__(self, input_ids, positions, hidden_states, inputs_embeds=None):
+            del positions, hidden_states, inputs_embeds
+            return torch.ones(input_ids.shape[0], 4, dtype=torch.float32)
+
+        def compute_logits(self, sample_hidden_states):
+            n = sample_hidden_states.shape[0]
+            logits = torch.zeros(n, 16, dtype=torch.float32)
+            logits[:, 2] = 1.0
+            return logits
+
+    proposer.model = _MockModel()
+    captured = {}
+
+    def _build_for_drafting(*, common_attn_metadata, draft_index):
+        captured["draft_index"] = draft_index
+        captured["causal"] = common_attn_metadata.causal
+        captured["num_actual_tokens"] = common_attn_metadata.num_actual_tokens
+        captured["max_query_len"] = common_attn_metadata.max_query_len
+        captured["query_start_loc"] = common_attn_metadata.query_start_loc.clone()
+        captured["seq_lens"] = common_attn_metadata.seq_lens.clone()
+        return SimpleNamespace(causal=False)
+
+    builder = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(block_size=4),
+        build_for_drafting=_build_for_drafting,
+    )
+    common_attn_metadata = SimpleNamespace(
+        batch_size=lambda: 2,
+        seq_lens=torch.tensor([4, 3], dtype=torch.int32),
+        block_table_tensor=torch.tensor([[10, 11], [20, 21]], dtype=torch.int64),
+        slot_mapping=torch.tensor([9], dtype=torch.int64),
+        num_actual_tokens=2,
+        max_query_len=1,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_seq_len=4,
+        _seq_lens_cpu=torch.tensor([4, 3], dtype=torch.int32),
+        _num_computed_tokens_cpu=torch.tensor([4, 3], dtype=torch.int32),
+        causal=True,
+    )
+    original_seq_lens = common_attn_metadata.seq_lens.clone()
+    original_query_start_loc = common_attn_metadata.query_start_loc.clone()
+
+    with (
+        patch.object(proposer, "_get_attention_metadata_builder", return_value=builder),
+        patch(
+            "vllm.v1.spec_decode.dflash.set_forward_context",
+            return_value=_NullContext(),
+        ),
+    ):
+        out = proposer._propose_block_drafting(
+            target_positions=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int64),
+            target_hidden_states=torch.zeros(5, 4, dtype=torch.float32),
+            next_token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            common_attn_metadata=common_attn_metadata,
+        )
+
+    assert tuple(out.shape) == (2, proposer.num_speculative_tokens)
+    assert torch.equal(out, torch.full((2, proposer.num_speculative_tokens), 2))
+    assert captured["draft_index"] == 0
+    assert captured["causal"] is False
+    assert captured["num_actual_tokens"] == 8
+    assert captured["max_query_len"] == 4
+    assert torch.equal(captured["query_start_loc"], torch.tensor([0, 4, 8]))
+    assert torch.equal(captured["seq_lens"], torch.tensor([8, 7], dtype=torch.int32))
+    assert torch.equal(common_attn_metadata.seq_lens, original_seq_lens)
+    assert torch.equal(common_attn_metadata.query_start_loc, original_query_start_loc)
+    assert common_attn_metadata.causal is True
+
+
 def test_dflash_get_slot_mapping_pads_with_padding_slot_id():
     proposer = DFlashProposer.__new__(DFlashProposer)
     proposer._slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)

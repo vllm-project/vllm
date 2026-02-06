@@ -485,7 +485,11 @@ def test_eagle_correctness(
     else:
         attention_config = {"backend": attn_backend}
 
-    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
+    if (
+        attn_backend == "TRITON_ATTN"
+        and not current_platform.is_rocm()
+        and model_setup[0] in ("eagle", "eagle3")
+    ):
         pytest.skip(
             "TRITON_ATTN does not support "
             "multi-token eagle spec decode on current platform"
@@ -547,6 +551,14 @@ def test_eagle_correctness(
         # Heuristic: expect at least 60% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(0.6 * len(ref_outputs))
+
+        if method == "dflash":
+            name2metric = {metric.name: metric for metric in spec_llm.get_metrics()}
+            n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
+            n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+            assert n_draft_toks > 0
+            assert n_accepted_toks >= 0
+
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
