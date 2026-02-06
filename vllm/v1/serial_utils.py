@@ -186,7 +186,7 @@ class MsgpackEncoder:
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             raise TypeError(
-                f"Object of type {type(obj)} is not serializable"
+                f"Object of type {type(obj)} is not serializable. "
                 "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
                 "fallback to pickle-based serialization."
             )
