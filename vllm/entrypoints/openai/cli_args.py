@@ -215,6 +215,9 @@ class FrontendArgs:
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    disable_inference: bool = False
+    """Disable inference and use a no-op engine client. Useful for running
+    only the render API for preprocessing/tokenization without GPU."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

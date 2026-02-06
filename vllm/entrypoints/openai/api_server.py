@@ -94,6 +94,7 @@ async def build_async_engine_client(
         engine_args,
         usage_context=usage_context,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+        disable_inference=args.disable_inference,
         client_config=client_config,
     ) as engine:
         yield engine
@@ -105,6 +106,7 @@ async def build_async_engine_client_from_engine_args(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
+    disable_inference: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     """
@@ -140,6 +142,7 @@ async def build_async_engine_client_from_engine_args(
             client_addresses=client_config,
             client_count=client_count,
             client_index=client_index,
+            disable_inference=disable_inference,
         )
 
         # Don't keep the dummy data in memory

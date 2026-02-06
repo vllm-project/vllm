@@ -105,6 +105,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        disable_inference: bool = False,
     ) -> "MPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -115,6 +116,8 @@ class EngineCoreClient(ABC):
             client_count,
             client_index,
         )
+        if disable_inference:
+            return AsyncMPClientNoInference(*client_args)
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
@@ -1031,6 +1034,38 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+
+class AsyncMPClientNoInference(MPClient):
+    """Asyncio-compatible client that skips engine core for no-inference mode."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        client_addresses: dict[str, str] | None = None,
+        client_count: int = 1,
+        client_index: int = 0,
+    ):
+        self.vllm_config = vllm_config
+        self.log_stats = log_stats
+        self.client_count = client_count
+        self.client_index = client_index
+        self.resources = BackgroundResources(ctx=zmq.Context())
+        self.resources.engine_dead = False
+        self.engine_ranks_managed = [0]
+        self._finalizer = weakref.finalize(self, lambda: None)
+
+    async def get_output_async(self) -> EngineCoreOutputs:
+        await asyncio.get_running_loop().create_future()
+        raise AssertionError("unreachable")
+
+    async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
+        return ("generate",)
+
+    async def reset_mm_cache_async(self) -> None:
+        pass
 
 
 class DPAsyncMPClient(AsyncMPClient):
