@@ -925,12 +925,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-        # TODO(rob): this validation should happen at kernel selection
-        # time in the oracle rather than here.
-        assert layer.activation == "silu", (
-            f"Expected 'silu' activation but got {layer.activation}"
-        )
-        assert not layer.renormalize
         return apply_fi_trtllm_fp8_per_tensor_moe(
             layer=layer,
             hidden_states=x,

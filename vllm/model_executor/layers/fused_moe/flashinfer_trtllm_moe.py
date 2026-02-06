@@ -34,8 +34,8 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
-    return False
+    """Supports non-gated MoE."""
+    return True
 
 
 def _supports_quant_scheme(
@@ -51,8 +51,7 @@ def _supports_quant_scheme(
 
 
 def _supports_activation(activation: str) -> bool:
-    """Supports silu activation only."""
-    return activation in ["silu"]
+    return activation in ["silu", "relu2_no_mul"]
 
 
 def _supports_routing_method(
@@ -71,6 +70,7 @@ def _supports_routing_method(
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
             # NOTE(mgoin): Disabled to investigate accuracy issues.
             # See https://github.com/vllm-project/vllm/issues/33532
@@ -291,6 +291,7 @@ def fi_trtllm_fp8_per_tensor_moe(
     use_routing_scales_on_input: bool,
     routing_method_type: int,
     routed_scaling_factor: float = 1.0,
+    activation_type: int = 3,  # Swiglu
 ) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
@@ -302,7 +303,10 @@ def fi_trtllm_fp8_per_tensor_moe(
         per_act_token_quant=False,
     )
 
-    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
+    from vllm.utils.flashinfer import (
+        FlashinferActivationType,
+        flashinfer_trtllm_fp8_per_tensor_scale_moe,
+    )
 
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
         routing_logits=routing_logits,
@@ -323,6 +327,7 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        activation_type=FlashinferActivationType(activation_type),
     )
 
 

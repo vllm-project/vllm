@@ -14,6 +14,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_str_to_enum_value,
+    align_fp4_moe_weights_for_fi,
+    is_gated_activation,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
@@ -48,8 +53,8 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
-    return False
+    """Supports non-gated MoE."""
+    return True
 
 
 def _supports_quant_scheme(
@@ -64,8 +69,7 @@ def _supports_quant_scheme(
 
 
 def _supports_activation(activation: str) -> bool:
-    """Supports silu activation only."""
-    return activation in ["silu"]
+    return activation in ["silu", "relu2_no_mul"]
 
 
 def _supports_routing_method(
@@ -144,6 +148,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     hidden_size,
     intermediate_size,
     num_experts,
+    is_gated_activation: bool,
 ):
     from flashinfer import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import (
@@ -154,15 +159,18 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
     """Prepare quantized weights for kernel (done offline with weights)."""
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
+    gemm1_intermediate_size = (
+        2 * intermediate_size if is_gated_activation else intermediate_size
+    )
 
     # Convert quantized weights to proper formats
     gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 2
+        num_experts, gemm1_intermediate_size, hidden_size // 2
     )  # packed fp4
     gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
     ).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 16
+        num_experts, gemm1_intermediate_size, hidden_size // 16
     )  # fp8 scaling factors
 
     gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
@@ -185,6 +193,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
             _cache_permute_indices,
             gemm1_weights_fp4[i].view(torch.uint8),
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_activation,
         )
         gemm1_weights_fp4_shuffled.append(
             gemm1_weights_fp4[i]
@@ -197,6 +206,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
             gemm1_scales_linear_fp4[i].view(torch.uint8),
             epilogue_tile_m,
             num_elts_per_sf=16,
+            is_gated_act_gemm=is_gated_activation,
         )
         gemm1_scales_fp4_shuffled.append(
             nvfp4_block_scale_interleave(
@@ -240,7 +250,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_scales_fp4_shuffled = (
         torch.stack(gemm1_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, 2 * intermediate_size, hidden_size // 16)
+        .reshape(num_experts, gemm1_intermediate_size, hidden_size // 16)
     )
 
     gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
@@ -290,12 +300,7 @@ def flashinfer_trtllm_fp4_moe(
     import flashinfer
 
     from vllm.model_executor.models.llama4 import Llama4MoE
-
-    # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2404
-    assert activation == "silu", (
-        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
-        f"{activation} found instead."
-    )
+    from vllm.utils.flashinfer import FlashinferActivationType
 
     # Quantize input to FP4
     if isinstance(x, tuple):
@@ -322,6 +327,9 @@ def flashinfer_trtllm_fp4_moe(
         if routing_method_type == RoutingMethodType.DeepSeekV3
         else router_logits
     )
+
+    # Determine activation type
+    activation_type = activation_str_to_enum_value(layer.activation)
 
     # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
@@ -353,6 +361,7 @@ def flashinfer_trtllm_fp4_moe(
         routed_scaling_factor=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
+        activation_type=FlashinferActivationType(activation_type),
     )[0]
 
     return out
@@ -477,10 +486,16 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
-    if is_act_and_mul and backend in [
-        NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    ]:
+    is_gated = is_gated_activation(layer.activation)
+    if (
+        is_gated
+        and is_act_and_mul
+        and backend
+        in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        ]
+    ):
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
 
     # For some FI kernels, the input scales are shared by all experts.
@@ -493,19 +508,34 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        # Align weights for FI NVFP4 MoE kernels.
+        block_quant = (
+            hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
+        )
+        if not block_quant:
+            w13, w13_scale, w2, w2_scale, padded_intermediate = (
+                align_fp4_moe_weights_for_fi(
+                    w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment=128
+                )
+            )
+            layer.intermediate_size_per_partition = padded_intermediate
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
             w13,
             w2,
             w13_scale,
             w2_scale,
-            w2.size(-2),  # hidden_size
-            w13.size(-2) // 2,  # intermediate_size
-            w13.size(0),  # num_experts
+            hidden_size=w2.size(-2),
+            intermediate_size=w13.size(-2) // 2 if is_gated else w13.size(-2),
+            num_experts=w13.size(0),
+            is_gated_activation=is_gated,
         )
 
         # We do not need to make this a parameter, because
         # it is not used during the weight (re)-loading process.
-        layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        if is_gated:
+            layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        else:
+            layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
         layer.a1_gscale = 1.0 / a13_scale
         layer.g1_alphas = a13_scale * w13_scale_2
         layer.g2_alphas = a2_scale * w2_scale_2
