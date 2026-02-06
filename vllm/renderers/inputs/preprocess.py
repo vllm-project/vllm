@@ -38,6 +38,12 @@ def prompt_to_seq(  # type: ignore[misc]
 ) -> Sequence[ExplicitEncoderDecoderPrompt]: ...
 
 
+@overload
+def prompt_to_seq(  # type: ignore[misc]
+    prompt_or_prompts: PromptType | Sequence[PromptType],
+) -> Sequence[PromptType]: ...
+
+
 def prompt_to_seq(
     prompt_or_prompts: PromptType | Sequence[PromptType],
 ) -> Sequence[PromptType]:

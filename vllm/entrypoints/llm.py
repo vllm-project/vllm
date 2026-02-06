@@ -1729,16 +1729,16 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
-        engine_prompts = prompt_to_seq(prompts)
-        engine_params = self._params_to_seq(params, len(engine_prompts))
+        seq_prompts = prompt_to_seq(prompts)
+        seq_params = self._params_to_seq(params, len(seq_prompts))
 
-        if any(param.truncate_prompt_tokens is not None for param in engine_params):
+        if any(param.truncate_prompt_tokens is not None for param in seq_params):
             # TODO: Remove this after deprecating `param.truncate_prompt_tokens`
             # Then, move the code from the `else` block to the top and let
             # `self._preprocess_completion` handle prompt normalization
             engine_prompts = [
                 engine_prompt
-                for prompt, param in zip(engine_prompts, engine_params)
+                for prompt, param in zip(seq_prompts, seq_params)
                 for engine_prompt in self._preprocess_completion(
                     [prompt],
                     tokenization_kwargs=merge_kwargs(
@@ -1749,13 +1749,13 @@ class LLM:
             ]
         else:
             engine_prompts = self._preprocess_completion(
-                engine_prompts,
+                seq_prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
         self._validate_and_add_requests(
             prompts=engine_prompts,
-            params=engine_params,
+            params=seq_params,
             use_tqdm=use_tqdm,
             lora_request=self._get_modality_specific_lora_reqs(
                 engine_prompts, lora_request
@@ -1822,11 +1822,11 @@ class LLM:
         priority: list[int] | None = None,
     ) -> None:
         num_requests = len(prompts)
-        engine_params = self._params_to_seq(params, num_requests)
-        engine_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
-        engine_priority = self._priority_to_seq(priority, num_requests)
+        seq_params = self._params_to_seq(params, num_requests)
+        seq_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
+        seq_priority = self._priority_to_seq(priority, num_requests)
 
-        for sp in engine_params:
+        for sp in seq_params:
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
@@ -1843,10 +1843,10 @@ class LLM:
             for i, prompt in enumerate(it):
                 request_id = self._add_request(
                     prompt,
-                    engine_params[i],
-                    lora_request=engine_lora_requests[i],
+                    seq_params[i],
+                    lora_request=seq_lora_requests[i],
                     tokenization_kwargs=tokenization_kwargs,
-                    priority=engine_priority[i],
+                    priority=seq_priority[i],
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
