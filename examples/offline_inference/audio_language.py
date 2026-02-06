@@ -12,8 +12,6 @@ import os
 from dataclasses import asdict
 from typing import Any, NamedTuple
 
-# kimia_infer is required for Kimi-Audio preprocessing
-import kimia_infer.api.prompt_manager  # noqa: F401
 import librosa
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -498,6 +496,9 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     a single audio clip.
     """
     assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
+
+    # Lazy import kimia_infer since it's only needed for Kimi-Audio
+    import kimia_infer.api.prompt_manager  # noqa: F401
 
     # Use HuggingFace model path.
     model_path = "moonshotai/Kimi-Audio-7B-Instruct"
