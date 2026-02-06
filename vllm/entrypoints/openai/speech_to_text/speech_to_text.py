@@ -38,11 +38,12 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType
-from vllm.inputs.parse import EncoderDecoderDictPrompt, parse_enc_dec_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
+from vllm.renderers.inputs import EncoderDecoderDictPrompt
+from vllm.renderers.inputs.parse import parse_enc_dec_prompt
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 

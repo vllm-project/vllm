@@ -17,6 +17,15 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers import renderer_from_config
+from vllm.renderers.inputs import (
+    DecoderDictPrompt,
+    DecoderOnlyDictPrompt,
+    DictPromptType,
+    EncoderDecoderDictPrompt,
+    EncoderDictPrompt,
+    SingletonDictPrompt,
+)
+from vllm.renderers.inputs.parse import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -36,16 +45,6 @@ from .data import (
     TokensPrompt,
     embeds_inputs,
     token_inputs,
-)
-from .parse import (
-    DecoderDictPrompt,
-    DecoderOnlyDictPrompt,
-    DictPromptType,
-    EncoderDecoderDictPrompt,
-    EncoderDictPrompt,
-    SingletonDictPrompt,
-    parse_dec_only_prompt,
-    parse_enc_dec_prompt,
 )
 
 logger = init_logger(__name__)
@@ -355,7 +354,7 @@ class InputPreprocessor:
     ) -> DecoderInputs: ...
 
     @overload
-    def _prompt_to_llm_inputs(
+    def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
         prompt: SingletonDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,

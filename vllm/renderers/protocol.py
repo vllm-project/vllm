@@ -12,12 +12,8 @@ from vllm.inputs.data import (
     TextPrompt,
     TokensPrompt,
 )
-from vllm.inputs.parse import (
-    DictPromptType,
-    SingletonDictPrompt,
-    parse_dec_only_prompt,
-    parse_enc_dec_prompt,
-)
+from vllm.renderer.inputs import DictPromptType, SingletonDictPrompt
+from vllm.renderer.inputs.parse import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
@@ -77,7 +73,7 @@ class BaseRenderer(ABC):
     ) -> Sequence[SingletonPrompt]: ...
 
     @overload
-    def prompt_to_seq(
+    def prompt_to_seq(  # type: ignore[misc]
         self,
         prompt_or_prompts: PromptType | Sequence[PromptType],
     ) -> Sequence[PromptType]: ...
@@ -106,7 +102,7 @@ class BaseRenderer(ABC):
     ) -> SingletonDictPrompt: ...
 
     @overload
-    def render_completion(
+    def render_completion(  # type: ignore[misc]
         self,
         prompt: PromptType,
     ) -> DictPromptType: ...

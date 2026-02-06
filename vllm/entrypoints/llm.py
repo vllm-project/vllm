@@ -60,11 +60,6 @@ from vllm.inputs.data import (
     TextPrompt,
     TokensPrompt,
 )
-from vllm.inputs.parse import (
-    DecoderOnlyDictPrompt,
-    DictPromptType,
-    get_prompt_components,
-)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -78,6 +73,8 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.inputs import DecoderOnlyDictPrompt, DictPromptType
+from vllm.renderers.inputs.parse import get_prompt_components
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
