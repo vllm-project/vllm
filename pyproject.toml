@@ -115,6 +115,8 @@ markers = [
     "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
+    "sig(name): associates a test with a vLLM SIG for ownership/triage (informational)",
+    "execution_tag(key, value): adds execution tag for Buildkite Test Engine",
 ]
 
 [tool.ty.src]

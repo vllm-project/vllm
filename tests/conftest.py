@@ -1350,9 +1350,44 @@ def pytest_addoption(parser):
     parser.addoption(
         "--optional", action="store_true", default=False, help="run optional test"
     )
+    parser.addoption(
+        "--sig", type=str, default=None, help="tag all tests with SIG ownership (e.g., --sig=sig-ci)"
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Ensure sig marker is registered even if config changes."""
+    config.addinivalue_line(
+        "markers",
+        "sig(name): associates a test with a vLLM SIG for ownership/triage (informational)",
+    )
+    # Register execution_tag for Buildkite Test Engine
+    config.addinivalue_line(
+        "markers",
+        "execution_tag(key, value): adds execution tag for Buildkite Test Engine",
+    )
+
+
+def pytest_itemcollected(item):
+    """Add execution_tag markers during collection for Buildkite Test Engine."""
+    # The buildkite-test-collector scans for execution_tag during item collection,
+    # so we must add markers here (not in pytest_collection_modifyitems)
+    sig_value = item.config.getoption("--sig")
+    if sig_value:
+        # Add execution_tag for Buildkite Test Engine
+        item.add_marker(pytest.mark.execution_tag("sig", sig_value))
 
 
 def pytest_collection_modifyitems(config, items):
+    # Handle --sig CLI option: auto-tag all tests with SIG ownership
+    sig_value = config.getoption("--sig")
+    if sig_value:
+        for item in items:
+            # Only add sig marker if not already tagged explicitly
+            if item.get_closest_marker("sig") is None:
+                item.add_marker(pytest.mark.sig(sig_value))
+
+    # Handle --optional flag
     if config.getoption("--optional"):
         # --optional given in cli: do not skip optional tests
         return
@@ -1360,6 +1395,13 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
+
+        # Copy @pytest.mark.sig("<sig-name>") into per-test user_properties
+        # This is tool-agnostic metadata that can be surfaced later in CI summaries
+        m = item.get_closest_marker("sig")
+        if m and m.args:
+            sig_name = str(m.args[0])
+            item.user_properties.append(("sig", sig_name))
 
 
 @pytest.fixture(scope="session")
