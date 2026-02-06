@@ -76,7 +76,7 @@ class Mxfp4Backend(Enum):
     TRITON = 6
 
 
-def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
+def get_mxfp4_backend_with_lora(activation: str) -> Mxfp4Backend:
     """
     Not all MXFP4 backends support LoRA. Select backends that are known to
     have LoRA support.
@@ -92,7 +92,11 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
         # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
         and (9, 0) <= current_platform.get_device_capability() < (11, 0)
     )
-    if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
+    if (
+        envs.VLLM_MXFP4_USE_MARLIN is False
+        and triton_kernels_supported
+        and activation != "silu"
+    ):
         logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
         return Mxfp4Backend.TRITON
 
@@ -100,13 +104,25 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     return Mxfp4Backend.MARLIN
 
 
-def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
+def get_mxfp4_backend(
+    with_lora_support: bool, activation: str = "swigluoai"
+) -> Mxfp4Backend:
     # Backend Selection
 
     if with_lora_support:
-        return get_mxfp4_backend_with_lora()
+        return get_mxfp4_backend_with_lora(activation)
 
     if current_platform.is_cuda():
+        """
+        Not all MXFP4 backends support standard SwiGLU activation but 
+        only the OpenAI variant that adds a bias term. For 
+        the Triton backend, support of standard SwiGLU is pending in 
+        https://github.com/triton-lang/triton/pull/8460. For now, we 
+        always use the Marlin backend for standard SwiGLU.
+        """
+        if activation == "silu":
+            logger.info_once("Using Marlin backend")
+            return Mxfp4Backend.MARLIN
         if (
             current_platform.is_device_capability(90)
             and has_flashinfer()
@@ -162,7 +178,11 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
     elif current_platform.is_xpu():
         logger.info_once("Using ipex marlin backend on XPU")
         return Mxfp4Backend.MARLIN
-    elif current_platform.is_rocm() and has_triton_kernels():
+    elif (
+        current_platform.is_rocm()
+        and has_triton_kernels()
+        and activation == "swigluoai"
+    ):
         logger.info_once("Using Triton backend")
         return Mxfp4Backend.TRITON
 
@@ -233,7 +253,7 @@ class Mxfp4Config(QuantizationConfig):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+        self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled, moe.activation)
 
         self.marlin_input_dtype = None
         self.max_capture_size = (

@@ -1076,6 +1076,8 @@ class FusedMoEConfig:
     routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
 
+    activation: str
+
     # The activation type.
     in_dtype: torch.dtype
 
