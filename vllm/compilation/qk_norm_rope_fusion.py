@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import operator
+from collections import defaultdict
 from collections.abc import Callable
-from typing import ParamSpec
+from typing import Any, ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -237,8 +239,76 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        coalesced = self.coalesce_equivalent_splits(graph)
+        if coalesced > 0:
+            logger.debug(
+                "Coalesced %d duplicate split_with_sizes nodes before matching",
+                coalesced,
+            )
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Fused QK Norm+RoPE on %s sites", self.matched_count)
+
+    @staticmethod
+    def _to_hashable(arg: Any) -> Any:
+        if isinstance(arg, fx.Node):
+            # Node identity is sufficient for grouping equivalent calls.
+            return arg
+        if isinstance(arg, tuple):
+            return tuple(QKNormRoPEFusionPass._to_hashable(a) for a in arg)
+        if isinstance(arg, list):
+            return tuple(QKNormRoPEFusionPass._to_hashable(a) for a in arg)
+        if isinstance(arg, dict):
+            return tuple(
+                (k, QKNormRoPEFusionPass._to_hashable(v))
+                for k, v in sorted(arg.items())
+            )
+        if isinstance(arg, slice):
+            return (
+                "slice",
+                QKNormRoPEFusionPass._to_hashable(arg.start),
+                QKNormRoPEFusionPass._to_hashable(arg.stop),
+                QKNormRoPEFusionPass._to_hashable(arg.step),
+            )
+        try:
+            hash(arg)
+        except TypeError:
+            return repr(arg)
+        return arg
+
+    def coalesce_equivalent_splits(self, graph: fx.Graph) -> int:
+        """
+        Normalize graphs where CSE failed to merge equivalent split_with_sizes
+        calls (seen on B200 + FP8), so downstream matching sees one split node
+        with multiple users.
+        """
+        split_groups: dict[tuple[Any, ...], list[fx.Node]] = defaultdict(list)
+        for node in graph.nodes:
+            if node.op != "call_function":
+                continue
+            if node.target != torch.ops.aten.split_with_sizes.default:
+                continue
+            if not all(
+                user.op == "call_function" and user.target == operator.getitem
+                for user in node.users
+            ):
+                continue
+
+            key = (
+                tuple(self._to_hashable(arg) for arg in node.args),
+                tuple(
+                    (k, self._to_hashable(v)) for k, v in sorted(node.kwargs.items())
+                ),
+            )
+            split_groups[key].append(node)
+
+        coalesced = 0
+        for nodes in split_groups.values():
+            canonical = nodes[0]
+            for duplicate in nodes[1:]:
+                duplicate.replace_all_uses_with(canonical)
+                coalesced += 1
+
+        return coalesced
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, QkNormRopePattern)
