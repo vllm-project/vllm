@@ -1064,14 +1064,14 @@ The following extra parameters are supported:
 
 #### CausalLM Models (Generative Scoring)
 
-When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the endpoint computes the probability of specified token IDs appearing as the next token. This is useful for classification tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens.
+When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the endpoint computes the probability of specified token IDs appearing as the next token. This is useful for generative scoring tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens.
 
 **Requirements for CausalLM models:**
 
-- The `label_token_ids` parameter is **required** and specifies which token IDs to compute probabilities for.
-- The score returned is the probability of the first token in `label_token_ids`.
+- The `label_token_ids` parameter is **required** and must contain **exactly 2 token IDs** (for generative scoring).
+- The score is computed as: `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))`
 
-##### Example: Classification with CausalLM
+##### Example: Score with CausalLM
 
 ```bash
 curl -X POST http://localhost:8000/v1/score \
@@ -1105,9 +1105,9 @@ curl -X POST http://localhost:8000/v1/score \
 
 1. **Prompt Construction**: For each document, builds `prompt = query + document`
 2. **Forward Pass**: Runs the model to get next-token logits
-3. **Probability Extraction**: Extracts probabilities for specified `label_token_ids`
-4. **Softmax Normalization**: Applies softmax over only the label tokens (probabilities sum to 1 over label tokens)
-5. **Score Selection**: Returns the probability of the first token in `label_token_ids` as the score
+3. **Probability Extraction**: Extracts logprobs for the 2 specified `label_token_ids`
+4. **Softmax Normalization**: Applies softmax over only the 2 label tokens
+5. **Score Computation**: Returns `P(token[0]) / (P(token[0]) + P(token[1]))` as the score
 
 ##### Finding Token IDs
 
