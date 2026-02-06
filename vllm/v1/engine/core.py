@@ -1055,8 +1055,8 @@ class EngineCoreProc(EngineCore):
             set_process_title(process_title)
             maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs(
-                disable_prefix=vllm_config.observability_config
-                .disable_log_prefix,
+                enable_prefix=vllm_config.observability_config
+                .enable_log_prefix,
             )
 
             if data_parallel and vllm_config.kv_transfer_config is not None:

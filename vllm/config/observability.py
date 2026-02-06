@@ -70,9 +70,11 @@ class ObservabilityConfig:
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
     argument."""
 
-    disable_log_prefix: bool = False
-    """Disable the process/thread log prefix (e.g. '(APIServer pid=12345)')
-    that vLLM adds to stdout/stderr. Useful when using custom logging
+    enable_log_prefix: bool = True
+    """Enable the process/thread log prefix (e.g. '(APIServer pid=12345)')
+    that vLLM adds to stdout/stderr. When set to True (the default), vLLM
+    decorates log output with process identification. Use
+    --no-enable-log-prefix to disable this when using custom logging
     configurations or log aggregation systems that already handle process
     identification."""
 

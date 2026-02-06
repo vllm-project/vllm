@@ -24,8 +24,8 @@ def test_unique_filepath():
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
 
 
-class TestDecorateLogsDisablePrefix:
-    """Tests for the --disable-log-prefix feature."""
+class TestDecorateLogsEnablePrefix:
+    """Tests for the --enable-log-prefix feature."""
 
     def test_add_prefix_decorates_output(self):
         """Verify _add_prefix adds the expected prefix to writes."""
@@ -50,15 +50,15 @@ class TestDecorateLogsDisablePrefix:
         assert "(TestWorker pid=" in fake_stdout.getvalue()
         assert "(TestWorker pid=" in fake_stderr.getvalue()
 
-    def test_decorate_logs_skipped_when_disable_prefix_true(self):
-        """decorate_logs should be a no-op when disable_prefix=True."""
+    def test_decorate_logs_skipped_when_enable_prefix_false(self):
+        """decorate_logs should be a no-op when enable_prefix=False."""
         fake_stdout = io.StringIO()
         fake_stderr = io.StringIO()
         with (
             mock.patch.object(sys, "stdout", fake_stdout),
             mock.patch.object(sys, "stderr", fake_stderr),
         ):
-            decorate_logs("TestWorker", disable_prefix=True)
+            decorate_logs("TestWorker", enable_prefix=False)
 
             fake_stdout.write("stdout line\n")
             fake_stderr.write("stderr line\n")
