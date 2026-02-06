@@ -234,7 +234,7 @@ def test_rope_kvcache_fusion(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.rocm_aiter_fusion import (
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             ROCmAiterTritonRopeReshapeKVCacheFusionPass,
         )
 
