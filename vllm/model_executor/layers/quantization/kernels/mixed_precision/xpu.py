@@ -3,12 +3,12 @@
 
 
 import torch
+from torch.nn.parameter import Parameter
 
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
-from torch.nn.parameter import Parameter
 
 _XPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
