@@ -4327,6 +4327,34 @@ class GPUModelRunner(
 
         return None
 
+    @staticmethod
+    def _is_supported_dflash_metadata_builder(builder_name: str) -> bool:
+        return builder_name in {
+            "FlashAttentionMetadataBuilder",
+            "FlashInferMetadataBuilder",
+            "TritonAttentionMetadataBuilder",
+            "RocmAttentionMetadataBuilder",
+            "AiterFlashAttentionMetadataBuilder",
+            "FlexAttentionMetadataBuilder",
+        }
+
+    def _raise_if_unsupported_dflash_backend(self) -> None:
+        if not self.speculative_config or self.speculative_config.method != "dflash":
+            return
+
+        assert isinstance(self.drafter, DFlashProposer)
+        builder = self.drafter._get_attention_metadata_builder()
+        builder_name = type(builder).__name__
+        if self._is_supported_dflash_metadata_builder(builder_name):
+            return
+
+        raise NotImplementedError(
+            "DFlash speculative decoding requires an attention backend with "
+            "non-causal drafting support. "
+            f"Detected metadata builder: {builder_name}. "
+            "Try --attention-backend FLASH_ATTN or --attention-backend TRITON_ATTN."
+        )
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -6084,6 +6112,7 @@ class GPUModelRunner(
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
+            self._raise_if_unsupported_dflash_backend()
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()

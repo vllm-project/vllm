@@ -1225,3 +1225,15 @@ def test_get_eagle3_aux_layers_from_config_uses_eagle_field_for_eagle3():
     )
 
     assert runner._get_eagle3_aux_layers_from_config() == (2, 16, 29)
+
+
+def test_is_supported_dflash_metadata_builder():
+    assert GPUModelRunner._is_supported_dflash_metadata_builder(
+        "FlashAttentionMetadataBuilder"
+    )
+    assert GPUModelRunner._is_supported_dflash_metadata_builder(
+        "TritonAttentionMetadataBuilder"
+    )
+    assert not GPUModelRunner._is_supported_dflash_metadata_builder(
+        "GDNAttentionMetadataBuilder"
+    )

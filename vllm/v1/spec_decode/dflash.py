@@ -40,3 +40,12 @@ class DFlashProposer(EagleProposer):
             )
 
         return use_aux_hidden_state
+
+    def propose(self, *args, **kwargs) -> torch.Tensor:
+        common_attn_metadata = kwargs.get("common_attn_metadata")
+        if common_attn_metadata is not None and common_attn_metadata.batch_size() > 1:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports batch size 1 only. "
+                "Please reduce max_num_seqs to 1 for method='dflash'."
+            )
+        return super().propose(*args, **kwargs)
