@@ -561,7 +561,7 @@ class Qwen3CoderToolParser(ToolParser):
                                             "arguments"
                                         ] = json.loads(args_json)
                             except Exception:
-                                pass
+                                logger.warning("Failed to parse tool call arguments in one-shot.", exc_info=True)
                         self.streamed_args_for_tool[
                             self.current_tool_index
                         ] = args_json
