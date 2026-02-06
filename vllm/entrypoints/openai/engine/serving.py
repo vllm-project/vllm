@@ -95,7 +95,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import RequestRejectedError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
@@ -129,21 +129,6 @@ from vllm.utils.async_utils import (
     merge_async_iterators,
 )
 from vllm.utils.mistral import is_mistral_tokenizer
-
-
-class GenerationError(Exception):
-    """raised when finish_reason indicates internal server error (500)"""
-
-    def __init__(
-        self,
-        message: str = "Internal server error",
-        err_type: str = "InternalServerError",
-        status_code: HTTPStatus = HTTPStatus.INTERNAL_SERVER_ERROR,
-    ):
-        super().__init__(message)
-        self.err_type = err_type
-        self.status_code = status_code
-
 
 logger = init_logger(__name__)
 
@@ -228,6 +213,9 @@ class ServeContext(Generic[RequestT]):
 
 
 class OpenAIServing:
+    # Limit rejected log frequency
+    rejected_log_counter: int = 0
+    rejected_log_interval: int = 100
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID (e.g. "embd", "classify")
     so you can easily tell “this ID came from Embedding vs Classification.”
@@ -687,7 +675,9 @@ class OpenAIServing:
         return json_str
 
     def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
-        """Raise GenerationError if finish_reason indicates an error."""
+        """
+        Raise appropriate exception if finish_reason indicates an error or rejection.
+        """
         if finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
@@ -695,34 +685,39 @@ class OpenAIServing:
             )
             raise GenerationError("Internal server error")
         if finish_reason == "rejected":
-            logger.error(
-                "Request %s was rejected due to waiting queue is full", request_id
-            )
-            raise GenerationError(
-                "Request was rejected",
-                err_type="ServiceUnavailableError",
-                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
-            )
+            if type(self).rejected_log_counter % type(self).rejected_log_interval == 0:
+                logger.error(
+                    "Request %s was rejected due to "
+                    "a full waiting queue (log every %d requests)",
+                    request_id,
+                    type(self).rejected_log_interval,
+                )
+                type(self).rejected_log_counter = 0
+            type(self).rejected_log_counter += 1
+            raise RequestRejectedError("Request was rejected")
 
-    def _convert_generation_error_to_response(
-        self, e: GenerationError
-    ) -> ErrorResponse:
-        """Convert GenerationError to ErrorResponse."""
-        return self.create_error_response(
-            str(e),
-            err_type=e.err_type,
-            status_code=e.status_code,
-        )
+    def _convert_generation_error_to_response(self, e: Exception) -> ErrorResponse:
+        """Convert GenerationError or RequestRejectedError to ErrorResponse."""
+        if isinstance(e, (GenerationError, RequestRejectedError)):
+            return self.create_error_response(
+                str(e),
+                err_type=e.err_type,
+                status_code=e.status_code,
+            )
+        # fallback for other exception types
+        return self.create_error_response(str(e))
 
-    def _convert_generation_error_to_streaming_response(
-        self, e: GenerationError
-    ) -> str:
-        """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type=e.err_type,
-            status_code=e.status_code,
-        )
+    def _convert_generation_error_to_streaming_response(self, e: Exception) -> str:
+        """
+        Convert GenerationError or RequestRejectedError to streaming error response.
+        """
+        if isinstance(e, (GenerationError, RequestRejectedError)):
+            return self.create_streaming_error_response(
+                str(e),
+                err_type=e.err_type,
+                status_code=e.status_code,
+            )
+        return self.create_streaming_error_response(str(e))
 
     async def _check_model(
         self,

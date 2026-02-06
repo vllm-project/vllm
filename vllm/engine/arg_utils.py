@@ -448,7 +448,7 @@ class EngineArgs:
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
-    max_waiting_queue_length: int | None = get_field(
+    max_waiting_queue_length: int = get_field(
         SchedulerConfig, "max_waiting_queue_length"
     )
     max_logprobs: int = ModelConfig.max_logprobs
