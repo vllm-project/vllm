@@ -8,7 +8,9 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
