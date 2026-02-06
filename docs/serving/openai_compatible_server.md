@@ -311,7 +311,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
-      --chat-template examples/template_vlm2vec_phi3v.jinja
+      --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
     ```
 
     !!! important
@@ -319,7 +319,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
-        and can be found here: [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja)
+        and can be found here: [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja)
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
@@ -359,14 +359,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
       --trust-remote-code \
       --max-model-len 8192 \
-      --chat-template examples/template_dse_qwen2_vl.jinja
+      --chat-template examples/pooling/embed/template/dse_qwen2_vl.jinja
     ```
 
     !!! important
         Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-        by a custom chat template: [examples/template_dse_qwen2_vl.jinja](../../examples/template_dse_qwen2_vl.jinja)
+        by a custom chat template: [examples/pooling/embed/template/dse_qwen2_vl.jinja](../../examples/pooling/embed/template/dse_qwen2_vl.jinja)
 
     !!! important
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
