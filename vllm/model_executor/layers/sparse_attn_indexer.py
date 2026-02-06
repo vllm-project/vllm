@@ -108,6 +108,7 @@ def sparse_attn_indexer(
                 weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
+                clean_logits=False,
             )
             num_rows = logits.shape[0]
 
@@ -157,21 +158,41 @@ def sparse_attn_indexer(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
+            clean_logits=False,
         )
 
         num_rows = logits.shape[0]
-
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
+
+        max_seq_len = decode_metadata.seq_lens.max().item()
+        use_fast_topk = max_seq_len > 8192  # Observed threshold for fast topk
+
+        if use_fast_topk:
+            if next_n == 1:
+                lengths = decode_metadata.seq_lens
+            else:
+                offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
+                lengths = (
+                    decode_metadata.seq_lens.unsqueeze(1) - next_n + 1 + offsets
+                ).flatten()
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            torch.ops._C.fast_topk(
+                logits,
+                topk_indices,
+                lengths,
+                None,
+            )
+        else:
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
