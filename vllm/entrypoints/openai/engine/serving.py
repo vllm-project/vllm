@@ -967,9 +967,7 @@ class OpenAIServing:
 
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
-            prompts.extend(
-                [prompt_embeds] if isinstance(prompt_embeds, bytes) else prompt_embeds  # type: ignore[arg-type]
-            )
+            prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
 

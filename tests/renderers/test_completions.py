@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
-from vllm.inputs import PromptType
+from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -87,7 +87,7 @@ def _build_renderer(
 
 def _preprocess_prompt(
     mdoel_config: ModelConfig,
-    prompt_or_prompts: PromptType | Sequence[PromptType],
+    prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
 ):
     return [
         (

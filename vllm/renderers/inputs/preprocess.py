@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 @overload
 def prompt_to_seq(
-    prompt_or_prompts: SingletonPrompt | Sequence[SingletonPrompt],
+    prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
 ) -> Sequence[SingletonPrompt]: ...
 
 
@@ -45,9 +45,9 @@ def prompt_to_seq(  # type: ignore[misc]
 
 
 def prompt_to_seq(
-    prompt_or_prompts: PromptType | Sequence[PromptType],
+    prompt_or_prompts: PromptType | bytes | Sequence[PromptType | bytes],
 ) -> Sequence[PromptType]:
-    if isinstance(prompt_or_prompts, (dict, str)) or (
+    if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
         len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
     ):
         return [prompt_or_prompts]  # type: ignore[list-item]
@@ -56,7 +56,7 @@ def prompt_to_seq(
 
 
 def conversation_to_seq(
-    conversation_or_conversations: Sequence["ChatCompletionMessageParam"]
+    conversation_or_conversations: list["ChatCompletionMessageParam"]
     | Sequence[list["ChatCompletionMessageParam"]],
 ) -> Sequence[list["ChatCompletionMessageParam"]]:
     if len(conversation_or_conversations) > 0 and is_list_of(
