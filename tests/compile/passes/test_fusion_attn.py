@@ -267,7 +267,7 @@ elif current_platform.is_rocm():
     PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
-    BACKENDS = [
+    BACKENDS_FP8 = [
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
@@ -474,6 +474,14 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
     )
+
+    assert attn_nodes_pre[0].kwargs.get("kv_cache_dummy_dep") is not None, (
+        "Attention should have kv_cache_dummy_dep before fusion"
+    )
+    assert attn_nodes_post[0].kwargs.get("kv_cache_dummy_dep") is not None, (
+        "Attention should have kv_cache_dummy_dep after fusion"
+    )
+
     if quant_key.dtype == FP8_DTYPE:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
             "Attention should not have output_block_scale after FP8 fusion"
