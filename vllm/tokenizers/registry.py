@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -18,7 +17,10 @@ from vllm.transformers_utils.gguf_utils import (
     is_remote_gguf,
     split_remote_gguf,
 )
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
+    is_mistral_model_repo,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
@@ -31,6 +33,7 @@ logger = init_logger(__name__)
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
+    "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
 }
@@ -141,15 +144,26 @@ def resolve_tokenizer_args(
         kwargs["use_fast"] = False
 
     # Try to use official Mistral tokenizer if possible
-    if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
-        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
-        files_list = list_filtered_repo_files(
+    if (
+        tokenizer_mode == "auto"
+        and is_mistral_model_repo(
+            model_name_or_path=str(tokenizer_name), revision=revision
+        )
+        and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
-            allow_patterns=allow_patterns,
+            allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
         )
-        if len(files_list) > 0:
-            tokenizer_mode = "mistral"
+    ):
+        tokenizer_mode = "mistral"
+
+    # Try to use Grok2 tiktoken tokenizer if possible
+    if tokenizer_mode == "auto" and any_pattern_in_repo_files(
+        model_name_or_path=str(tokenizer_name),
+        allow_patterns=["tokenizer.tok.json"],
+        revision=revision,
+    ):
+        tokenizer_mode = "grok2"
 
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":

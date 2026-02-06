@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -30,11 +30,11 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -103,7 +103,6 @@ class VisualTokenizer(torch.nn.Module):
         config: PretrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -111,7 +110,6 @@ class VisualTokenizer(torch.nn.Module):
         self.vit = self._init_backbone(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vit",
         )
         # reserved tokens for INDICATOR_IDS
@@ -130,7 +128,6 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         model_type = config.model_type
@@ -138,7 +135,6 @@ class VisualTokenizer(torch.nn.Module):
             return Siglip2NavitModel(
                 config=config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=prefix,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
@@ -451,27 +447,36 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return IMAGE_TOKEN
+        if modality.startswith("video"):
+            return VIDEO_TOKEN
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
-        self.llm = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "llm"),
-        )
 
-        self.visual_tokenizer = VisualTokenizer(
-            config=config.vit_config,
-            visual_vocab_size=config.visual_vocab_size,
-            multimodal_config=multimodal_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.visual_tokenizer",
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = init_vllm_registered_model(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "llm"),
+            )
 
-        self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual_tokenizer = VisualTokenizer(
+                config=config.vit_config,
+                visual_vocab_size=config.visual_vocab_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.visual_tokenizer",
+            )
+            self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
 
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
@@ -627,7 +632,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -650,12 +655,8 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.llm.compute_logits(hidden_states)
-        return logits
+        return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm

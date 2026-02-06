@@ -49,12 +49,12 @@ class AiterTritonMLAImpl(AiterMLAImpl):
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
-        result = self.flash_attn_varlen_func(
+        result = self.flash_attn_varlen_func(  # type: ignore[call-arg]
             q,
             k,
             v,
             softmax_scale=softmax_scale,
-            return_softmax_lse=return_softmax_lse,
+            return_lse=return_softmax_lse,
             **kwargs,
         )
         # Transpose the LSE if Triton MHA is used:

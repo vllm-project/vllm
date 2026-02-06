@@ -14,12 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from .utils import create_scheduler, create_vllm_config

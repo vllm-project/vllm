@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_test_weights
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -12,9 +13,14 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    CutlassExpertsFp4,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -83,17 +89,21 @@ def test_cutlass_fp4_moe_no_graph(
             w2_scale=w2_blockscale,
         )
 
-        cutlass_output = cutlass_moe_fp4(
-            a=a,
-            w1_fp4=w1_q,
-            w2_fp4=w2_q,
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp4(
+                moe_config=make_dummy_moe_config(),
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+        cutlass_output = kernel(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_config=quant_config,
-            m=m,
-            n=n,
-            k=k,
-            e=e,
         )
 
         # Reference check:

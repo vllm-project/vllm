@@ -9,10 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
@@ -50,6 +48,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -75,7 +74,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
+ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -97,8 +96,7 @@ AttnTypeStr = Literal[
 ]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -106,6 +104,10 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    model_weights: str = ""
+    """Original model weights path. Used when the model is pulled from object
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
+    the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -187,11 +189,15 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    allow_deprecated_quantization: bool = False
+    """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    enable_return_routed_experts: bool = False
+    """Whether to return routed experts."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -298,6 +304,7 @@ class ModelConfig:
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
@@ -317,7 +324,6 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
-            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
@@ -412,6 +418,7 @@ class ModelConfig:
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
@@ -533,9 +540,12 @@ class ModelConfig:
                     if getattr(self.pooler_config, k) is None:
                         setattr(self.pooler_config, k, v)
 
-            default_pooling_type = self._model_info.default_pooling_type
-            if self.pooler_config.pooling_type is None:
-                self.pooler_config.pooling_type = default_pooling_type
+            default_seq_pooling_type = self._model_info.default_seq_pooling_type
+            if self.pooler_config.seq_pooling_type is None:
+                self.pooler_config.seq_pooling_type = default_seq_pooling_type
+            default_tok_pooling_type = self._model_info.default_tok_pooling_type
+            if self.pooler_config.tok_pooling_type is None:
+                self.pooler_config.tok_pooling_type = default_tok_pooling_type
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
@@ -543,13 +553,14 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            config_format=self.config_format,
         )
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
 
         if self.is_encoder_decoder:
-            self.mm_processor_cache_gb = 0
+            mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
         # Init multimodal config if needed
@@ -572,6 +583,7 @@ class ModelConfig:
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
@@ -705,6 +717,10 @@ class ModelConfig:
             tokenizer: Tokenizer name or path
         """
 
+        # Skip if model_weights is already set (model already pulled)
+        if self.model_weights:
+            return
+
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
@@ -740,7 +756,7 @@ class ModelConfig:
             )
             self.tokenizer = object_storage_tokenizer.dir
 
-    def _get_encoder_config(self):
+    def _get_encoder_config(self) -> dict[str, Any] | None:
         model = self.model
         if is_remote_gguf(model):
             model, _ = split_remote_gguf(model)
@@ -827,13 +843,6 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
-        if convert == "reward":
-            logger.warning(
-                "`--convert reward` is deprecated and will be removed in v0.15. "
-                "Please use `--convert embed` instead."
-            )
-            return "embed"
-
         if convert != "auto":
             return convert
 
@@ -863,12 +872,9 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "bitblas",
-                "gptq_marlin_24",
                 "gptq_marlin",
-                "gptq_bitblas",
                 "awq_marlin",
-                "ipex",
+                "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
@@ -931,6 +937,21 @@ class ModelConfig:
             from vllm.platforms import current_platform
 
             current_platform.verify_quantization(self.quantization)
+
+        if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
+            if self.allow_deprecated_quantization:
+                logger.warning(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM.",
+                    self.quantization,
+                )
+            else:
+                raise ValueError(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM. To bypass, "
+                    "set `--allow-deprecated-quantization`.",
+                    self.quantization,
+                )
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
@@ -1096,6 +1117,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
+            "molmo2",
             "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):
@@ -1295,10 +1317,9 @@ class ModelConfig:
         Returns:
             A dictionary containing the non-default sampling parameters.
         """
-        if self.generation_config == "vllm":
-            config = {}
-        else:
-            config = self.try_get_generation_config()
+        src = self.generation_config
+
+        config = {} if src == "vllm" else self.try_get_generation_config()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
@@ -1324,13 +1345,16 @@ class ModelConfig:
         else:
             diff_sampling_param = {}
 
-        if diff_sampling_param:
+        if diff_sampling_param and src != "vllm":
             logger.warning_once(
-                "Default sampling parameters have been overridden by the "
-                "model's Hugging Face generation config recommended from the "
-                "model creator. If this is not intended, please relaunch "
-                "vLLM instance with `--generation-config vllm`."
+                "Default vLLM sampling parameters have been overridden by %s: `%s`. "
+                "If this is not intended, please relaunch vLLM instance "
+                "with `--generation-config vllm`.",
+                "the model's `generation_config.json`" if src == "auto" else src,
+                str(diff_sampling_param),
+                scope="local",
             )
+
         return diff_sampling_param
 
     @property
@@ -1386,6 +1410,11 @@ class ModelConfig:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"
         )
+
+    @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
@@ -1464,7 +1493,7 @@ class ModelConfig:
 
         if self.runner_type != "pooling" and head_dtype != self.dtype:
             logger.warning_once(
-                "`head_dtype` currently only supports pooling models."
+                "`head_dtype` currently only supports pooling models, "
                 "fallback to model dtype [%s].",
                 self.dtype,
             )
@@ -1484,6 +1513,10 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
+        # Check for embedding_size set by model config (e.g., Voyage models)
+        override = getattr(self.hf_config, "embedding_size", None)
+        if override is not None:
+            return override
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
@@ -1518,8 +1551,8 @@ class ModelConfig:
     @property
     def attn_type(self) -> AttnTypeStr:
         if self.pooler_config is not None:
-            pooling_type = self._model_info.default_pooling_type.lower()
-            if pooling_type == "cls":
+            seq_pooling_type = self._model_info.default_seq_pooling_type
+            if seq_pooling_type == "CLS":
                 return "encoder_only"
             else:
                 is_causal = getattr(self.hf_config, "is_causal", True)
@@ -1536,89 +1569,102 @@ class ModelConfig:
     @property
     def is_chunked_prefill_supported(self) -> bool:
         attn_type = self.attn_type
-        if self.pooler_config is not None:
+
+        if pooler_config := self.pooler_config:
             # for pooling models
             if attn_type == "encoder_only":
                 logger.debug(
-                    "Pooling models with bidirectional attn does not support "
-                    "chunked prefill."
+                    "Pooling models with bidirectional attn "
+                    "do not support chunked prefill."
                 )
                 return False
-            elif attn_type == "decoder":
-                pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["mean", "step", "cls"]:
+
+            if attn_type == "decoder":
+                if (
+                    pooler_config.seq_pooling_type in ("MEAN", "CLS")
+                    or pooler_config.tok_pooling_type == "STEP"
+                ):
                     logger.debug(
-                        "Pooling models with %s pooling does not "
-                        "support chunked prefill.",
-                        pooling_type,
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "do not support chunked prefill.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
                     )
                     return False
-                elif pooling_type in ["all", "last"]:
+                else:
                     logger.debug(
-                        "Pooling models with causal attn and %s pooling support "
-                        "chunked prefill.",
-                        pooling_type,
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "support chunked prefill.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
                     )
                     return True
-                else:
-                    raise ValueError(f"{pooling_type=} not supported.")
+
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return attn_type != "encoder_decoder"
         else:
+            # for generative models
             if attn_type == "encoder_decoder":
-                logger.debug("Encoder decoder models does not support chunked prefill.")
+                logger.debug("Encoder decoder models do not support chunked prefill.")
                 return False
+
             logger.debug("Generative models support chunked prefill.")
             return True
 
     @property
     def is_prefix_caching_supported(self) -> bool:
         attn_type = self.attn_type
-        if self.pooler_config is not None:
+
+        if pooler_config := self.pooler_config:
             # for pooling models
             if attn_type == "encoder_only":
                 logger.debug(
-                    "Pooling models with bidirectional attn does not "
-                    "support prefix caching."
+                    "Pooling models with bidirectional attn "
+                    "do not support prefix caching."
                 )
                 return False
-            elif attn_type == "decoder":
-                pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["mean", "step", "cls"]:
+
+            if attn_type == "decoder":
+                if (
+                    pooler_config.seq_pooling_type in ("MEAN", "CLS")
+                    or pooler_config.tok_pooling_type == "STEP"
+                ):
                     logger.debug(
-                        "Pooling models with %s pooling does not "
-                        "support prefix caching.",
-                        pooling_type,
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "do not support prefix caching.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
                     )
                     return False
-                elif pooling_type in ["all", "last"]:
+                else:
                     logger.debug(
-                        "Pooling models with causal attn and %s pooling support "
-                        "prefix caching.",
-                        pooling_type,
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "support prefix caching.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
                     )
                     return True
-                else:
-                    raise ValueError(f"{pooling_type=} not supported.")
+
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return False
         else:
+            # for generative models
             if attn_type == "hybrid":
                 logger.debug(
-                    "Hybrid models does not support prefix caching since the feature "
+                    "Hybrid models do not support prefix caching since the feature "
                     "is still experimental."
                 )
                 return False
             elif attn_type == "attention_free":
                 logger.debug(
-                    "Attention free models does not support prefix caching since the "
+                    "Attention free models do not support prefix caching since the "
                     "feature is still experimental."
                 )
                 return False
             elif attn_type == "encoder_decoder":
-                logger.debug("Encoder decoder models does not support prefix caching.")
+                logger.debug("Encoder decoder models do not support prefix caching.")
                 return False
             else:  # attn_type == "decoder"
                 logger.debug("Generative models support prefix caching.")
@@ -1788,9 +1834,10 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
+    config_format: ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        config, model_id, revision=revision
+        config, model_id, revision=revision, config_format=config_format
     )
     model_type = config.model_type
 
@@ -1860,7 +1907,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window: int | None,
     spec_target_max_model_len: int | None = None,
-    encoder_config: Any | None = None,
+    encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     (derived_max_model_len, max_len_key) = (

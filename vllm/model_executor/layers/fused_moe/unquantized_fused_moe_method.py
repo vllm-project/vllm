@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
+from torch.nn import Module
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -16,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -27,85 +27,85 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    AiterExperts,
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+    convert_to_unquantized_kernel_format,
+    make_unquantized_moe_kernel,
+    select_unquantized_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
+    convert_moe_weights_to_flashinfer_trtllm_block_layout,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts
 else:
     TritonExperts = None  # type: ignore
 
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
 
 logger = init_logger(__name__)
 
 
+# --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-
-        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
-        # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
-        self.flashinfer_cutlass_moe_enabled = (
-            has_flashinfer_cutlass_fused_moe()
-            and envs.VLLM_USE_FLASHINFER_MOE_FP16
-            and self.moe.moe_parallel_config.use_ep
-            and self.moe.moe_parallel_config.dp_size == 1
-            and current_platform.get_device_capability()[0] >= 9
+        self.unquantized_backend = select_unquantized_moe_backend(
+            moe_config=self.moe,
+            use_ep=self.moe.moe_parallel_config.use_ep,
+            use_dp=self.moe.moe_parallel_config.dp_size > 1,
         )
-        if self.flashinfer_cutlass_moe_enabled:
-            logger.info_once(
-                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
-            )
+
+        # AITER only supports gated activations (silu/gelu), so disable it
+        # for non-gated MoE (is_act_and_mul=False)
+        self.rocm_aiter_moe_enabled = (
+            rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
+        )
+        self.kernel: mk.FusedMoEModularKernel | None = None
+        self._is_monolithic = (
+            current_platform.is_cpu()
+            or self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        )
+
+        if self.is_monolithic:
+            self.apply_monolithic: Callable = self._select_monolithic()
+
+    def _select_monolithic(self) -> Callable:
+        """Select the monolithic implementation based on platform."""
+        if current_platform.is_cpu():
+            return self.forward_monolithic_cpu
         else:
-            if (
-                self.moe.moe_parallel_config.use_ep
-                and self.moe.moe_parallel_config.dp_size == 1
-            ):
-                logger.info_once(
-                    "FlashInfer CUTLASS MoE is available for EP"
-                    " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
-                    scope="local",
-                )
-            elif self.moe.moe_parallel_config.dp_size > 1:
-                logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP.",
-                    scope="local",
-                )
+            return self.forward_monolithic_cuda
+
+    def forward_native(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(layer, x, topk_weights, topk_ids)
+
+    @property
+    def is_monolithic(self) -> bool:
+        return self._is_monolithic
 
     @property
     def supports_eplb(self) -> bool:
-        return True
-
-    @property
-    def allow_inplace(self) -> bool:
         return True
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> FusedMoEPrepareAndFinalize | None:
-        if self.rocm_aiter_moe_enabled:
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
             return None
         else:
             return super().maybe_make_prepare_finalize(routing_tables)
@@ -122,13 +122,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(self.moe_quant_config)
+            return TritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
 
     def create_weights(
         self,
@@ -197,6 +201,32 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         return weight
 
+    def _setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+    ) -> None:
+        # Shuffle weights to runtime format.
+        w13, w2 = convert_to_unquantized_kernel_format(
+            self.unquantized_backend,
+            layer=layer,
+            w13_weight=w13,
+            w2_weight=w2,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+
+        # Setup Modular Kernel for TP Case
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+
+        self.kernel = make_unquantized_moe_kernel(
+            backend=self.unquantized_backend,
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
@@ -204,17 +234,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
-        if current_platform.is_xpu():
-            import intel_extension_for_pytorch as ipex
-
-            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                layer.w13_weight,
-                layer.w2_weight,
-                use_prepack=True,
-                experts_start_id=ep_rank_start,
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
+            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+            layer.w13_weight.data = w13_weight_swapped.contiguous()
+            w13_weights_shuffled, w2_weights_shuffled = (
+                convert_moe_weights_to_flashinfer_trtllm_block_layout(
+                    _cache_permute_indices,
+                    layer.w13_weight.data,
+                    layer.w2_weight.data,
+                )
             )
-        elif current_platform.is_cpu():
+            layer.w13_weight = Parameter(w13_weights_shuffled, requires_grad=False)
+            layer.w2_weight = Parameter(w2_weights_shuffled, requires_grad=False)
+        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
@@ -240,62 +275,30 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-        elif current_platform.is_cuda_alike():
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            if self.rocm_aiter_moe_enabled:
-                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                    layer.w13_weight.data, layer.w2_weight.data
-                )
-                replace_parameter(layer, "w13_weight", shuffled_w13)
-                replace_parameter(layer, "w2_weight", shuffled_w2)
-
-                self.use_inplace = True
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    AiterExperts(self.moe_quant_config),
-                    shared_experts=None,
-                )
-
-            elif self.flashinfer_cutlass_moe_enabled:
-                self.use_inplace = False
-                # Swap halves to arrange as [w3; w1] (kernel expectation)
-                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-                replace_parameter(layer, "w13_weight", w13_weight)
-
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    FlashInferExperts(
-                        out_dtype=layer.params_dtype,
-                        quant_config=self.moe_quant_config,
-                        tp_rank=self.moe.moe_parallel_config.tp_rank,
-                        tp_size=self.moe.moe_parallel_config.tp_size,
-                        ep_rank=self.moe.moe_parallel_config.ep_rank,
-                        ep_size=self.moe.moe_parallel_config.ep_size,
-                    ),
-                )
-            else:
-                self.use_inplace = True
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonExperts(self.moe_quant_config),
-                    shared_experts=None,
-                )
+                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
+            self._setup_kernel(
+                layer=layer,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
+            )
 
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
             layer=layer,
             x=x,
-            router_logits=router_logits,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
@@ -311,43 +314,56 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
+        assert self.kernel is not None
 
-        result = self.kernel(
+        return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
         )
 
-        return result
-
-    def forward_cpu(
+    def forward_monolithic_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for CPU.")
+        import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
 
-        return layer.cpu_fused_moe(
+        assert self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+
+        return torch.ops.vllm.flashinfer_fused_moe_bf16(
+            routing_logits=router_logits,
+            routing_bias=layer.e_score_correction_bias,
+            hidden_states=x,
+            gemm1_weights=layer.w13_weight,
+            gemm2_weights=layer.w2_weight,
+            num_experts=layer.global_num_experts,
+            top_k=layer.top_k,
+            n_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            intermediate_size=layer.intermediate_size_per_partition,
+            local_expert_offset=layer.ep_rank * layer.local_num_experts,
+            local_num_experts=layer.local_num_experts,
+            routing_method_type=layer.routing_method_type,
+        )
+
+    def forward_monolithic_cpu(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.cpu_fused_moe(
             layer,
             x,
             layer.use_grouped_topk,
@@ -365,80 +381,3 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.apply_router_weight_on_input,
             layer.activation,
         )
-
-    def forward_xpu(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        return layer.ipex_fusion(
-            x,
-            layer.use_grouped_topk,
-            layer.top_k,
-            router_logits,
-            layer.renormalize,
-            layer.topk_group,
-            layer.num_expert_group,
-            custom_routing_function=layer.custom_routing_function,
-        )
-
-    def forward_tpu(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not layer.use_grouped_topk
-        assert layer.num_expert_group is None
-        assert layer.topk_group is None
-        assert layer.custom_routing_function is None
-        assert layer.apply_router_weight_on_input is False
-        if layer.scoring_func != "softmax":
-            raise NotImplementedError(
-                "Only softmax scoring function is supported for TPU."
-            )
-        if layer.e_score_correction_bias is not None:
-            raise NotImplementedError(
-                "Expert score correction bias is not supported for TPU."
-            )
-        assert layer.activation == "silu", (
-            f"{layer.activation} is not supported for TPU."
-        )
-        assert layer.routed_scaling_factor == 1.0, (
-            f"routed_scaling_factor {layer.routed_scaling_factor} is "
-            "not supported for TPU."
-        )
-        if (
-            layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for TPU.")
-        return fused_moe_pallas(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk=layer.top_k,
-            gating_output=router_logits,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            renormalize=layer.renormalize,
-        )
-
-    if current_platform.is_tpu():
-        forward_native = forward_tpu
-    elif current_platform.is_cpu():
-        forward_native = forward_cpu
-    elif current_platform.is_xpu():
-        forward_native = forward_xpu
-    else:
-        forward_native = forward_cuda

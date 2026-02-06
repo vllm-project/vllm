@@ -6,7 +6,10 @@ from collections.abc import Sequence
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -76,7 +79,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer = []
         self.text_buffer = ""
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.current_state == "response"
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

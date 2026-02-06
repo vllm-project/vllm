@@ -8,15 +8,23 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8,
-    flashinfer_cutlass_moe_fp8,
+    apply_fi_trtllm_fp8_per_tensor_moe,
     register_scales_for_trtllm_fp8_per_tensor_moe,
-    rotate_flashinfer_fp8_moe_weights,
+    rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
@@ -103,6 +111,7 @@ class TestData:
         w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
 
         layer = torch.nn.Module()
+        layer.orig_dtype = torch.bfloat16
         layer.w13_weight = w13_quantized.clone()
         layer.w2_weight = w2_quantized.clone()
         layer.w13_input_scale = a1_scale
@@ -110,23 +119,14 @@ class TestData:
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
         # Setup dummy config.
-        layer.moe_parallel_config = mk.FusedMoEParallelConfig(
-            tp_size=1,
-            pcp_size=1,
-            dp_size=1,
-            ep_size=1,
-            tp_rank=1,
-            pcp_rank=1,
-            dp_rank=1,
-            ep_rank=1,
-            use_ep=False,
-            all2all_backend="naive",
-        )
+        layer.moe_parallel_config = mk.FusedMoEParallelConfig.make_no_parallel()
 
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
         if is_trtllm:
-            rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+            rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
+                layer.w13_weight, layer.w2_weight
+            )
             register_scales_for_trtllm_fp8_per_tensor_moe(
                 layer,
                 layer.w13_weight_scale,
@@ -135,6 +135,8 @@ class TestData:
                 layer.w2_input_scale,
             )
         layer.custom_routing_function = Llama4MoE.custom_routing_function
+        layer.routing_method_type = RoutingMethodType.Llama4
+        layer.renormalize = False
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
@@ -199,7 +201,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
-        flashinfer_output = apply_flashinfer_per_tensor_scale_fp8(
+        flashinfer_output = apply_fi_trtllm_fp8_per_tensor_moe(
             layer=td.layer,
             hidden_states=td.hidden_states,
             router_logits=score,
@@ -230,6 +232,8 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 ):
     set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    assert activation in ["silu", "relu2_no_mul"]
+    is_act_and_mul = activation == "silu_and_mul"
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=False, activation=activation
@@ -277,9 +281,33 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         td.layer.get_fused_moe_quant_config = get_fused_moe_quant_config
         td.layer.quant_method = td.layer
 
-        flashinfer_cutlass_output = flashinfer_cutlass_moe_fp8(
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            is_act_and_mul=is_act_and_mul,
+            routing_method=RoutingMethodType.TopK,
+        )
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+        flashinfer_cutlass_output = kernel(
             td.hidden_states,
-            td.layer,
+            td.layer.w13_weight,
+            td.layer.w2_weight,
             topk_weights,
             topk_ids,
             activation=activation,
@@ -287,7 +315,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             expert_map=None,
             apply_router_weight_on_input=True,
         )
-
         torch.testing.assert_close(
             output, flashinfer_cutlass_output, atol=5.5e-2, rtol=1e-2
         )

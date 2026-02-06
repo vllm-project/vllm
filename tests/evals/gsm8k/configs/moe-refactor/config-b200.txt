@@ -1,12 +1,15 @@
+Llama-4-Scout-Fp8-CT-vllm-cutlass.yaml
 Llama-4-Scout-Fp8-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-fi-trtllm.yaml  
 Qwen3-30B-A3B-NvFp4-CT-vllm-cutlass.yaml
 Qwen3-30B-A3B-NvFp4-CT-marlin.yaml
 Qwen3-30B-A3B-NvFp4-CT-fi-trtllm.yaml
 Qwen3-30B-A3B-NvFp4-CT-fi-cutlass.yaml
-Qwen3-30B-A3B-NvFp4-CT-fi-cutlass-dp-ep.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-vllm-cutlass.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-marlin.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass.yaml
-Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass-dp-ep.yaml
+Llama-4-Scout-BF16-fi-cutlass.yaml
+Llama-4-Scout-BF16-triton.yaml
+Mixtral-8x7B-BF16-fi-cutlass.yaml
+Mixtral-8x7B-BF16-triton.yaml

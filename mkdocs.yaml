@@ -80,6 +80,7 @@ plugins:
         - "re:vllm\\._.*"  # Internal modules
         - "vllm.third_party"
         - "vllm.vllm_flash_attn"
+        - "re:vllm\\.grpc\\..*_pb2.*"  # Auto-generated protobuf files
         - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
   - mkdocstrings:
       handlers:
@@ -87,7 +88,8 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
-            filters: []
+            filters:
+              - "!.*_pb2_grpc"  # Exclude auto-generated gRPC stubs
             summary:
               modules: true
             show_if_no_docstring: true
@@ -106,6 +108,7 @@ plugins:
 
 markdown_extensions:
   - attr_list
+  - def_list
   - md_in_html
   - admonition
   - pymdownx.details
@@ -138,6 +141,7 @@ extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
+  - mkdocs/javascript/reo.js
   - mkdocs/javascript/run_llm_widget.js
   - mkdocs/javascript/mathjax.js
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
