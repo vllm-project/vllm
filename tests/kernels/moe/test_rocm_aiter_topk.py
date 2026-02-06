@@ -10,7 +10,6 @@
 # and the platform is not ROCm.
 
 import importlib.util
-import os
 
 import pytest
 import torch
