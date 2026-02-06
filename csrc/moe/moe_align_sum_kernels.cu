@@ -888,7 +888,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
         // Use same base condition as regular moe_align_block_size,
         // but also cap num_virtual_experts to fit in shared memory
         bool small_batch_expert_mode =
-            (topk_ids.numel() <= 128) && (num_virtual_experts <= 8);
+            (topk_ids.numel() <= 128) && (num_virtual_experts <= 16);
 
         if (small_batch_expert_mode) {
           // Use fused small batch kernel
