@@ -32,7 +32,6 @@ SEPARATE_GROUPS = [
     "vllm/model_executor",
     # v1 related
     "vllm/v1/kv_offload",
-    "vllm/v1/spec_decode",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

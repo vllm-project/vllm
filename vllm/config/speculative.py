@@ -5,7 +5,6 @@ import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
@@ -41,6 +40,7 @@ MTPModelTypes = Literal[
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
+    "step3p5_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -54,7 +54,6 @@ SpeculativeMethod = Literal[
 
 
 @config
-@dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
@@ -117,9 +116,16 @@ class SpeculativeConfig:
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
+    # Alternative drafting strategies
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
     """
+    parallel_drafting: bool = False
+    """Enable parallel drafting, where all speculative tokens are generated
+    in parallel rather than sequentially. This can improve performance but
+    requires the speculative model be trained to support parallel drafting.
+    Only compatible with EAGLE and draft model methods."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -263,6 +269,11 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
+
+        if hf_config.model_type == "step3p5":
+            hf_config.model_type = "step3p5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
@@ -682,6 +693,7 @@ class SpeculativeConfig:
             "gpt_oss",
             "hunyuan_vl",
             "hunyuan_v1_dense",
+            "afmoe",
         ]
         if (
             self.method == "eagle3"

@@ -651,9 +651,11 @@ class Lfm2MoeForCausalLM(
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
 
-        assert not cache_config.enable_prefix_caching, (
-            "Lfm2Moe currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Lfm2Moe currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         super().__init__()
         self.config = config

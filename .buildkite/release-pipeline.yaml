@@ -257,14 +257,14 @@ steps:
           - input-release-version
           - build-wheels
 
-      - label: "Upload release wheels to PyPI and GitHub"
+      - label: "Upload release wheels to PyPI"
         depends_on:
           - block-upload-release-wheels
         id: upload-release-wheels
         agents:
           queue: small_cpu_queue_postmerge
         commands:
-          - "bash .buildkite/scripts/upload-release-wheels.sh"
+          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
 
   # =============================================================================
   # ROCm Release Pipeline (x86_64 only)

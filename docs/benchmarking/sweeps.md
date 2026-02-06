@@ -82,7 +82,7 @@ vllm bench sweep serve \
     You can use `--dry-run` to preview the commands to be run.
 
     We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
-    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
+    Between each benchmark run, we call all `/reset_*_cache` endpoints to get a clean slate for the next run.
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note

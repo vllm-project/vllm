@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -562,7 +562,7 @@ direct_register_custom_op(
 
 def get_attention_context(
     layer_name: str,
-) -> tuple[dict | object | None, "Attention | MLAAttention", torch.Tensor]:
+) -> tuple[Any, "Attention | MLAAttention", torch.Tensor]:
     """Extract attention context for a given layer.
 
     This helper function extracts the attention metadata, attention layer

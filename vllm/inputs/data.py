@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 import torch
-from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
+
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
         MultiModalDataDict,
+        MultiModalEncDecInputs,
         MultiModalInputs,
         MultiModalUUIDDict,
     )
 else:
     MultiModalDataDict = object
+    MultiModalEncDecInputs = object
     MultiModalInputs = object
     MultiModalUUIDDict = object
 
 
-class TextPrompt(TypedDict):
-    """Schema for a text prompt."""
-
-    prompt: str
-    """The input text to be tokenized before passing to the model."""
-
+class _CommonKeys(TypedDict):
     multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
@@ -53,7 +53,14 @@ class TextPrompt(TypedDict):
     """
 
 
-class TokensPrompt(TypedDict):
+class TextPrompt(_CommonKeys):
+    """Schema for a text prompt."""
+
+    prompt: str
+    """The input text to be tokenized before passing to the model."""
+
+
+class TokensPrompt(_CommonKeys):
     """Schema for a tokenized prompt."""
 
     prompt_token_ids: list[int]
@@ -65,47 +72,18 @@ class TokensPrompt(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-    multi_modal_data: NotRequired[MultiModalDataDict | None]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
-    """
-    Optional multi-modal processor kwargs to be forwarded to the
-    multimodal input mapper & processor. Note that if multiple modalities
-    have registered mappers etc for the model being considered, we attempt
-    to pass the mm_processor_kwargs to each of them.
-    """
-
-    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
-    """
-    Optional user-specified UUIDs for multimodal items, mapped by modality.
-    Lists must match the number of items per modality and may contain `None`.
-    For `None` entries, the hasher will compute IDs automatically; non-None
-    entries override the default hashes for caching.
-    """
-
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
-
-
-class EmbedsPrompt(TypedDict):
+class EmbedsPrompt(_CommonKeys):
     """Schema for a prompt provided via token embeddings."""
 
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token embeddings, if available."""
 
 
-class DataPrompt(TypedDict):
+class DataPrompt(_CommonKeys):
     """Represents generic inputs handled by IO processor plugins."""
 
     data: Any
@@ -138,22 +116,6 @@ where the decoder-prompt is not specified explicitly, or
 more than one prompt, i.e. 
 [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
 """
-
-
-def is_tokens_prompt(prompt: SingletonPrompt) -> TypeIs[TokensPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" in prompt
-        and "prompt_embeds" not in prompt
-    )
-
-
-def is_embeds_prompt(prompt: SingletonPrompt) -> TypeIs[EmbedsPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" not in prompt
-        and "prompt_embeds" in prompt
-    )
 
 
 _T1_co = TypeVar(
@@ -194,7 +156,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt
+PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt[Any, Any]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -281,7 +243,7 @@ class EncoderDecoderInputs(TypedDict):
     This specifies the required data for encoder-decoder models.
     """
 
-    encoder: TokenInputs | MultiModalInputs
+    encoder: TokenInputs | MultiModalEncDecInputs
     """The inputs for the encoder portion."""
 
     decoder: TokenInputs | MultiModalInputs
@@ -357,3 +319,15 @@ def to_enc_dec_tuple_list(
         (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
         for enc_dec_prompt in enc_dec_prompts
     ]
+
+
+@dataclass
+class StreamingInput:
+    """Input data for a streaming generation request.
+
+    This is used with generate() to support multi-turn streaming sessions
+    where inputs are provided via an async generator.
+    """
+
+    prompt: PromptType
+    sampling_params: SamplingParams | None = None

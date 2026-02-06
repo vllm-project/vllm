@@ -4,11 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.v1.outputs import (
-    AsyncModelRunnerOutput,
-    LogprobsTensors,
-    ModelRunnerOutput,
-)
+from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 

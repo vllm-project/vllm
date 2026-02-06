@@ -53,7 +53,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
@@ -164,7 +164,7 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
 async def test_mcp_tool_call(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24? Use python to calculate the result.",
+        input="What is 123 * 456? Use python to calculate the result.",
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
         extra_body={"enable_response_messages": True},
         temperature=0.0,
@@ -179,12 +179,12 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
     assert response.output[2].type == "reasoning"
     # make sure the correct math is in the final output
     assert response.output[3].type == "message"
-    assert "312" in response.output[3].content[0].text
+    assert "56088" in response.output[3].content[0].text
 
     # test raw input_messages / output_messages
     assert len(response.input_messages) == 1
     assert len(response.output_messages) == 3
-    assert "312" in response.output_messages[2]["message"]
+    assert "56088" in response.output_messages[2]["message"]
 
 
 @pytest.mark.asyncio

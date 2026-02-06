@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.config import (
@@ -66,24 +63,19 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    is_fp4_marlin_supported,
-    prepare_fp4_layer_for_marlin,
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    apply_nvfp4_linear,
+    convert_to_nvfp4_linear_kernel_format,
+    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
-    cutlass_fp4_supported,
     is_layer_skipped,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
-    pad_nvfp4_activation_for_cutlass,
-    pad_nvfp4_weight_for_cutlass,
-    slice_nvfp4_output,
-    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -96,11 +88,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    flashinfer_scaled_fp4_mm,
-    has_flashinfer,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -181,7 +168,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, Attention):
             return self.KVCacheMethodCls(self)
@@ -498,7 +485,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
         if not (layer.weight_scale == layer.weight_scale[0]).all():
@@ -580,7 +567,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -681,7 +668,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Keep weight in [out, in] layout for W8A8BlockFp8LinearOp.
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
@@ -866,7 +853,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -980,7 +967,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1108,32 +1094,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-
-        self.backend = "none"
-        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
-            if current_platform.has_device_capability(100) and has_flashinfer():
-                self.backend = "flashinfer-cutlass"
-            elif cutlass_fp4_supported():
-                self.backend = "cutlass"
-            elif is_fp4_marlin_supported():
-                self.backend = "marlin"
-        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
-            self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
-            assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
-        elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
-            self.backend = "cutlass"
-            assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
-        elif envs.VLLM_NVFP4_GEMM_BACKEND == "marlin":
-            self.backend = "marlin"
-            assert is_fp4_marlin_supported(), f"Marlin is required for {self.backend}"
-
-        if self.backend == "none":
-            raise ValueError(
-                "No valid NVFP4 GEMM backend found. "
-                "Please check your platform capability."
-            )
-
-        logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
+        self.backend = select_nvfp4_linear_backend()
 
     def create_weights(
         self,
@@ -1181,19 +1142,19 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        # Input Weight Scale
-        input_scale = PerTensorScaleParameter(
+        # Input Global Scale
+        input_global_scale = PerTensorScaleParameter(
             data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
             weight_loader=weight_loader,
         )
-        layer.register_parameter("input_scale", input_scale)
+        layer.register_parameter("input_scale", input_global_scale)
 
-        # Global Weight Scale
-        weight_scale_2 = PerTensorScaleParameter(
+        # Weight Global Scale
+        weight_global_scale = PerTensorScaleParameter(
             data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
             weight_loader=weight_loader,
         )
-        layer.register_parameter("weight_scale_2", weight_scale_2)
+        layer.register_parameter("weight_scale_2", weight_global_scale)
 
         # Per Block Weight Scale
         weight_scale = ModelWeightParameter(
@@ -1209,65 +1170,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # global scales:
-        input_scale_2 = layer.input_scale.max().to(torch.float32)
-        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Rename ModelOpt checkpoint names to standardized names
+        input_global_scale = layer.input_scale.max().to(torch.float32)
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        del layer.input_scale
+        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        del layer.weight_scale_2
 
-        weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
-
+        # Pre-compute alpha and inverse for runtime quantization
         layer.alpha = Parameter(
-            layer.input_scale * layer.weight_scale_2, requires_grad=False
+            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
+        )
+        layer.input_global_scale_inv = Parameter(
+            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
-        # Calculate `1 / input_scale` so that we don't need to do so at runtime
-        layer.input_scale_inv = Parameter(
-            (1 / layer.input_scale).to(torch.float32), requires_grad=False
-        )
-
-        # Swizzle the weight blockscale.
-        # contracting dimension is input dimension
-        # block_size = 16;
-        assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
-            "Weight Block scale must be represented as FP8-E4M3"
-        )
-
-        if self.backend == "marlin":
-            prepare_fp4_layer_for_marlin(layer)
-            del layer.alpha
-            del layer.input_scale
-        elif self.backend == "flashinfer-trtllm":
-            # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
-            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
-            # layout but we use our own quantization so we have to call
-            # shuffles ourselves.
-            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
-
-            weight = layer.weight.data
-            weight_scale = layer.weight_scale.data
-
-            epilogue_tile_m = 128
-            weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
-            weight_scale = (
-                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
-                .reshape(weight_scale.shape)
-                .view(torch.float8_e4m3fn)
-            )
-
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-            layer.weight = Parameter(weight, requires_grad=False)
-        else:
-            # Swizzle block scales and pad the packed NVFP4 weights for kernel
-            # alignment (CUTLASS/FlashInfer require K and N divisible by 32).
-            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
-            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-
-            weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-                layer.weight.data
-            )
-            layer.weights_padding_cols = weights_padding_cols
-            layer.weight = Parameter(weight, requires_grad=False)
+        # Convert layer to NVFP4 linear kernel format
+        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
     def apply(
         self,
@@ -1275,62 +1196,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.backend == "marlin":
-            return apply_fp4_marlin_linear(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                weight_scale_2=layer.weight_scale_2,
-                workspace=layer.workspace,
-                size_n=layer.output_size_per_partition,
-                size_k=layer.input_size_per_partition,
-                bias=bias,
-                input_dtype=self.marlin_input_dtype,
-            )
-
-        output_dtype = x.dtype
-
-        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x, layer.input_scale_inv, is_sf_swizzled_layout=True, backend=self.backend
+        return apply_nvfp4_linear(
+            backend=self.backend,
+            layer=layer,
+            x=x,
+            bias=bias,
         )
-
-        # validate dtypes of quantized input, input block scale,
-        # weight and weight_blockscale
-        assert x_fp4.dtype == torch.uint8
-        assert layer.weight.dtype == torch.uint8
-        assert x_blockscale.dtype == torch.float8_e4m3fn
-        assert layer.weight_scale.dtype == torch.float8_e4m3fn
-        assert layer.alpha.dtype == torch.float32
-
-        # Pad activations to match weight K-dimension padding
-        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
-        output_size = layer.output_size_per_partition
-        output_shape = [x.shape[0], output_size]
-        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
-
-        mm_args = (
-            x_fp4,
-            layer.weight,
-            x_blockscale,
-            layer.weight_scale,
-            layer.alpha,
-            output_dtype,
-        )
-
-        if self.backend.startswith("flashinfer-"):
-            backend_name = self.backend[len("flashinfer-") :]
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
-        else:
-            assert self.backend == "cutlass"
-            out = cutlass_scaled_fp4_mm(*mm_args)
-
-        # Slice output to remove N-dimension padding
-        out = slice_nvfp4_output(out, output_size)
-
-        if bias is not None:
-            out = out + bias
-        return out.view(*output_shape)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
@@ -1666,7 +1537,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,

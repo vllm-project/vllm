@@ -220,7 +220,12 @@ class PerceptionEncoderVisionAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
         self.rope = PerceptionEncoderRope2D(
             dim=self.head_dim,
             max_grid_height=max_grid_height,

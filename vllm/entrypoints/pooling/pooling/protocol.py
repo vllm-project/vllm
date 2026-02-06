@@ -3,12 +3,10 @@
 import time
 from typing import Any, Generic, TypeAlias, TypeVar
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
 from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
@@ -18,8 +16,12 @@ from vllm.entrypoints.pooling.base.protocol import (
     EncodingRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class PoolingCompletionRequest(
@@ -30,11 +32,31 @@ class PoolingCompletionRequest(
 ):
     task: PoolingTask | None = None
 
-    def to_pooling_params(self):
-        return PoolingParams(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
+        return PoolingParams(
+            task=self.task,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            use_activation=get_use_activation(self),
         )
 
 
@@ -48,11 +70,31 @@ class PoolingChatRequest(
         description=("Additional kwargs to pass to the HF processor."),
     )
 
-    def to_pooling_params(self):
-        return PoolingParams(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
+        return PoolingParams(
+            task=self.task,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            use_activation=get_use_activation(self),
         )
 
 
@@ -64,7 +106,7 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     task: PoolingTask = "plugin"
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(task=self.task)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):

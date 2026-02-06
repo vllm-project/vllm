@@ -11,7 +11,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Optional,
     TypeAlias,
     TypedDict,
     Union,
@@ -27,12 +26,12 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 
+from .media import MediaWithBytes
+
 if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
-
-    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -58,7 +57,7 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", "MediaWithBytes[HfImageItem]"]
+ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", MediaWithBytes[HfImageItem]]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
@@ -186,7 +185,7 @@ class PlaceholderRange:
     length: int
     """The length of the placeholder."""
 
-    is_embed: Optional["torch.Tensor"] = None
+    is_embed: "torch.Tensor | None" = None
     """
     A boolean mask of shape `(length,)` indicating which positions
     between `offset` and `offset + length` to assign embeddings to.
@@ -341,7 +340,7 @@ class MultiModalFeatureSpec:
     `MultiModalFeatureSpec` per item.
     """
 
-    data: Optional["MultiModalKwargsItem"]
+    data: "MultiModalKwargsItem | None"
     """
     Represents multimodal data for this feature.
 
@@ -425,8 +424,9 @@ class BaseMultiModalField(ABC):
 
     keep_on_cpu: bool = False
     """
-    If `True`, then this field is excluded from being moved to the accelerator
-    when `MultiModalKwargsItems.get_data()` is called to batch the data.
+    If `True`, then this field is excluded from being moved to the accelerator when
+    [`group_and_batch_mm_items`][vllm.multimodal.utils.group_and_batch_mm_items]
+    is called to batch the data.
     """
 
     def _field_factory(self):
@@ -1007,27 +1007,38 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         pin_memory: bool = False,
     ) -> BatchedTensorInputs:
         """Construct a dictionary of keyword arguments to pass to the model."""
-        elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
-        for modality, items in self.items():
-            for i, item in enumerate(items):
-                if item is None:
-                    raise RuntimeError(
-                        f"Cannot build data from empty mm_items[{modality}][{i}]"
-                    )
+        from .utils import group_and_batch_mm_items
 
-                for key, elem in item.items():
-                    elems_by_key[key].append(elem)
-
-        data = {
-            key: elems[0].field.reduce_data(
-                elems,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            for key, elems in elems_by_key.items()
+        items_by_modality = self.require_data()
+        batches_by_modality = {
+            modality: [
+                data
+                for _, data in group_and_batch_mm_items(
+                    items,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+            ]
+            for modality, items in items_by_modality.items()
+            if len(items) > 0
         }
 
-        return data
+        out_data: BatchedTensorInputs = {}
+        for _, batches in batches_by_modality.items():
+            if len(batches) != 1:
+                num_batches_by_modality = {
+                    modality: len(batches)
+                    for modality, batches in batches_by_modality.items()
+                }
+
+                raise RuntimeError(
+                    f"Some modalities cannot be merged into a single batch "
+                    f"({num_batches_by_modality=})"
+                )
+
+            out_data.update(batches[0])
+
+        return out_data
 
 
 MultiModalKwargsOptionalItems: TypeAlias = (
@@ -1084,6 +1095,10 @@ class MultiModalEncDecInputs(MultiModalInputs):
     Represents the outputs of
     [`EncDecMultiModalProcessor`][vllm.multimodal.processing.EncDecMultiModalProcessor]
     ready to be passed to vLLM internals.
+
+    Note: Even text-only encoder-decoder models are currently implemented
+    as multi-modal models for convenience.
+    (Example: https://github.com/vllm-project/bart-plugin)
     """
 
     encoder_prompt_token_ids: list[int]

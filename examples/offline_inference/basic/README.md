@@ -56,17 +56,10 @@ Try it yourself with the following argument:
 
 vLLM supports models that are quantized using GGUF.
 
-Try one yourself by downloading a quantized GGUF model and using the following arguments:
-
-```python
-from huggingface_hub import hf_hub_download
-repo_id = "bartowski/Phi-3-medium-4k-instruct-GGUF"
-filename = "Phi-3-medium-4k-instruct-IQ2_M.gguf"
-print(hf_hub_download(repo_id, filename=filename))
-```
+Try one yourself using the `repo_id:quant_type` format to load directly from HuggingFace:
 
 ```bash
---model {local-path-printed-above} --tokenizer microsoft/Phi-3-medium-4k-instruct
+--model unsloth/Qwen3-0.6B-GGUF:Q4_K_M --tokenizer Qwen/Qwen3-0.6B
 ```
 
 ### CPU offload
