@@ -280,13 +280,8 @@ class Hermes2ProToolParser(ToolParser):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
+
+                if self.prev_tool_call_arr[self.current_tool_id].get("arguments"):
                     if '"}' not in delta_text:
                         return None
                     end_loc = delta_text.rindex('"}')
@@ -296,7 +291,24 @@ class Hermes2ProToolParser(ToolParser):
                         "been streamed yet: %s",
                         diff,
                     )
-                    self.streamed_args_for_tool[self.current_tool_id] += diff
+                    total_arg_text = (
+                        self.streamed_args_for_tool[self.current_tool_id] + diff
+                    )
+                    brace_diff = total_arg_text.count("}") - total_arg_text.count("{")
+                    if brace_diff > 0:
+                        end_loc = total_arg_text.rindex("}")
+                        n = 1
+                        while n < brace_diff:
+                            end_loc = total_arg_text.rindex("}", 0, end_loc)
+                            n += 1
+                        dist_from_end = len(total_arg_text) - end_loc
+                        total_arg_text = total_arg_text[:-dist_from_end]
+                        diff = diff[:-dist_from_end]
+
+                    self.streamed_args_for_tool[self.current_tool_id] = total_arg_text
+                    self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                        total_arg_text
+                    )
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
