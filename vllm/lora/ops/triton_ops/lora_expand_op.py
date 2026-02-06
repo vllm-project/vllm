@@ -10,7 +10,10 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
+from vllm.lora.ops.triton_ops.utils import (
+    _get_lora_b_ptr,
+    get_lora_op_configs,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -240,6 +243,10 @@ def _lora_expand(
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.
     use_gdc = False  # supports_pdl(inputs.device)
+    """
+    stream = get_lora_stream()
+    with torch.cuda.stream(stream):
+    """
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,

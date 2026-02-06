@@ -127,7 +127,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: tuple[torch.Tensor, ...],
         output_slices: tuple[int, ...],
         offset_start: int = 0,
-        add_inputs=True,
+        add_inputs=False,
         **kwargs,
     ) -> None:
         """
@@ -161,7 +161,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 num_tokens, self.lora_config.specialize_active_lora
             ),
             offset_start=offset_start,
-            add_inputs=True,
+            add_inputs=add_inputs,
         )
 
         y = y.view_as(y_org)
@@ -257,7 +257,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer,  # type: ignore
             lora_b_stacked,
             output_slices,
-            add_inputs=True,
+            add_inputs=False,
             **kwargs,
         )
 

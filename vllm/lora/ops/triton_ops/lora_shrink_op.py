@@ -220,6 +220,15 @@ def _lora_shrink(
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.
     use_gdc = False  # supports_pdl(inputs.device)
+
+    """
+    stream = get_lora_stream()
+    inputs.record_stream(stream)
+    output_tensor.record_stream(stream)
+    stream.wait_stream(torch.cuda.current_stream())
+
+    with torch.cuda.stream(stream):
+    """
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
