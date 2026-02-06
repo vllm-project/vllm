@@ -4989,7 +4989,7 @@ class GPUModelRunner(
                 if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                    self.afd_connector.send_dp_metadata_list(dp_metadata_list)
+                    self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)
                 logger.info(f'jcz send dp_metadata_list in prepare input')
                 outputs = self.model(
                     input_ids=input_ids,
