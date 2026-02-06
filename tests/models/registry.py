@@ -1022,6 +1022,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="z-lab/Qwen3-8B-DFlash-b16",
+        speculative_method="dflash",
+    ),
     "MedusaModel": _HfExamplesInfo(
         "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
     ),

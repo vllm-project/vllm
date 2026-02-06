@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.config import ParallelConfig, SpeculativeConfig
+from vllm.model_executor.models import ModelRegistry
 
 
 class _DummyDraftModelConfig:
@@ -138,3 +139,23 @@ def test_dflash_hash_differs_from_non_eagle3_method():
             target_parallel_config=ParallelConfig(),
         )
     assert dflash_config.compute_hash() != ngram_config.compute_hash()
+
+
+def test_dflash_architecture_is_registered():
+    assert "DFlashDraftModel" in ModelRegistry.get_supported_archs()
+    assert ModelRegistry._try_load_model_cls("DFlashDraftModel") is not None
+
+
+def test_use_eagle_returns_true_for_dflash():
+    with patch(
+        "vllm.config.speculative.ModelConfig",
+        new=_model_config_factory(),
+    ):
+        config = SpeculativeConfig(
+            method="dflash",
+            model="org/dflash-draft",
+            num_speculative_tokens=1,
+            target_model_config=_make_target_model_config(),
+            target_parallel_config=ParallelConfig(),
+        )
+    assert config.use_eagle()

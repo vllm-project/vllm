@@ -735,7 +735,7 @@ class SpeculativeConfig:
                 )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
