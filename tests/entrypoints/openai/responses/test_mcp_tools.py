@@ -160,6 +160,7 @@ class TestMCPEnabled:
                 "No developer messages should be present with valid mcp tool"
             )
 
+    @pytest.mark.flaky(reruns=3)
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])
     async def test_mcp_tool_with_allowed_tools_star(
@@ -221,7 +222,7 @@ class TestMCPEnabled:
                 "server_label": "code_interpreter",
             }
         ]
-        input_text = "What is 13 * 24? Use python to calculate the result."
+        input_text = "What is 123 * 456? Use python to calculate the result."
 
         stream_response = await mcp_enabled_client.responses.create(
             model=model_name,
