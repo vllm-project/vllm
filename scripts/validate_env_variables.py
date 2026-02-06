@@ -9,11 +9,13 @@ This script validates that:
    (except in envs_impl/__init__.py which needs it for TYPE_CHECKING)
 2. All variables in _variables.py have valid type annotations (no Any allowed)
 3. Default values match their declared types (basic check)
+4. _variables.py stays in sync with env vars exposed by vllm.envs
 
 Note: Factory function type consistency is handled by mypy.
 """
 
 import ast
+import importlib
 import sys
 from pathlib import Path
 
@@ -270,6 +272,51 @@ def check_variable_type_annotations(variables_file: Path) -> list[str]:
     return errors
 
 
+def _get_declared_variables(variables_file: Path) -> set[str]:
+    """Extract declared env var names from _variables.py."""
+    with open(variables_file) as f:
+        tree = ast.parse(f.read())
+
+    return {
+        node.target.id
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id.isupper()
+            and not node.target.id.startswith("_")
+        )
+    }
+
+
+def check_env_var_list_sync(repo_root: Path, variables_file: Path) -> list[str]:
+    """Check that _variables.py and vllm.envs expose the same env var names."""
+    errors = []
+
+    declared_vars = _get_declared_variables(variables_file)
+
+    # Ensure project root is importable when script runs standalone.
+    sys.path.insert(0, str(repo_root))
+    envs_module = importlib.import_module("vllm.envs")
+    exposed_vars = set(envs_module.__dir__())
+
+    missing_in_variables = sorted(exposed_vars - declared_vars)
+    extra_in_variables = sorted(declared_vars - exposed_vars)
+
+    if missing_in_variables:
+        errors.append(
+            "_variables.py is missing env vars defined in vllm.envs: "
+            f"{', '.join(missing_in_variables)}"
+        )
+    if extra_in_variables:
+        errors.append(
+            "_variables.py has env vars not exposed by vllm.envs: "
+            f"{', '.join(extra_in_variables)}"
+        )
+
+    return errors
+
+
 def main() -> int:
     """Run all validation checks.
 
@@ -313,6 +360,17 @@ def main() -> int:
             print(f"     - {error}")
     else:
         print("   ✓ All variables have valid type annotations")
+
+    # Check 3: Env var list sync
+    print("\n3. Checking env var list sync with vllm.envs...")
+    sync_errors = check_env_var_list_sync(script_dir.parent, variables_file)
+    if sync_errors:
+        all_errors.extend(sync_errors)
+        print(f"   ✗ Found {len(sync_errors)} sync error(s)")
+        for error in sync_errors:
+            print(f"     - {error}")
+    else:
+        print("   ✓ Env var list is in sync")
 
     print()
     if all_errors:
