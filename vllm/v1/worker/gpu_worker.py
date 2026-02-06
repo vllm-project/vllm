@@ -62,6 +62,8 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from .utils import request_memory
 
+import threading
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -724,19 +726,7 @@ class Worker(WorkerBase):
         ):
             return
 
-        self.model_runner.capture_model()
         self.model_runner.initialize_afd_connector()
-
-        if self.profiler:
-            self.profiler.start()
-            for _ in range(1000):  # FIXME: hardcoded profiler iterations
-                self.model_runner.execute_model(scheduler_output=None)
-            torch.cuda.synchronize()  # Ensure GPU operations complete
-            self.profiler.stop()
-            print(self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
-
-        import threading
-
         self._ffn_shutdown_event = threading.Event()
 
         def ffn_worker_loop():
@@ -748,11 +738,14 @@ class Worker(WorkerBase):
                 while not self._ffn_shutdown_event.is_set():
                     # Execute FFN computation
                     logger.info("jcz before recv_dp_metadata_list")
-                    dp_metadata_list, is_graph_capturing = self.model_runner.connector.recv_dp_metadata_list()
+                    dp_metadata_list, is_attn_graph_capturing = self.model_runner.connector.recv_dp_metadata_list()
                     logger.info(f"jcz after recv_dp_metadata_list dp_metadata_list:{dp_metadata_list}")
+                    if is_attn_graph_capturing:
+                        self.model_runner.capture_model(
+                            dp_metadata_list=dp_metadata_list,
+                        )
                     self.model_runner.execute_model(scheduler_output=None,
-                                                    dp_metadata_list=dp_metadata_list,
-                                                    is_graph_capturing=is_graph_capturing)
+                                                    dp_metadata_list=dp_metadata_list)
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise
