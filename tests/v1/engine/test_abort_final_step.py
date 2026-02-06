@@ -43,6 +43,14 @@ if not current_platform.is_cuda():
 
 TEXT_PROMPT = "Hello"
 
+# Register the test connector so it can be used by the engine
+# This must be done before any test uses the connector
+KVConnectorFactory.register_connector(
+    "DummyKVConnector",
+    "tests.v1.engine.test_abort_final_step",
+    "DummyKVConnector",
+)
+
 
 class DummyKVConnectorMetadata(KVConnectorMetadata):
     """Dummy metadata for the test connector."""

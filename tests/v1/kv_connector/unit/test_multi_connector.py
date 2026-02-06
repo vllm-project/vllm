@@ -191,9 +191,13 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens and update_state_after_alloc will be called
-    # on each connector in turn.
-    assert events["storage1-SCHEDULER"][:3] == [
+    # on each connector in turn. With shared prefix (PROMPT_CONTEXT) between
+    # the two prompts, the second request gets a prefix cache hit, causing an
+    # extra get_num_new_matched_tokens call with the cached token count.
+    assert events["storage1-SCHEDULER"][:5] == [
         "get_num_new_matched_tokens 0",
+        "update_state_after_alloc num_blocks=[0] 0",
+        "get_num_new_matched_tokens 96",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
@@ -204,8 +208,10 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert events["storage2-SCHEDULER"][:5] == [
         "get_num_new_matched_tokens 0",
+        "update_state_after_alloc num_blocks=[0] 0",
+        "get_num_new_matched_tokens 96",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
