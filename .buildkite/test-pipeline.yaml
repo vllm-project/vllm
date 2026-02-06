@@ -206,6 +206,7 @@ steps:
   - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - examples/offline_inference/new_weight_syncing/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -240,9 +241,15 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
+  # OLD rlhf examples
   - pushd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - popd
+  # NEW rlhf examples
+  - pushd ../examples/offline_inference/new_weight_syncing
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
@@ -512,6 +519,7 @@ steps:
   # However, find does not normally propagate error codes, so we combine it with xargs
   # (using -0 for proper path handling)
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -797,10 +805,11 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/
+  - tests/models/test_terratorch.py
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
   commands:
-    - pytest -v -s models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
 - label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
@@ -1072,14 +1081,14 @@ steps:
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
   - tests/compile/test_fusion_attn.py
   - tests/compile/test_silu_mul_quant_fusion.py
-  - tests/compile/distributed/test_fusion_all_reduce.py
+  - tests/compile/passes/distributed/test_fusion_all_reduce.py
   - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
     - pytest -v -s tests/compile/test_fusion_attn.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_gpus=2 is not set
-    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
+    - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
     #  # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
     #  # Wrap with quotes to escape yaml
     #  - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
@@ -1146,6 +1155,8 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_packed_tensor.py
+  - pytest -v -s distributed/test_weight_transfer.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
@@ -1411,8 +1422,8 @@ steps:
   commands:
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
     # Run sequence parallel tests
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
-    - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
+    - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+    - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
 
 - label: Distributed Tests (H100) # optional
   gpu: h100
@@ -1420,7 +1431,7 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py

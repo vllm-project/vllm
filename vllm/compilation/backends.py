@@ -22,17 +22,13 @@ from torch._dispatch.python import enable_python_dispatcher
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
+from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .compiler_interface import (
@@ -43,8 +39,12 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+from .partition_rules import (
+    inductor_partition_rule_context,
+    should_split,
+)
+from .passes.inductor_pass import InductorPass, pass_context
+from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
@@ -234,6 +234,7 @@ class CompilerManager:
         )
         return compiled_graph
 
+    @instrument(span_name="Compile graph")
     def compile(
         self,
         graph: fx.GraphModule,
@@ -497,6 +498,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
+    @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
         # maybe instead just assert inputs are fake?
         fake_args = [
@@ -921,6 +923,11 @@ class VllmBackend:
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
         self.compilation_config.compilation_time += dynamo_time
+
+        # Record Dynamo time in tracing if available
+        start_time = int(torch_compile_start_time * 1e9)
+        attributes = {"dynamo.time_seconds": dynamo_time}
+        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
 
         # we control the compilation process, each instance can only be
         # called once
