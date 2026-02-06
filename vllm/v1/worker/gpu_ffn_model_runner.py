@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
 )
-from vllm.forward_context import set_forward_context, get_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.utils.mem_utils import DeviceMemoryProfiler, GiB_bytes

@@ -41,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step3_vl import Step3TextConfig
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled, dbo_yield
 
 from .interfaces import SupportsPP
 from .utils import (

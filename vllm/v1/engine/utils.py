@@ -4,16 +4,15 @@ import contextlib
 import json
 import multiprocessing
 import os
+import threading
 import time
 import uuid
-import threading
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Any, cast, Optional, List, Dict
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -22,10 +21,9 @@ import regex as re
 import zmq
 
 from vllm import envs
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import AFDConfig, CacheConfig, ParallelConfig, VllmConfig
 from vllm.inputs import PromptType
 from vllm.inputs.parse import get_prompt_components
-from vllm.config import AFDConfig, CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -35,7 +33,6 @@ from vllm.utils.network_utils import (
     recv_router_dealer_message,
     zmq_socket_ctx,
 )
-
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -345,14 +342,15 @@ class BaseActorManager:
         }
 
         import ray
+
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
             ray.init()
 
-
     def get_actor_class(self, vllm_config):
         from vllm.v1.engine.core import EngineCoreProc
+
         return EngineCoreProc
 
     def scale_up_elastic_ep(
@@ -377,6 +375,7 @@ class BaseActorManager:
         """
         pass
 
+
 class FFNActorManager(BaseActorManager):
     def __init__(
         self,
@@ -394,10 +393,13 @@ class FFNActorManager(BaseActorManager):
             executor_class=executor_class,
             log_stats=log_stats,
             placement_groups=placement_groups,
-            local_dp_ranks=local_dp_ranks)
+            local_dp_ranks=local_dp_ranks,
+        )
 
         import copy
+
         import ray
+
         ffn_vllm_config = copy.deepcopy(vllm_config)
         ffn_vllm_config.afd_config.afd_role = "ffn"
         self.vllm_config = ffn_vllm_config
@@ -414,11 +416,14 @@ class FFNActorManager(BaseActorManager):
 
         self.created_placement_groups = placement_groups
         ffn_vllm_config.parallel_config.data_parallel_master_ip = ep_master_ip
-        logger.info(f"iwslog ffn placement_groups: {[pg.bundle_specs for pg in placement_groups]},"
-                    f"{ep_master_ip=}, local_dp_ranks: {local_dp_ranks}")
+        logger.info(
+            f"iwslog ffn placement_groups: {[pg.bundle_specs for pg in placement_groups]},"
+            f"{ep_master_ip=}, local_dp_ranks: {local_dp_ranks}"
+        )
 
         refs = []
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         for idx, pg in enumerate(placement_groups):
             local_client = idx < local_engine_count
@@ -447,13 +452,14 @@ class FFNActorManager(BaseActorManager):
             self.actors.append(actor)
             refs.append(actor.wait_for_init.remote())
         ray.get(refs)
-        logger.info(f"iwslog ffn actor init finished")
+        logger.info("iwslog ffn actor init finished")
         for actor in self.actors:
             self.run_refs.append(actor.async_run.remote())
-        logger.info(f"iwslog ffn manager init finished")
+        logger.info("iwslog ffn manager init finished")
 
     def get_actor_class(self, vllm_config):
         from vllm.v1.engine.core import FFNActor
+
         return FFNActor
 
     @staticmethod
@@ -482,7 +488,9 @@ class FFNActorManager(BaseActorManager):
         device_str = current_platform.ray_device_key
 
         pack_strategy = envs.VLLM_RAY_DP_PACK_STRATEGY
-        assert pack_strategy in ("strict", "fill"), f"afd only support strict/fill now, but {pack_strategy=}"
+        assert pack_strategy in ("strict", "fill"), (
+            f"afd only support strict/fill now, but {pack_strategy=}"
+        )
         placement_strategy = "STRICT_PACK"
 
         ep_master_ip = ""
@@ -491,12 +499,16 @@ class FFNActorManager(BaseActorManager):
                 break
 
             node_ip_keys = [
-                key for key in node_resources if key.startswith("node:")
-                    and key != "node:__internal_head__" and "_group_" not in key
+                key
+                for key in node_resources
+                if key.startswith("node:")
+                and key != "node:__internal_head__"
+                and "_group_" not in key
             ]
             try:
                 node_ip = node_ip_keys[0].split(":")[1]
                 import ipaddress
+
                 _ = ipaddress.ip_address(node_ip).version
             except Exception as e:
                 raise e
@@ -540,7 +552,7 @@ class FFNActorManager(BaseActorManager):
 
     @staticmethod
     def add_ep_placement_groups(
-            old_vllm_config: VllmConfig, new_data_parallel_size: int
+        old_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> tuple[list["PlacementGroup"], list[int]]:
         """
         Add placement groups for new data parallel size.
@@ -553,7 +565,7 @@ class FFNActorManager(BaseActorManager):
         from ray.util.state import list_nodes
 
         old_dp_size = old_vllm_config.parallel_config.data_parallel_size
-        num_pg_to_create = (new_data_parallel_size - old_dp_size)
+        num_pg_to_create = new_data_parallel_size - old_dp_size
 
         if num_pg_to_create <= 0:
             return [], []
@@ -579,7 +591,7 @@ class FFNActorManager(BaseActorManager):
                 continue
 
             # list_nodes could return dead nodes
-            if node.state != 'ALIVE':
+            if node.state != "ALIVE":
                 continue
 
             node_id = node.node_id
@@ -604,7 +616,9 @@ class FFNActorManager(BaseActorManager):
                 rank = old_dp_size + num_pg_created
 
                 # Create bundles with node constraint for master node
-                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [{"CPU": 1.0}]
+                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [
+                    {"CPU": 1.0}
+                ]
 
                 pg = ray.util.placement_group(
                     name=f"ep_rank_{rank}",
@@ -623,29 +637,39 @@ class FFNActorManager(BaseActorManager):
         return placement_groups, local_dp_ranks
 
     def reinitialize_distributed(
-            self, reconfig_request: ReconfigureDistributedRequest
+        self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         """
         dispatch reinitialize_distributed to engine core by ray
         """
-        logger.info(f"iwslog ffn_reinitialize_distributed is called")
+        logger.info("iwslog ffn_reinitialize_distributed is called")
         refs = []
         for cur_idx, actor in enumerate(self.actors):
             if cur_idx >= reconfig_request.new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (
                     ReconfigureRankType.SHUTDOWN_CURRENT_RANK
                 )
-            reconfig_request.new_data_parallel_master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
-            refs.append(actor.ffn_reinitialize_distributed.remote(reconfig_request=reconfig_request))
+            reconfig_request.new_data_parallel_master_ip = (
+                self.vllm_config.parallel_config.data_parallel_master_ip
+            )
+            refs.append(
+                actor.ffn_reinitialize_distributed.remote(
+                    reconfig_request=reconfig_request
+                )
+            )
         import ray
+
         ray.get(refs)
 
-        logger.info(f"Parallel reinitialization of {len(self.actors)} actors completed.")
+        logger.info(
+            f"Parallel reinitialization of {len(self.actors)} actors completed."
+        )
 
     def scale_up_elastic_ep(
         self, cur_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> None:
         import copy
+
         import ray
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -659,7 +683,9 @@ class FFNActorManager(BaseActorManager):
         )
 
         self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        self.vllm_config.afd_config.afd_extra_config["afd_size"] = f"{new_data_parallel_size}A{new_data_parallel_size}F"
+        self.vllm_config.afd_config.afd_extra_config["afd_size"] = (
+            f"{new_data_parallel_size}A{new_data_parallel_size}F"
+        )
         self.vllm_config.afd_config.afd_port += 1
 
         with BaseActorManager._pg_create_lock:
@@ -667,7 +693,9 @@ class FFNActorManager(BaseActorManager):
                 cur_vllm_config, new_data_parallel_size
             )
             ray.get([pg.ready() for pg in placement_groups])
-        logger.info(f"iwslog addfffn placement_groups={[pg.bundle_specs for pg in placement_groups]}, {local_dp_ranks}")
+        logger.info(
+            f"iwslog addfffn placement_groups={[pg.bundle_specs for pg in placement_groups]}, {local_dp_ranks}"
+        )
 
         runtime_env = RuntimeEnv(
             env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
@@ -705,10 +733,10 @@ class FFNActorManager(BaseActorManager):
             refs.append(actor.wait_for_init.remote())
 
         ray.get(refs)
-        logger.info(f"iwslog ffn actor add finished")
-        for scaled_actor in self.actors[-(len(placement_groups)):]:
+        logger.info("iwslog ffn actor add finished")
+        for scaled_actor in self.actors[-(len(placement_groups)) :]:
             self.run_refs.append(scaled_actor.async_run.remote())
-        logger.info(f"iwslog ffn manager scale finished")
+        logger.info("iwslog ffn manager scale finished")
 
     def scale_down_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -753,25 +781,28 @@ class GlobalActorManager(BaseActorManager):
             executor_class=executor_class,
             log_stats=log_stats,
             placement_groups=placement_groups,
-            local_dp_ranks=local_dp_ranks)
+            local_dp_ranks=local_dp_ranks,
+        )
 
-        self.managers: Dict[str,BaseActorManager] = {}
+        self.managers: dict[str, BaseActorManager] = {}
         manager_class = [CoreEngineActorManager]
         if vllm_config.afd_config:
             manager_class.append(FFNActorManager)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
         with ThreadPoolExecutor(max_workers=len(manager_class)) as pool:
             futures = {}
             for manager_class in manager_class:
-                manger_future = pool.submit(manager_class,
-                                vllm_config=vllm_config,
-                                addresses=addresses,
-                                executor_class=executor_class,
-                                log_stats=log_stats,
-                                placement_groups = placement_groups,
-                                local_dp_ranks = local_dp_ranks
-                                )
+                manger_future = pool.submit(
+                    manager_class,
+                    vllm_config=vllm_config,
+                    addresses=addresses,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    placement_groups=placement_groups,
+                    local_dp_ranks=local_dp_ranks,
+                )
                 futures[manger_future] = manager_class.__name__
 
             for future in as_completed(futures):
@@ -780,11 +811,14 @@ class GlobalActorManager(BaseActorManager):
                     mgr = future.result()  # wait all managers
                     self.managers[name] = mgr
                 except Exception as e:
-                    raise RuntimeError(f"{name} failed to initialize actor manager for {name}: {e}")
+                    raise RuntimeError(
+                        f"{name} failed to initialize actor manager for {name}: {e}"
+                    )
 
-    def reinitialize_distributed(self,
-            reconfig_request: ReconfigureDistributedRequest,
-            target_managers: Optional[List[str]] = None,
+    def reinitialize_distributed(
+        self,
+        reconfig_request: ReconfigureDistributedRequest,
+        target_managers: list[str] | None = None,
     ) -> None:
         """
         Reinitialize distributed EP replicas for selected sub-managers.
@@ -800,10 +834,10 @@ class GlobalActorManager(BaseActorManager):
         logger.info("All selected managers reinitialize_distributed done.")
 
     def scale_up_elastic_ep(
-            self,
-            cur_vllm_config: VllmConfig,
-            new_data_parallel_size: int,
-            target_managers: Optional[List[str]] = None,
+        self,
+        cur_vllm_config: VllmConfig,
+        new_data_parallel_size: int,
+        target_managers: list[str] | None = None,
     ) -> None:
         """
         Scale up Elastic EP replicas for selected sub-managers.
@@ -819,10 +853,10 @@ class GlobalActorManager(BaseActorManager):
         logger.info("All selected managers scale_up_elastic_ep done.")
 
     def scale_down_elastic_ep(
-            self,
-            cur_data_parallel_size: int,
-            new_data_parallel_size: int,
-            target_managers: Optional[list[str]] = None,
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        target_managers: list[str] | None = None,
     ) -> None:
         """
         Scale down Elastic EP replicas for selected sub-managers.
@@ -838,12 +872,12 @@ class GlobalActorManager(BaseActorManager):
         logger.info("All selected managers scale_down_elastic_ep done.")
 
     def _dispatch_to_managers(
-            self,
-            *,
-            method_name: str,
-            method_args: tuple,
-            target_managers: Optional[list[str]],
-            thread_name_prefix: str,
+        self,
+        *,
+        method_name: str,
+        method_args: tuple,
+        target_managers: list[str] | None,
+        thread_name_prefix: str,
     ) -> None:
         managers_to_run = self.get_target_managers(target_managers)
         threads: list[threading.Thread] = []
@@ -868,7 +902,7 @@ class GlobalActorManager(BaseActorManager):
         for thread in threads:
             thread.join()
 
-    def get_target_managers(self, target_managers: Optional[list[str]] = None):
+    def get_target_managers(self, target_managers: list[str] | None = None):
         if target_managers is None:
             selected_managers = self.managers
         else:
@@ -925,9 +959,11 @@ class CoreEngineActorManager(BaseActorManager):
             executor_class=executor_class,
             log_stats=log_stats,
             placement_groups=placement_groups,
-            local_dp_ranks=local_dp_ranks)
+            local_dp_ranks=local_dp_ranks,
+        )
 
         import copy
+
         import ray
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -1049,9 +1085,11 @@ class CoreEngineActorManager(BaseActorManager):
 
     def get_actor_class(self, vllm_config):
         from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
-        return  (
+
+        return (
             DPMoEEngineCoreActor
-            if vllm_config.parallel_config.data_parallel_size > 1 and vllm_config.model_config.is_moe
+            if vllm_config.parallel_config.data_parallel_size > 1
+            and vllm_config.model_config.is_moe
             else EngineCoreActor
         )
 
@@ -1282,7 +1320,7 @@ class CoreEngineActorManager(BaseActorManager):
 
             node_ip = node.node_ip
             # list_nodes could return dead nodes
-            if node.state != 'ALIVE':
+            if node.state != "ALIVE":
                 continue
 
             node_id = node.node_id
@@ -1312,7 +1350,9 @@ class CoreEngineActorManager(BaseActorManager):
                         {device_str: 1.0, "node:" + dp_master_ip: 0.001}
                     ] * world_size + [{"CPU": 1.0}]
                 else:
-                    bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [{"CPU": 1.0}]
+                    bundles = [
+                        {device_str: 1.0, "node:" + node_ip: 0.001}
+                    ] * world_size + [{"CPU": 1.0}]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{rank}",
@@ -1374,8 +1414,9 @@ class CoreEngineActorManager(BaseActorManager):
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
-            dp_vllm_config.afd_config.afd_extra_config[
-                "afd_size"] = f"{new_data_parallel_size}A{new_data_parallel_size}F"
+            dp_vllm_config.afd_config.afd_extra_config["afd_size"] = (
+                f"{new_data_parallel_size}A{new_data_parallel_size}F"
+            )
             dp_vllm_config.afd_config.afd_port += 1
 
             # Check if this placement group is on the head node

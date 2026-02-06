@@ -33,8 +33,8 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (
-    AttentionConfig,
     AFDConfig,
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,

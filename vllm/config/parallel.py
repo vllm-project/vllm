@@ -398,7 +398,9 @@ class ParallelConfig:
             # temp code for loop scaling
             if self.multi_level_index >= 0:
                 level_offset = (self.data_parallel_size.bit_length() - 2) << 1
-                level_key = (level_offset + self.multi_level_index) % len(self._data_parallel_master_port_list)
+                level_key = (level_offset + self.multi_level_index) % len(
+                    self._data_parallel_master_port_list
+                )
                 self.multi_level_index += 1
                 return self._data_parallel_master_port_list[level_key]
 
@@ -621,7 +623,7 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
-            
+
             from vllm.v1.executor import ray_utils
 
             backend: DistributedExecutorBackend = "mp"

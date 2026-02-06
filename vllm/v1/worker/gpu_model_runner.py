@@ -3588,7 +3588,9 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
-        afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+        afd_metadata = self._build_afd_metadata(
+            ubatch_slices_padded, num_tokens_unpadded
+        )
 
         self.profiler.step()
         # Run the model.

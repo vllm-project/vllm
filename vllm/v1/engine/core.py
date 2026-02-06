@@ -74,8 +74,7 @@ from vllm.v1.serial_utils import (
     serialize_method_call,
 )
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
-from vllm.v1.utils import get_engine_client_zmq_addr
+from vllm.v1.utils import compute_iteration_details, get_engine_client_zmq_addr
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -1505,7 +1504,7 @@ class EngineCoreProc(EngineCore):
             if coord_socket is not None:
                 # Wait for ready message from coordinator.
                 if not os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
-                   assert coord_socket.recv() == b"READY"
+                    assert coord_socket.recv() == b"READY"
                 poller.register(coord_socket, zmq.POLLIN)
 
             ready_event.set()
@@ -1828,7 +1827,7 @@ class DPEngineCoreProc(EngineCoreProc):
         parallel_config = self.vllm_config.parallel_config
         old_dp_size = parallel_config.data_parallel_size
         parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
-        if parallel_config.multi_level_index >= 0:           # temp code for loop scaling
+        if parallel_config.multi_level_index >= 0:  # temp code for loop scaling
             parallel_config.multi_level_index = 0
         if reconfig_request.new_data_parallel_rank != -1:
             parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank
@@ -2057,13 +2056,22 @@ class FFNActor(DPMoEEngineCoreActor):
     ):
         self.is_active = True
         import asyncio
+
         self._reinitialize_distributed_event = asyncio.Event()
 
         # FFN poll nothing
         addresses.coordinator_input = None
         addresses.inputs = []
 
-        super().__init__(vllm_config, local_client, addresses, executor_class, log_stats, dp_rank, local_dp_rank)
+        super().__init__(
+            vllm_config,
+            local_client,
+            addresses,
+            executor_class,
+            log_stats,
+            dp_rank,
+            local_dp_rank,
+        )
 
     def run(self):
         raise RuntimeError("use async_run instead")
@@ -2084,7 +2092,6 @@ class FFNActor(DPMoEEngineCoreActor):
                 self._reinitialize_distributed_event.clear()
                 logger.info("iwslog signal call...")
 
-
         except KeyboardInterrupt:
             logger.info("Server shutting down...")
             self.model_executor.collective_rpc("stop_ffn_server_loop")
@@ -2102,10 +2109,13 @@ class FFNActor(DPMoEEngineCoreActor):
         self.reinitialize_distributed(reconfig_request)
         logger.info("iwslog ffn reinitialize_distributed end...")
 
-        to_shutdown = reconfig_request.new_data_parallel_rank == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        to_shutdown = (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        )
         self.restart_running_loop(to_shutdown)
 
-    def restart_running_loop(self, to_shutdown = False):
+    def restart_running_loop(self, to_shutdown=False):
         if to_shutdown:
             self.is_active = False
         self._reinitialize_distributed_event.set()

@@ -50,8 +50,8 @@ from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
-    GlobalActorManager,
     CoreEngineProcManager,
+    GlobalActorManager,
     launch_core_engines,
     serialize_method_call,
 )
@@ -1440,7 +1440,8 @@ class DPAsyncMPClient(AsyncMPClient):
                             await socket.send(scale_msg)
                             nonlocal count_slice
                             count_slice = (
-                                self.engine_ranks_managed[0], self.engine_ranks_managed[-1] + 1
+                                self.engine_ranks_managed[0],
+                                self.engine_ranks_managed[-1] + 1,
                             )
                             continue
 
@@ -1652,12 +1653,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         logger.info("All reconfigure messages sent, starting engine creation")
 
         ffn_task = asyncio.create_task(
-            asyncio.to_thread(self.resources.engine_manager.reinitialize_distributed,
-                              reconfig_request=reconfig_request))
+            asyncio.to_thread(
+                self.resources.engine_manager.reinitialize_distributed,
+                reconfig_request=reconfig_request,
+            )
+        )
         reconfig_futures.append(ffn_task)
 
         await asyncio.sleep(0)
-        logger.info(f"All reconfigure messages sent, starting engine creation, {len(self.core_engines)=}")
+        logger.info(
+            f"All reconfigure messages sent, starting engine creation, {len(self.core_engines)=}"
+        )
 
         # Phase 2: Create new engines now that reconfig messages have been sent
         # self.resources.engine_manager is guaranteed to be
@@ -1738,15 +1744,20 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 reconfig_futures.append(task)
 
         ffn_task = asyncio.create_task(
-            asyncio.to_thread(self.resources.engine_manager.reinitialize_distributed,
-                              reconfig_request=reconfig_request))
+            asyncio.to_thread(
+                self.resources.engine_manager.reinitialize_distributed,
+                reconfig_request=reconfig_request,
+            )
+        )
         reconfig_futures.append(ffn_task)
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
 
         await asyncio.sleep(0)
-        logger.info(f"All reconfigure messages sent, starting engine shutdown, {len(self.core_engines)=}")
+        logger.info(
+            f"All reconfigure messages sent, starting engine shutdown, {len(self.core_engines)=}"
+        )
         await asyncio.gather(*reconfig_futures)
 
         assert isinstance(self.resources.engine_manager, GlobalActorManager)

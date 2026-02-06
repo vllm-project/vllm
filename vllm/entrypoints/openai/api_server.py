@@ -151,6 +151,7 @@ async def build_async_engine_client_from_engine_args(
         if async_llm:
             async_llm.shutdown()
 
+
 async def check_engine_fault(raw_request: Request):
     client = engine_client(raw_request)
     assert hasattr(client, "engine_core")
@@ -798,8 +799,6 @@ def _log_non_streaming_response(response_body: list) -> None:
         logger.info("response_body={%s}", decoded_body)
     except UnicodeDecodeError:
         logger.info("response_body={<binary_data>}")
-
-
 
 
 def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:

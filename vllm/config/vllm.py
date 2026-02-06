@@ -25,8 +25,8 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
-from .attention import AttentionConfig
 from .afd import AFDConfig
+from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig

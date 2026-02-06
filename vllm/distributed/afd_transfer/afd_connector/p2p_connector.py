@@ -14,11 +14,10 @@ from vllm.distributed.parallel_state import (
     init_afd_process_group,
     init_model_parallel_group,
 )
-from vllm.logger import init_logger
 from vllm.forward_context import (
     DPMetadata,
-    get_forward_context,
 )
+from vllm.logger import init_logger
 
 from .base import AFDConnectorBase
 from .metadata import AFDConnectorMetadata

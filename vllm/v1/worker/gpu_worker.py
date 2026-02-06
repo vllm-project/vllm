@@ -5,13 +5,13 @@
 import gc
 import os
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
-import time
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from types import NoneType
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -41,7 +41,8 @@ from vllm.distributed.parallel_state import (
     get_all_model_groups,
     get_pcp_group,
     get_pp_group,
-    get_tp_group, get_world_group,
+    get_tp_group,
+    get_world_group,
 )
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
@@ -65,14 +66,13 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
-from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_ffn_model_runner import GPUFFNModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
-from .utils import request_memory
 from ...distributed.afd_transfer import AFDConnectorFactory
+from .utils import request_memory
 
 logger = init_logger(__name__)
 
@@ -920,7 +920,7 @@ class Worker(WorkerBase):
             try:
                 while not self._ffn_shutdown_event.is_set():
                     # Execute FFN computation
-                    if "Exit" == self.model_runner.execute_model(scheduler_output=None):
+                    if self.model_runner.execute_model(scheduler_output=None) == "Exit":
                         break
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
@@ -1152,7 +1152,9 @@ class Worker(WorkerBase):
         if self.vllm_config.afd_config:
             self.vllm_config.afd_config.afd_port += 1
             afd_size = reconfig_request.new_data_parallel_size
-            self.vllm_config.afd_config.afd_extra_config["afd_size"] = f"{afd_size}A{afd_size}F"
+            self.vllm_config.afd_config.afd_extra_config["afd_size"] = (
+                f"{afd_size}A{afd_size}F"
+            )
             self.model_runner.afd_config = self.vllm_config.afd_config
 
             # init afd connector
