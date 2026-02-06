@@ -1111,6 +1111,9 @@ def _awq_gemm_triton(
         if current_platform.is_rocm():
             try:
                 from vllm._custom_ops import awq_gemv_hip
+                from vllm.model_executor.layers.quantization.awq_gemv_config import (
+                    get_awq_gemv_split_k,
+                )
 
                 # Check if weights are padded (qweight.K > activation.K)
                 padded_K = qweight.shape[0]
@@ -1124,15 +1127,20 @@ def _awq_gemm_triton(
                     act_padded[:K] = act
                     act = act_padded
 
+                # Look up optimal split-k from config
+                split_k = get_awq_gemv_split_k(N)
+
                 ctx = (
                     nullcontext()
                     if torch.compiler.is_compiling()
                     else torch.profiler.record_function(
-                        f"awq_gemv_hip {N}x{padded_K} gs={group_size}"
+                        f"awq_gemv_hip {N}x{padded_K} gs={group_size} sk={split_k}"
                     )
                 )
                 with ctx:
-                    return awq_gemv_hip(act, qweight, scales, qzeros).unsqueeze(0)
+                    return awq_gemv_hip(
+                        act, qweight, scales, qzeros, split_k
+                    ).unsqueeze(0)
             except (RuntimeError, AttributeError):
                 # Fall through to Triton kernels if HIP kernel not available
                 pass

@@ -584,12 +584,13 @@ def awq_gemv_hip(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
+    split_k: int = 0,
 ) -> torch.Tensor:
     """AWQ GEMV kernel optimized for ROCm/HIP (RDNA3/3.5).
 
     Only supports:
     - M=1 (single token)
-    - K=4096, group_size=128 (32 groups)
+    - group_size=128
     - N divisible by 8
 
     Args:
@@ -597,11 +598,12 @@ def awq_gemv_hip(
         qweight: [K, N/8] int32 tensor (8 int4 values per uint32)
         scales: [K/G, N] half tensor
         qzeros: [K/G, N/8] int32 tensor
+        split_k: Split-k factor (1/2/4/8/16). 0 = auto-detect via heuristic.
 
     Returns:
         output: [N] half tensor
     """
-    return torch.ops._C.awq_gemv_hip(activation, qweight, scales, qzeros)
+    return torch.ops._C.awq_gemv_hip(activation, qweight, scales, qzeros, split_k)
 
 
 def _awq_gemm_fake_impl(

@@ -202,7 +202,8 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 
 #ifdef USE_ROCM
 torch::Tensor awq_gemv_hip(torch::Tensor activation, torch::Tensor qweight,
-                           torch::Tensor scales, torch::Tensor qzeros);
+                           torch::Tensor scales, torch::Tensor qzeros,
+                           int64_t split_k);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,

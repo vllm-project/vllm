@@ -35,8 +35,9 @@ def compute_awq_padding_for_rocm(
     """Compute optimal K-padding for AWQ weights on ROCm.
 
     The HIP GEMV kernel uses split-k parallelization that requires num_groups
-    to be divisible by specific factors for best performance. For small N,
-    higher split-k values are needed to provide enough parallelism.
+    to be divisible by the split-k factor. The target split-k is determined
+    from the device config file (or a default heuristic). If num_groups is
+    not already divisible, we pad with zero-groups.
 
     Args:
         num_groups: Number of quantization groups (K // group_size)
@@ -51,27 +52,25 @@ def compute_awq_padding_for_rocm(
     if group_size != 128:
         return False, num_groups
 
+    from vllm.model_executor.layers.quantization.awq_gemv_config import (
+        get_awq_gemv_split_k,
+    )
+
     # Maximum padding overhead allowed (as fraction of original size)
     MAX_PADDING_OVERHEAD = 0.15  # 15%
 
-    # Determine which split-k values to try based on N
-    # For smaller N, we need higher split-k for more K-parallelism
-    # Always include 2 as a final fallback
-    if N <= 4096:
-        split_k_targets = [16, 8, 4, 2]
-    elif N <= 8192:
-        split_k_targets = [8, 4, 2]
-    elif N <= 12288:
-        split_k_targets = [4, 2]
-    else:
-        # Large N has enough parallelism, no padding needed
-        return False, num_groups
+    # Get the target split-k from config (or heuristic fallback)
+    target_split_k = get_awq_gemv_split_k(N)
 
-    # Try each split-k target in order, stopping at the first one
-    # that either already works or can be achieved with acceptable overhead
-    for split_k in split_k_targets:
+    # Try the target split-k first, then fall back to lower values
+    split_k_candidates = []
+    for sk in [16, 8, 4, 2]:
+        if sk <= target_split_k:
+            split_k_candidates.append(sk)
+
+    for split_k in split_k_candidates:
         if num_groups % split_k == 0:
-            # Already divisible, no padding needed for this split-k
+            # Already divisible, no padding needed
             return False, num_groups
 
         # Calculate padding needed

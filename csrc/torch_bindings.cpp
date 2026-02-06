@@ -371,7 +371,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // AWQ GEMV for ROCm (optimized for RDNA3/3.5)
   ops.def(
       "awq_gemv_hip(Tensor activation, Tensor qweight, Tensor scales, "
-      "Tensor qzeros) -> Tensor");
+      "Tensor qzeros, int split_k) -> Tensor");
   ops.impl("awq_gemv_hip", torch::kCUDA, &awq_gemv_hip);
 #endif
 

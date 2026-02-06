@@ -385,7 +385,8 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
 torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
                            torch::Tensor qweight,     // [K, N/8]
                            torch::Tensor scales,      // [K/G, N]
-                           torch::Tensor qzeros)      // [K/G, N/8]
+                           torch::Tensor qzeros,      // [K/G, N/8]
+                           int64_t split_k)           // 0=auto, 1/2/4/8/16
 {
   // ========== Dimension checks ==========
   TORCH_CHECK(qweight.dim() == 2, "qweight must be 2D, got ", qweight.dim(),
@@ -481,112 +482,43 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
   // Get current stream
   auto stream = at::hip::getCurrentHIPStream();
 
-  // Choose kernel based on N and num_groups divisibility
+  // Choose split-k value
   int64_t total_outputs = (N + OUTPUT_PER_THREAD - 1) / OUTPUT_PER_THREAD;
   constexpr int THREADS_PER_SPLIT = 32;
 
-  // Check natural divisibility for split-k
-  bool can_use_splitk_16 = (num_groups % 16 == 0);
-  bool can_use_splitk_8 = (num_groups % 8 == 0);
-  bool can_use_splitk_4 = (num_groups % 4 == 0);
-  bool can_use_splitk_2 = (num_groups % 2 == 0);
-
-  if (can_use_splitk_16 && N <= 4096) {
-    // For small N, use split-k=16 for more K-parallelism (512 threads/block)
-    constexpr int SPLIT_K = 16;
-    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;  // 512
-    // Verify threads don't exceed kernel launch bounds (512 for SPLIT_K=16)
-    static_assert(THREADS_PER_BLOCK <= 512,
-                  "THREADS_PER_BLOCK exceeds launch bounds for split_k=16");
-    int64_t num_blocks =
-        (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
-    size_t smem_size =
-        SPLIT_K * THREADS_PER_SPLIT * OUTPUT_PER_THREAD * sizeof(float);
-
-    awq_gemv_kernel_splitk<8, SPLIT_K>
-        <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
-            reinterpret_cast<const __half*>(act_flat.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
-            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qzeros.data_ptr<int32_t>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), 1,
-            static_cast<size_t>(K), static_cast<size_t>(N),
-            static_cast<size_t>(G));
-  } else if (can_use_splitk_8 && N <= 16384) {
-    // Use split-k=8 for maximum parallelism
-    constexpr int SPLIT_K = 8;
-    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;  // 256
-    // Verify threads don't exceed kernel launch bounds (256 for SPLIT_K<=8)
-    static_assert(THREADS_PER_BLOCK <= 256,
-                  "THREADS_PER_BLOCK exceeds launch bounds for split_k=8");
-    int64_t num_blocks =
-        (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
-    size_t smem_size =
-        SPLIT_K * THREADS_PER_SPLIT * OUTPUT_PER_THREAD * sizeof(float);
-
-    awq_gemv_kernel_splitk<8, SPLIT_K>
-        <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
-            reinterpret_cast<const __half*>(act_flat.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
-            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qzeros.data_ptr<int32_t>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), 1,
-            static_cast<size_t>(K), static_cast<size_t>(N),
-            static_cast<size_t>(G));
-  } else if (can_use_splitk_4) {
-    // Small N: use split-k=4 for more parallelism
-    constexpr int SPLIT_K = 4;
-    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;  // 128
-    // Verify threads don't exceed kernel launch bounds (256 for SPLIT_K<=8)
-    static_assert(THREADS_PER_BLOCK <= 256,
-                  "THREADS_PER_BLOCK exceeds launch bounds for split_k=4");
-    int64_t num_blocks =
-        (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
-    size_t smem_size =
-        SPLIT_K * THREADS_PER_SPLIT * OUTPUT_PER_THREAD * sizeof(float);
-
-    awq_gemv_kernel_splitk<8, SPLIT_K>
-        <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
-            reinterpret_cast<const __half*>(act_flat.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
-            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qzeros.data_ptr<int32_t>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), 1,
-            static_cast<size_t>(K), static_cast<size_t>(N),
-            static_cast<size_t>(G));
-  } else if (can_use_splitk_2) {
-    // Medium N: use split-k=2
-    constexpr int SPLIT_K = 2;
-    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;  // 64
-    // Verify threads don't exceed kernel launch bounds (256 for SPLIT_K<=8)
-    static_assert(THREADS_PER_BLOCK <= 256,
-                  "THREADS_PER_BLOCK exceeds launch bounds for split_k=2");
-    int64_t num_blocks =
-        (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
-    size_t smem_size =
-        SPLIT_K * THREADS_PER_SPLIT * OUTPUT_PER_THREAD * sizeof(float);
-
-    awq_gemv_kernel_splitk<8, SPLIT_K>
-        <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
-            reinterpret_cast<const __half*>(act_flat.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
-            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
-            reinterpret_cast<const uint32_t*>(qzeros.data_ptr<int32_t>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), 1,
-            static_cast<size_t>(K), static_cast<size_t>(N),
-            static_cast<size_t>(G));
+  // Determine effective split-k: use passed value, or fall back to heuristic
+  int64_t effective_splitk;
+  if (split_k > 0) {
+    // Explicit split-k from Python config
+    effective_splitk = split_k;
   } else {
-    // Odd num_groups: use split-k=1 (same as non-split-k, but with fp32
-    // accumulators)
-    constexpr int SPLIT_K = 1;
-    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;  // 32
-    // Verify threads don't exceed kernel launch bounds (256 for SPLIT_K<=8)
-    static_assert(THREADS_PER_BLOCK <= 256,
-                  "THREADS_PER_BLOCK exceeds launch bounds for split_k=1");
+    // Fallback heuristic (safety net when no config is available)
+    if ((num_groups % 16 == 0) && N <= 4096) {
+      effective_splitk = 16;
+    } else if ((num_groups % 8 == 0) && N <= 16384) {
+      effective_splitk = 8;
+    } else if (num_groups % 4 == 0) {
+      effective_splitk = 4;
+    } else if (num_groups % 2 == 0) {
+      effective_splitk = 2;
+    } else {
+      effective_splitk = 1;
+    }
+  }
+
+  // Validate divisibility: fall back to lower split-k if needed
+  while (effective_splitk > 1 && num_groups % effective_splitk != 0) {
+    effective_splitk /= 2;
+  }
+
+  // Helper to launch the kernel with a specific SPLIT_K
+  auto launch = [&]<int SPLIT_K>() {
+    constexpr int THREADS_PER_BLOCK = THREADS_PER_SPLIT * SPLIT_K;
     int64_t num_blocks =
         (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
-    // No shared memory needed for SPLIT_K=1
-    size_t smem_size = 0;
+    size_t smem_size = (SPLIT_K > 1) ? SPLIT_K * THREADS_PER_SPLIT *
+                                           OUTPUT_PER_THREAD * sizeof(float)
+                                     : 0;
 
     awq_gemv_kernel_splitk<8, SPLIT_K>
         <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
@@ -597,6 +529,25 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
             reinterpret_cast<__half*>(output.data_ptr<at::Half>()), 1,
             static_cast<size_t>(K), static_cast<size_t>(N),
             static_cast<size_t>(G));
+  };
+
+  // Dispatch to the appropriate template instantiation
+  switch (effective_splitk) {
+    case 16:
+      launch.template operator()<16>();
+      break;
+    case 8:
+      launch.template operator()<8>();
+      break;
+    case 4:
+      launch.template operator()<4>();
+      break;
+    case 2:
+      launch.template operator()<2>();
+      break;
+    default:
+      launch.template operator()<1>();
+      break;
   }
 
   return output;
