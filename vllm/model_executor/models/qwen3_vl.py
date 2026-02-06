@@ -385,14 +385,6 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"Qwen3-VL does not support {self.attn_backend} backend now."
-            )
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -526,9 +518,10 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
+        if self.attn_backend in (
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
