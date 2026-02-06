@@ -48,14 +48,26 @@ GET_WEATHER_SCHEMA = {
 
 
 def get_weather(latitude, longitude):
-    response = requests.get(
-        f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={latitude}&longitude={longitude}"
-        f"&current=temperature_2m,wind_speed_10m"
-        f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"
-    )
-    data = response.json()
-    return data["current"]["temperature_2m"]
+    try:
+        response = requests.get(
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={latitude}&longitude={longitude}"
+            f"&current=temperature_2m,wind_speed_10m"
+            f"&hourly=temperature_2m,relative_humidity_2m,"
+            f"wind_speed_10m",
+            timeout=10,
+        )
+        data = response.json()
+        return data["current"]["temperature_2m"]
+    except (requests.RequestException, KeyError) as e:
+        logger.warning(
+            "External weather API call failed (%s), "
+            "returning fake value. This does not affect "
+            "test correctness — only the tool-calling "
+            "protocol is under test.",
+            e,
+        )
+        return 15.0
 
 
 def get_place_to_travel():
