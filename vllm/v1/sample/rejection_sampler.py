@@ -39,11 +39,10 @@ class RejectionSampler(nn.Module):
     bonus tokens:
         If all proposed tokens are accepted, the bonus token is added to the
         end of the sequence. The bonus token is only sampled from the target
-        probabilities. We pass in the bonus tokens instead of sampling them
-        in the rejection sampler to allow for more flexibility in the
-        sampling process. For example, we can use top_p, top_k sampling for
-        bonus tokens, while spec decode does not support these sampling
-        strategies.
+        probabilities. We compute the bonus tokens with the standard sampler
+        and pass them into the rejection sampling kernels (instead of sampling
+        them inside the kernels) to reuse the regular sampling logic (e.g.,
+        top_p and top_k).
     output tokens:
         Tokens are finally generated with the rejection sampler.
         output tokens = accepted tokens + recovered tokens + bonus tokens
