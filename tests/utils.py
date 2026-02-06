@@ -232,7 +232,7 @@ class RemoteOpenAIServer:
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
-                    device_count = cuda_device_count_stateless()
+                    device_count = current_platform.device_count()
                     for i in range(device_count):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
