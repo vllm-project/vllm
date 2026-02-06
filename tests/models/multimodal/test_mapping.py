@@ -33,7 +33,9 @@ def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
         model = model_cls._from_config(config)
     # TODO(hmellor): Remove this once Transformers has fixed tied weights on meta device
     # https://github.com/huggingface/transformers/issues/43522
-    if getattr(config.get_text_config(), "tie_word_embeddings", False):
+    if getattr(config.get_text_config(), "tie_word_embeddings", False) or getattr(
+        config, "tie_word_embeddings", False
+    ):
         model.tie_weights()
     return model
 
@@ -100,17 +102,6 @@ def test_hf_model_weights_mapper(model_arch: str):
 
     # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
-
-    # Delete tied weights, some repo have them serialized but a dummy HF
-    # model will tie them by default resulting in weights mismatch
-    if (
-        tied_weights_keys := hf_dummy_model._tied_weights_keys
-    ) and hf_dummy_model.config.tie_word_embeddings:
-        tied_keys = tied_weights_keys.keys()
-        tied_params_iterator = ((name, torch.empty(0)) for name in tied_keys)
-        tied_params_iterator = mapper.apply(tied_params_iterator)
-        tied_keys = set(map(lambda x: x[0], tied_params_iterator))
-        ref_weight_names = ref_weight_names - tied_keys
 
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names
