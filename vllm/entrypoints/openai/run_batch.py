@@ -60,6 +60,7 @@ from vllm.entrypoints.pooling.score.protocol import (
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import SupportedTask
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
@@ -672,7 +673,7 @@ def build_endpoint_registry(
     args: Namespace,
     base_model_paths: list[BaseModelPath],
     request_logger: RequestLogger | None,
-    supported_tasks: set[str],
+    supported_tasks: tuple[SupportedTask, ...],
 ) -> dict[str, dict[str, Any]]:
     """
     Build the endpoint registry with all serving objects and handler configurations.
@@ -682,7 +683,7 @@ def build_endpoint_registry(
         args: Command line arguments
         base_model_paths: List of base model paths
         request_logger: Optional request logger
-        supported_tasks: Set of supported tasks
+        supported_tasks: Tuple of supported tasks
 
     Returns:
         Dictionary mapping endpoint keys to their configurations
