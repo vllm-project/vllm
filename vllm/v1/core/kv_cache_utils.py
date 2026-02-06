@@ -7,6 +7,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, NewType, TypeAlias, overload
 
 from vllm import envs
@@ -1478,10 +1479,8 @@ def _project_kv_cache_groups_to_worker(
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec
         ]
-        if not worker_layer_names:
-            continue
         group_spec = group.kv_cache_spec
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
                 block_size=group_spec.block_size,
                 kv_cache_specs={
@@ -1566,35 +1565,21 @@ def get_kv_cache_configs(
             continue
         _check_enough_kv_cache_memory(
             avail_mem,
-            lambda g=groups: _max_memory_usage_bytes_from_groups(  # type: ignore[misc]
-                vllm_config, g
-            ),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am, g=groups: _estimate_max_model_len_from_groups(  # type: ignore[misc]
-                vllm_config, g, am
-            ),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
-    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        kv_cache_specs, available_memory
+    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
+        projected_groups_per_worker, kv_cache_specs, available_memory
     ):
-        kv_cache_groups_one_worker: list[KVCacheGroupSpec] = []
-        for group in global_kv_cache_groups:
-            group_layer_names_one_worker = [
-                layer_name
-                for layer_name in group.layer_names
-                if layer_name in kv_cache_spec_one_worker
-            ]
-            kv_cache_groups_one_worker.append(
-                KVCacheGroupSpec(group_layer_names_one_worker, group.kv_cache_spec)
-            )
-        assert sum(
-            len(group.layer_names) for group in kv_cache_groups_one_worker
-        ) == len(kv_cache_spec_one_worker), "Some layers are not assigned to any group."
+        assert sum(len(group.layer_names) for group in projected_groups) == len(
+            kv_cache_spec_one_worker
+        ), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
-                vllm_config, kv_cache_groups_one_worker, available_memory_one_worker
+                vllm_config, projected_groups, available_memory_one_worker
             )
         )
 

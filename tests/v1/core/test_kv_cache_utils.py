@@ -1118,7 +1118,9 @@ def test_project_kv_cache_groups_to_worker():
     projected = kv_cache_utils._project_kv_cache_groups_to_worker(
         global_groups, {"layer4": spec_a}
     )
-    assert projected == []
+    assert len(projected) == 1
+    assert projected[0].layer_names == []
+    assert projected[0].kv_cache_spec is spec_a
 
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=16,
