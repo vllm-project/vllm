@@ -957,12 +957,16 @@ class WorkerProc:
                 self.handle_output(output)
 
     @staticmethod
-    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+    def setup_proc_title_and_log_prefix(
+        enable_ep: bool,
+        disable_log_prefix: bool = False,
+    ) -> None:
         # Check if parallel groups are initialized first
         if not model_parallel_is_initialized():
             # Parallel groups not yet initialized, use default process name
             set_process_title(name="Worker")
-            decorate_logs("Worker")
+            if not disable_log_prefix:
+                decorate_logs("Worker")
             return
 
         dp_size = get_dp_group().world_size
@@ -990,7 +994,7 @@ class WorkerProc:
             ep_rank = get_ep_group().rank_in_group
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
-        decorate_logs(process_name)
+        decorate_logs(process_name, disable_prefix=disable_log_prefix)
 
 
 def set_multiprocessing_worker_envs():

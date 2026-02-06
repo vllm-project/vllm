@@ -25,7 +25,7 @@ def test_unique_filepath():
 
 
 class TestDecorateLogsDisablePrefix:
-    """Tests for the VLLM_DISABLE_LOG_PREFIX / --disable-log-prefix feature."""
+    """Tests for the --disable-log-prefix feature."""
 
     def test_add_prefix_decorates_output(self):
         """Verify _add_prefix adds the expected prefix to writes."""
@@ -41,11 +41,7 @@ class TestDecorateLogsDisablePrefix:
         with (
             mock.patch.object(sys, "stdout", fake_stdout),
             mock.patch.object(sys, "stderr", fake_stderr),
-            mock.patch.dict(os.environ, {"VLLM_DISABLE_LOG_PREFIX": "0"}, clear=False),
         ):
-            # Reset envs cache so the patched env var is picked up
-            disable_envs_cache()
-
             decorate_logs("TestWorker")
 
             fake_stdout.write("stdout line\n")
@@ -54,18 +50,15 @@ class TestDecorateLogsDisablePrefix:
         assert "(TestWorker pid=" in fake_stdout.getvalue()
         assert "(TestWorker pid=" in fake_stderr.getvalue()
 
-    def test_decorate_logs_skipped_when_env_var_set(self):
-        """decorate_logs should be a no-op when VLLM_DISABLE_LOG_PREFIX=1."""
+    def test_decorate_logs_skipped_when_disable_prefix_true(self):
+        """decorate_logs should be a no-op when disable_prefix=True."""
         fake_stdout = io.StringIO()
         fake_stderr = io.StringIO()
         with (
             mock.patch.object(sys, "stdout", fake_stdout),
             mock.patch.object(sys, "stderr", fake_stderr),
-            mock.patch.dict(os.environ, {"VLLM_DISABLE_LOG_PREFIX": "1"}, clear=False),
         ):
-            disable_envs_cache()
-
-            decorate_logs("TestWorker")
+            decorate_logs("TestWorker", disable_prefix=True)
 
             fake_stdout.write("stdout line\n")
             fake_stderr.write("stderr line\n")
@@ -83,7 +76,7 @@ class TestDecorateLogsDisablePrefix:
             mock.patch.object(sys, "stderr", fake_stderr),
             mock.patch.dict(
                 os.environ,
-                {"VLLM_CONFIGURE_LOGGING": "0", "VLLM_DISABLE_LOG_PREFIX": "0"},
+                {"VLLM_CONFIGURE_LOGGING": "0"},
                 clear=False,
             ),
         ):

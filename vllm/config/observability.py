@@ -70,6 +70,12 @@ class ObservabilityConfig:
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
     argument."""
 
+    disable_log_prefix: bool = False
+    """Disable the process/thread log prefix (e.g. '(APIServer pid=12345)')
+    that vLLM adds to stdout/stderr. Useful when using custom logging
+    configurations or log aggregation systems that already handle process
+    identification."""
+
     enable_logging_iteration_details: bool = False
     """Enable detailed logging of iteration details.
     If set, vllm EngineCore will log iteration details

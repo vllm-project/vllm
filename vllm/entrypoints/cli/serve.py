@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import os
 import signal
 import time
 
@@ -56,10 +55,6 @@ class ServeSubcommand(CLISubcommand):
 
             uvloop.run(serve_grpc(args))
             return
-
-        # Propagate CLI flag to env var so all child processes inherit it.
-        if getattr(args, "disable_log_prefix", False):
-            os.environ["VLLM_DISABLE_LOG_PREFIX"] = "1"
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
@@ -362,7 +357,9 @@ def run_api_server_worker_proc(
 
     # Set process title and add process-specific prefix to stdout and stderr.
     set_process_title("APIServer", str(server_index))
-    decorate_logs()
+    decorate_logs(
+        disable_prefix=getattr(args, "disable_log_prefix", False),
+    )
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
