@@ -63,7 +63,7 @@ def setup_cuda():
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(
     is_torch_equal_or_newer("2.10.0"),
-    reason="Test fails with PyTorch 2.10.0 see: https://github.com/vllm-project/vllm/issues/33995"
+    reason="Test fails with PyTorch 2.10.0 see: https://github.com/vllm-project/vllm/issues/33995",
 )
 def test_routed_input_transform_inside_vs_outside(
     num_tokens: int,
