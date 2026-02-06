@@ -9,12 +9,13 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
 from ..tokenizers.hf import HfTokenizer
+from .inputs import DictPrompt
+from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 from .protocol import BaseRenderer
 
@@ -62,7 +63,7 @@ class DeepseekV32Renderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -76,7 +77,7 @@ class DeepseekV32Renderer(BaseRenderer):
             **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -88,7 +89,7 @@ class DeepseekV32Renderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
@@ -102,7 +103,7 @@ class DeepseekV32Renderer(BaseRenderer):
             **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
