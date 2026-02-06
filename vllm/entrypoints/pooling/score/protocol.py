@@ -6,6 +6,7 @@ from typing import Any, TypeAlias
 from pydantic import (
     BaseModel,
     Field,
+    field_validator,
 )
 
 from vllm import PoolingParams
@@ -21,6 +22,9 @@ from vllm.entrypoints.pooling.score.utils import (
 )
 from vllm.utils import random_uuid
 
+# Maximum number of token IDs allowed in label_token_ids
+MAX_LABEL_TOKEN_IDS = 2
+
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [start:score-extra-params]
@@ -32,10 +36,21 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         default=None,
         description=(
             "List of token IDs to compute probabilities for when using "
-            "CausalLM models. Required for generative scoring."
+            f"CausalLM models. Required for generative scoring. "
+            f"Maximum {MAX_LABEL_TOKEN_IDS} token IDs allowed."
         ),
     )
     # --8<-- [end:score-extra-params]
+
+    @field_validator('label_token_ids')
+    @classmethod
+    def validate_label_token_ids(cls, v: list[int] | None) -> list[int] | None:
+        if v is not None and len(v) > MAX_LABEL_TOKEN_IDS:
+            raise ValueError(
+                f"label_token_ids must contain at most {MAX_LABEL_TOKEN_IDS} "
+                f"token IDs, but got {len(v)}"
+            )
+        return v
 
     def to_pooling_params(self):
         return PoolingParams(
