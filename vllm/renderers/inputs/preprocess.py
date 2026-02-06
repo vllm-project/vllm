@@ -61,28 +61,28 @@ def conversation_to_seq(
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
 """
 A [`DecoderOnlyPrompt`][vllm.inputs.data.DecoderOnlyPrompt]
-that has been normalized to a dictionary.
+that has been standardized into a dictionary.
 """
 
 
 EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
 A [`EncoderPrompt`][vllm.inputs.data.EncoderPrompt]
-that has been normalized to a dictionary.
+that has been standardized into a dictionary.
 """
 
 
 DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
 A [`DecoderPrompt`][vllm.inputs.data.DecoderPrompt]
-that has been normalized to a dictionary.
+that has been standardized into a dictionary.
 """
 
 
 class EncoderDecoderDictPrompt(TypedDict):
     """
     A [`EncoderDecoderPrompt`][vllm.inputs.data.EncoderDecoderPrompt]
-    that has been normalized to a dictionary.
+    that has been standardized into a dictionary.
     """
 
     encoder_prompt: EncoderDictPrompt
@@ -95,14 +95,14 @@ SingletonDictPrompt: TypeAlias = (
 )
 """
 A [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt]
-that has been normalized to a dictionary.
+that has been standardized into a dictionary.
 """
 
 
 DictPrompt: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
 """
 A [`PromptType`][vllm.inputs.data.PromptType]
-that has been normalized to a dictionary.
+that has been standardized into a dictionary.
 """
 
 

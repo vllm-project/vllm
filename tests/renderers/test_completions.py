@@ -86,7 +86,8 @@ def _build_renderer(
 
 
 def _preprocess_prompt(
-    mdoel_config: ModelConfig, prompt_or_prompts: PromptType | Sequence[PromptType]
+    mdoel_config: ModelConfig,
+    prompt_or_prompts: PromptType | Sequence[PromptType],
 ):
     return [
         (
