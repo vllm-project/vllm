@@ -12,12 +12,3 @@ warnings.warn(
 )
 
 from vllm.entrypoints.openai.speech_to_text.api_router import *  # noqa: F401,F403,E402
-from vllm.entrypoints.openai.speech_to_text.api_router import (  # noqa: E402
-    attach_router,
-    create_transcriptions,
-    create_translations,
-    init_transcription_state,
-    router,
-    transcription,
-    translation,
-)

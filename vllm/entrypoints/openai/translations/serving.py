@@ -12,7 +12,3 @@ warnings.warn(
 )
 
 from vllm.entrypoints.openai.speech_to_text.serving import *  # noqa: F401,F403,E402
-from vllm.entrypoints.openai.speech_to_text.serving import (  # noqa: E402
-    OpenAIServingTranscription,
-    OpenAIServingTranslation,
-)

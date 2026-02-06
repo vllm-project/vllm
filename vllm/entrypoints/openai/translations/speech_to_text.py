@@ -13,6 +13,3 @@ warnings.warn(
 )
 
 from vllm.entrypoints.openai.speech_to_text.speech_to_text import *  # noqa: F401,F403,E402
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import (  # noqa: E402
-    OpenAISpeechToText,
-)

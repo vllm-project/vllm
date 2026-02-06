@@ -12,23 +12,3 @@ warnings.warn(
 )
 
 from vllm.entrypoints.openai.speech_to_text.protocol import *  # noqa: F401,F403,E402
-from vllm.entrypoints.openai.speech_to_text.protocol import (  # noqa: E402
-    AudioResponseFormat,
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseStreamChoice,
-    TranscriptionResponseVariant,
-    TranscriptionResponseVerbose,
-    TranscriptionSegment,
-    TranscriptionStreamResponse,
-    TranscriptionUsageAudio,
-    TranscriptionWord,
-    TranslationRequest,
-    TranslationResponse,
-    TranslationResponseStreamChoice,
-    TranslationResponseVariant,
-    TranslationResponseVerbose,
-    TranslationSegment,
-    TranslationStreamResponse,
-    TranslationWord,
-)
