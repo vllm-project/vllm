@@ -23,6 +23,7 @@ class LoRAMapping:
     prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
     type: LoRAMappingType = LoRAMappingType.LANGUAGE
+    target_prefix: str | None = None
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)

@@ -179,14 +179,14 @@ class LoRAModelManager:
             mm_budget.get_encoder_budget()
         )
 
-        # Tower wrappers
-        tower_punica_wrapper = get_punica_wrapper(
-            num_encoder_tokens,
-            max_batches=self.max_num_seqs * limit_per_prompt,
-            device=self.device,
-            lora_config=self.lora_config,
-        )
+        # Tower wrappers for each modality separately
         for prefix in self.mm_mapping.tower_model:
+            tower_punica_wrapper = get_punica_wrapper(
+                num_encoder_tokens,
+                max_batches=self.max_num_seqs * limit_per_prompt,
+                device=self.device,
+                lora_config=self.lora_config,
+            )
             self.punica_wrapper_mapping[prefix] = tower_punica_wrapper
 
         # Use wrapper for connector if present.
@@ -282,8 +282,9 @@ class LoRAModelManager:
         )  # type: ignore
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
-        # Default to the main language model wrapper
-        if not (self.supports_mm and self.supports_tower_connector_lora):
+        if mapping.target_prefix is not None:
+            target_prefix = mapping.target_prefix
+        elif not (self.supports_mm and self.supports_tower_connector_lora):
             target_prefix = (
                 self.mm_mapping.language_model[0]
                 if self.supports_mm
@@ -297,7 +298,10 @@ class LoRAModelManager:
             target_prefix = self.mm_mapping.language_model[0]
 
         punica_wrapper = self._get_punica_wrapper(target_prefix)
-        assert punica_wrapper is not None
+        assert punica_wrapper is not None, (
+            f"No punica wrapper found for prefix '{target_prefix}'. "
+            f"Available prefixes: {list(self.punica_wrapper_mapping.keys())}"
+        )
 
         punica_wrapper.update_metadata(
             mapping,

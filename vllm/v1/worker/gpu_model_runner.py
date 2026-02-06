@@ -2315,54 +2315,136 @@ class GPUModelRunner(
         if self.lora_config and self.lora_manager.supports_tower_connector_lora():
             # Build LoRA mappings independently for encoder inputs
             # (encoder batch structure is different from main batch)
-            prompt_lora_mapping = []
-            token_lora_mapping = []
-            lora_requests = set()
-            encoder_token_counts = []
+            lora_requests: set = set()
+            connector_prompt_mapping: list[int] = []
+            connector_token_counts: list[int] = []
 
-            for req_id, pos_info in mm_lora_refs:
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                lora_id = int(self.input_batch.request_lora_mapping[req_idx])
+            has_modality_aware = hasattr(
+                self.model, "get_num_mm_encoder_tokens_by_modality"
+            ) and hasattr(self.model, "get_tower_prefix_for_modality")
 
-                # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
-                num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds
+            mm_mapping = self.lora_manager.mm_mapping
+
+            if has_modality_aware and mm_mapping:
+                # Multi-tower model: build separate mappings per tower
+                tower_data: dict[str, dict] = {}
+
+                for (req_id, pos_info), mm_item in zip(mm_lora_refs, mm_kwargs):
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    lora_id = int(self.input_batch.request_lora_mapping[req_idx])
+                    modality = mm_item.modality
+
+                    tower_prefix = self.model.get_tower_prefix_for_modality(modality)  # type: ignore[attr-defined]
+                    if tower_prefix is None:
+                        tower_prefix = mm_mapping.tower_model[0]
+
+                    if tower_prefix not in tower_data:
+                        tower_data[tower_prefix] = {
+                            "prompt_mapping": [],
+                            "token_mapping": [],
+                        }
+
+                    num_tokens = self.model.get_num_mm_encoder_tokens_by_modality(  # type: ignore[attr-defined]
+                        modality, pos_info.get_num_embeds
+                    )
+                    tower_data[tower_prefix]["prompt_mapping"].append(lora_id)
+                    tower_data[tower_prefix]["token_mapping"].extend(
+                        [lora_id] * num_tokens
+                    )
+
+                    # Connector aggregates all modalities
+                    connector_prompt_mapping.append(lora_id)
+                    if hasattr(self.model, "get_num_mm_connector_tokens_by_modality"):
+                        conn_tokens = (
+                            self.model.get_num_mm_connector_tokens_by_modality(  # type: ignore[attr-defined]
+                                modality, num_tokens
+                            )
+                        )
+                    elif hasattr(self.model, "get_num_mm_connector_tokens"):
+                        conn_tokens = self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
+                    else:
+                        conn_tokens = num_tokens
+                    connector_token_counts.append(conn_tokens)
+
+                    if lora_id > 0:
+                        lora_request = self.input_batch.lora_id_to_lora_request.get(
+                            lora_id
+                        )
+                        if lora_request is not None:
+                            lora_requests.add(lora_request)
+
+                # Set tower mappings - each tower gets only its own tokens
+                for prefix in mm_mapping.tower_model:
+                    if prefix in tower_data:
+                        data = tower_data[prefix]
+                        tower_mapping = LoRAMapping(
+                            tuple(data["token_mapping"]),
+                            tuple(data["prompt_mapping"]),
+                            is_prefill=True,
+                            type=LoRAMappingType.TOWER,
+                            target_prefix=prefix,
+                        )
+                    else:
+                        # No items for this tower, set empty mapping
+                        tower_mapping = LoRAMapping(
+                            tuple(),
+                            tuple(),
+                            is_prefill=True,
+                            type=LoRAMappingType.TOWER,
+                            target_prefix=prefix,
+                        )
+                    self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
+            else:
+                # Single-tower model: original behavior
+                prompt_lora_mapping: list[int] = []
+                token_lora_mapping: list[int] = []
+
+                for req_id, pos_info in mm_lora_refs:
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    lora_id = int(self.input_batch.request_lora_mapping[req_idx])
+
+                    num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                        pos_info.get_num_embeds
+                    )
+                    prompt_lora_mapping.append(lora_id)
+                    token_lora_mapping.extend([lora_id] * num_tokens)
+                    connector_prompt_mapping.append(lora_id)
+                    if hasattr(self.model, "get_num_mm_connector_tokens"):
+                        connector_token_counts.append(
+                            self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
+                        )
+                    else:
+                        connector_token_counts.append(num_tokens)
+
+                    if lora_id > 0:
+                        lora_request = self.input_batch.lora_id_to_lora_request.get(
+                            lora_id
+                        )
+                        if lora_request is not None:
+                            lora_requests.add(lora_request)
+
+                tower_mapping = LoRAMapping(
+                    tuple(token_lora_mapping),
+                    tuple(prompt_lora_mapping),
+                    is_prefill=True,
+                    type=LoRAMappingType.TOWER,
                 )
-                prompt_lora_mapping.append(lora_id)
-                token_lora_mapping.extend([lora_id] * num_tokens)
-                encoder_token_counts.append(num_tokens)
+                self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-                if lora_id > 0:
-                    lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
-                    if lora_request is not None:
-                        lora_requests.add(lora_request)
-
-            # Set tower adapter mapping
-            tower_mapping = LoRAMapping(
-                tuple(token_lora_mapping),
-                tuple(prompt_lora_mapping),
-                is_prefill=True,
-                type=LoRAMappingType.TOWER,
-            )
-            self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
-
-            if hasattr(self.model, "get_num_mm_connector_tokens"):
-                post_op_counts = [
-                    self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
-                    for num_tokens in encoder_token_counts
-                ]
-
+            # Set connector mapping (aggregated across all modalities)
+            if connector_token_counts and hasattr(
+                self.model, "get_num_mm_connector_tokens"
+            ):
                 connector_token_mapping = np.repeat(
-                    np.array(prompt_lora_mapping, dtype=np.int32),
-                    np.array(post_op_counts, dtype=np.int32),
+                    np.array(connector_prompt_mapping, dtype=np.int32),
+                    np.array(connector_token_counts, dtype=np.int32),
                 )
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(connector_token_mapping.tolist()),
-                    prompt_mapping=tuple(prompt_lora_mapping),
+                    prompt_mapping=tuple(connector_prompt_mapping),
                     is_prefill=True,
                     type=LoRAMappingType.CONNECTOR,
                 )
-
                 self.lora_manager.set_active_adapters(
                     lora_requests,
                     connector_mapping,

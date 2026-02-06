@@ -1452,3 +1452,34 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             connector="merger.",
             tower_model=["visual.", "audio_tower."],
         )
+
+    def get_num_mm_encoder_tokens(self, num_mm_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        spatial_merge_size = vision_config.spatial_merge_size
+        return num_mm_tokens * (spatial_merge_size**2)
+
+    def get_num_mm_encoder_tokens_by_modality(
+        self, modality: str, num_mm_tokens: int
+    ) -> int:
+        if modality in ("image", "video"):
+            vision_config = self.config.vision_config
+            spatial_merge_size = vision_config.spatial_merge_size
+            return num_mm_tokens * (spatial_merge_size**2)
+        elif modality == "audio":
+            return num_mm_tokens
+        return num_mm_tokens
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        return num_encoder_tokens
+
+    def get_num_mm_connector_tokens_by_modality(
+        self, modality: str, num_encoder_tokens: int
+    ) -> int:
+        return num_encoder_tokens
+
+    def get_tower_prefix_for_modality(self, modality: str) -> str | None:
+        if modality in ("image", "video"):
+            return "visual."
+        elif modality == "audio":
+            return "audio_tower."
+        return None
