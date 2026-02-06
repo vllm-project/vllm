@@ -90,19 +90,43 @@ class BaseRenderer(ABC):
 
         return parse_dec_only_prompt(prompt)
 
+    @overload
+    def render_completions(
+        self,
+        prompts: Sequence[SingletonPrompt | bytes],
+    ) -> list[SingletonDictPrompt]: ...
+
+    @overload
+    def render_completions(  # type: ignore[misc]
+        self,
+        prompts: Sequence[PromptType],
+    ) -> list[DictPromptType]: ...
+
     def render_completions(
         self,
         prompts: Sequence[PromptType | bytes],
-    ) -> list[SingletonDictPrompt]:
+    ) -> list[SingletonDictPrompt] | list[DictPromptType]:
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
         return [self.render_completion(prompt) for prompt in prompts]
 
+    @overload
+    async def render_completions_async(
+        self,
+        prompts: Sequence[SingletonPrompt | bytes],
+    ) -> list[SingletonDictPrompt]: ...
+
+    @overload
+    async def render_completions_async(  # type: ignore[misc]
+        self,
+        prompts: Sequence[PromptType],
+    ) -> list[DictPromptType]: ...
+
     async def render_completions_async(
         self,
         prompts: Sequence[PromptType | bytes],
-    ) -> list[SingletonDictPrompt]:
+    ) -> list[SingletonDictPrompt] | list[DictPromptType]:
         return self.render_completions(prompts)
 
     @abstractmethod
