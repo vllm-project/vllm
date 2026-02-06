@@ -30,6 +30,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
+from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -128,6 +129,9 @@ OPTIMIZATION_LEVEL_00 = {
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "disable_flashinfer_autotune": True,
+    },
 }
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
@@ -143,6 +147,9 @@ OPTIMIZATION_LEVEL_01 = {
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "disable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -160,6 +167,9 @@ OPTIMIZATION_LEVEL_02 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "disable_flashinfer_autotune": False,
+    },
 }
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
@@ -175,6 +185,9 @@ OPTIMIZATION_LEVEL_03 = {
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "disable_flashinfer_autotune": False,
     },
 }
 
@@ -210,6 +223,8 @@ class VllmConfig:
     """Load configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    kernel_config: KernelConfig = Field(default_factory=KernelConfig)
+    """Kernel configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None

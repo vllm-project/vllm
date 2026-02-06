@@ -36,8 +36,13 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
+    disable_flashinfer_autotune = (
+        worker.vllm_config.kernel_config.disable_flashinfer_autotune
+    )
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if has_flashinfer() and current_platform.has_device_capability(90):
+    if disable_flashinfer_autotune:
+        logger.info("Skipping FlashInfer autotune because it is disabled.")
+    elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
