@@ -82,7 +82,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def render_completion(request: CompletionRequest, raw_request: Request):
+async def render_prompt(request: CompletionRequest, raw_request: Request):
     """render completion request and return engine prompts without generating."""
     handler = completion(raw_request)
     if handler is None:
@@ -92,7 +92,7 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
         )
 
     try:
-        result = await handler.render_completion_request(request)
+        result = await handler.render_prompt_request(request)
     except Exception as e:
         return handler.create_error_response(e)
 

@@ -63,7 +63,7 @@ class BaseRenderer(ABC):
         return self._async_tokenizer
 
     # Step 1: Convert raw inputs to prompts
-    def render_completion(
+    def render_prompt(
         self,
         prompt: DictPrompt | bytes,
     ) -> DictPrompt:
@@ -73,20 +73,20 @@ class BaseRenderer(ABC):
 
         return prompt
 
-    def render_completions(
+    def render_prompts(
         self,
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        return [self.render_completion(prompt) for prompt in prompts]
+        return [self.render_prompt(prompt) for prompt in prompts]
 
-    async def render_completions_async(
+    async def render_prompts_async(
         self,
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
-        return self.render_completions(prompts)
+        return self.render_prompts(prompts)
 
     @abstractmethod
     def render_messages(

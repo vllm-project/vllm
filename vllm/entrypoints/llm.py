@@ -831,7 +831,7 @@ class LLM:
         engine_prompts = list[DictPrompt]()
         for prompt in prompts:
             parsed_prompt = parse_model_prompt(model_config, prompt)
-            in_prompt = renderer.render_completion(parsed_prompt)
+            in_prompt = renderer.render_prompt(parsed_prompt)
 
             # Some MM models have non-default `add_special_tokens`
             # TODO: Move multi-modal processor into tokenization

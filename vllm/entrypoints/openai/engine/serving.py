@@ -987,7 +987,7 @@ class OpenAIServing:
             )
             for prompt in prompts
         ]
-        in_prompts = await renderer.render_completions_async(parsed_prompts)
+        in_prompts = await renderer.render_prompts_async(parsed_prompts)
         engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         extra_items = {
