@@ -146,16 +146,10 @@ def _get_kimia_prompt_manager(
 
 
 def _kimia_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    # All tensors are batched (= one audio item per request).
-
-    # Shape expectations:
-
+    # All tensors are batched (= one audio item per request). Shape expectations:
     # - whisper_input_features: [B, S, F]
-
     # - is_continuous_mask:     [B, S]
-
     # - text_input_ids:         [B, S]
-
     # - audio_input_ids:        [B, S] (original Kimi-Audio ids incl. audio-vocab)
 
     return dict(
@@ -192,14 +186,10 @@ class KimiAudioASRProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
-        # Avoid slow dummy multimodal processing at startup.
-
-        # Kimi-Audio maps audio into the *same* token sequence (prompt_token_ids)
-
-        # and provides additional tensors aligned to that sequence, so we cap
-
-        # per-audio token budget to the model max.
-
+        # Avoid slow dummy multimodal processing at startup. Kimi-Audio maps
+        # audio into the *same* token sequence (prompt_token_ids) and provides
+        # additional tensors aligned to that sequence, so we cap per-audio token
+        # budget to the model max.
         return {"audio": min(int(seq_len), int(self.ctx.model_config.max_model_len))}
 
 
@@ -291,11 +281,8 @@ class KimiAudioASRMultiModalProcessor(
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         # We bypass HF processors entirely, and rely on vLLM's prompt-update
-
         # mechanism (PromptReplacement) to expand a single placeholder token
-
         # into the full placeholder sequence.
-
         return False
 
     def _call_hf_processor(
@@ -387,15 +374,11 @@ class KimiAudioASRMultiModalProcessor(
 class VQAdaptor(torch.nn.Module):
     """Kimi-Audio VQ Adaptor for whisper feature -> hidden dim.
 
-
-
     Matches the architecture in Kimi-Audio's modeling_kimia.py
-
     """
 
     def __init__(self, input_dim: int, hidden_size: int, rms_norm_eps: float = 1e-6):
         super().__init__()
-
         self.layers = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_size, bias=True),
             torch.nn.SiLU(),
@@ -727,17 +710,7 @@ class KimiAudioForConditionalGeneration(
             # implementation (KimiAPromptManager). This ensures the returned
             # multimodal tensors (audio/text token streams + whisper features)
             # match training-time expectations.
-            import sys
-            from pathlib import Path
-
-            try:
-                import kimia_infer.api.prompt_manager  # noqa: F401
-            except Exception:  # noqa: BLE001
-                # In our dev setup, the Kimi-Audio repo lives under the vLLM
-                # checkout. Add it to sys.path as a fallback.
-                kimi_audio_root = Path(__file__).resolve().parents[3] / "Kimi-Audio"
-                if str(kimi_audio_root) not in sys.path:
-                    sys.path.insert(0, str(kimi_audio_root))
+            import kimia_infer.api.prompt_manager  # noqa: F401
 
             hf_cfg = model_config.hf_config
             kimia_token_offset = int(getattr(hf_cfg, "kimia_token_offset", 152064))

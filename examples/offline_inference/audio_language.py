@@ -12,13 +12,24 @@ import os
 from dataclasses import asdict
 from typing import Any, NamedTuple
 
+import librosa
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.models.kimi_audio_asr import (
+    _get_kimia_prompt_manager,
+    _write_wav_tmp,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+# kimia_infer is required for Kimi-Audio preprocessing
+try:
+    import kimia_infer.api.prompt_manager  # noqa: F401
+except ImportError:
+    kimia_infer = None  # type: ignore
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
@@ -490,45 +501,29 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     This example is intended as a minimal smoke-test and only builds inputs for
     a single audio clip.
     """
+    if kimia_infer is None:
+        raise RuntimeError(
+            "kimia_infer is required for Kimi-Audio. "
+            "Install from https://github.com/MoonshotAI/Kimi-Audio"
+        )
+
     assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
 
-    # Prefer a local snapshot if present; otherwise download from HF.
-    local_path = "/data1/moonshotai/Kimi-Audio-7B-Instruct"
-    if os.path.isdir(local_path):
-        model_path = local_path
-    else:
-        model_path = snapshot_download("moonshotai/Kimi-Audio-7B-Instruct")
+    # Use HuggingFace model path.
+    model_path = "moonshotai/Kimi-Audio-7B-Instruct"
 
     # Build multimodal tensors using the reference Kimi prompt manager.
     # (Same approach as vLLM's KimiAudioForConditionalGeneration.get_generation_prompt)
-    from vllm.model_executor.models.kimi_audio_asr import (  # noqa: PLC0415
-        _get_kimia_prompt_manager,
-        _write_wav_tmp,
-    )
 
     audio, sr = audio_assets[0].audio_and_sample_rate
     # Kimi expects 16kHz audio features.
     if sr != 16000:
-        import librosa
-
         audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
         sr = 16000
 
     wav_path = _write_wav_tmp(audio, sr)
 
     try:
-        # Ensure kimia_infer is importable.
-        try:
-            import kimia_infer.api.prompt_manager  # noqa: F401
-        except ModuleNotFoundError:
-            # In some dev setups, the Kimi-Audio repo is checked out next to vLLM.
-            import sys
-            from pathlib import Path
-
-            kimi_audio_root = Path(__file__).resolve().parents[2] / "Kimi-Audio"
-            sys.path.insert(0, str(kimi_audio_root))
-            import kimia_infer.api.prompt_manager  # noqa: F401
-
         # Match defaults used in the model code.
         kimia_token_offset = 152064
         kimia_text_audiodelaytokens = 0

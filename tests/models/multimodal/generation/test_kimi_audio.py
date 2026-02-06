@@ -3,9 +3,13 @@
 
 from pathlib import Path
 
+import librosa
 import pytest
 import torch
+from transformers import AutoModelForCausalLM
 
+from tests.models.utils import check_logprobs_close
+from vllm.assets.audio import AudioAsset
 from vllm.model_executor.models.kimi_audio_asr import KimiAudioForConditionalGeneration
 from vllm.platforms import current_platform
 
@@ -128,21 +132,14 @@ def test_kimi_audio_hf_outputs_match_vllm(
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"kimia_infer not available: {e}")
 
-    # Prefer local model path when present (faster, no download).
-    local_path = "/data1/moonshotai/Kimi-Audio-7B-Instruct"
-    model = (
-        local_path if Path(local_path).exists() else "moonshotai/Kimi-Audio-7B-Instruct"
-    )
+    # Use HuggingFace model path.
+    model = "moonshotai/Kimi-Audio-7B-Instruct"
 
     # Use a short, deterministic audio clip.
-    from vllm.assets.audio import AudioAsset
-
     audio, sr = AudioAsset("mary_had_lamb").audio_and_sample_rate
 
     # Kimi-Audio expects 16kHz features (see get_speech_to_text_config).
     if sr != 16000:
-        import librosa
-
         audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
         sr = 16000
 
@@ -172,8 +169,6 @@ def test_kimi_audio_hf_outputs_match_vllm(
             pytest.skip(f"vLLM does not accept raw audio for Kimi-Audio yet: {e}")
 
     # HF: run the same clip through the reference model.
-    from transformers import AutoModelForCausalLM
-
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForCausalLM) as hf_model:
         if not hasattr(hf_model.model, "generate"):
             pytest.skip(
@@ -188,8 +183,6 @@ def test_kimi_audio_hf_outputs_match_vllm(
         )
 
     # Compare tokens/logprobs approximately (exact match may differ).
-    from tests.models.utils import check_logprobs_close
-
     check_logprobs_close(
         outputs_0_lst=hf_out, outputs_1_lst=vllm_out, name_0="hf", name_1="vllm"
     )
