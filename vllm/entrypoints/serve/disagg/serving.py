@@ -284,7 +284,8 @@ class ServingTokens(OpenAIServing):
                                 logprob=max(p[1].logprob, -9999.0),
                             )
                             for i, p in enumerate(step_top_logprobs.items())
-                            if num_output_top_logprobs and i < num_output_top_logprobs
+                            if num_output_top_logprobs is not None
+                            and i < max(num_output_top_logprobs, 1)
                         ],
                     )
                 )

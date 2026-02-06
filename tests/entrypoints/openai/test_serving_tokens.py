@@ -109,7 +109,8 @@ async def test_generate_logprobs(client, logprobs_value):
     assert len(logprobs_content) == len(choice["token_ids"])
     for entry in logprobs_content:
         assert "logprob" in entry
-        assert len(entry["top_logprobs"]) <= logprobs_value
+        assert len(entry["top_logprobs"]) >= 1
+        assert len(entry["top_logprobs"]) <= max(logprobs_value, 1)
 
 
 @pytest.mark.asyncio
