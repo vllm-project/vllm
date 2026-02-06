@@ -19,7 +19,9 @@ from vllm.model_executor.models.vision import (
     run_dp_sharded_vision_model,
 )
 from vllm.platforms import current_platform
-from vllm.utils import get_open_port, update_environment_variables
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -97,7 +99,7 @@ def run_dp_sharded_vision_model_vs_direct(
     """
 
     # Set random seed for reproducibility
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = f"{current_platform.device_name}:{local_rank}"
     current_platform.set_device(device)
@@ -283,7 +285,7 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
     calling the model directly.
     """
     # Set random seed for reproducibility
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     device = f"{current_platform.device_name}:{local_rank}"
     current_platform.set_device(device)
     torch.set_default_device(device)
@@ -407,7 +409,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 ):
     """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
     # Set up distributed environment
-    current_platform.seed_everything(123)
+    set_random_seed(123)
     device = f"{current_platform.device_name}:{local_rank}"
     current_platform.set_device(device)
     torch.set_default_device(device)

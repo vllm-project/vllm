@@ -31,11 +31,11 @@ import torch
 from torch import nn
 from transformers import OlmoConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -64,7 +64,7 @@ from .utils import (
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as
-    ``Attention(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
+    `Attention(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -87,7 +87,6 @@ class OlmoAttention(nn.Module):
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
         self.clip_qkv = config.clip_qkv
 
         # Attention input projection. Projects x -> (q, k, v)
@@ -103,9 +102,8 @@ class OlmoAttention(nn.Module):
         # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=config.rope_parameters,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -144,7 +142,7 @@ class OlmoAttention(nn.Module):
 class OlmoMLP(nn.Module):
     """
     This is the MLP block where the output is computed as
-    ``MLP(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
+    `MLP(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -193,7 +191,7 @@ class OlmoMLP(nn.Module):
 class OlmoDecoderLayer(nn.Module):
     """
     This is a typical transformer block where the output is
-    computed as ``MLP(LN(x + Attention(LN(x))))``
+    computed as `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -268,12 +266,12 @@ class OlmoModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -285,7 +283,7 @@ class OlmoModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -368,11 +366,9 @@ class OlmoForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -381,12 +377,12 @@ class OlmoForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

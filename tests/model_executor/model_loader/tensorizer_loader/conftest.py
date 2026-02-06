@@ -8,8 +8,8 @@ from vllm import LLM, EngineArgs
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.model_loader import tensorizer as tensorizer_mod
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.v1.executor.abstract import UniProcExecutor
+from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.executor import UniProcExecutor
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 MODEL_REF = "facebook/opt-125m"
@@ -67,7 +67,7 @@ def assert_from_collective_rpc(engine: LLM, closure: Callable, closure_kwargs: d
 class DummyExecutor(UniProcExecutor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         local_rank = 0
         # set local rank as the device index if specified

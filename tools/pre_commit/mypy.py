@@ -23,43 +23,35 @@ import sys
 
 import regex as re
 
-FILES = [
-    "vllm/*.py",
-    "vllm/assets",
-    "vllm/distributed",
-    "vllm/entrypoints",
-    "vllm/executor",
-    "vllm/inputs",
-    "vllm/logging_utils",
-    "vllm/multimodal",
-    "vllm/platforms",
-    "vllm/transformers_utils",
-    "vllm/triton_utils",
-    "vllm/usage",
-]
-
 # After fixing errors resulting from changing follow_imports
-# from "skip" to "silent", move the following directories to FILES
+# from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    "vllm/attention",
-    "vllm/compilation",
-    "vllm/engine",
-    "vllm/inputs",
+    # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    "vllm/plugins",
-    "vllm/worker",
-    "vllm/v1",
+    # v1 related
+    "vllm/v1/kv_offload",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
+    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
     # Ignore triton kernels in ops.
-    "vllm/attention/ops",
+    "vllm/v1/attention/ops",
+    # TODO: Remove these entries after fixing mypy errors.
+    "vllm/benchmarks",
+    "vllm/config",
+    "vllm/device_allocator",
+    "vllm/profiler",
+    "vllm/reasoning",
+    "vllm/tool_parser",
+    "vllm/v1/cudagraph_dispatcher.py",
+    "vllm/outputs.py",
+    "vllm/logger.py",
 ]
 
 
@@ -74,7 +66,6 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
     """
     exclude_pattern = re.compile(f"^{'|'.join(EXCLUDE)}.*")
-    files_pattern = re.compile(f"^({'|'.join(FILES)}).*")
     file_groups = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     for changed_file in changed_files:
@@ -82,14 +73,13 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         if exclude_pattern.match(changed_file):
             continue
         # Group files by mypy call
-        if files_pattern.match(changed_file):
-            file_groups[""].append(changed_file)
-            continue
+        for directory in SEPARATE_GROUPS:
+            if re.match(f"^{directory}.*", changed_file):
+                file_groups[directory].append(changed_file)
+                break
         else:
-            for directory in SEPARATE_GROUPS:
-                if re.match(f"^{directory}.*", changed_file):
-                    file_groups[directory].append(changed_file)
-                    break
+            if changed_file.startswith("vllm/"):
+                file_groups[""].append(changed_file)
     return file_groups
 
 

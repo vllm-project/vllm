@@ -10,7 +10,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.attention import Attention, AttentionBackend, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -29,13 +28,16 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fla.ops import (
-    RMSNormGated,
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3NextRMSNorm
+from vllm.model_executor.layers.layernorm import (
+    GemmaRMSNorm as Qwen3NextRMSNorm,
+)
+from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -46,6 +48,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -56,12 +60,12 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
@@ -71,7 +75,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
@@ -107,7 +112,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -142,7 +147,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self.shared_expert_gate = ReplicatedLinear(
+            config.hidden_size,
+            1,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.shared_expert_gate",
+        )
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(
@@ -159,6 +170,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_expert,
+            gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -181,11 +193,17 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         if self.shared_expert is not None:
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
@@ -206,12 +224,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
-        return "linear_attention"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
-
-        return GDNAttentionBackend
+        return "gdn_attention"
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
@@ -325,7 +338,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
-                dtype=torch.float32,
             )
         )
 
@@ -430,17 +442,68 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        return torch.ops.vllm.gdn_attention(
-            hidden_states,
-            output,
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
+        num_tokens = hidden_states.size(0)
+
+        # ============================================================
+        # Part 1: Input Projection
+        # ============================================================
+        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba
+        )
+        query, key, value = map(
+            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+        )
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+
+        # ============================================================
+        # Part 2: Core Attention (Custom Op)
+        # ============================================================
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
             self.prefix,
         )
 
-    def _forward(
+        # ============================================================
+        # Part 3: Output Projection
+        # ============================================================
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _forward_core(
         self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
     ):
+        """
+        Core attention computation (called by custom op).
+        """
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
@@ -465,18 +528,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        # 1. Set up dimensions for reshapes later
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states[:num_actual_tokens])
-        projected_states_ba, _ = self.in_proj_ba(hidden_states[:num_actual_tokens])
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
-        # 2. Convolution sequence transformation
+        # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
@@ -492,7 +548,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
 
-        # 2.1: process the mutli-query part
+        # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
@@ -509,7 +565,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 validate_data=False,
             )
 
-        # 2.2: process the remaining part
+        # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
@@ -533,7 +589,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_decodes
+                    : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
             )
@@ -545,10 +601,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
-        beta = b.sigmoid()
-        # g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-        g = fused_gdn_gating(self.A_log, a, self.dt_bias)
-        g, beta = map(lambda x: rearrange(x, "l d -> 1 l d"), (g, beta))
+        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -567,9 +620,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             g_non_spec = g
             beta_non_spec = beta
 
-        # 3. Recurrent attention
+        # 2. Recurrent attention
 
-        # 3.1: process the mutlti-query part
+        # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
                 q=query_spec,
@@ -587,7 +640,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
-        # 3.2: process the remaining part
+        # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
@@ -630,30 +683,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
-        # Merge core attention output
+        # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            core_attn_out = torch.empty(
+            merged_out = torch.empty(
                 (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
-            core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-
+            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out = core_attn_out_spec
+            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out = core_attn_out_non_spec
-
-        z_shape_og = z.shape
-        # reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-
-        output[:num_actual_tokens], _ = self.out_proj(core_attn_out)
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
 
 class Qwen3NextAttention(nn.Module):
@@ -711,11 +754,8 @@ class Qwen3NextAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
-            base=config.rope_theta,
-            rope_scaling=config.rope_scaling,
-            partial_rotary_factor=config.partial_rotary_factor,
+            rope_parameters=config.rope_parameters,
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 
@@ -831,6 +871,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
             )
 
         self.input_layernorm = Qwen3NextRMSNorm(
@@ -926,22 +967,17 @@ class Qwen3NextModel(nn.Module):
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
-        lora_config = vllm_config.lora_config
+
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         def get_layer(prefix: str):
@@ -963,12 +999,12 @@ class Qwen3NextModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -977,7 +1013,7 @@ class Qwen3NextModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -1002,6 +1038,7 @@ class Qwen3NextModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -1028,6 +1065,12 @@ class Qwen3NextModel(nn.Module):
 
             if name.startswith("mtp."):
                 continue
+
+            # Remapping the name of FP8 kv-scale.
+            if name.endswith("scale"):
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -1064,6 +1107,8 @@ class Qwen3NextModel(nn.Module):
                         name.endswith(".bias") or name.endswith("_bias")
                     ) and name not in params_dict:
                         continue
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(
@@ -1080,6 +1125,11 @@ class Qwen3NextModel(nn.Module):
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if name not in params_dict:
+                        logger.warning_once(
+                            f"Parameter {name} not found in params_dict, skip loading"
+                        )
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -1089,99 +1139,7 @@ class Qwen3NextModel(nn.Module):
         return loaded_params
 
 
-class Qwen3NextForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, MixtureOfExperts, IsHybrid
-):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
-        self.quant_config = vllm_config.quant_config
-
-        super().__init__()
-        self.config = config
-        self.scheduler_config = scheduler_config
-        self.model = Qwen3NextModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-        # Set MoE hyperparameters
-        self.expert_weights = []
-
-        self.moe_layers: list[SharedFusedMoE] = []
-        example_layer = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-
-            assert isinstance(layer, Qwen3NextDecoderLayer)
-            if isinstance(layer.mlp, Qwen3NextSparseMoeBlock):
-                example_layer = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-
-        if example_layer is None:
-            raise RuntimeError("No Qwen3Next layer found in the model.layers.")
-
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_shared_experts = 0
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
+class QwenNextMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -1199,12 +1157,89 @@ class Qwen3NextForCausalLM(
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def set_moe_parameters(self):
+        self.expert_weights = []
+
+        self.moe_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, Qwen3NextDecoderLayer) and isinstance(
+                layer.mlp, Qwen3NextSparseMoeBlock
+            ):
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
+        if example_moe is None:
+            raise RuntimeError("No Qwen3Next layer found in the model.layers.")
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+
+class Qwen3NextForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    QwenNextMixtureOfExperts,
+    IsHybrid,
+):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+
+        scheduler_config = vllm_config.scheduler_config
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3Next currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
+        self.quant_config = vllm_config.quant_config
+
+        super().__init__()
+        self.config = config
+        self.scheduler_config = scheduler_config
+        self.model = Qwen3NextModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1247,6 +1282,10 @@ class Qwen3NextForCausalLM(
             num_spec,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1264,38 +1303,54 @@ class Qwen3NextForCausalLM(
         return self.model.get_expert_mapping()
 
 
-def gdn_attention(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
+def gdn_attention_core(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
     layer_name: str,
 ) -> None:
+    """
+    Custom op for the core attention computation.
+    Only handles the convolution + recurrent attention part.
+    Input/output projections are handled outside this op.
+    """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._forward(hidden_states=hidden_states, output=output)
+    self._forward_core(
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+    )
 
 
-def gdn_attention_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
+def gdn_attention_core_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
     layer_name: str,
 ) -> None:
+    """Fake implementation for torch.compile."""
     return
 
 
 direct_register_custom_op(
-    op_name="gdn_attention",
-    op_func=gdn_attention,
-    mutates_args=["output"],
-    fake_impl=gdn_attention_fake,
+    op_name="gdn_attention_core",
+    op_func=gdn_attention_core,
+    mutates_args=["core_attn_out"],
+    fake_impl=gdn_attention_core_fake,
 )
 
 
-# g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 @triton.jit
 def fused_gdn_gating_kernel(
     g,
+    beta_output,
     A_log,
     a,
+    b,
     dt_bias,
     seq_len,
     NUM_HEADS: tl.constexpr,
@@ -1309,6 +1364,7 @@ def fused_gdn_gating_kernel(
     mask = head_off < NUM_HEADS
     blk_A_log = tl.load(A_log + head_off, mask=mask)
     blk_a = tl.load(a + off, mask=mask)
+    blk_b = tl.load(b + off, mask=mask)
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
     # If the model is loaded in fp16, without the .float() here, A might be -inf
     x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
@@ -1317,20 +1373,44 @@ def fused_gdn_gating_kernel(
     )
     blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
+    # compute beta_output = sigmoid(b)
+    blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
+    tl.store(
+        beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
+    )
 
 
 def fused_gdn_gating(
     A_log: torch.Tensor,
     a: torch.Tensor,
+    b: torch.Tensor,
     dt_bias: torch.Tensor,
     beta: float = 1.0,
     threshold: float = 20.0,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused computation of g and beta for Gated Delta Net.
+    g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    beta_output = b.sigmoid()
+    TODO maybe use torch.compile to replace this triton kernel
+    """
     batch, num_heads = a.shape
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
-    g = torch.empty_like(a, dtype=torch.float32)
+    g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
     fused_gdn_gating_kernel[grid](
-        g, A_log, a, dt_bias, seq_len, num_heads, beta, threshold, 8, num_warps=1
+        g,
+        beta_output,
+        A_log,
+        a,
+        b,
+        dt_bias,
+        seq_len,
+        num_heads,
+        beta,
+        threshold,
+        8,
+        num_warps=1,
     )
-    return g
+    return g, beta_output

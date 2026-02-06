@@ -14,17 +14,20 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, import_pynvml
+from vllm.utils.import_utils import import_pynvml
+from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
-    _Backend = None
+    VllmConfig = None
+    CacheDType = None
 
 logger = init_logger(__name__)
 
@@ -36,6 +39,47 @@ pynvml = import_pynvml()
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
+
+
+@cache
+def _get_backend_priorities(
+    use_mla: bool,
+    device_capability: DeviceCapability,
+) -> list[AttentionBackendEnum]:
+    """Get backend priorities with lazy import to avoid circular dependency."""
+    if use_mla:
+        if device_capability.major == 10:
+            return [
+                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.CUTLASS_MLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHMLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
+        else:
+            return [
+                AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHMLA,
+                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
+    else:
+        if device_capability.major == 10:
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
+        else:
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -58,6 +102,9 @@ class CudaPlatformBase(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+    ]
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -104,6 +151,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -126,7 +175,7 @@ class CudaPlatformBase(Platform):
             and cache_config.block_size is not None
         ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
-            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # If `--attention-config.backend` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
@@ -134,25 +183,40 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
-            if envs.VLLM_ATTENTION_BACKEND is None:
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+
+            if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability(100):
-                    # Blackwell => Force CutlassMLA.
+                hf_text_config = model_config.hf_text_config
+                qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+                if (
+                    cls.is_device_capability_family(100)
+                    and not use_sparse
+                    and qk_nope_head_dim == 128
+                ):
+                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
+                    # and only if qk_nope_head_dim == 128 (kernel constraint)
+                    use_flashinfer_mla = True
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.FLASHINFER_MLA
+                    )
+                elif cls.is_device_capability_family(100) and not use_sparse:
+                    # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
                     use_cutlass_mla = True
-                    # TODO: This does not work, because the
-                    # global_force_attn_backend_context_manager is not set.
-                    # See vllm/attention/selector.py:_cached_get_attn_backend
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
-                else:
-                    # Not Blackwell
+                elif is_flashmla_dense_supported()[0]:
+                    # Non-Blackwell with FlashMLA support
                     use_flashmla = True
+                else:
+                    # Fallback: will use Triton MLA or other compatible backend
+                    pass
             else:
                 # Forced case
-                use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
-                use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
-                use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
-
-            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+                backend = vllm_config.attention_config.backend
+                use_flashmla = backend == AttentionBackendEnum.FLASHMLA
+                use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
+                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
 
             if (
                 use_flashmla
@@ -184,27 +248,20 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
-        # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
 
-        compilation_config = vllm_config.compilation_config
+        scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
         if (
-            parallel_config.all2all_backend == "deepep_high_throughput"
-            and parallel_config.data_parallel_size > 1
-            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
         ):
-            # TODO: Piecewise Cuda graph might be enabled
-            # if torch compile cache key issue fixed
-            # See https://github.com/vllm-project/vllm/pull/25093
-            logger.info(
-                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
-                "kernels are optimized for prefill and are incompatible with "
-                "CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+            logger.warning(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def get_current_memory_usage(
@@ -215,216 +272,141 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        from vllm.attention.backends.registry import _Backend
+    def get_valid_backends(
+        cls,
+        device_capability: DeviceCapability,
+        attn_selector_config: "AttentionSelectorConfig",
+    ) -> tuple[
+        list[tuple["AttentionBackendEnum", int]],
+        dict["AttentionBackendEnum", list[str]],
+    ]:
+        valid_backends_priorities = []
+        invalid_reasons = {}
 
-        # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-        if cls.has_device_capability(100):
-            return _Backend.TORCH_SDPA
-
-        if dtype not in (torch.float16, torch.bfloat16):
-            return _Backend.XFORMERS
-
-        if cls.has_device_capability(80):
-            FLASH_ATTN_V1 = (
-                "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-            )
-            from vllm.attention.selector import is_attn_backend_supported
-
-            is_default_fa_supported = is_attn_backend_supported(
-                FLASH_ATTN_V1, head_size, dtype, allow_import_error=False
-            )
-            if is_default_fa_supported:
-                return _Backend.FLASH_ATTN
+        backend_priorities = _get_backend_priorities(
+            attn_selector_config.use_mla, device_capability
+        )
+        for priority, backend in enumerate(backend_priorities):
+            try:
+                backend_class = backend.get_class()
+                invalid_reasons_i = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons_i = ["ImportError"]
+            if invalid_reasons_i:
+                invalid_reasons[backend] = invalid_reasons_i
             else:
-                # Fallback to XFORMERS
-                return _Backend.XFORMERS
-        else:
-            # Fallback for Volta/Turing GPUs or FA not supported
-            return _Backend.XFORMERS
+                valid_backends_priorities.append((backend, priority))
+
+        return valid_backends_priorities, invalid_reasons
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_v1,
-        use_mla,
-        has_sink,
-        use_sparse,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        device_capability = cls.get_device_capability()
+        assert device_capability is not None
 
-        if use_mla:
-            if not use_v1:
-                raise RuntimeError(
-                    "MLA attention backends require the V1 engine. "
-                    "Set VLLM_USE_V1=1 to enable them."
+        attn_selector_config = attn_selector_config._replace(block_size=None)
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
                 )
-
-            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
-            from vllm.attention.utils.fa_utils import flash_attn_supports_mla
-
-            if use_sparse:
-                logger.info_once("Using Sparse MLA backend on V1 engine.")
-                return (
-                    "vllm.v1.attention.backends.mla.flashmla_sparse."
-                    "FlashMLASparseBackend"
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
                 )
-
-            use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
-                selected_backend is None
-                and cls.is_device_capability(100)
-                and block_size % 128 == 0
-            )
-            use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
-                selected_backend is None
-                and cls.is_device_capability(100)
-                and (block_size == 32 or block_size % 64 == 0)
-            )
-            use_flashmla = selected_backend == _Backend.FLASHMLA or (
-                selected_backend is None and is_flashmla_dense_supported()[0]
-            )
-            use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
-                selected_backend is None and flash_attn_supports_mla()
-            )
-            use_triton = selected_backend == _Backend.TRITON_MLA or (
-                selected_backend is None
-            )
-
-            if use_cutlassmla:
-                logger.info_once("Using Cutlass MLA backend on V1 engine.")
-                return "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
-            if use_flashinfermla:
-                from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-                set_kv_cache_layout("HND")
-                logger.info_once("Using FlashInfer MLA backend on V1 engine.")
-                return (
-                    "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
-                )
-            if use_flashmla:
-                if block_size % 64 != 0:
-                    logger.warning(
-                        "FlashMLA backend is not supported for block size %d"
-                        " (currently only supports block size 64).",
-                        block_size,
-                    )
-                else:
-                    logger.info_once("Using FlashMLA backend on V1 engine.")
-                    return "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend"
-            if use_flashattn:
-                logger.info_once("Using FlashAttention MLA backend on V1 engine.")
-                return (
-                    "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
-                )
-            if use_triton:
-                logger.info_once("Using Triton MLA backend on V1 engine.")
-                return "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
-        if use_v1:
-            FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
-            FLEX_ATTENTION_V1 = (
-                "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            )
-            TRITON_ATTN = (
-                "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-            )
-            FLASH_ATTN_V1 = (
-                "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-            )
-            TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
-            XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
-
-            use_fp8_kv_cache = kv_cache_dtype is not None and kv_cache_dtype.startswith(
-                "fp8"
-            )
-
-            if selected_backend == _Backend.FLASHINFER:
-                logger.info_once("Using FlashInfer backend on V1 engine.")
-                if cls.has_device_capability(100):
-                    from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-                    set_kv_cache_layout("HND")
-                return FLASHINFER_V1
-            elif selected_backend == _Backend.FLEX_ATTENTION:
-                logger.info_once("Using FlexAttention backend on V1 engine.")
-                return FLEX_ATTENTION_V1
-            elif selected_backend == _Backend.TRITON_ATTN:
-                logger.info_once("Using Triton backend on V1 engine.")
-                return TRITON_ATTN
-            elif selected_backend == _Backend.FLASH_ATTN:
-                logger.info_once("Using Flash Attention backend on V1 engine.")
-                return FLASH_ATTN_V1
-            elif selected_backend == _Backend.TREE_ATTN:
-                logger.info_once("Using Tree Attention backend on V1 engine.")
-                return TREE_ATTN_V1
-            elif selected_backend == _Backend.XFORMERS:
-                logger.info_once("Using XFormers backend on V1 engine.")
-                return XFORMERS_V1
-
-            from vllm.attention.selector import is_attn_backend_supported
-
-            # Default backends for V1 engine
-            # Prefer FlashInfer for Blackwell GPUs if installed
-            if cls.is_device_capability(100):
-                if is_default_backend_supported := is_attn_backend_supported(
-                    FLASHINFER_V1, head_size, dtype
-                ):
-                    from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-                    logger.info_once(
-                        "Using FlashInfer backend with HND KV cache layout on "
-                        "V1 engine by default for Blackwell (SM 10.0) GPUs."
-                    )
-                    set_kv_cache_layout("HND")
-
-                    return FLASHINFER_V1
-
-                if not is_default_backend_supported.can_import:
-                    logger.warning_once(
-                        "FlashInfer failed to import for V1 engine on "
-                        "Blackwell (SM 10.0) GPUs; it is recommended to "
-                        "install FlashInfer for better performance."
-                    )
-
-            # FlashAttention is the default for SM 8.0+ GPUs
-            if cls.has_device_capability(80):
-                if (has_sink or use_fp8_kv_cache) and not cls.is_device_capability(90):
-                    logger.info_once("Using Triton backend on V1 engine.")
-                    return TRITON_ATTN
-                elif is_default_backend_supported := is_attn_backend_supported(
-                    FLASH_ATTN_V1, head_size, dtype, allow_import_error=False
-                ):
-                    logger.info_once("Using Flash Attention backend on V1 engine.")
-                    return FLASH_ATTN_V1
-
-            # FlexAttention is the default for older GPUs
             else:
-                logger.info_once("Using FlexAttention backend on V1 engine.")
-                return FLEX_ATTENTION_V1
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
 
-            assert not is_default_backend_supported
-
-            use_flex_attention_reason = {}
-            if not is_default_backend_supported.head_size:
-                use_flex_attention_reason["head_size"] = head_size
-            if not is_default_backend_supported.dtype:
-                use_flex_attention_reason["dtype"] = dtype
-
-            logger.info_once(
-                "Using FlexAttention backend for %s on V1 engine.",
-                ", ".join(f"{k}={v}" for k, v in use_flex_attention_reason.items()),
-            )
-            return FLEX_ATTENTION_V1
-
-        raise RuntimeError(
-            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-            "to select a supported backend."
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
+            device_capability=device_capability,
+            attn_selector_config=attn_selector_config,
         )
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()
+            )
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
+            )
+
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
+        )
+
+        return selected_backend.get_path()
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.FLASH_ATTN,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: "AttentionBackendEnum | None" = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        # Try FlashAttention first
+        if (cc := cls.get_device_capability()) and cc.major >= 8:
+            try:
+                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
+                if backend_class.supports_head_size(
+                    head_size
+                ) and backend_class.supports_dtype(dtype):
+                    return AttentionBackendEnum.FLASH_ATTN
+            except ImportError:
+                pass
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -455,49 +437,6 @@ class CudaPlatformBase(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        fp8_attention = kv_cache_dtype.startswith("fp8")
-        attention_backend = envs.VLLM_ATTENTION_BACKEND
-
-        supported = False
-        if model_config is not None and model_config.use_mla:
-            # Default to CutlassMLA for blackwell,
-            # FlashMLA otherwise
-            if attention_backend is None:
-                if cls.is_device_capability(100):
-                    attention_backend = "CUTLASS_MLA"
-                else:
-                    attention_backend = "FLASHMLA"
-
-            # Only FlashMLA and CUTLASS_MLA support fp8
-            if attention_backend in ["FLASHMLA", "CUTLASS_MLA", "FLASHINFER_MLA"]:
-                supported = True
-            else:
-                supported = not fp8_attention
-        else:
-            # Default to FlashAttention
-            if attention_backend is None:
-                attention_backend = "FLASH_ATTN"
-
-            # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
-                supported = True
-            elif attention_backend == "FLASH_ATTN":
-                if fp8_attention:
-                    from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
-
-                    supported = flash_attn_supports_fp8()
-                else:
-                    supported = True
-            elif attention_backend == "FLASHINFER":
-                supported = True
-            elif attention_backend == "TRITON_ATTN":
-                supported = cls.supports_fp8()
-        return supported
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

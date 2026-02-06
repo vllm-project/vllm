@@ -18,36 +18,10 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.system_utils import find_loaded_library
 
 logger = init_logger(__name__)
-
-
-def find_loaded_library(lib_name) -> str | None:
-    """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
-    the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    a loaded library.
-    """  # noqa
-    found_line = None
-    with open("/proc/self/maps") as f:
-        for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
-    return path
 
 
 cumem_available = False
@@ -63,7 +37,7 @@ try:
     libcudart = CudaRTLibrary()
     cumem_available = True
 except ModuleNotFoundError:
-    # rocm platform does not support cumem allocator
+    # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None

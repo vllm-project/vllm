@@ -29,8 +29,8 @@ pip install vllm
     - API Path: `/chat/completions`
     - Model: `qwen/Qwen1.5-0.5B-Chat`
 
-    ![](../../assets/deployment/chatbox-settings.png)
+    ![Chatbox settings screen](../../assets/deployment/chatbox-settings.png)
 
 1. Go to `Just chat`, and start to chat:
 
-    ![](../../assets/deployment/chatbox-chat.png)
+    ![Chatbot chat screen](../../assets/deployment/chatbox-chat.png)

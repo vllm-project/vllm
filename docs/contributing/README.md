@@ -16,13 +16,13 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Unsure on where to start? Check out the following links for tasks to work on:
 
 - [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-    - [Selected onboarding tasks](gh-project:6)
+    - [Selected onboarding tasks](https://github.com/orgs/vllm-project/projects/6)
 - [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new-model%22)
-    - [Models with multi-modal capabilities](gh-project:10)
+    - [Models with multi-modal capabilities](https://github.com/orgs/vllm-project/projects/10)
 
 ## License
 
-See <gh-file:LICENSE>.
+See [LICENSE](../../LICENSE).
 
 ## Developing
 
@@ -43,10 +43,16 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install vLLM using:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
-uv pip install -e .
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
+
+then install vLLM using:
+
+```bash
+uv pip install -e . --no-build-isolation
 ```
 
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
@@ -54,7 +60,7 @@ For more details about installing from source and installing for other hardware,
 For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](gh-file:docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -88,7 +94,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
 ### Documentation
 
-MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, <gh-file:mkdocs.yaml>.
+MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, [mkdocs.yaml](../../mkdocs.yaml).
 
 Get started with:
 
@@ -152,7 +158,7 @@ pytest -s -v tests/test_logger.py
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 !!! important
-    If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
+    If you discover a security vulnerability, please follow the instructions [here](../../SECURITY.md).
 
 ## Pull Requests & Code Reviews
 
@@ -162,7 +168,7 @@ code quality and improve the efficiency of the review process.
 
 ### DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the <gh-file:DCO>.
+When contributing changes to this project, you must agree to the [DCO](../../DCO).
 Commits must include a `Signed-off-by:` header which certifies agreement with
 the terms of the DCO.
 

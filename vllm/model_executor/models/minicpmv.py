@@ -42,14 +42,11 @@ from typing_extensions import TypeVar
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.resampler import (
     BaseResampler,
     Resampler2,
     get_2d_sincos_pos_embed,
 )
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -74,7 +71,8 @@ from vllm.multimodal.parse import (
     VideoItem,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
@@ -83,11 +81,11 @@ from vllm.multimodal.processing import (
     ResolvedPromptUpdate,
     _seq2text,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.collections import flatten_2d_lists
+from vllm.utils.collection_utils import flatten_2d_lists
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
@@ -141,7 +139,7 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
     image_embeds: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "ns", "hs"),
+        TensorShape("bn", "ns", "hs", dynamic_dims={"ns"}),
     ]
 
 
@@ -559,6 +557,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return MiniCPMVMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
 
@@ -738,9 +741,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMVMultiModalDataParser()
-
     def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
@@ -767,10 +767,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items(
+            "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
@@ -795,10 +794,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (videos := mm_data.get("videos")) is None:
             return {}
 
-        parsed_videos = (
-            self._get_data_parser()
-            .parse_mm_data({"video": videos})
-            .get_items("video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+        mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
+        parsed_videos = mm_items.get_items(
+            "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
 
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
@@ -1005,8 +1003,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
-    merge_by_field_config = True
-
     supports_encoder_tp_data = True
 
     @classmethod
@@ -1032,25 +1028,29 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
-        )
-        self.vpm = self.init_vision_module(
-            config, quant_config, prefix=maybe_prefix(prefix, "vpm")
-        )
-        self.vision_dim = (
-            self.vpm.embed_dim
-            if self.version == (2, 0)
-            else self.vpm.embeddings.embed_dim
-        )
-        self.embed_dim = self.config.hidden_size
 
-        self.resampler = self.init_resampler(
-            self.embed_dim,
-            self.vision_dim,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "resampler"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = self.init_llm(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
+            )
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vpm = self.init_vision_module(
+                config, quant_config, prefix=maybe_prefix(prefix, "vpm")
+            )
+            self.vision_dim = (
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
+            )
+            self.embed_dim = self.config.hidden_size
+
+            self.resampler = self.init_resampler(
+                self.embed_dim,
+                self.vision_dim,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "resampler"),
+            )
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
@@ -1138,10 +1138,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return multimodal_embeddings
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -1150,7 +1147,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1340,7 +1337,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1433,7 +1429,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1514,11 +1509,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 0)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
-            return None
-        return quant_config
-
     def init_llm(
         self,
         vllm_config: VllmConfig,
@@ -1532,12 +1522,10 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1550,7 +1538,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         with set_default_torch_dtype(torch.float16):
             # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
             resampler = Resampler2_5(
@@ -1619,11 +1606,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 5)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
-            return None
-        return quant_config
-
     def init_llm(
         self,
         vllm_config: VllmConfig,
@@ -1637,12 +1619,10 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1655,7 +1635,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         with set_default_torch_dtype(torch.float16):
             # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
             resampler = Resampler4_5(
@@ -1757,5 +1736,4 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
         cls.embedding_modules.update(instance_cls.embedding_modules)
-        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape,
     moe_kernel_quantize_input,
 )
-from vllm.utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -32,7 +32,7 @@ def pplx_hidden_dim_scale_bytes(
     align = 16
 
     # For blocked per token: set to
-    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    #   cdiv(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
     if quant_dtype is not None:
         assert isinstance(quant_dtype, torch.dtype)
@@ -106,7 +106,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -274,6 +281,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         hook, receiver = self.prepare_async(
             a1,
@@ -283,6 +291,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            defer_input_quant=defer_input_quant,
         )
         hook()
         return receiver()

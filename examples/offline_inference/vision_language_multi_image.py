@@ -18,22 +18,22 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/flycatcher.jpeg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/somefish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/starfish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/snail.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/thistle.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/husky.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/orangetabbycat.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/guineapig.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/rabbit.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/horsepony.jpg",
 ]
 
 
@@ -44,6 +44,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: list[int] | None = None
     chat_template: str | None = None
     lora_requests: list[LoRARequest] | None = None
+    sampling_params: SamplingParams | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -75,7 +76,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -95,6 +96,41 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_bee(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Open-Bee/Bee-8B-RL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        trust_remote_code=True,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -166,6 +202,46 @@ def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    model_name = "deepseek-ai/DeepSeek-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    placeholder = "<image>\n" * len(image_urls)
+    prompt = placeholder + question
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=8192,
+        # ngram logit processor args
+        extra_args=dict(
+            ngram_size=30,
+            window_size=90,
+            # whitelist: <td>, </td>
+            whitelist_token_ids={128821, 128822},
+        ),
+        skip_special_tokens=False,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+        sampling_params=sampling_params,
+    )
+
+
 def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "google/gemma-3-4b-it"
 
@@ -229,6 +305,28 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+# HunyuanOCR
+def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "tencent/HunyuanOCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholder = (
+        "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    ) * len(image_urls)
+    prompt = f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -667,6 +765,32 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# OpenPangu
+def load_openpangu_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "FreedomIntelligence/openPangu-VL-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "[unused18][unused19][unused20]" * len(image_urls)
+    prompt = (
+        f"<s>[unused9]系统：[unused10][unused9]用户：{question}{placeholders}"
+        "[unused10][unused9]助手："
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
@@ -717,6 +841,27 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
         f"<|im_start|>user\n\n{placeholders}\n{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>" * len(image_urls)
+    prompt = f"<|begin_of_sentence|>User: {question}{placeholders}\nAssistant: "
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -803,40 +948,6 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
     placeholders = "".join(f"<|image_{i}|>" for i, _ in enumerate(image_urls, start=1))
-    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
-    )
-
-
-def load_phi4_multimodal(question: str, image_urls: list[str]) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process multi images inputs.
-    """
-
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    vision_lora_path = os.path.join(model_path, "vision-lora")
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        enable_lora=True,
-        max_lora_rank=320,
-        # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={"dynamic_hd": 4},
-    )
-
-    placeholders = "<|image|>" * len(image_urls)
     prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
 
     return ModelRequestData(
@@ -1013,6 +1124,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=16384,
         max_num_seqs=16,
+        trust_remote_code=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -1096,6 +1208,32 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "stepfun-ai/Step3-VL-10B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"vision_config": {"enable_patch": False}},
+        trust_remote_code=True,
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompt = (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"{'<im_patch>' * len(image_urls)}{question}<|EOT|><|BOT|>"
+        "assistant\n<think>\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "omni-research/Tarsier-7b"
 
@@ -1124,7 +1262,10 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=32768,
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
     )
 
     prompt = (
@@ -1132,6 +1273,42 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
         f"<|vision_end|>{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+# GLM-4.1V
+def load_glm4_1v(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.1V-9B-Thinking"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=45082,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
     image_data = [fetch_image(url) for url in image_urls]
 
@@ -1212,13 +1389,53 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={"image": len(image_urls)},
+        max_num_batched_tokens=36864,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        },
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
+    "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
+    "deepseek_ocr": load_deepseek_ocr,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
+    "hunyuan_vl": load_hunyuan_vl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
@@ -1231,12 +1448,14 @@ model_example_map = {
     "llava-next": load_llava_next,
     "llava-onevision": load_llava_onevision,
     "mistral3": load_mistral3,
+    "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
+    "openpangu_vl": load_openpangu_vl,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
+    "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
-    "phi4_multimodal": load_phi4_multimodal,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
@@ -1244,17 +1463,27 @@ model_example_map = {
     "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
+    "stepvl": load_step_vl,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
+    "glm4_1v": load_glm4_1v,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,
 }
 
 
-def run_generate(model, question: str, image_urls: list[str], seed: int | None):
+def run_generate(
+    model,
+    question: str,
+    image_urls: list[str],
+    seed: int,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(
@@ -1277,7 +1506,13 @@ def run_generate(model, question: str, image_urls: list[str], seed: int | None):
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str], seed: int | None):
+def run_chat(
+    model: str,
+    question: str,
+    image_urls: list[str],
+    seed: int,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory
@@ -1287,10 +1522,16 @@ def run_chat(model: str, question: str, image_urls: list[str], seed: int | None)
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
-    sampling_params = SamplingParams(
-        temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
     outputs = llm.chat(
         [
@@ -1347,7 +1588,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     parser.add_argument(
@@ -1358,6 +1599,13 @@ def parse_args():
         default=2,
         help="Number of images to use for the demo.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
     return parser.parse_args()
 
 
@@ -1365,13 +1613,20 @@ def main(args: Namespace):
     model = args.model_type
     method = args.method
     seed = args.seed
+    tensor_parallel_size = args.tensor_parallel_size
+
+    if tensor_parallel_size is not None and tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {tensor_parallel_size}"
+        )
 
     image_urls = IMAGE_URLS[: args.num_images]
 
     if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
+        run_generate(model, QUESTION, image_urls, seed, tensor_parallel_size)
     elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
+        run_chat(model, QUESTION, image_urls, seed, tensor_parallel_size)
     else:
         raise ValueError(f"Invalid method: {method}")
 

@@ -10,7 +10,7 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import get_cache_dir
 
@@ -94,7 +94,7 @@ def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
 
     metadata = {
         "total_num_frames": num_frames,
-        "fps": fps,
+        "fps": duration / num_frames,
         "duration": duration,
         "video_backend": "opencv",
         "frames_indices": list(range(num_frames)),

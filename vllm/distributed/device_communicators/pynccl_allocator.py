@@ -14,7 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import find_nccl_include_paths
+from vllm.utils.nccl import find_nccl_include_paths
 
 logger = init_logger(__name__)
 
@@ -60,7 +60,7 @@ def is_symmetric_memory_tensor(tensor: torch.Tensor):
     return False
 
 
-def set_graph_pool_id(graph_pool_id):
+def set_graph_pool_id(graph_pool_id: Any) -> None:
     global _graph_pool_id
     _graph_pool_id = graph_pool_id
 
@@ -157,7 +157,7 @@ class nccl_symm_mem_context:
         if self.disabled:
             return self
         assert self.pynccl_comm is not None, (
-            "Symmetric memory requires pynccl to be initalized"
+            "Symmetric memory requires pynccl to be initialized"
         )
         assert self.pynccl_comm.nccl_version >= 22703, (
             "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"

@@ -21,6 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -273,16 +274,6 @@ class KeyeVL1_5Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
-    def get_max_frame_per_video(self) -> int:
-        return 2048
-
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
-        return {"image": None, "video": 1}
-
-
 def _keye_field_config(
     hf_inputs: Mapping[str, torch.Tensor],
 ):
@@ -332,7 +323,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -349,7 +340,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_video_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -364,10 +355,22 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return KeyeVL1_5MultiModalDataParser()
+class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
+    def get_data_parser(self):
+        return KeyeVL1_5MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
+    def get_max_frame_per_video(self) -> int:
+        return 2048
+
+    def get_supported_mm_limits(
+        self,
+    ) -> Mapping[str, int | None]:
+        return {"image": None, "video": 1}
+
+
+class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -594,22 +597,20 @@ class KeyeVL1_5ForConditionalGeneration(
             new_video_embeds.append(video_embeds[start:end])
         return tuple(new_video_embeds)
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+
         if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
             video_grid_thw = video_grid_thw[0]
-        """Get mrope input positions and delta value (Keye series)."""
 
         def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
             """
@@ -635,6 +636,7 @@ class KeyeVL1_5ForConditionalGeneration(
 
         video_grid_thw = split_thw(video_grid_thw)
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
@@ -664,20 +666,12 @@ class KeyeVL1_5ForConditionalGeneration(
                 ed_video = len(input_tokens) + 1
 
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index]
                 video_index += 1
                 remain_frames -= 1
                 ed = ed_video
@@ -730,6 +724,5 @@ class KeyeVL1_5ForConditionalGeneration(
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta

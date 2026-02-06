@@ -4,19 +4,24 @@
 import pytest
 import torch
 
-from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.custom_op import CustomOp
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import (
+    CompilationConfig,
+    VllmConfig,
+    get_cached_compilation_config,
+    set_current_vllm_config,
+)
+from vllm.model_executor.custom_op import CustomOp, op_registry
 from vllm.model_executor.layers.activation import (
     GeluAndMul,
     ReLUSquaredActivation,
     SiluAndMul,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    dispatch_topk_func,
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    dispatch_topk_sigmoid_func,
+    dispatch_topk_softmax_func,
+    vllm_topk_sigmoid,
     vllm_topk_softmax,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled,
 )
 from vllm.model_executor.layers.layernorm import (
     RMSNorm,
@@ -36,7 +41,7 @@ class Relu3(ReLUSquaredActivation):
 
 
 @pytest.mark.parametrize(
-    "env, torch_level, backend, ops_enabled, default_on",
+    "env, compilation_mode, backend, ops_enabled, default_on",
     [
         # Default values based on compile level
         # - All by default (no Inductor compilation)
@@ -77,7 +82,7 @@ class Relu3(ReLUSquaredActivation):
 )
 def test_enabled_ops(
     env: str | None,
-    torch_level: int,
+    compilation_mode: int,
     backend: str,
     ops_enabled: list[int],
     default_on: bool,
@@ -85,26 +90,27 @@ def test_enabled_ops(
     custom_ops = env.split(",") if env else []
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            backend=backend, level=torch_level, custom_ops=custom_ops
+            backend=backend, mode=compilation_mode, custom_ops=custom_ops
         )
     )
+    get_cached_compilation_config.cache_clear()
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
         ops_enabled = [bool(x) for x in ops_enabled]
 
         assert RMSNorm(1024).enabled() == ops_enabled[0]
-        assert CustomOp.op_registry["rms_norm"].enabled() == ops_enabled[0]
+        assert op_registry["rms_norm"].enabled() == ops_enabled[0]
 
         assert SiluAndMul().enabled() == ops_enabled[1]
-        assert CustomOp.op_registry["silu_and_mul"].enabled() == ops_enabled[1]
+        assert op_registry["silu_and_mul"].enabled() == ops_enabled[1]
 
         assert GeluAndMul().enabled() == ops_enabled[2]
-        assert CustomOp.op_registry["gelu_and_mul"].enabled() == ops_enabled[2]
+        assert op_registry["gelu_and_mul"].enabled() == ops_enabled[2]
 
         # If registered, subclasses should follow their own name
         assert Relu3().enabled() == ops_enabled[3]
-        assert CustomOp.op_registry["relu3"].enabled() == ops_enabled[3]
+        assert op_registry["relu3"].enabled() == ops_enabled[3]
 
         # Unregistered subclass
         class SiluAndMul2(SiluAndMul):
@@ -126,50 +132,51 @@ def test_enabled_ops_invalid(env: str):
             RMSNorm(1024).enabled()
 
 
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    topk_func = dispatch_topk_func()
-    is_rocm_aiter_moe_enabled.cache_clear()
-    if current_platform.is_rocm() and int(use_rocm_aiter):
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            rocm_aiter_topk_softmax,
-        )
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
+def test_topk_softmax_dispatch(use_rocm_aiter: bool):
+    topk_func = dispatch_topk_softmax_func(use_rocm_aiter)
 
-        assert topk_func == rocm_aiter_topk_softmax
+    if current_platform.is_rocm() and use_rocm_aiter:
+        assert topk_func == rocm_aiter_ops.topk_softmax
     else:
         assert topk_func == vllm_topk_softmax
 
 
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
+def test_topk_sigmoid_dispatch(use_rocm_aiter: bool):
+    topk_func = dispatch_topk_sigmoid_func(use_rocm_aiter)
+
+    if current_platform.is_rocm() and use_rocm_aiter:
+        assert topk_func == rocm_aiter_ops.topk_sigmoid
+    else:
+        assert topk_func == vllm_topk_sigmoid
+
+
 @pytest.mark.parametrize("add_residual", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-@pytest.mark.parametrize("use_rocm_aiter_norm", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter", [True, False])
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="AITER is a feature exclusive for ROCm"
 )
 def test_rms_norm_dispatch(
-    add_residual: bool,
-    dtype: torch.dtype,
-    use_rocm_aiter: str,
-    use_rocm_aiter_norm: str,
-    monkeypatch,
+    add_residual: bool, dtype: torch.dtype, use_rocm_aiter: bool
 ):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", use_rocm_aiter_norm)
-    rms_norm_func = dispatch_rocm_rmsnorm_func(add_residual, dtype)
+    rms_norm_func = dispatch_rocm_rmsnorm_func(add_residual, dtype, use_rocm_aiter)
 
     should_use_rocm_aiter = (
         current_platform.is_rocm()
-        and int(use_rocm_aiter)
-        and int(use_rocm_aiter_norm)
+        and use_rocm_aiter
         and dtype in RMS_NORM_SUPPORTED_DTYPES
     )
 
     if add_residual and should_use_rocm_aiter:
-        assert rms_norm_func == torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add
+        assert rms_norm_func == rocm_aiter_ops.rms_norm2d_with_add
     elif should_use_rocm_aiter:
-        assert rms_norm_func == torch.ops.vllm.rocm_aiter_rms_norm
+        assert rms_norm_func == rocm_aiter_ops.rms_norm
     elif add_residual:
         assert rms_norm_func == fused_add_rms_norm
     else:

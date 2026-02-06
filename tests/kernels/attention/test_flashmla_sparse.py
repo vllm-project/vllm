@@ -5,7 +5,7 @@ import torch
 
 
 def test_sparse_flashmla_metadata_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -34,7 +34,7 @@ def test_sparse_flashmla_metadata_smoke():
 
 
 def test_sparse_flashmla_decode_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -43,7 +43,7 @@ def test_sparse_flashmla_decode_smoke():
     device = torch.device("cuda")
     batch_size = 1
     seqlen_q = 1
-    num_heads_q = 1
+    num_heads_q = 64
     head_dim_k = 576
     head_dim_v = 512
     num_heads_k = 1
@@ -97,7 +97,7 @@ def test_sparse_flashmla_decode_smoke():
 
 
 def test_sparse_flashmla_prefill_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:

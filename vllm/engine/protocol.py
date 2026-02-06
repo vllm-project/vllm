@@ -6,20 +6,20 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
-
-logger = init_logger(__name__)
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 class EngineClient(ABC):
@@ -27,8 +27,12 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    processor: Processor
+    input_processor: InputProcessor
     io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> BaseRenderer: ...
 
     @property
     @abstractmethod
@@ -49,7 +53,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -88,11 +92,6 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_tokenizer(self) -> AnyTokenizer:
-        """Get the tokenizer"""
-        ...
-
-    @abstractmethod
     async def is_tracing_enabled(self) -> bool: ...
 
     @abstractmethod
@@ -110,7 +109,7 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def stop_profile(self) -> None:
-        """Start profiling the engine"""
+        """Stop profiling the engine"""
         ...
 
     @abstractmethod
@@ -119,8 +118,15 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
-        """Reset the prefix cache"""
+    async def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache"""
+        ...
+
+    @abstractmethod
+    async def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        """Reset the prefix cache and optionally any configured connector cache"""
         ...
 
     @abstractmethod
@@ -143,6 +149,33 @@ class EngineClient(ABC):
         """Load a new LoRA adapter into the engine for future requests."""
         ...
 
+    @abstractmethod
+    async def pause_generation(
+        self,
+        *,
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """Pause new generation/encoding requests.
+
+        Args:
+            wait_for_inflight_requests: When ``True`` waits for in-flight requests
+                to finish before pausing. When ``False`` (default), aborts in-flight
+                requests immediately.
+            clear_cache: Whether to clear KV and prefix caches after draining.
+        """
+        ...
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume accepting generation/encoding requests."""
+        ...
+
+    @abstractmethod
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
+        ...
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
@@ -161,4 +194,14 @@ class EngineClient(ABC):
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
+        raise NotImplementedError
+
+    async def init_weight_transfer_engine(
+        self, init_request: WeightTransferInitRequest
+    ) -> None:
+        """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """Batched weight update for RL training."""
         raise NotImplementedError

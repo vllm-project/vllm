@@ -28,7 +28,9 @@ class StructuredOutputRequest:
         if sampling_params is None:
             return None
         params = sampling_params.structured_outputs
-        return StructuredOutputRequest(params=params) if params else None
+        if not params or params.all_constraints_none():
+            return None
+        return StructuredOutputRequest(params=params)
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports

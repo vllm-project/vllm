@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -21,11 +21,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
+    prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -66,8 +63,9 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             )
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
-
-        if quant_config._is_fp8_w8a8(weight_config, input_config):
+        if quant_config._is_fp8_w4a8(weight_config, input_config):
+            return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+        elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_ocp_mx(weight_config, input_config):
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
@@ -121,7 +119,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if current_platform.is_rocm():
             self.use_marlin = False
 
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
     def create_weights(
         self,
@@ -308,30 +306,34 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts,
-                shuffle_weights,
-            )
-
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
             layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
-            self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
         elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(layer, False)
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
-            self.fused_experts_func = None
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            self.fused_experts_func = fused_experts
+            w13_weight, w2_weight, w13_weight_scale, w2_weight_scale = (
+                prepare_fp8_moe_layer_for_marlin(
+                    layer,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    layer.w13_weight_scale,
+                    layer.w2_weight_scale,
+                )
+            )
+            # TODO(rob): once we apply refactor to Quark, switch to using
+            # replace_parameter for compatibility with reloading in RL.
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(
+                w13_weight_scale, requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                w2_weight_scale, requires_grad=False
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -341,68 +343,37 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            per_act_token_quant=self.weight_qscheme == "per_channel",
+            per_act_token_quant=self.input_qscheme == "per_channel",
+            per_out_ch_quant=self.weight_qscheme == "per_channel",
         )
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet."
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-        )
-
-        if self.rocm_aiter_moe_enabled:
-            return self.rocm_aiter_fused_experts_func(
+            return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 quant_config=self.moe_quant_config,
-                expert_map=expert_map,
+                expert_map=layer.expert_map,
             )
-        if self.use_marlin:
-            assert activation == "silu", f"{activation} not supported for Marlin MoE."
+        elif self.use_marlin:
+            assert layer.activation == "silu", (
+                f"{layer.activation} not supported for Marlin MoE."
+            )
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -411,29 +382,180 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
-                router_logits,
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                inplace=not self.moe.disable_inplace,
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=not self.moe.disable_inplace,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                quant_config=self.moe_quant_config,
             )
 
-        assert self.fused_experts_func is not None
 
-        return self.fused_experts_func(
+class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
+        self.weight_quant = weight_config
+        self.input_quant = input_config
+
+        assert rocm_aiter_ops.is_fused_moe_enabled(), (
+            "W4A8 FP8 MoE requires ROCm AITER fused MoE support."
+        )
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        params_dtype = torch.uint32
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 8,  # INT32 packing for W4
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 8,  # INT32 packing for W4
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Per-tensor fp8 weight scales
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Per-channel int4 weight scales
+        w13_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+        w2_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(num_experts, hidden_size, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
+        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+        )
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+            layer.w13_weight.data, layer.w2_weight.data
+        )
+        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+
+        # INT4-FP8 : offset INT4 w13_weight_scale1 to single w13_weight_scale
+        # Fp8 moe kernel needs single fp8 w13_weight_scale for w13 per expert.
+        # We won't do requant each expert's fp8 weight (not direct available),
+        # instead we adjust half of INT4 w13_weight_scale1 numbers
+        shard_size = layer.intermediate_size_per_partition
+        max_w13_scales = layer.w13_weight_scale.max(dim=1).values
+        assert torch.all(max_w13_scales != 0), "fp8 weight scale cannot be zero."
+        for expert_id in range(layer.local_num_experts):
+            start = 0
+            max_w13_scale_fp8 = max_w13_scales[expert_id]
+            for shard_id in range(2):
+                if layer.w13_weight_scale[expert_id][shard_id] != max_w13_scale_fp8:
+                    int4_rescale = (
+                        layer.w13_weight_scale[expert_id][shard_id] / max_w13_scale_fp8
+                    )
+                    layer.w13_weight_scale_2[expert_id][start : start + shard_size] *= (
+                        int4_rescale
+                    )
+                start += shard_size
+
+        layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales, requires_grad=False)
+
+        # special hack to asm_moe, which takes (weight_scale1 * weight_scale) as post
+        # GEMM scaling optimal design - shall apply per-column weight_scale1 before
+        # GEMM, and weight_scale post
+        for expert_id in range(layer.local_num_experts):
+            layer.w13_weight_scale_2[expert_id] *= max_w13_scales[expert_id]
+            layer.w2_weight_scale_2[expert_id] *= layer.w2_weight_scale[expert_id]
+
+    def get_fused_moe_quant_config(self, layer):
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=layer.w13_weight_scale_2,
+            w2_scale=layer.w2_weight_scale_2,
+            per_out_ch_quant=True,
+        )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            rocm_aiter_fused_experts,
+        )
+
+        return rocm_aiter_fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
+            expert_map=layer.expert_map,
         )
 
 
@@ -461,6 +583,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
         self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
+        self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
@@ -472,22 +595,24 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "not implemented. Please open an issue."
             )
 
-        if not current_platform.supports_mx():
-            self.emulate = True
+        self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
+
+        self.emulate = not current_platform.supports_mx() or not (
+            self.use_rocm_aiter_moe and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        )
+        if self.emulate:
             logger.warning_once(
-                "The current platform does not support native MXFP4/MXFP6 "
+                f"The current mode (supports_mx={current_platform.supports_mx()}, "
+                f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
+                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
+                "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
             )
         else:
-            self.emulate = True
             logger.warning_once(
-                "The current platform supports native MXFP4/MXFP6 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
+                "The current mode supports native MoE MXFP4 computation"
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
@@ -568,6 +693,35 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+    def process_weights_after_loading(self, layer):
+        if self.emulate:
+            return
+
+        from aiter.utility.fp4_utils import e8m0_shuffle
+
+        # Pre-shuffle weight scales
+        s0, s1, _ = layer.w13_weight_scale.shape
+        w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
+        w13_weight_scale = e8m0_shuffle(w13_weight_scale)
+        layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
+
+        s0, s1, _ = layer.w2_weight_scale.shape
+        w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
+        w2_weight_scale = e8m0_shuffle(w2_weight_scale)
+        layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
+
+        if self.fp4_dtype is not None:
+            layer.w13_weight = torch.nn.Parameter(
+                layer.w13_weight.view(self.fp4_dtype),
+                requires_grad=layer.w13_weight.requires_grad,
+            )
+            layer.w2_weight = torch.nn.Parameter(
+                layer.w2_weight.view(self.fp4_dtype),
+                requires_grad=layer.w2_weight.requires_grad,
+            )
+
+        torch.cuda.empty_cache()
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -583,62 +737,41 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
+        if not self.emulate:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
             )
 
-        from vllm.model_executor.layers.fused_moe import fused_experts
+            out = rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                quant_config=self.moe_quant_config,
+                expert_map=layer.expert_map,
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-        )
+            out = fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=not self.moe.disable_inplace,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                quant_config=self.moe_quant_config,
+            )
 
-        out = fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
-            quant_config=self.moe_quant_config,
-        )
         return out

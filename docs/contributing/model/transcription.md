@@ -248,9 +248,10 @@ No extra registration is required beyond having your model class available via t
 
 ## Examples in-tree
 
-- Whisper encoder–decoder (audio-only): <gh-file:vllm/model_executor/models/whisper.py>
-- Voxtral decoder-only (audio embeddings + LLM): <gh-file:vllm/model_executor/models/voxtral.py>
-- Gemma3n decoder-only with fixed instruction prompt: <gh-file:vllm/model_executor/models/gemma3n_mm.py>
+- Whisper encoder–decoder (audio-only): [vllm/model_executor/models/whisper.py](../../../vllm/model_executor/models/whisper.py)
+- Voxtral decoder-only (audio embeddings + LLM): [vllm/model_executor/models/voxtral.py](../../../vllm/model_executor/models/voxtral.py). Make sure to have installed `mistral-common[audio]`.
+- Gemma3n decoder-only with fixed instruction prompt: [vllm/model_executor/models/gemma3n_mm.py](../../../vllm/model_executor/models/gemma3n_mm.py)
+- Qwen3-Omni multimodal with audio embeddings: [vllm/model_executor/models/qwen3_omni_moe_thinker.py](../../../vllm/model_executor/models/qwen3_omni_moe_thinker.py)
 
 ## Test with the API
 
@@ -278,7 +279,7 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
       http://localhost:8000/v1/audio/translations
     ```
 
-Or check out more examples in <gh-file:examples/online_serving>.
+Or check out more examples in [examples/online_serving](../../../examples/online_serving).
 
 !!! note
     - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.

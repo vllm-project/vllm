@@ -29,7 +29,8 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import suppress_stdout
 
 logger = init_logger(__name__)
 
@@ -276,7 +277,7 @@ class StatelessProcessGroup:
             # Check for timeout
             cur_time = time.time()
             if cur_time - start_time > timeout:
-                raise RuntimeError("Barrier timed out after %f seconds", timeout)
+                raise RuntimeError(f"Barrier timed out after {timeout:.2f} seconds")
 
             # Check for each process
             for i in range(self.world_size):
@@ -323,7 +324,9 @@ class StatelessProcessGroup:
         while len(processes_departed) < self.world_size:
             # Check for timeout
             if time.time() - start_time > timeout:
-                raise RuntimeError("Barrier departure timed out after %f s", timeout)
+                raise RuntimeError(
+                    f"Barrier departure timed out after {timeout:.2f} seconds"
+                )
 
             # Check for each process
             for i in range(self.world_size):
@@ -424,33 +427,23 @@ def init_gloo_process_group(
     Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
-    if is_torch_equal_or_newer("2.6"):
+    with suppress_stdout():
         pg = ProcessGroup(
             prefix_store,
             group_rank,
             group_size,
         )
-    else:
-        options = ProcessGroup.Options(backend="gloo")
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-            options,
-        )
-    from torch.distributed.distributed_c10d import ProcessGroupGloo
+        from torch.distributed.distributed_c10d import ProcessGroupGloo
 
-    backend_class = ProcessGroupGloo(
-        prefix_store, group_rank, group_size, timeout=timeout
-    )
-    backend_type = ProcessGroup.BackendType.GLOO
-    device = torch.device("cpu")
-    if is_torch_equal_or_newer("2.6"):
-        # _set_default_backend is supported in torch >= 2.6
+        backend_class = ProcessGroupGloo(
+            prefix_store, group_rank, group_size, timeout=timeout
+        )
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
         pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
+        backend_class._set_sequence_number_for_group()
 
-    pg._register_backend(device, backend_type, backend_class)
+        pg._register_backend(device, backend_type, backend_class)
     return pg
 
 
@@ -529,12 +522,5 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    if is_torch_equal_or_newer("2.7"):
-        pg.shutdown()
-    else:
-        # Lazy import for non-CUDA backends.
-        from torch.distributed.distributed_c10d import _shutdown_backend
-
-        _shutdown_backend(pg)
-
+    pg.shutdown()
     _unregister_process_group(pg.group_name)

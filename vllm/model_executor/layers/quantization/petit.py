@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/modelopt.py
 
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -158,9 +159,7 @@ class PetitNvFp4Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
+    ) -> "QuantizeMethodBase | None":
         exclude = self.require_exclude_modules()
 
         if isinstance(layer, LinearBase):

@@ -5,25 +5,26 @@
 # https://github.com/zai-org/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 
-import itertools
 from argparse import Namespace
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Annotated, Literal
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import LayerNorm
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PretrainedConfig, PreTrainedTokenizer, TensorType
+from transformers import BatchFeature, PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -36,22 +37,23 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .chatglm import ChatGLMBaseModel, ChatGLMModel
+from .chatglm import ChatGLMBaseModel, ChatGLMModel, GLMTransformer
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -77,7 +79,7 @@ class GLMVImagePixelInputs(TensorSchema):
 class EVA2CLIPPatchEmbedding(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             config.in_channels,
             config.hidden_size,
             kernel_size=config.patch_size,
@@ -133,8 +135,11 @@ class EVA2CLIPAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.attn = MultiHeadAttention(
-            self.num_heads_per_rank, self.head_dim, self.scale
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_rank,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
@@ -332,7 +337,7 @@ class EVA2CLIPModel(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_proj",
         )
-        self.conv = nn.Conv2d(
+        self.conv = Conv2dLayer(
             in_channels=vision_config.hidden_size,
             out_channels=config.hidden_size,
             kernel_size=2,
@@ -559,8 +564,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -591,11 +594,16 @@ class GLM4VForCausalLM(
         prefix: str = "",
         transformer_type: type[GLM4VModel] = GLM4VModel,
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=GLMTransformer,
+            tower_targets={"image": EVA2CLIPModel},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: GLM4VModel
 
@@ -619,156 +627,60 @@ class GLM4VForCausalLM(
 
         return self.transformer.vision(pixel_values)
 
-    @classmethod
-    def get_mrope_input_positions(
-        cls,
-        input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
-    ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for GLM4V."""
-
-        image_token_id = hf_config.image_token_id
-        video_start_token_id = hf_config.video_start_token_id
-        video_end_token_id = hf_config.video_end_token_id
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        hf_config = self.config
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            offset = mm_feature.mm_position.offset
+            if mm_feature.modality == "image":
+                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                assert t == 1, f"Image must have 1 frame, got {t}"
+                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
+            else:
+                # glm4v only supports image modality
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
+        st = 0
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w)).reshape(
+                3, -1
+            )
+            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            # EVA2CLIPModel has embeddings for boi and eoi tokens as well
+            st = offset + 1 + llm_grid_t * llm_grid_h * llm_grid_w + 1
 
-        if not (image_grid_thw is None and video_grid_thw is None):
-            if isinstance(image_grid_thw, torch.Tensor):
-                image_grid_thw = image_grid_thw.tolist()
+        if st < len(input_tokens):
+            text_len = len(input_tokens) - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
 
-            input_token_type: list[str] = []
-            video_check_flg = False
-            for token in input_tokens:
-                if token == video_start_token_id:
-                    video_check_flg = True
-                elif token == video_end_token_id:
-                    video_check_flg = False
-
-                if (token == image_token_id) and (video_check_flg is False):
-                    input_token_type.append("image")
-                elif (token == image_token_id) and (video_check_flg is True):
-                    input_token_type.append("video")
-                else:
-                    input_token_type.append("text")
-
-            input_type_group: list[tuple[str, int, int]] = []
-            for key, group_iter in itertools.groupby(
-                enumerate(input_token_type), lambda x: x[1]
-            ):
-                group_list = list(group_iter)
-                start_index = group_list[0][0]
-                end_index = group_list[-1][0] + 1
-                input_type_group.append((key, start_index, end_index))
-
-            video_frame_num = 1
-            mm_data_idx = 0
-            for modality_type, start_idx, end_idx in input_type_group:
-                st_idx = (
-                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                )
-                if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t,
-                        h // spatial_merge_size,
-                        w // spatial_merge_size,
-                    )
-
-                    t_index = (
-                        torch.arange(llm_grid_t)
-                        .view(-1, 1)
-                        .expand(-1, llm_grid_h * llm_grid_w)
-                        .flatten()
-                    )
-                    h_index = (
-                        torch.arange(llm_grid_h)
-                        .view(1, -1, 1)
-                        .expand(llm_grid_t, -1, llm_grid_w)
-                        .flatten()
-                    )
-                    w_index = (
-                        torch.arange(llm_grid_w)
-                        .view(1, 1, -1)
-                        .expand(llm_grid_t, llm_grid_h, -1)
-                        .flatten()
-                    )
-                    llm_pos_ids_list.append(
-                        torch.stack([t_index, h_index, w_index]) + st_idx
-                    )
-                    mm_data_idx += 1
-
-                elif modality_type == "video":
-                    t, h, w = (
-                        video_frame_num,
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t,
-                        h // spatial_merge_size,
-                        w // spatial_merge_size,
-                    )
-
-                    for t_idx in range(llm_grid_t):
-                        t_index = (
-                            torch.tensor(t_idx)
-                            .view(-1, 1)
-                            .expand(-1, llm_grid_h * llm_grid_w)
-                            .flatten()
-                        )
-                        h_index = (
-                            torch.arange(llm_grid_h)
-                            .view(1, -1, 1)
-                            .expand(1, -1, llm_grid_w)
-                            .flatten()
-                        )
-                        w_index = (
-                            torch.arange(llm_grid_w)
-                            .view(1, 1, -1)
-                            .expand(1, llm_grid_h, -1)
-                            .flatten()
-                        )
-                        llm_pos_ids_list.append(
-                            torch.stack([t_index, h_index, w_index]) + st_idx
-                        )
-
-                    mm_data_idx += 1
-                    video_frame_num += 1
-
-                else:
-                    text_len = end_idx - start_idx
-                    llm_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                    )
-                    video_frame_num = 1
-
-        else:
-            text_len = len(input_tokens)
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        llm_positions = llm_positions[:, context_len:seq_len]
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        return llm_positions, mrope_position_delta
+        return torch.from_numpy(llm_positions), mrope_position_delta
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
-    get_input_embeddings = SupportsMultiModal.get_input_embeddings
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -778,7 +690,7 @@ class GLM4VForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

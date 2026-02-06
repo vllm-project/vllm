@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, has_deep_gemm
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
     calc_diff,
@@ -15,6 +14,8 @@ from vllm.utils.deep_gemm import (
     get_num_sms,
     get_paged_mqa_logits_metadata,
 )
+from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.math_utils import cdiv
 
 
 def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
@@ -94,7 +95,8 @@ def _ref_fp8_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_mqa_logits():
+@pytest.mark.parametrize("clean_logits", [True, False])
+def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
     torch.manual_seed(0)
     random.seed(0)
     num_heads, head_dim = 32, 128
@@ -125,7 +127,9 @@ def test_deepgemm_fp8_mqa_logits():
 
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
-                logits = fp8_mqa_logits(q_fp8, kv_fp8, weights, ks, ke)
+                logits = fp8_mqa_logits(
+                    q_fp8, kv_fp8, weights, ks, ke, clean_logits=clean_logits
+                )
 
                 ref_logits = _ref_fp8_mqa_logits(
                     q=q,
@@ -134,13 +138,14 @@ def test_deepgemm_fp8_mqa_logits():
                     cu_seqlen_ks=ks,
                     cu_seqlen_ke=ke,
                 )
-
                 ref_neginf_mask = ref_logits == float("-inf")
-                neginf_mask = logits == float("-inf")
-                assert torch.equal(neginf_mask, ref_neginf_mask)
+
+                if clean_logits:
+                    neginf_mask = logits == float("-inf")
+                    assert torch.equal(neginf_mask, ref_neginf_mask)
 
                 ref_logits = ref_logits.masked_fill(ref_neginf_mask, 0)
-                logits = logits.masked_fill(neginf_mask, 0)
+                logits = logits.masked_fill(ref_neginf_mask, 0)
                 diff = calc_diff(logits, ref_logits)
                 assert diff < 1e-3, f"{diff=}"
 
@@ -200,7 +205,8 @@ def _ref_fp8_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_paged_mqa_logits():
+@pytest.mark.parametrize("clean_logits", [True, False])
+def test_deepgemm_fp8_paged_mqa_logits(clean_logits: bool):
     torch.manual_seed(0)
     random.seed(0)
 
@@ -263,6 +269,7 @@ def test_deepgemm_fp8_paged_mqa_logits():
                     block_tables,
                     schedule_metadata,
                     max_model_len,
+                    clean_logits=clean_logits,
                 )
 
                 ref_logits = _ref_fp8_paged_mqa_logits(

@@ -7,7 +7,7 @@ This guide covers optimization strategies and performance tuning for vLLM V1.
 
 ## Preemption
 
-Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
+Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
 In such cases, vLLM can preempt requests to free up KV cache space for other requests. Preempted requests are recomputed when sufficient KV cache space becomes
 available again. When this occurs, you may see the following warning:
 
@@ -27,15 +27,11 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
-[](){ #chunked-prefill }
-
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
 
-In vLLM V1, **chunked prefill is always enabled by default**. This is different from vLLM V0, where it was conditionally enabled based on model characteristics.
-
-With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
+In V1, **chunked prefill is enabled by default whenever possible**. With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
 
 This policy has two benefits:
 
@@ -50,6 +46,10 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
+
+!!! warning
+    When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
+    In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
 
 ```python
 from vllm import LLM
@@ -174,14 +174,14 @@ Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to u
 
 Known supported models (with corresponding benchmarks):
 
-- dots_ocr (<gh-pr:25466>)
-- GLM-4.1V or above (<gh-pr:23168>)
-- InternVL (<gh-pr:23909>)
-- Kimi-VL (<gh-pr:23817>)
-- Llama4 (<gh-pr:18368>)
-- MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
-- Qwen2-VL or above (<gh-pr:22742>, <gh-pr:24955>, <gh-pr:25445>)
-- Step3 (<gh-pr:22697>)
+- dots_ocr (<https://github.com/vllm-project/vllm/pull/25466>)
+- GLM-4.1V or above (<https://github.com/vllm-project/vllm/pull/23168>)
+- InternVL (<https://github.com/vllm-project/vllm/pull/23909>)
+- Kimi-VL (<https://github.com/vllm-project/vllm/pull/23817>)
+- Llama4 (<https://github.com/vllm-project/vllm/pull/18368>)
+- MiniCPM-V-2.5 or above (<https://github.com/vllm-project/vllm/pull/23327>, <https://github.com/vllm-project/vllm/pull/23948>)
+- Qwen2-VL or above (<https://github.com/vllm-project/vllm/pull/22742>, <https://github.com/vllm-project/vllm/pull/24955>, <https://github.com/vllm-project/vllm/pull/25445>)
+- Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
 ## Input Processing
 
@@ -288,5 +288,11 @@ Based on the configuration, the content of the multi-modal caches on `P0` and `P
 | shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
 | N/A | Disabled | N/A | N/A | N/A | `0` |
 
-K: Stores the hashes of multi-modal items  
+K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
+
+## Attention Backend Selection
+
+vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
+
+For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.

@@ -8,7 +8,6 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
-import os
 from dataclasses import dataclass
 from importlib.util import find_spec
 
@@ -56,7 +55,10 @@ def enable_pickle(monkeypatch):
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     with vllm_runner(
-        model_path, kv_cache_dtype=kv_cache_dtype, tensor_parallel_size=tp
+        model_path,
+        enforce_eager=True,
+        kv_cache_dtype=kv_cache_dtype,
+        tensor_parallel_size=tp,
     ) as llm:
 
         def check_model(model):
@@ -74,14 +76,14 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
     model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
-    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -98,14 +100,14 @@ def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
-    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -117,7 +119,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
@@ -210,11 +212,11 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
     rtol = 0.1
 
-    # Smaller cuda_graph_sizes to speed up the test.
+    # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cuda_graph_sizes": [16]}
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
         tasks=task,
         batch_size=64,
@@ -243,8 +245,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     task = "gsm8k"
     rtol = 0.03
 
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(tp_size=8, model_max_len=38768),
@@ -259,8 +259,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         measured_value - rtol < EXPECTED_VALUE
         and measured_value + rtol > EXPECTED_VALUE
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
-
-    del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
 
 
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")

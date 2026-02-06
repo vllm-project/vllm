@@ -4,12 +4,11 @@
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
-from vllm.reasoning import (
-    DeepSeekR1ReasoningParser,
-    DeepSeekV3ReasoningParser,
-    IdentityReasoningParser,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
+from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
@@ -42,18 +41,19 @@ def test_identity_reasoning_parser_basic(tokenizer):
     input_tokens = tokenizer.tokenize(input_text)
     input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
     assert parser.is_reasoning_end(input_ids) is True
+    assert parser.is_reasoning_end_streaming(input_ids, input_ids) is True
 
     # Test extract_content_ids returns all input_ids
     assert parser.extract_content_ids(input_ids) == input_ids
 
-    # Test extract_reasoning_content returns (None, model_output)
+    # Test extract_reasoning returns (None, model_output)
     request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
-    reasoning, content = parser.extract_reasoning_content(input_text, request)
+    reasoning, content = parser.extract_reasoning(input_text, request)
     assert reasoning is None
     assert content == input_text
 
-    # Test extract_reasoning_content_streaming returns DeltaMessage or None
-    result = parser.extract_reasoning_content_streaming(
+    # Test extract_reasoning_streaming returns DeltaMessage or None
+    result = parser.extract_reasoning_streaming(
         previous_text="",
         current_text="Hello world",
         delta_text="Hello world",
@@ -65,7 +65,7 @@ def test_identity_reasoning_parser_basic(tokenizer):
     assert result.content == "Hello world"
 
     # If delta_text is empty, should return None
-    result_none = parser.extract_reasoning_content_streaming(
+    result_none = parser.extract_reasoning_streaming(
         previous_text="Hello world",
         current_text="Hello world",
         delta_text="",

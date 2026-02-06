@@ -7,32 +7,46 @@ from typing import ClassVar
 import torch
 
 import vllm._custom_ops as ops
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    MultipleOf,
-    is_quantized_kv_cache,
-)
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
 
 class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # enable full CUDA Graph support for decode-only capture
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
 
 class CutlassMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [128]
+
     @staticmethod
     def get_name() -> str:
         return "CUTLASS_MLA"
@@ -45,9 +59,9 @@ class CutlassMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
 
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [128]
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 10
 
 
 class SM100Workspace:
@@ -230,7 +244,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return out, lse
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,

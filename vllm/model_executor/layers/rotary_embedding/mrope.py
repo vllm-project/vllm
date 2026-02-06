@@ -4,12 +4,10 @@
 
 import numpy as np
 import torch
-from transformers import PretrainedConfig
 
 from vllm.triton_utils import tl, triton
 
-from .base import RotaryEmbedding
-from .common import apply_rotary_emb_dispatch
+from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
 
 
@@ -200,7 +198,7 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
-class MRotaryEmbedding(RotaryEmbedding):
+class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
     def __init__(
@@ -279,9 +277,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if positions.ndim == 2:
             assert self.mrope_section
@@ -302,14 +300,22 @@ class MRotaryEmbedding(RotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query_rot = self.apply_rotary_emb.forward_native(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key_rot = self.apply_rotary_emb.forward_native(
+            key_rot,
+            cos,
+            sin,
+        )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -323,9 +329,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
         key_shape = key.shape
@@ -348,24 +354,23 @@ class MRotaryEmbedding(RotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query_rot = self.apply_rotary_emb(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key_rot = self.apply_rotary_emb(
+            key_rot,
+            cos,
+            sin,
+        )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
-
-    def forward_xpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_native(positions, query, key, offsets)
 
     def forward_cpu(
         self,
@@ -375,39 +380,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
-
-    @classmethod
-    def get_input_positions(
-        cls,
-        input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
-    ) -> tuple[list[list[int]], int]:
-        """Get mrope input positions and delta value."""
-
-        image_grid_thw = [] if image_grid_thw is None else image_grid_thw
-        video_grid_thw = [] if video_grid_thw is None else video_grid_thw
-        second_per_grid_ts = [] if second_per_grid_ts is None else second_per_grid_ts
-
-        llm_positions, mrope_position_delta = cls.get_input_positions_tensor(
-            input_tokens=input_tokens,
-            hf_config=hf_config,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,
-            context_len=context_len,
-            seq_len=seq_len,
-            audio_feature_lengths=audio_feature_lengths,
-            use_audio_in_video=use_audio_in_video,
-        )
-
-        return llm_positions.tolist(), mrope_position_delta
 
     @staticmethod
     def get_next_input_positions(

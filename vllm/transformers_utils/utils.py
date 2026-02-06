@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import struct
 from functools import cache
 from os import PathLike
@@ -18,22 +19,12 @@ def is_s3(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("s3://")
 
 
-def check_gguf_file(model: str | PathLike) -> bool:
-    """Check if the file is a GGUF model."""
-    model = Path(model)
-    if not model.is_file():
-        return False
-    elif model.suffix == ".gguf":
-        return True
+def is_gcs(model_or_path: str) -> bool:
+    return model_or_path.lower().startswith("gs://")
 
-    try:
-        with model.open("rb") as f:
-            header = f.read(4)
 
-        return header == b"GGUF"
-    except Exception as e:
-        logger.debug("Error reading file %s: %s", model, e)
-        return False
+def is_cloud_storage(model_or_path: str) -> bool:
+    return is_s3(model_or_path) or is_gcs(model_or_path)
 
 
 def modelscope_list_repo_files(
@@ -109,3 +100,13 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
         length_of_metadata = struct.unpack("<Q", f.read(8))[0]
         metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
         return metadata
+
+
+def convert_model_repo_to_path(model_repo: str) -> str:
+    """When VLLM_USE_MODELSCOPE is True convert a model
+    repository string to a Path str."""
+    if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
+        return model_repo
+    from modelscope.utils.file_utils import get_model_cache_root
+
+    return os.path.join(get_model_cache_root(), model_repo)

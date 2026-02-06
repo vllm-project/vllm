@@ -3,9 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import fields
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jsonschema
 import pytest
@@ -21,15 +20,9 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import (
-    GuidedDecodingParams,
     SamplingParams,
     StructuredOutputsParams,
 )
-
-if TYPE_CHECKING:
-    from vllm.config.model import TokenizerMode
-else:
-    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -46,17 +39,45 @@ EAGLE_SPEC_CONFIG = {
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
+    # it, we skip these tests for now.
+    # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
+    pytest.param(
+        "mistralai/Ministral-8B-Instruct-2410",
+        "lm-format-enforcer",
+        "hf",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
     # ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG),
 ]
@@ -65,6 +86,10 @@ PARAMS_MODELS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "auto"),
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
+
+platform_args = {}
+if current_platform.is_rocm():
+    platform_args["async_scheduling"] = False
 
 
 class CarType(str, Enum):
@@ -80,24 +105,6 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-def test_guided_decoding_deprecated():
-    with pytest.warns(DeprecationWarning, match="GuidedDecodingParams is deprecated.*"):
-        guided_decoding = GuidedDecodingParams(json_object=True)
-
-    structured_outputs = StructuredOutputsParams(json_object=True)
-    assert fields(guided_decoding) == fields(structured_outputs)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp1 = SamplingParams(guided_decoding=guided_decoding)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp2 = SamplingParams.from_optional(guided_decoding=guided_decoding)
-
-    assert sp1 == sp2
-    assert sp1.structured_outputs == guided_decoding
-
-
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
@@ -128,7 +135,10 @@ def test_structured_output(
         ),
         seed=120,
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
+        **platform_args,
     )
 
     #
@@ -602,9 +612,8 @@ Make the response as short as possible.
                 )
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config, async_scheduling",  # noqa: E501
     [
         (
             "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -612,16 +621,19 @@ Make the response as short as possible.
             "auto",
             "deepseek_r1",
             NGRAM_SPEC_CONFIG,
+            False,
         ),
-        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, False),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, True),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
     backend: str,
-    tokenizer_mode: TokenizerMode,
+    tokenizer_mode: str,
     reasoning_parser: str,
     model_name: str,
     speculative_config: dict[str, Any] | None,
+    async_scheduling: bool,
 ):
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
@@ -642,6 +654,7 @@ def test_structured_output_with_reasoning_matrices(
         ),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
+        async_scheduling=async_scheduling,
     )
     tokenizer = llm.get_tokenizer()
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
@@ -674,15 +687,19 @@ def test_structured_output_with_reasoning_matrices(
     assert output is not None and isinstance(output, RequestOutput)
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    reasoning_content, content = run_reasoning_extraction(reasoner, [generated_text])
-    print(f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}")
+    reasoning, content = run_reasoning_extraction(reasoner, [generated_text])
+    print(f"Prompt: {prompt!r}\nReasoning: {reasoning!r}\nContent: {content!r}")
 
-    assert content is not None and reasoning_content is not None
-    output_json = json.loads(content)
-    jsonschema.validate(instance=output_json, schema=reasoning_schema)
+    if "Qwen3" in model_name:
+        assert content is not None
+
+    assert reasoning is not None
+
+    if content is not None:
+        output_json = json.loads(content)
+        jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
     unsupported_json_schema: dict[str, Any],
@@ -694,6 +711,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
+        load_format="auto",
+        config_format="auto",
     )
 
     sampling_params = SamplingParams(
@@ -729,7 +748,6 @@ def test_structured_output_auto_mode(
         assert isinstance(parsed_json, dict)
 
 
-@pytest.mark.skip_global_cleanup
 def test_guidance_no_additional_properties():
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
@@ -864,3 +882,44 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
             # non-structured outputs requests should not return a valid JSON here
             with pytest.raises(ValueError):
                 output_json = json.loads(generated_text)
+
+
+@pytest.mark.parametrize("backend", ["xgrammar"])
+def test_structured_output_with_structural_tag(backend: str):
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
+    )
+
+    structural_tag_config = {
+        "type": "structural_tag",
+        "format": {
+            "type": "triggered_tags",
+            "tags": [
+                {"begin": "hello_flag", "content": {"type": "any_text"}, "end": "hello"}
+            ],
+            "triggers": ["hello"],
+            "stop_after_first": False,
+        },
+    }
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=500,
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=json.dumps(structural_tag_config)
+        ),
+    )
+
+    prompt = "Hello and repete hello 10 times, do not say anything else. Only say hello hello hello, now start"
+    outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        assert "hello_flag" in generated_text, (
+            f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
+        )

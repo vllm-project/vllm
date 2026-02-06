@@ -9,7 +9,7 @@ import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
@@ -33,7 +33,7 @@ def run_test(
     auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     comparator: Callable[..., None],
-    get_stop_token_ids: Callable[[AnyTokenizer], list[int]] | None,
+    get_stop_token_ids: Callable[[TokenizerLike], list[int]] | None,
     stop_str: list[str] | None,
     limit_mm_per_prompt: dict[str, int],
     vllm_runner_kwargs: dict[str, Any] | None,
@@ -71,8 +71,9 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
-    if model_info.skip_tokenizer_init:
-        vllm_runner_kwargs_["skip_tokenizer_init"] = model_info.skip_tokenizer_init
+    if model_info.require_embed_inputs:
+        for k in ("skip_tokenizer_init", "enable_prompt_embeds", "enable_mm_embeds"):
+            vllm_runner_kwargs_[k] = model_info.require_embed_inputs
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)

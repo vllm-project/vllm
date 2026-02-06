@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class FPQuantConfig(QuantizationConfig):
@@ -246,10 +246,6 @@ class FPQuantLinearMethod(LinearMethodBase):
             self.quant_config.forward_method,
             self.quant_config.forward_dtype,
         )
-
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
 
 
 def fused_quantize_mx(

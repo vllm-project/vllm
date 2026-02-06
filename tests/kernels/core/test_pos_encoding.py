@@ -9,7 +9,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float]
@@ -62,6 +62,7 @@ TENSORS_SHAPES_FN = [
 @pytest.mark.parametrize("use_key", USE_KEY)
 @torch.inference_mode()
 def test_rotary_embedding(
+    default_vllm_config,
     is_neox_style: bool,
     tensor_shape_fn: Callable[[int, int, int, int], tuple[int, ...]],
     batch_size: int,
@@ -74,16 +75,21 @@ def test_rotary_embedding(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: float = 10000,
+    rope_theta: float = 10000,
 ) -> None:
     if rotary_dim is None:
         rotary_dim = head_size
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
+    rope_parameters = {
+        "rope_type": "default",
+        "rope_theta": rope_theta,
+        "partial_rotary_factor": rotary_dim / head_size,
+    }
+    rope = get_rope(head_size, max_position, is_neox_style, rope_parameters)
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
@@ -118,11 +124,11 @@ def test_rotary_embedding(
 
 
 @torch.inference_mode()
-def test_rope_module_cache():
+def test_rope_module_cache(default_vllm_config):
     MAX_POSITIONS = [123, 1234]
-    BASES = [10000, 1000000]
-    ROPE_SCALINGS = (
-        None,
+    ROPE_THETAS = [10000, 1000000]
+    ROPE_PARAMETERS = (
+        {"rope_type": "default"},
         {"rope_type": "linear", "factor": (1,)},
         {"rope_type": "dynamic", "factor": 1},
     )
@@ -130,9 +136,9 @@ def test_rope_module_cache():
         HEAD_SIZES,
         ROTARY_DIMS,
         MAX_POSITIONS,
-        BASES,
+        ROPE_THETAS,
         IS_NEOX_STYLE,
-        ROPE_SCALINGS,
+        ROPE_PARAMETERS,
         DTYPES,
     )
     rope_setting_id_map: dict[str, int] = {}
@@ -141,20 +147,20 @@ def test_rope_module_cache():
             head_size,
             rotary_dim,
             max_position,
-            base,
-            is_neox_stype,
-            rope_scaling,
+            rope_theta,
+            is_neox_style,
+            rope_parameters,
             dtype,
         ) = setting
         if rotary_dim is None:
             rotary_dim = head_size
+        rope_parameters["rope_theta"] = rope_theta
+        rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
             head_size,
-            rotary_dim,
             max_position,
-            base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         )
         # different settings cannot share the same rope module
@@ -168,20 +174,20 @@ def test_rope_module_cache():
             head_size,
             rotary_dim,
             max_position,
-            base,
-            is_neox_stype,
-            rope_scaling,
+            rope_theta,
+            is_neox_style,
+            rope_parameters,
             dtype,
         ) = setting
         if rotary_dim is None:
             rotary_dim = head_size
+        rope_parameters["rope_theta"] = rope_theta
+        rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
             head_size,
-            rotary_dim,
             max_position,
-            base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         )
         # check if cache take effect

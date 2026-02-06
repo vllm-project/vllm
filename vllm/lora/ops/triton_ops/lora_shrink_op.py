@@ -12,7 +12,7 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -41,15 +41,26 @@ def _lora_shrink_kernel(
     BLOCK_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
     SLICE_NUM: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
 
     pid_sk_m_n = tl.program_id(axis=0)
     pid_sk = pid_sk_m_n % SPLIT_K
-    pid_m = (pid_sk_m_n // SPLIT_K) % cta_m_num
-    pid_n = pid_sk_m_n // (SPLIT_K * cta_m_num) % cta_n_num
+
+    pid_m_n = pid_sk_m_n // SPLIT_K
+    num_pid_in_group = GROUP_SIZE_M * cta_n_num
+    group_id = pid_m_n // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(cta_m_num - first_pid_m, GROUP_SIZE_M)
+
+    # Column-major ordering within groups for better cache reuse
+    pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
+    pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
@@ -74,7 +85,6 @@ def _lora_shrink_kernel(
     cta_lora_seq_indices = (
         token_indices_sorted_by_lora_ids + lora_m_indices_start + cta_m_offset
     )
-
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
     ram = tl.load(cta_lora_seq_indices + offset_m)
@@ -109,6 +119,7 @@ def _lora_shrink_kernel(
         EVEN_K,
         SPLIT_K,
         SLICE_NUM,
+        USE_GDC,
     )
 
 
@@ -123,6 +134,7 @@ def _lora_shrink(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     scaling: float,
 ) -> None:
     """
@@ -169,6 +181,8 @@ def _lora_shrink(
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
 
+    output_tensor.zero_()
+
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1, lora_strides_d2) = (
         _get_lora_a_ptr(lora_a_weights, inputs.device)
     )
@@ -192,6 +206,7 @@ def _lora_shrink(
     NUM_WARPS = kernel_config["num_warps"]
     NUM_STAGES = kernel_config["num_stages"]
     NUM_CTAS = kernel_config["num_ctas"]
+    GROUP_SIZE_M = kernel_config.get("group_size_m", 8)
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
     # TODO (varun): This grid formulation maximizes parallelization at the
@@ -200,12 +215,11 @@ def _lora_shrink(
     grid = (
         SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        # Each LoRA receives its own set of thread blocks for output
-        # computation. If some LoRA doesn't have any tokens to process, its
-        # thread blocks exit early.
-        MAX_LORAS,
+        num_active_loras,
     )
-
+    # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
+    # making PDL invalid and affecting the kernel performance.
+    use_gdc = False  # supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -231,10 +245,13 @@ def _lora_shrink(
         BLOCK_K,
         EVEN_K,
         SPLIT_K,
+        GROUP_SIZE_M,
         NUM_SLICES,
+        use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
+        launch_pdl=use_gdc,
     )
 
     return
@@ -250,6 +267,7 @@ def _lora_shrink_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: int,
     scaling: float,
 ) -> None:
     return

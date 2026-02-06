@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import MemorySnapshot
+from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 # Global queue to track operation order across processes

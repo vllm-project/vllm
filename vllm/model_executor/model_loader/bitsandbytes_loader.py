@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 import fnmatch
 import glob
 import itertools
@@ -23,6 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.lora.utils import is_moe_model
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -32,7 +32,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import ParamMapping, set_default_torch_dtype
+from vllm.model_executor.model_loader.utils import ParamMapping
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -48,17 +48,13 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
 
-def is_moe_model(model: torch.nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers."""
-    return bool(any(isinstance(module, FusedMoE) for module in model.modules()))
-
-
 class BitsAndBytesModelLoader(BaseModelLoader):
-    """Model loader to load model weights with BitAndBytes quantization."""
+    """Model loader to load model weights with BitsAndBytes quantization."""
 
     possible_config_file_names = ["adapter_config.json"]
 

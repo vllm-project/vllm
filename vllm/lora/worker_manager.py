@@ -8,8 +8,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.lora.models import (
-    LoRAModel,
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.model_manager import (
     LoRAModelManager,
     LRUCacheLoRAModelManager,
     create_lora_manager,
@@ -34,12 +34,10 @@ class WorkerLoRAManager:
         vllm_config: VllmConfig,
         device: torch.device,
         embedding_modules: dict[str, str],
-        embedding_padding_modules: list[str],
         lora_model_cls: type[LoRAModel] = LoRAModel,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
-        self.embedding_padding_modules = embedding_padding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
@@ -71,6 +69,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -80,6 +79,7 @@ class WorkerLoRAManager:
             lora_config=self.lora_config,
             device=self.device,
             lora_manager_cls=self._manager_cls,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -88,14 +88,15 @@ class WorkerLoRAManager:
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_modules: list[str] = []
+            expected_lora_lst: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_lora_lst.extend(packed_modules_mapping[module])
                 else:
-                    expected_lora_modules.append(module)
-
-            expected_lora_modules = list(set(expected_lora_modules))
+                    expected_lora_lst.append(module)
+                if module == "experts":
+                    expected_lora_lst.append(module)
+            expected_lora_modules = set(expected_lora_lst)
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
@@ -113,6 +114,9 @@ class WorkerLoRAManager:
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
+            # Get model-defined prefixes to skip during LoRA loading.
+            lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -120,12 +124,10 @@ class WorkerLoRAManager:
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size
-                + self.lora_config.lora_extra_vocab_size,
-                embedding_modules=self.embedding_modules,
-                embedding_padding_modules=self.embedding_padding_modules,
+                model_vocab_size=self.vocab_size,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
+                skip_prefixes=lora_skip_prefixes,
             )
 
         except FileNotFoundError as e:
@@ -142,12 +144,6 @@ class WorkerLoRAManager:
             # For BadRequestError
             raise e
 
-        if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
-            raise ValueError(
-                f"LoRA added vocab size {lora.extra_vocab_size} "
-                f"is greater than lora_extra_vocab_size "
-                f"{self.lora_config.lora_extra_vocab_size}."
-            )
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
@@ -170,6 +166,12 @@ class WorkerLoRAManager:
         self._apply_adapters(requests)
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
+
+    def supports_tower_connector_lora(self) -> bool:
+        return (
+            self._adapter_manager.supports_mm
+            and self._adapter_manager.supports_tower_connector_lora
+        )
 
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
@@ -220,6 +222,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -229,6 +232,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -254,12 +258,19 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if (
+            lora_request.lora_int_id not in self.list_adapters()
+            or lora_request.load_inplace
+        ):
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
+
+            # Remove the existing adapter if it exists
+            # Use case for LoRA inplace
+            self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
