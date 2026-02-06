@@ -922,16 +922,16 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     ) -> tuple[np.ndarray, dict[str, Any]]:
         """
         Ensure video has at least _MIN_VIDEO_FRAMES frames.
-        
+
         Qwen3-VL's video processor requires a minimum of 2 frames.
-        For very short videos where only 1 frame is sampled (e.g., when 
+        For very short videos where only 1 frame is sampled (e.g., when
         fps * duration < 2), we duplicate the single frame to meet this
         requirement without re-downloading or re-processing the video.
-        
+
         Args:
             video_array: Video frames array with shape (num_frames, H, W, C)
             metadata: Video metadata dict, may contain 'frames_indices'
-            
+
         Returns:
             Tuple of (adjusted_video_array, adjusted_metadata)
         """
@@ -941,13 +941,13 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             repeats = min_frames - video_array.shape[0] + 1
             video_array = np.concatenate([video_array] * repeats, axis=0)
             video_array = video_array[:min_frames]
-            
+
             # Keep metadata consistent with frame count
             if "frames_indices" in metadata:
                 metadata = dict(metadata)
                 indices = metadata["frames_indices"]
                 metadata["frames_indices"] = (indices * repeats)[:min_frames]
-        
+
         return video_array, metadata
 
     def _call_hf_processor(
