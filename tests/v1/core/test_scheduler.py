@@ -129,7 +129,7 @@ def test_schedule_multimodal_requests_one_batch():
 
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
-    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.0, 2.0), (2.0, 2.0)],
+    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 2.0)],
 )
 def test_schedule_multimodal_requests_multi_batch(
     encoder_budget_mult, encoder_cache_mult
@@ -146,6 +146,8 @@ def test_schedule_multimodal_requests_multi_batch(
             length=int(MAX_MM_ITEM_TOKS * (i / NUM_MM_ITEMS)),
         )
         mm_positions.append(mm_position)
+
+        print(f"{mm_position.length=}")
         start_idx += mm_position.length
     total_len = start_idx
 
@@ -156,9 +158,6 @@ def test_schedule_multimodal_requests_multi_batch(
         encoder_cache_size=int(encoder_cache_mult * MAX_MM_ITEM_TOKS),
     )
 
-    # The test should check different regimes of
-    # max_num_batched_encoder_embeds and encoder_cache_size
-    # based on
     assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
     requests = create_requests(
         num_requests=1,
@@ -183,6 +182,7 @@ def test_schedule_multimodal_requests_multi_batch(
         )
         scheduler.update_from_output(output, model_runner_output)
 
+        print(f"{output.num_scheduled_tokens=}")
         total_scheduled_tokens += sum(output.num_scheduled_tokens.values())
 
     assert total_scheduled_tokens == total_len, (
