@@ -949,6 +949,13 @@ def test_streamed_args_for_tool_populated_v11_multiple_tools(
         "streamed_args_for_tool should have entries for each tool call "
         f"but had {len(mistral_tool_parser.streamed_args_for_tool)}"
     )
+    # The accumulated arguments strings should match the expected arguments
+    expected_args_0 = json.dumps({"a": 3.5, "b": 4})
+    expected_args_1 = json.dumps(
+        {"city": "San Francisco", "state": "CA", "unit": "celsius"}
+    )
+    assert mistral_tool_parser.streamed_args_for_tool[0] == expected_args_0
+    assert mistral_tool_parser.streamed_args_for_tool[1] == expected_args_1
 
 
 def test_streamed_args_for_tool_populated_pre_v11(
@@ -978,6 +985,10 @@ def test_streamed_args_for_tool_populated_pre_v11(
         "calls but was empty, which would cause IndexError in "
         "serving_chat.py"
     )
+    # The accumulated arguments string should match the expected arguments
+    assert json.loads(
+        mistral_pre_v11_tool_parser.streamed_args_for_tool[0]
+    ) == {"a": 3, "b": 4}
 
 
 def test_streamed_args_for_tool_populated_pre_v11_multiple_tools(
@@ -1008,3 +1019,10 @@ def test_streamed_args_for_tool_populated_pre_v11_multiple_tools(
         "streamed_args_for_tool should have entries for each tool call "
         f"but had {len(mistral_pre_v11_tool_parser.streamed_args_for_tool)}"
     )
+    # The accumulated arguments strings should match the expected arguments
+    assert json.loads(
+        mistral_pre_v11_tool_parser.streamed_args_for_tool[0]
+    ) == {"a": 3.5, "b": 4}
+    assert json.loads(
+        mistral_pre_v11_tool_parser.streamed_args_for_tool[1]
+    ) == {"city": "San Francisco", "state": "CA", "unit": "celsius"}
