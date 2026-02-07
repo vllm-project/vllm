@@ -179,7 +179,11 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
 
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
+    mk = FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
     return mk
 
 
@@ -256,7 +260,6 @@ def deep_ep_moe_impl(
             w2=w2,
             topk_weights=topk_weights_chunk,
             topk_ids=topk_chunk,
-            inplace=False,
             activation="silu",
             global_num_experts=num_experts,
             expert_map=build_expert_map(),

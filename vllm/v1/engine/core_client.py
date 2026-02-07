@@ -24,6 +24,7 @@ from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
 from vllm.utils.network_utils import (
     close_sockets,
@@ -96,6 +97,7 @@ class EngineCoreClient(ABC):
         return InprocClient(vllm_config, executor_class, log_stats)
 
     @staticmethod
+    @instrument(span_name="Overall Loading")
     def make_async_mp_client(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
@@ -103,7 +105,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-    ) -> "MPClient":
+    ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
             vllm_config,
@@ -650,6 +652,7 @@ def _process_utility_output(
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
+    @instrument(span_name="SyncMPClient init")
     def __init__(
         self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
     ):
@@ -819,6 +822,7 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
+    @instrument(span_name="AsyncMPClient init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -971,6 +975,16 @@ class AsyncMPClient(MPClient):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+        Blocks until the EngineCore acknowledges the pause.
+        """
+        await self.call_utility_async("pause_scheduler")
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        await self.call_utility_async("resume_scheduler")
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
@@ -1183,6 +1197,18 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue."""
+        raise NotImplementedError(
+            "pause_scheduler_async is not yet supported for data parallel"
+        )
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        raise NotImplementedError(
+            "resume_scheduler_async is not yet supported for data parallel"
+        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

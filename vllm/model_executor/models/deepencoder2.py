@@ -31,7 +31,7 @@ class CustomQwen2Decoder(nn.Module):
         num_key_value_heads: int = 2,
         intermediate_size: int = 4864,
         vocab_size: int = 151936,
-        attn_implementation: str = "sdpa",  # ⭐
+        attn_implementation: str = "sdpa",
         rms_norm_eps: float = 1e-06,
         rope_theta: float = 1000000.0,
         attention_dropout: float = 0.0,

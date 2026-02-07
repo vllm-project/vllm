@@ -95,10 +95,11 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             prefix=prefix,
             decoder_layer_type=decoder_layer_type,
         )
-        if not get_pp_group().is_first_rank:
-            assert self.start_layer >= len(
-                vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
-            ), (
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        if not get_pp_group().is_first_rank and hasattr(
+            vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
                 "start_layer should be greater than or equal to "
                 "len(deepstack_visual_indexes)"
             )

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, overload
 
 from typing_extensions import assert_never
 
@@ -12,33 +12,41 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
-    MultiModalEncDecInputs,
     MultiModalInputs,
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers import renderer_from_config
+from vllm.renderers.inputs import (
+    DecoderDictPrompt,
+    DecoderOnlyDictPrompt,
+    DictPrompt,
+    EncoderDecoderDictPrompt,
+    EncoderDictPrompt,
+    SingletonDictPrompt,
+    TokPrompt,
+)
+from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .data import (
+    DecoderInputs,
     DecoderOnlyInputs,
     EmbedsInputs,
     EmbedsPrompt,
     EncoderDecoderInputs,
-    ExplicitEncoderDecoderPrompt,
+    EncoderInputs,
     ProcessorInputs,
     PromptType,
     SingletonInputs,
-    SingletonPrompt,
     TextPrompt,
     TokenInputs,
     TokensPrompt,
     embeds_inputs,
     token_inputs,
 )
-from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
 
@@ -86,30 +94,15 @@ class InputPreprocessor:
 
         return self.tokenizer.eos_token_id
 
-    def get_decoder_start_token_id(self) -> int | None:
+    def get_decoder_start_token_id(self) -> int:
         """
         Obtain the decoder start token id employed by an encoder/decoder
-        model. Returns None for non-encoder/decoder models or if the
-        model config is unavailable.
+        model. Raises an error if it is not available.
         """
-
-        if not self.model_config.is_encoder_decoder:
-            logger.warning_once(
-                "Using None for decoder start token id because "
-                "this is not an encoder/decoder model."
-            )
-            return None
-
-        if self.model_config is None or self.model_config.hf_config is None:
-            logger.warning_once(
-                "Using None for decoder start token id because "
-                "model config is not available."
-            )
-            return None
-
         dec_start_token_id = getattr(
             self.model_config.hf_config, "decoder_start_token_id", None
         )
+
         if dec_start_token_id is None:
             logger.warning_once(
                 "Falling back on <BOS> for decoder start token "
@@ -118,48 +111,12 @@ class InputPreprocessor:
             )
             dec_start_token_id = self.get_bos_token_id()
 
+        if dec_start_token_id is None:
+            raise RuntimeError("Cannot find decoder start token id or <BOS>")
+
         return dec_start_token_id
 
-    def _get_default_enc_dec_decoder_prompt(self) -> list[int]:
-        """
-        Specifically for encoder/decoder models:
-        generate a default decoder prompt for when
-        the user specifies only the encoder prompt.
-
-        Encoder/decoder models utilize the decoder
-        prompt in different ways; as new models are
-        added, it is intended that this function
-        will be extended to produce differing
-        default decoder prompts, depending on the
-        model variety.
-
-        Absent a special case, the default behavior
-        of this method is to mirror the behavior of
-        the HuggingFace (HF) GenerationMixin for a None
-        decoder prompt, which is to employ a logit processor
-        setting to force the first decoded token to be <BOS>.
-        Here, this behavior is approximated by having the
-        "default" decoder prompt be <BOS>.
-
-        However, it is possible that in the future
-        other models may have different or more
-        complex logic for the default decoder prompt.
-        This motivates having a special helper method
-        for default decoder prompts.
-
-        Returns:
-
-        * prompt_token_ids
-        """
-
-        bos_token_id = self.get_bos_token_id()
-        assert bos_token_id is not None
-        return [bos_token_id]
-
-    def _prepare_decoder_input_ids_for_generation(
-        self,
-        decoder_input_ids: list[int] | None,
-    ) -> list[int]:
+    def _prepare_decoder_input_ids(self, decoder_input_ids: list[int]) -> list[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
 
@@ -176,14 +133,7 @@ class InputPreprocessor:
 
         * Processed token list
         """
-
         decoder_start_token_id = self.get_decoder_start_token_id()
-        assert decoder_start_token_id is not None
-
-        if decoder_input_ids is None:
-            # no decoder prompt input ->
-            # use decoder_start_token_id as decoder_input_ids
-            decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
         if (
             len(decoder_input_ids) == 0
@@ -386,9 +336,36 @@ class InputPreprocessor:
 
         return inputs
 
+    @overload
     def _prompt_to_llm_inputs(
         self,
-        prompt: SingletonPrompt,
+        prompt: EncoderDictPrompt,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        *,
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> EncoderInputs: ...
+
+    @overload
+    def _prompt_to_llm_inputs(  # type: ignore[misc]
+        self,
+        prompt: DecoderDictPrompt,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        *,
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> DecoderInputs: ...
+
+    @overload
+    def _prompt_to_llm_inputs(  # type: ignore[misc]
+        self,
+        prompt: DecoderOnlyDictPrompt,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        *,
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> DecoderOnlyInputs: ...
+
+    def _prompt_to_llm_inputs(
+        self,
+        prompt: SingletonDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -404,139 +381,87 @@ class InputPreprocessor:
 
         * [`SingletonInputs`][vllm.inputs.data.SingletonInputs] instance
         """
-        parsed = parse_singleton_prompt(prompt)
+        if "prompt_embeds" in prompt:
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        if parsed["type"] == "embeds":
-            return self._process_embeds(parsed["content"])
-        if parsed["type"] == "tokens":
+        if "prompt_token_ids" in prompt:
             return self._process_tokens(
-                parsed["content"],
+                prompt,  # type: ignore[arg-type]
                 mm_uuids=mm_uuids,
             )
-        if parsed["type"] == "text":
+
+        if "prompt" in prompt:
             return self._process_text(
-                parsed["content"],
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
-        if parsed["type"] == "str":
-            return self._process_text(
-                TextPrompt(prompt=parsed["content"]),
+                prompt,  # type: ignore[arg-type]
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
 
-        assert_never(parsed)
+        assert_never(prompt)  # type: ignore[arg-type]
 
-    def _build_enc_dec_llm_inputs(
+    def _validate_enc_inputs(self, inputs: SingletonInputs) -> EncoderInputs:
+        if inputs["type"] == "embeds":
+            raise ValueError(
+                "Embedding inputs are not supported for encoder-decoder models"
+            )
+
+        if inputs["type"] == "multimodal" and "encoder_prompt_token_ids" not in inputs:
+            raise RuntimeError(
+                "You should register an encoder-decoder "
+                "multi-modal processor for encoder-decoder models."
+            )
+
+        return inputs  # type: ignore[return-value]
+
+    def _validate_dec_inputs(self, inputs: SingletonInputs) -> DecoderInputs:
+        if inputs["type"] == "embeds":
+            raise ValueError(
+                "Embedding inputs are not supported for encoder-decoder models"
+            )
+
+        return inputs
+
+    def _build_enc_dec_inputs(
         self,
         encoder_inputs: SingletonInputs,
-        decoder_inputs: SingletonInputs | None,
+        decoder_inputs: SingletonInputs | None = None,
     ) -> EncoderDecoderInputs:
-        if (
-            encoder_inputs["type"] == "embeds"
-            or decoder_inputs
-            and decoder_inputs["type"] == "embeds"
-        ):
-            raise ValueError(
-                "Embedding inputs are not supported for encoder-decoder models"
-            )
-
-        # Needed for mypy
-        encoder_inputs = cast(TokenInputs | MultiModalInputs, encoder_inputs)
-        decoder_inputs = cast(TokenInputs | MultiModalInputs | None, decoder_inputs)
+        enc_inputs = self._validate_enc_inputs(encoder_inputs)
 
         if decoder_inputs is None:
-            if self.model_config.hf_config.model_type == "whisper":
-                # For Whisper models, the text prompt should go to the decoder.
-                # If no explicit encoder/decoder inputs, then copy the prompt
-                # from the encoder to the decoder. The encoder tokens are later
-                # overridden by the audio features.
-                dec_token_ids = encoder_inputs["prompt_token_ids"].copy()
-            else:
-                dec_token_ids = self._prepare_decoder_input_ids_for_generation(None)
-            decoder_inputs = token_inputs(dec_token_ids)
+            dec_inputs: DecoderInputs = enc_inputs  # type: ignore[assignment]
         else:
-            if "multi_modal_data" in decoder_inputs:
-                raise ValueError(
-                    "Multi-modal decoder inputs of encoder-"
-                    "decoder models are not supported yet"
-                )
+            dec_inputs = self._validate_dec_inputs(decoder_inputs)
 
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                decoder_inputs["prompt_token_ids"]
-            )
-            decoder_inputs["prompt_token_ids"] = dec_token_ids
+        enc_inputs_new: EncoderInputs
+        dec_inputs_new: DecoderInputs
 
-        return EncoderDecoderInputs(
-            encoder=encoder_inputs,
-            decoder=decoder_inputs,
-        )
-
-    def _split_enc_dec_mm_inputs(
-        self,
-        inputs: SingletonInputs | MultiModalEncDecInputs,
-        decoder_inputs_to_override: SingletonInputs | None = None,
-    ) -> tuple[SingletonInputs, SingletonInputs]:
-        """
-        For encoder/decoder models only:
-        Separate Encoder/Decoder inputs from a MultiModalEncDecInputs
-        """
-        if (
-            inputs["type"] == "embeds"
-            or decoder_inputs_to_override
-            and decoder_inputs_to_override["type"] == "embeds"
-        ):
-            raise ValueError(
-                "Embedding inputs are not supported for encoder-decoder models"
-            )
-
-        # Needed for mypy
-        inputs = cast(
-            TokenInputs | MultiModalInputs | MultiModalEncDecInputs,
-            inputs,
-        )
-        decoder_inputs_to_override = cast(
-            TokenInputs | MultiModalInputs | None,
-            decoder_inputs_to_override,
-        )
-
-        encoder_inputs: SingletonInputs
-        decoder_inputs: SingletonInputs
-
-        if inputs["type"] == "multimodal":  # Multimodal data inputs
-            if "encoder_prompt_token_ids" not in inputs:
-                raise RuntimeError(
-                    "You should register an encoder-decoder "
-                    "multi-modal processor for encoder-decoder "
-                    "models."
-                )
-            inputs = cast(MultiModalEncDecInputs, inputs)
-
-            encoder_inputs = token_inputs(inputs["encoder_prompt_token_ids"])
-
-            decoder_prompt_inputs = decoder_inputs_to_override or inputs
-            decoder_inputs = MultiModalInputs(
+        if enc_inputs["type"] == "multimodal":
+            enc_inputs_new = token_inputs(enc_inputs["encoder_prompt_token_ids"])
+            dec_inputs_new = MultiModalInputs(
                 type="multimodal",
-                prompt_token_ids=decoder_prompt_inputs["prompt_token_ids"],
-                mm_kwargs=inputs["mm_kwargs"],
-                mm_hashes=inputs["mm_hashes"],
-                mm_placeholders=inputs["mm_placeholders"],
+                prompt_token_ids=dec_inputs["prompt_token_ids"],
+                mm_kwargs=enc_inputs["mm_kwargs"],
+                mm_hashes=enc_inputs["mm_hashes"],
+                mm_placeholders=enc_inputs["mm_placeholders"],
             )
-            if cache_salt := inputs.get("cache_salt"):
-                decoder_inputs["cache_salt"] = cache_salt
-
-        elif inputs["type"] == "token":  # Text-only inputs
-            encoder_inputs = token_inputs(prompt_token_ids=[])
-            decoder_inputs = decoder_inputs_to_override or inputs
+        elif enc_inputs["type"] == "token":
+            enc_inputs_new = token_inputs(prompt_token_ids=[])
+            dec_inputs_new = dec_inputs
         else:
-            assert_never(inputs)  # type: ignore[arg-type]
+            assert_never(enc_inputs)
 
-        return encoder_inputs, decoder_inputs
+        dec_inputs_new["prompt_token_ids"] = self._prepare_decoder_input_ids(
+            dec_inputs_new["prompt_token_ids"]
+        )
+        if cache_salt := enc_inputs.get("cache_salt"):
+            dec_inputs_new["cache_salt"] = cache_salt
+
+        return EncoderDecoderInputs(encoder=enc_inputs_new, decoder=dec_inputs_new)
 
     def _process_encoder_decoder_prompt(
         self,
-        prompt: PromptType,
+        prompt: EncoderDecoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -547,24 +472,6 @@ class InputPreprocessor:
         [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
         instance.
 
-        There are two types of input prompts:
-        singleton prompts which carry only the
-        encoder prompt, and explicit encoder/decoder
-        prompts which carry both the encoder and the
-        decoder prompts as member variables.
-
-        This function handles the following scenarios:
-        * Singleton encoder prompt: extract encoder prompt
-          token ids & infer default decoder prompt token ids
-        * Explicit encoder/decoder prompt: extract encoder
-          and decoder prompt token ids
-
-        Note that for Explicit encoder/decoder prompts,
-        each sub-prompt (encoder or decoder prompt) can
-        have any possible singleton type; thus this
-        method relies on helper functions to obtain
-        token ids for the sub-prompts.
-
         Arguments:
 
         * prompt: an input prompt
@@ -574,58 +481,28 @@ class InputPreprocessor:
         * [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
           instance
         """
-        encoder_inputs: SingletonInputs
-        decoder_inputs: SingletonInputs | None
-        if is_explicit_encoder_decoder_prompt(prompt):
-            # `cast` is needed for mypy, but not pyright
-            prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
-            encoder_inputs = self._prompt_to_llm_inputs(
-                prompt_["encoder_prompt"],
+        encoder_prompt = prompt["encoder_prompt"]
+        decoder_prompt = prompt["decoder_prompt"]
+
+        return self._build_enc_dec_inputs(
+            encoder_inputs=self._prompt_to_llm_inputs(
+                encoder_prompt,
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
-            )
-            if (decoder_input := prompt_["decoder_prompt"]) is None:
-                decoder_inputs = None
-            else:
-                decoder_inputs = self._prompt_to_llm_inputs(
-                    decoder_input, tokenization_kwargs=tokenization_kwargs
+            ),
+            decoder_inputs=(
+                None
+                if decoder_prompt is None
+                else self._prompt_to_llm_inputs(
+                    decoder_prompt,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
-            # For multimodal model, override decoder prompt from processor
-            # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model:
-                encoder_inputs, decoder_inputs = self._split_enc_dec_mm_inputs(
-                    encoder_inputs, decoder_inputs
-                )
-        else:
-            # `cast` is needed for mypy, but not pyright
-            inputs = self._prompt_to_llm_inputs(
-                cast(SingletonPrompt, prompt),
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
-            if self.model_config.is_multimodal_model:
-                # Encoder-Decoder Multimodal model
-                encoder_inputs, decoder_inputs = self._split_enc_dec_mm_inputs(inputs)
-            else:
-                encoder_inputs = inputs
-                decoder_inputs = None
-
-        return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
-
-    def _build_decoder_only_llm_inputs(
-        self,
-        prompt_inputs: DecoderOnlyInputs,
-    ) -> DecoderOnlyInputs:
-        if "prompt_token_ids" in prompt_inputs:
-            prompt_inputs = cast(
-                TokenInputs | MultiModalInputs, prompt_inputs
-            )  # Needed for mypy
-
-        return prompt_inputs
+            ),
+        )
 
     def _process_decoder_only_prompt(
         self,
-        prompt: SingletonPrompt,
+        prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -643,18 +520,15 @@ class InputPreprocessor:
 
         * [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] instance
         """
-
-        prompt_comps = self._prompt_to_llm_inputs(
+        return self._prompt_to_llm_inputs(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
 
-        return self._build_decoder_only_llm_inputs(prompt_comps)
-
     def _preprocess(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -663,27 +537,20 @@ class InputPreprocessor:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
             return self._process_encoder_decoder_prompt(
-                prompt,
+                parse_enc_dec_prompt(prompt),
                 tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            raise ValueError(
-                "Cannot pass encoder-decoder prompt to decoder-only models"
-            )
-
-        # Decoder-only operation
-        # `cast` is needed for mypy, but not pyright
         return self._process_decoder_only_prompt(
-            cast(SingletonPrompt, prompt),
+            parse_dec_only_prompt(prompt),
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
 
     def preprocess(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,

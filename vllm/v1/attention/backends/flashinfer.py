@@ -60,7 +60,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -573,6 +573,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+
+        # TRTLLM attention requires strictly contiguous KV cache tensors.
+        # When KV transfer (P/D disaggregation) is enabled, the KV cache may be
+        # permuted into non-contiguous views, which causes assertion failures.
+        self._kv_transfer_enabled = vllm_config.kv_transfer_config is not None
+        if can_use_trtllm and self._kv_transfer_enabled:
+            logger.info_once(
+                "TRTLLM attention is disabled because KV transfer "
+                "(P/D disaggregation) is enabled. TRTLLM attention requires "
+                "strictly contiguous KV cache tensors which may not be "
+                "guaranteed with KV transfer."
+            )
+            can_use_trtllm = False
+
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
@@ -644,12 +658,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        has_trtllm_support = can_use_trtllm_attention(
-            num_qo_heads=vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            ),
-            num_kv_heads=kv_cache_spec.num_kv_heads,
+        """Get the cudagraph support level for FlashInfer attention.
+
+        This depends on whether we can use TRTLLM attention for decodes, since we can
+        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
+        To check this, we must call can_use_trtllm_attention with the number of KV
+        heads from the kv_cache_spec. We check all available KV cache specs and
+        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        """
+        # For UniformTypeKVCacheSpecs, check all contained specs
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
         )
+        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        has_trtllm_support: bool = len(kv_specs) > 0
+        for spec in kv_specs:
+            if not isinstance(spec, AttentionSpec):
+                # FlashInfer only applies to attention, so we don't consider other types
+                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
+                continue
+            if not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+            ):
+                has_trtllm_support = False
+                break
+
         if has_trtllm_support:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
@@ -822,6 +860,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
+        # KV transfer requires non-contiguous KV cache views, incompatible with TRTLLM
+        if self._kv_transfer_enabled:
+            prefill_use_trtllm = False
         decode_use_trtllm = (
             self.use_trtllm_decode_attention and self.dcp_world_size <= 1
         )

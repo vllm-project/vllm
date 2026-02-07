@@ -37,13 +37,12 @@ def test_moe_compilation_cold_start(monkeypatch, use_fresh_inductor_cache):
     # The forward pass consists of 32 transformer layers.
     # Then, we split on the attention operation. This results in
     # 33 subgraphs (not including the attention operation).
-    # We then standalone_compile the unique subgraphs.
+    # The 33 subgraphs then get standalone_compile'd.
     #
     # There are actually only 3 unique subgraphs for this model
     # (all of its transformer layers are the same modulo weights);
     # this is true for most vLLM models.
-    # So we test that during cold start, only 3 subgraphs are compiled
-    # These 3 subgraphs should cache miss, and then there should be
-    # no other compilation (so no cache hits).
+    # So we test that during cold start, the aot_autograd cache
+    # misses for 3 subgraphs and hits for the rest.
     assert counters["aot_autograd"]["autograd_cache_miss"] == 3
-    assert counters["aot_autograd"]["autograd_cache_hit"] == 0
+    assert counters["aot_autograd"]["autograd_cache_hit"] == 30
