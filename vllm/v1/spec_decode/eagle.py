@@ -386,7 +386,8 @@ class SpecDecodeBaseProposer:
         token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
+        mm_embed_inputs: tuple[
+            list[torch.Tensor], torch.Tensor, list[str]] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
