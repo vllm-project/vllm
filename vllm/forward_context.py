@@ -398,7 +398,10 @@ def set_forward_context(
     )
 
     try:
-        with override_forward_context(forward_context):
+        with (
+            override_forward_context(forward_context),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+        ):
             yield
     finally:
         global last_logging_time, batchsize_logging_interval

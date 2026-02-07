@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
+from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass
 
 if rocm_aiter_ops.is_enabled():
@@ -97,8 +98,17 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             else:
                 logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
-        # post-cleanup goes before fix_functionalization
-        # because it requires a functional graph
+        # perform the first post-cleanup before IR lowering to clean up fusion artifacts
+        # and make sure no dead IR ops are lowered.
+        self.post_cleanup(graph)
+        VllmInductorPass.dump_prefix += 1
+
+        # lowering before cleanup so DCE can clean up lowered ops.
+        # DCE handles mutating ops correctly as well.
+        self.ir_lowering(graph)
+        VllmInductorPass.dump_prefix += 1
+
+        # clean up after lowering again
         self.post_cleanup(graph)
         VllmInductorPass.dump_prefix += 1
 
@@ -143,7 +153,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
-            # needs a functional graph
+            self.ir_lowering = VllmIRLoweringPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
@@ -162,6 +172,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
         for pass_ in self.passes:
             passes.append(pass_.uuid())
+
+        passes.append(self.post_cleanup.uuid())
+        passes.append(self.ir_lowering.uuid())
+        passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
         # Include the compile range in the uuid to ensure that inductor
