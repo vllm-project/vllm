@@ -16,6 +16,7 @@ from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
 )
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -45,6 +46,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         is_neox: bool,
         vllm_config: VllmConfig,
         dtype: torch.dtype,
+        test_scattered_split: bool = False,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         super().__init__()
@@ -78,11 +80,17 @@ class QKNormRoPETestModel(torch.nn.Module):
             is_neox_style=is_neox,
             dtype=self.dtype,
         )
+        self.test_scattered_split = test_scattered_split
         self.enable_rms_norm_custom_op = self.q_norm.enabled()
         self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.test_scattered_split:
+            q, _, _ = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            _, k, _ = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            _, _, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
@@ -112,6 +120,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         return [FUSED_QK_ROPE_OP]
 
 
+@pytest.mark.parametrize("scattered_split", [True, False])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
@@ -122,7 +131,12 @@ class QKNormRoPETestModel(torch.nn.Module):
     reason="Only test on cuda and rocm platform",
 )
 def test_qk_norm_rope_fusion(
-    eps, is_neox, enable_rms_norm_custom_op, enable_rope_custom_op, dtype
+    eps,
+    is_neox,
+    enable_rms_norm_custom_op,
+    enable_rope_custom_op,
+    dtype,
+    scattered_split,
 ):
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
@@ -161,13 +175,15 @@ def test_qk_norm_rope_fusion(
             is_neox=is_neox,
             vllm_config=vllm_config,
             dtype=dtype,
+            test_scattered_split=scattered_split,
         )
 
         noop_pass = NoOpEliminationPass(vllm_config)
+        coalesce_pass = SplitCoalescingPass(vllm_config)
         fusion_pass = QKNormRoPEFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
-        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend = TestBackend(noop_pass, coalesce_pass, fusion_pass, cleanup_pass)
         backend_baseline = TestBackend(noop_pass, cleanup_pass)
 
         qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
