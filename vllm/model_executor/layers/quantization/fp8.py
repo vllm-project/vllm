@@ -13,6 +13,9 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -44,9 +47,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (

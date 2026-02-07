@@ -26,22 +26,14 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear import (
     CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    FP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,

@@ -10,6 +10,10 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    MPLinearLayerConfig,
+    choose_mp_linear_kernel,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -26,10 +30,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
-    MPLinearLayerConfig,
-    choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
