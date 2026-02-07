@@ -105,7 +105,7 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
-def test_schedule_multimodal_requests():
+def test_schedule_multimodal_requests_one_batch():
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
     requests = create_requests(
@@ -125,6 +125,69 @@ def test_schedule_multimodal_requests():
     assert len(output.scheduled_encoder_inputs) == 10
     for req_id, encoder_input in output.scheduled_encoder_inputs.items():
         assert len(encoder_input) == 1
+
+
+@pytest.mark.parametrize(
+    ("encoder_budget_mult", "encoder_cache_mult"),
+    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.0, 2.0), (2.0, 2.0)],
+)
+def test_schedule_multimodal_requests_multi_batch(
+    encoder_budget_mult, encoder_cache_mult
+):
+    NUM_MM_ITEMS = 10
+    MAX_MM_ITEM_TOKS = 576
+    NUM_TEXT_TOKS = 100
+
+    mm_positions = []
+    start_idx = NUM_TEXT_TOKS
+    for i in range(NUM_MM_ITEMS):
+        mm_position = PlaceholderRange(
+            offset=start_idx,
+            length=int(MAX_MM_ITEM_TOKS * (i / NUM_MM_ITEMS)),
+        )
+        mm_positions.append(mm_position)
+        start_idx += mm_position.length
+    total_len = start_idx
+
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=total_len,
+        max_num_batched_encoder_embeds=int(encoder_budget_mult * MAX_MM_ITEM_TOKS),
+        encoder_cache_size=int(encoder_cache_mult * MAX_MM_ITEM_TOKS),
+    )
+
+    # The test should check different regimes of
+    # max_num_batched_encoder_embeds and encoder_cache_size
+    # based on
+    assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
+    requests = create_requests(
+        num_requests=1,
+        num_tokens=total_len,
+        mm_positions=[mm_positions],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    total_scheduled_tokens = 0
+    for _ in range(NUM_MM_ITEMS):  # Allow at most NUM_MM_ITEMS iterations
+        output = scheduler.schedule()
+
+        req_to_index = {request.request_id: i for i, request in enumerate(requests)}
+        model_runner_output = ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            req_id_to_index=req_to_index,
+            sampled_token_ids=[[] for _ in range(len(requests))],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_runner_output)
+
+        total_scheduled_tokens += sum(output.num_scheduled_tokens.values())
+
+    assert total_scheduled_tokens == total_len, (
+        "Failed to finish scheduling all tokens in the request"
+    )
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
