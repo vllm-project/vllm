@@ -89,7 +89,7 @@ class SchedulerConfig:
 
     Defaults to `max_num_batched_tokens`. This will be overridden by the
     maximum possible multimodal embedding count of the model if it is larger,
-    in order to ensure that a multimodal item will be eventually scheduled
+    ensuring that a multimodal item will be eventually scheduled
     regardless of its corresponding embedding count.
 
     Note that the number of encoder embeddings might be smaller than the
@@ -103,7 +103,7 @@ class SchedulerConfig:
 
     Defaults to `max_num_batched_encoder_embeds`. This will be overridden by the
     maximum possible multimodal embedding count of the model if it is larger,
-    in order to ensure that a multimodal item will be eventually scheduled
+    ensuring that a multimodal item will be eventually scheduled
     regardless of its corresponding embedding count.
 
     Note that the number of encoder embeddings might be smaller than the
