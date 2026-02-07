@@ -84,19 +84,22 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = Field(init=False)
-    """Multimodal encoder compute budget, only used in V1.
+    max_num_batched_encoder_tokens: int | None = None
+    """MMaximum number of encoder tokens to be processed in a single iteration,
+    defaults to `max_num_batched_tokens`.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    It must be no greater than `max_num_batched_tokens`.
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
-    """Multimodal encoder cache size, only used in V1.
+    NOTE: It will be overridden by the maximum possible multimodal embedding size
+    if it is larger."""
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    encoder_cache_size: int | None = None
+    """Multimodal encoder cache size, defaults to `max_num_batched_tokens`.
+
+    It must be no smaller than `max_num_batched_tokens`.
+
+    NOTE: It will be overridden by the maximum possible multimodal embedding size
+    if it is larger."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
@@ -107,11 +110,12 @@ class SchedulerConfig:
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
-    partially schedule a multimodal item. Only used in V1
+    partially schedule a multimodal item.
+
     This ensures that if a request has a mixed prompt
-    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
+    (like text tokens `TTTT` followed by image tokens `IIIIIIIIII`) where only
+    some image tokens can be scheduled (like `TTTTIIIII`, leaving `IIIII`),
+    it will be scheduled as `TTTT` in one step and `IIIIIIIIII` in the next."""
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
@@ -216,9 +220,6 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
-
-        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

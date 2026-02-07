@@ -403,13 +403,17 @@ class GPUModelRunner(
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
-
-        if self.model_config.is_encoder_decoder:
-            # Maximum length of the encoder input, only for encoder-decoder
-            # models.
-            self.max_encoder_len = scheduler_config.max_num_encoder_input_tokens
-        else:
-            self.max_encoder_len = 0
+        self.mm_budget = mm_budget = (
+            MultiModalBudget(self.vllm_config, self.mm_registry)
+            if self.supports_mm_inputs
+            else None
+        )
+        # For encoder-decoder models, allocate the maximum number of tokens for Cross
+        # Attn blocks, as for Whisper its input is always padded to the maximum length.
+        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
+        self.max_encoder_len = (
+            max(mm_budget.mm_max_toks_per_item.values(), default=0) if mm_budget else 0
+        )
 
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -509,11 +513,17 @@ class GPUModelRunner(
         custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (
             tuple(logits_processors) if logits_processors is not None else ()
         )
+
+        if model_config.is_encoder_decoder:
+            # We need to use the encoder length for encoder-decoder
+            # because of KV cache for cross-attention.
+            input_max_model_len = max(self.max_model_len, self.max_encoder_len)
+        else:
+            input_max_model_len = self.max_model_len
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            # We need to use the encoder length for encoder-decoer
-            # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            max_model_len=input_max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -650,12 +660,6 @@ class GPUModelRunner(
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
-
-        self.mm_budget = (
-            MultiModalBudget(self.vllm_config, self.mm_registry)
-            if self.supports_mm_inputs
-            else None
-        )
 
         self.reorder_batch_threshold: int | None = None
 

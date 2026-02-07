@@ -266,6 +266,88 @@ class EncoderCacheManager:
         return freed
 
 
+def _set_max_num_batched_encoder_tokens(
+    scheduler_config: "SchedulerConfig",
+    max_tokens_per_mm_item: int,
+) -> int:
+    max_num_batched_encoder_tokens = scheduler_config.max_num_batched_encoder_tokens
+    max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+
+    if max_num_batched_encoder_tokens is None:
+        max_num_batched_encoder_tokens = max_num_batched_tokens
+    elif max_num_batched_encoder_tokens > max_num_batched_tokens:
+        raise ValueError(
+            "Encoder tokens are a subset of total scheduled tokens, so "
+            f"{max_num_batched_encoder_tokens=} cannot be greater than "
+            f"{max_num_batched_tokens=}. "
+            "Please decrease max_num_batched_encoder_tokens "
+            "or increase max_num_batched_tokens."
+        )
+
+    max_num_batched_encoder_tokens = max(
+        max_num_batched_encoder_tokens, max_tokens_per_mm_item
+    )
+
+    if scheduler_config.max_num_batched_encoder_tokens is None:
+        logger.info_once(
+            "Defaulting max_num_batched_encoder_tokens to %d.",
+            max_num_batched_encoder_tokens,
+            scope="local",
+        )
+    elif (
+        max_num_batched_encoder_tokens
+        != scheduler_config.max_num_batched_encoder_tokens
+    ):
+        logger.info_once(
+            "Overriding max_num_batched_encoder_tokens from %d to %d.",
+            scheduler_config.max_num_batched_encoder_tokens,
+            max_num_batched_encoder_tokens,
+            scope="local",
+        )
+
+    scheduler_config.max_num_batched_encoder_tokens = max_num_batched_encoder_tokens
+
+    return max_num_batched_encoder_tokens
+
+
+def _set_encoder_cache_size(
+    scheduler_config: "SchedulerConfig",
+    max_tokens_per_mm_item: int,
+) -> int:
+    encoder_cache_size = scheduler_config.encoder_cache_size
+    max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+
+    if encoder_cache_size is None:
+        encoder_cache_size = max_num_batched_tokens
+    elif encoder_cache_size < max_num_batched_tokens:
+        raise ValueError(
+            "The encoder cache must be able to store all "
+            f"encoder inputs in a single batch, so {encoder_cache_size=}"
+            f"cannot be less than {max_num_batched_tokens=}. "
+            "Please increase encoder_cache_size."
+        )
+
+    encoder_cache_size = max(encoder_cache_size, max_tokens_per_mm_item)
+
+    if scheduler_config.encoder_cache_size is None:
+        logger.info_once(
+            "Defaulting encoder_cache_size to %d.",
+            encoder_cache_size,
+            scope="local",
+        )
+    elif encoder_cache_size != scheduler_config.encoder_cache_size:
+        logger.info_once(
+            "Overriding encoder_cache_size from %d to %d.",
+            scheduler_config.encoder_cache_size,
+            encoder_cache_size,
+            scope="local",
+        )
+
+    scheduler_config.encoder_cache_size = encoder_cache_size
+
+    return encoder_cache_size
+
+
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_max_toks_per_item: Mapping[str, int],
@@ -283,6 +365,10 @@ def compute_mm_encoder_budget(
             from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
+
+    Note:
+        This may update `scheduler_config.max_num_batched_encoder_tokens` and
+        `scheduler_config.encoder_cache_size` in place with new values.
     """
 
     if not mm_max_toks_per_item:
@@ -294,26 +380,34 @@ def compute_mm_encoder_budget(
         return 0, 0
 
     max_tokens_per_mm_item = max(mm_max_toks_per_item.values())
+    max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
     if (
         scheduler_config.disable_chunked_mm_input
-        and max_tokens_per_mm_item > scheduler_config.max_num_batched_tokens
+        and max_tokens_per_mm_item > max_num_batched_tokens
     ):
         raise ValueError(
-            "Chunked MM input disabled but max_tokens_per_mm_item "
-            f"({max_tokens_per_mm_item}) is larger than max_num_batched_tokens"
-            f" ({scheduler_config.max_num_batched_tokens}). Please increase "
-            "max_num_batched_tokens."
+            f"Chunked MM input disabled but {max_tokens_per_mm_item=} "
+            f"is larger than {max_num_batched_tokens=}. "
+            "Please increase max_num_batched_tokens."
         )
 
-    encoder_compute_budget = max(
-        scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
+    max_num_batched_encoder_tokens = _set_max_num_batched_encoder_tokens(
+        scheduler_config, max_tokens_per_mm_item
     )
-    encoder_cache_size = max(
-        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    encoder_cache_size = _set_encoder_cache_size(
+        scheduler_config, max_tokens_per_mm_item
     )
 
-    return encoder_compute_budget, encoder_cache_size
+    if max_num_batched_encoder_tokens > encoder_cache_size:
+        raise ValueError(
+            f"{max_num_batched_encoder_tokens=} cannot be greater than "
+            f"{encoder_cache_size=}. "
+            "Please decrease max_num_batched_encoder_tokens or "
+            "increase encoder_cache_size."
+        )
+
+    return max_num_batched_encoder_tokens, encoder_cache_size
 
 
 # NOTE (NickLucche): Temporary implementation for encoder-decoder models that only

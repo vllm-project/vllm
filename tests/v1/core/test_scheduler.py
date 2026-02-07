@@ -169,7 +169,7 @@ def test_schedule_partial_requests():
     assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
 
-    assert scheduler.max_num_encoder_input_tokens == 1024
+    assert scheduler.encoder_compute_budget == 1024
     # The first request is scheduled fully.
     assert output.num_scheduled_tokens[requests[0].request_id] == 800
     # The second request is scheduled partially.
@@ -1747,7 +1747,7 @@ def create_scheduler_with_priority(
     Args:
       model: model under test
       max_num_seqs: max sequences to schedule
-      max_num_batch_tokens: max num tokens to batch
+      max_num_batched_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
                              (False)

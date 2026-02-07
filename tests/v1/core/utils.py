@@ -63,7 +63,7 @@ def create_scheduler(
     Args:
       model: model under test
       max_num_seqs: max sequences to schedule
-      max_num_batch_tokens: max num tokens to batch
+      max_num_batched_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
                              (False)

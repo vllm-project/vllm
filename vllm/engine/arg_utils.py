@@ -439,6 +439,10 @@ class EngineArgs:
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
+    max_num_batched_encoder_tokens: int | None = (
+        SchedulerConfig.max_num_batched_encoder_tokens
+    )
+    encoder_cache_size: int | None = SchedulerConfig.encoder_cache_size
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
@@ -1120,6 +1124,14 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
+        scheduler_group.add_argument(
+            "--max-num-batched-encoder-tokens",
+            **scheduler_kwargs["max_num_batched_encoder_tokens"],
+        )
+        scheduler_group.add_argument(
+            "--encoder-cache-size",
+            **scheduler_kwargs["encoder_cache_size"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -1650,6 +1662,8 @@ class EngineArgs:
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
+            max_num_batched_encoder_tokens=self.max_num_batched_encoder_tokens,
+            encoder_cache_size=self.encoder_cache_size,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
