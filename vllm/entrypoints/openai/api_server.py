@@ -151,7 +151,18 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
-def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
+
+def build_app(
+    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+) -> FastAPI:
+    if supported_tasks is None:
+        # If no supported tasks are provided, default to only generating tasks.
+        logger.warning(
+            "No supported tasks provided to build_app, defaulting to only "
+            "'generate' tasks."
+        )
+        supported_tasks = ("generate",)
+
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
