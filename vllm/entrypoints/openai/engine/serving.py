@@ -1176,7 +1176,7 @@ class OpenAIServing:
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
-                    context.request,
+                    context.request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
                 )
