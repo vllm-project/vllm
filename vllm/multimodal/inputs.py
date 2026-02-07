@@ -379,6 +379,9 @@ class MultiModalFeatureSpec:
 
         return dict(kwargs)
 
+    def get_num_embeds(self) -> int:
+        return self.mm_position.get_num_embeds()
+
 
 @dataclass
 class MultiModalFieldElem:

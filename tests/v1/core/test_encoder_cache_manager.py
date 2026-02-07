@@ -234,7 +234,7 @@ def test_encoder_cache_with_is_embed_mask():
     assert "img1" in manager.cached
 
     old_size = 100
-    new_size = mm_feature.mm_position.get_num_embeds()
+    new_size = mm_feature.get_num_embeds()
     assert new_size == 8
     savings_ratio = old_size / new_size
     assert savings_ratio == 12.5
@@ -255,7 +255,7 @@ def test_encoder_cache_mask_based_retrieval():
     manager = EncoderCacheManager(cache_size=50)
     manager.allocate("r1", mm_feature)
 
-    assert mm_feature.mm_position.get_num_embeds() == 5
+    assert mm_feature.get_num_embeds() == 5
 
     start_idx = 2
     end_idx = 8

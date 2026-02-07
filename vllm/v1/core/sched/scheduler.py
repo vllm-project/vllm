@@ -459,7 +459,7 @@ class Scheduler(SchedulerInterface):
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
-                                    mm_feature.mm_position.get_num_embeds()
+                                    mm_feature.get_num_embeds()
                                     for mm_feature in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
@@ -1115,7 +1115,7 @@ class Scheduler(SchedulerInterface):
         for mm_feature in mm_features:
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
-            num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+            num_encoder_embeds = mm_feature.get_num_embeds()
             item_identifier = mm_feature.identifier
 
             # The encoder output is needed if the two ranges overlap:

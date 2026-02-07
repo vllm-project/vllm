@@ -155,7 +155,7 @@ class EncoderCacheManager:
             This method does not allocate physical memory for the encoder
             output but only the state of EncoderCacheManager.
         """
-        num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+        num_encoder_embeds = mm_feature.get_num_embeds()
 
         # Not enough compute budget
         if num_encoder_embeds > encoder_compute_budget:
@@ -200,7 +200,7 @@ class EncoderCacheManager:
         if mm_hash not in self.cached:
             self.cached[mm_hash] = set()
 
-        num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+        num_encoder_embeds = mm_feature.get_num_embeds()
 
         # NOTE: Encoder cache should always have enough space for encoder inputs
         # that are scheduled since eviction takes place at can_allocate().
@@ -248,7 +248,7 @@ class EncoderCacheManager:
         self.cached[mm_hash].discard(request_id)
 
         if not self.cached[mm_hash]:
-            num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+            num_encoder_embeds = mm_feature.get_num_embeds()
             self.freeable[mm_hash] = num_encoder_embeds
             self.num_freeable_slots += num_encoder_embeds
 
@@ -360,7 +360,7 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         encoder_compute_budget: int,
         num_embeds_to_schedule: int,
     ) -> bool:
-        num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+        num_encoder_embeds = mm_feature.get_num_embeds()
         # Not enough compute budget
         if num_encoder_embeds > encoder_compute_budget:
             return False
@@ -374,7 +374,7 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         request_id: str,
         mm_feature: MultiModalFeatureSpec,
     ) -> None:
-        num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+        num_encoder_embeds = mm_feature.get_num_embeds()
         self.num_free_slots -= num_encoder_embeds
 
         mm_hash = mm_feature.identifier
@@ -398,5 +398,5 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         request_id: str,
         mm_feature: MultiModalFeatureSpec,
     ) -> None:
-        num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
+        num_encoder_embeds = mm_feature.get_num_embeds()
         self.num_free_slots += num_encoder_embeds
