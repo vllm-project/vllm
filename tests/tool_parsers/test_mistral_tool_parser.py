@@ -968,9 +968,7 @@ def test_streamed_args_for_tool_populated_pre_v11(
     Verify that streamed_args_for_tool is populated during streaming
     for pre-v11 tokenizer.
     """
-    model_output = (
-        '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 3, "b": 4}}]'
-    )
+    model_output = '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 3, "b": 4}}]'
 
     for _ in stream_delta_message_generator(
         mistral_pre_v11_tool_parser,
@@ -986,9 +984,10 @@ def test_streamed_args_for_tool_populated_pre_v11(
         "serving_chat.py"
     )
     # The accumulated arguments string should match the expected arguments
-    assert json.loads(
-        mistral_pre_v11_tool_parser.streamed_args_for_tool[0]
-    ) == {"a": 3, "b": 4}
+    assert json.loads(mistral_pre_v11_tool_parser.streamed_args_for_tool[0]) == {
+        "a": 3,
+        "b": 4,
+    }
 
 
 def test_streamed_args_for_tool_populated_pre_v11_multiple_tools(
@@ -1020,9 +1019,12 @@ def test_streamed_args_for_tool_populated_pre_v11_multiple_tools(
         f"but had {len(mistral_pre_v11_tool_parser.streamed_args_for_tool)}"
     )
     # The accumulated arguments strings should match the expected arguments
-    assert json.loads(
-        mistral_pre_v11_tool_parser.streamed_args_for_tool[0]
-    ) == {"a": 3.5, "b": 4}
-    assert json.loads(
-        mistral_pre_v11_tool_parser.streamed_args_for_tool[1]
-    ) == {"city": "San Francisco", "state": "CA", "unit": "celsius"}
+    assert json.loads(mistral_pre_v11_tool_parser.streamed_args_for_tool[0]) == {
+        "a": 3.5,
+        "b": 4,
+    }
+    assert json.loads(mistral_pre_v11_tool_parser.streamed_args_for_tool[1]) == {
+        "city": "San Francisco",
+        "state": "CA",
+        "unit": "celsius",
+    }
