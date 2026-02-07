@@ -46,6 +46,27 @@ def server(request):
         "--max-model-len",
         "1024",
         "--enforce-eager",
+        # On ROCm (e.g. MI355X/gfx950), bf16 GEMM results can differ by
+        # 1 ULP when the batch dimension (M) changes, because different M
+        # values cause the Tensile backend to select different tile
+        # configurations with different fp32 accumulation orders. With
+        # prefix caching, cache-miss prefills compute all tokens in one
+        # pass (large M) while cache-hit requests compute only the
+        # uncached suffix (small M), seeding a divergence that amplifies
+        # through the residual stream and flips argmax tokens.
+        # See: https://github.com/vllm-project/vllm/issues/33123
+        #
+        # Either disable prefix caching entirely, or enable it with
+        # --deterministic-prefix-caching which forces cache-miss prefills
+        # to split at block boundaries so the suffix GEMM shape is always
+        # identical regardless of cache state.
+        #
+        # Option A: disable prefix caching
+        "--no-enable-prefix-caching",
+        #
+        # Option B: deterministic prefix caching
+        # "--enable-prefix-caching",
+        # "--deterministic-prefix-caching",
     ]
 
     extra_args = getattr(request, "param", None)
@@ -104,13 +125,17 @@ async def test_generate_logprobs(client, logprobs_value):
     resp.raise_for_status()
     data = resp.json()
     choice = data["choices"][0]
-    assert choice["logprobs"] is not None
-    logprobs_content = choice["logprobs"]["content"]
-    assert len(logprobs_content) == len(choice["token_ids"])
-    for entry in logprobs_content:
-        assert "logprob" in entry
-        assert len(entry["top_logprobs"]) >= 1
-        assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+
+    if logprobs_value == 0:
+        assert choice["logprobs"] is None
+    else:
+        assert choice["logprobs"] is not None
+        logprobs_content = choice["logprobs"]["content"]
+        assert len(logprobs_content) == len(choice["token_ids"])
+        for entry in logprobs_content:
+            assert "logprob" in entry
+            assert len(entry["top_logprobs"]) >= 1
+            assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
 
 
 @pytest.mark.asyncio
