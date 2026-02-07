@@ -360,6 +360,11 @@ class RocmPlatform(Platform):
                 vllm_config is not None
                 and vllm_config.attention_config.use_prefill_decode_attention
             ):
+                logger.warning_once(
+                    "use_prefill_decode_attention is deprecated and will be removed in "
+                    "future releases. "
+                    "Use --attention_config.backend to select the desired backend"
+                )
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
@@ -373,9 +378,9 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-            # Default: Triton Unified Attention
-            logger.info("Using Triton Attention backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            # Default: ROCm split Attention
+            logger.info("Using ROCm Attention backend.")
+            return AttentionBackendEnum.ROCM_ATTN.get_path()
 
         raise RuntimeError(
             f"Attention backend {selected_backend.name} is not supported on "
