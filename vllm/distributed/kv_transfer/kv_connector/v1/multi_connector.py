@@ -513,3 +513,22 @@ class MultiConnector(KVConnectorBase_V1):
     def reset_cache(self) -> bool:
         results = [c.reset_cache() is not False for c in self._connectors]
         return all(results)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get handshake metadata from all sub-connectors.
+        """
+        for connector in self._connectors:
+            if hasattr(connector, "get_handshake_metadata"):
+                metadata = connector.get_handshake_metadata()
+                if metadata is not None:
+                    return metadata
+        return None
+
+    def set_xfer_handshake_metadata(self, xfer_metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        """
+        Propagate handshake metadata to all sub-connectors.
+        """
+        for connector in self._connectors:
+            if hasattr(connector, "set_xfer_handshake_metadata"):
+                connector.set_xfer_handshake_metadata(xfer_metadata)
