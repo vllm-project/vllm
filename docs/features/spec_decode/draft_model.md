@@ -1,13 +1,11 @@
-## Speculating with a Draft Dodel
+# Speculating with a Draft Model
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
 ```python
 from vllm import LLM, SamplingParams
 
-prompts = [
-    "The future of AI is",
-]
+prompts = ["The future of AI is"]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(

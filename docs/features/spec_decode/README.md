@@ -1,17 +1,17 @@
 # Speculative Decoding
 
-This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads. To learn more about speculative decoding with vLLM, see [
-[vLLM Office Hours #40] Intro to Speculators](https://www.youtube.com/watch?v=2ISAr_JVGLs) as well as [Nvidia's Guide to Speculative Decoding with vLLM](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/tutorials/Feature_Guide/Speculative_Decoding/vLLM/README.html).
+This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
 
-To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless integration with vLLM.
+To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
 
-## vLLM speculation methods
+## vLLM Speculation Methods
 
-vLLM supports many 
+vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, draft models, and mlp provide the best latency reduction, while simpler methods such as n-gram and and suffix decoding provide modest speedups without increasing workload during peak traffic.
+
 * [EAGLE](eagle.md)
 * [Draft Model](draft_model.md)
-* [N-Gram](n_gram.md)
 * [MLP](mlp.md)
+* [N-Gram](n_gram.md)
 * [Suffix Decoding](suffix.md)
 
 ## Lossless guarantees of Speculative Decoding
@@ -51,10 +51,11 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 ## Known Feature Incompatibility
 
 1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
-2. Speculative decoding with a draft model is not supported in `vllm<=0.10.0` 
+2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors
 
+- [[vLLM Office Hours #40] Intro to Speculators](https://www.youtube.com/watch?v=2ISAr_JVGLs)
 - [A Hacker's Guide to Speculative Decoding in vLLM](https://www.youtube.com/watch?v=9wNAgpX6z_4)
 - [What is Lookahead Scheduling in vLLM?](https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a)
 - [Information on batch expansion](https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8)
