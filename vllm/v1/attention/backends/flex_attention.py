@@ -80,7 +80,7 @@ class FlexAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16", "float16"]
 
     @staticmethod
     def get_name() -> str:
