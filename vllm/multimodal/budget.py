@@ -93,7 +93,7 @@ class MultiModalBudget:
         if embed_only_modalities:
             logger.info_once(
                 "enable_mm_embeds is True; modalities handled as embedding-only: %s",
-                embed_only_modalities,
+                sorted(embed_only_modalities),
             )
 
         # Some models (e.g., Qwen3Omni with use_audio_in_video=True) share
