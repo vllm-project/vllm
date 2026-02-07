@@ -94,6 +94,9 @@ class VllmIRLoweringPass(VllmInductorPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        # clear at the beginning instead of end, so that tests can inspect
+        self.selected_impls.clear()
+
         count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
 
@@ -132,5 +135,3 @@ class VllmIRLoweringPass(VllmInductorPass):
         if failed_nodes or failed_ops:
             logger.warning("Failed to lower vLLM IR ops: %s", ",".join(failed_ops))
             logger.warning("Full node list: %s", failed_nodes)
-
-        self.selected_impls.clear()

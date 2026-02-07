@@ -21,12 +21,12 @@ class Model(nn.Module):
         self.weight = torch.ones(hidden_size, dtype=torch.bfloat16)
 
     def forward(self, x):
-        x1 = x + 2.0
+        x1 = x + 4.0
         x2 = ops.rms_norm(x1, self.weight, 1e-5)
         x3 = x2 * 5.0
         # no weight
         x4 = ops.rms_norm(x3, None, 1e-5)
-        x5 = x4 - 1.0
+        x5 = x4 / 2.0
         # dispatch to native due to variance_size parameter
         x6 = ops.rms_norm(x5, self.weight, 1e-5, self.hidden_size // 2)
         return x6 + 3.0
@@ -55,9 +55,6 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
     assert selected["rms_norm"] == rms_provider
     assert selected["rms_norm_1"] == rms_provider
     assert selected["rms_norm_2"] == "native"
-
-    # TODO remove print
-    backend.print_graphs()
 
     output2 = compiled_model(x)
     torch.testing.assert_close(output_unlowered, output)
