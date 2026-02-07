@@ -59,8 +59,9 @@ for output in outputs:
 ## Pre-Trained Eagle Draft Models
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
-* https://huggingface.co/collections/RedHatAI/speculator-models
-* https://huggingface.co/yuhuili/models?search=eagle
+
+* [RedHatAI/speculator-models](https://huggingface.co/collections/RedHatAI/speculator-models)
+* [yuhuili/models](https://huggingface.co/yuhuili/models?search=eagle)
 
 !!! warning
     If you are using `vllm<0.7.0`, please use [this script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`.

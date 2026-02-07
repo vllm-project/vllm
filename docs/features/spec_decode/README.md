@@ -1,6 +1,6 @@
 # Speculative Decoding
 
-This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
+This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
 
 To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
 
@@ -8,11 +8,11 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, draft models, and mlp provide the best latency reduction, while simpler methods such as n-gram and and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
-* [EAGLE](eagle.md)
-* [Draft Model](draft_model.md)
-* [MLP](mlp.md)
-* [N-Gram](n_gram.md)
-* [Suffix Decoding](suffix.md)
+- [EAGLE](eagle.md)
+- [Draft Model](draft_model.md)
+- [MLP](mlp.md)
+- [N-Gram](n_gram.md)
+- [Suffix Decoding](suffix.md)
 
 ## Lossless guarantees of Speculative Decoding
 
