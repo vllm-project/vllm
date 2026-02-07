@@ -326,7 +326,6 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
-        has_shared_experts: bool = False,
     ):
         super().__init__()
 
