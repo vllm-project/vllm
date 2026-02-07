@@ -2561,11 +2561,11 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
     # `all_token_ids` is only propagated in async scheduling mode
     if scheduler.scheduler_config.async_scheduling:
+        assert len(scheduled_cached_reqs.all_token_ids) == 1
         assert request_low.request_id in scheduled_cached_reqs.all_token_ids
         # request_low produced two decode tokens before being preempted.
         assert scheduled_cached_reqs.all_token_ids[request_low.request_id] == [100, 100]
@@ -3409,11 +3409,11 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
     # `all_token_ids` is only propagated in async scheduling mode
     if scheduler.scheduler_config.async_scheduling:
+        assert len(scheduled_cached_reqs.all_token_ids) == 1
         assert request_low.request_id in scheduled_cached_reqs.all_token_ids
         # request_low produced two decode tokens before being preempted.
         assert scheduled_cached_reqs.all_token_ids[request_low.request_id] == [100, 100]
