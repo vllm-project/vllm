@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pydantic models for Anthropic API protocol"""
 
-import time
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
+
+
+def generate_tool_call_id() -> str:
+    """Generate a unique tool call ID with the Anthropic ``toolu_`` prefix."""
+    return f"toolu_{uuid.uuid4().hex[:24]}"
 
 
 class AnthropicError(BaseModel):
@@ -158,5 +163,5 @@ class AnthropicMessagesResponse(BaseModel):
     usage: AnthropicUsage | None = None
 
     def model_post_init(self, __context):
-        if not self.id:
-            self.id = f"msg_{int(time.time() * 1000)}"
+        if not self.id or not self.id.startswith("msg_"):
+            self.id = f"msg_{uuid.uuid4().hex[:24]}"
