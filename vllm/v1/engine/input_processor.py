@@ -7,14 +7,13 @@ from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import (
+from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
     SingletonInputs,
     SingletonPrompt,
-    TextPrompt,
 )
-from vllm.inputs.parse import is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -30,7 +29,9 @@ from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -196,13 +197,41 @@ class InputProcessor:
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
+        # TODO: Validate generation tasks as well once `supported_tasks`
+        # is passed to all `process_inputs` calls
+        supported_tasks: tuple[SupportedTask, ...] | None,
     ):
         """
         Validate supported SamplingParam.
         Should raise ValueError if unsupported for API Server.
         """
-
         if isinstance(params, PoolingParams):
+            if supported_tasks is None:
+                raise RuntimeError("`supported_tasks` must be passed for pooling")
+
+            supported_pooling_tasks = [
+                task for task in supported_tasks if task in POOLING_TASKS
+            ]
+
+            if params.task is None:
+                if not supported_pooling_tasks:
+                    raise ValueError("Pooling tasks are not supported")
+
+                if "token_embed" in supported_pooling_tasks:
+                    params.task = "token_embed"
+                elif "token_classify" in supported_pooling_tasks:
+                    params.task = "token_classify"
+                elif "plugin" in supported_pooling_tasks:
+                    params.task = "plugin"
+
+            if params.task not in supported_pooling_tasks:
+                raise ValueError(
+                    f"Unsupported task: {params.task!r} "
+                    f"Supported tasks: {supported_pooling_tasks}"
+                )
+
+            params.verify(self.model_config)
+
             return
 
         self._validate_logprobs(params)
@@ -214,8 +243,8 @@ class InputProcessor:
         return mm_processor.info.parse_mm_data(mm_data)
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
-        if isinstance(prompt, str):
-            prompt = TextPrompt(prompt=prompt)
+        if not isinstance(prompt, dict):
+            return
 
         mm_data = cast(MultiModalDataDict, prompt.get("multi_modal_data") or {})
         mm_uuids = cast(MultiModalUUIDDict, prompt.get("multi_modal_uuids") or {})
@@ -268,7 +297,7 @@ class InputProcessor:
                         f"multi_modal_uuids[{modality!r}] is missing."
                     )
 
-    def _validate_mm_uuids(self, prompt: PromptType) -> None:
+    def _validate_mm_uuids(self, prompt: PromptType | DictPrompt | TokPrompt) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
         multi_modal_data in the incoming request prompt(s).
@@ -276,10 +305,10 @@ class InputProcessor:
         auto-hashed downstream.
         """
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
 
-            if (dec_prompt := prompt["decoder_prompt"]) is not None:
+            if (dec_prompt := prompt["decoder_prompt"]) is not None:  # type: ignore[typeddict-item]
                 self._validate_singleton_mm_uuids(dec_prompt)
         else:
             self._validate_singleton_mm_uuids(prompt)
@@ -420,21 +449,23 @@ class InputProcessor:
     def _extract_singleton_mm_data(
         self, prompt: SingletonPrompt
     ) -> MultiModalDataDict | None:
-        if isinstance(prompt, str):
+        if not isinstance(prompt, dict):
             return None
 
-        return prompt.get("multi_modal_data")  # type: ignore[return-value]
+        return prompt.get("multi_modal_data")
 
-    def _extract_mm_data(self, prompt: PromptType) -> MultiModalDataDict | None:
-        if is_explicit_encoder_decoder_prompt(prompt):
-            return self._extract_singleton_mm_data(prompt["encoder_prompt"])
+    def _extract_mm_data(
+        self, prompt: PromptType | DictPrompt | TokPrompt
+    ) -> MultiModalDataDict | None:
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            return self._extract_singleton_mm_data(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
         else:
             return self._extract_singleton_mm_data(prompt)
 
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
     ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
@@ -490,7 +521,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -498,10 +529,11 @@ class InputProcessor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        supported_tasks: tuple[SupportedTask, ...] | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
-        self._validate_params(params)
+        self._validate_params(params, supported_tasks)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -754,7 +786,7 @@ class InputProcessor:
             decoder_mm_positions = prompt_inputs["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds
+                    embed_length = mm_position.get_num_embeds()
                     if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "

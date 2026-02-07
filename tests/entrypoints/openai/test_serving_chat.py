@@ -511,6 +511,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
+    model = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -528,6 +529,7 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
