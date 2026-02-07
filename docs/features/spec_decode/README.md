@@ -1,11 +1,15 @@
 # Speculative Decoding
 
-This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM.
-Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
+This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads. To learn more about speculative decoding with vLLM, see [
+[vLLM Office Hours #40] Intro to Speculators](https://www.youtube.com/watch?v=2ISAr_JVGLs) as well as [Nvidia's Guide to Speculative Decoding with vLLM](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/tutorials/Feature_Guide/Speculative_Decoding/vLLM/README.html).
 
-To train your own draft models for optimized speculative decoding, see the official vLLM [Speculators](speculators.md) library.
+To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless integration with vLLM.
 
-## Speculating with a draft model
+## Choosing the right speculation method
+
+vLLM supports many 
+
+## Speculating with a Draft Dodel
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
@@ -265,19 +269,8 @@ A few important things to consider when using the EAGLE based draft models:
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
 
-| Base Model                                                           | EAGLE on Hugging Face                     | # EAGLE Parameters |
-|---------------------------------------------------------------------|-------------------------------------------|--------------------|
-| Vicuna-7B-v1.3                                                       | yuhuili/EAGLE-Vicuna-7B-v1.3             | 0.24B              |
-| Vicuna-13B-v1.3                                                      | yuhuili/EAGLE-Vicuna-13B-v1.3            | 0.37B              |
-| Vicuna-33B-v1.3                                                      | yuhuili/EAGLE-Vicuna-33B-v1.3            | 0.56B              |
-| LLaMA2-Chat 7B                                                       | yuhuili/EAGLE-llama2-chat-7B             | 0.24B              |
-| LLaMA2-Chat 13B                                                      | yuhuili/EAGLE-llama2-chat-13B            | 0.37B              |
-| LLaMA2-Chat 70B                                                      | yuhuili/EAGLE-llama2-chat-70B            | 0.99B              |
-| Mixtral-8x7B-Instruct-v0.1                                           | yuhuili/EAGLE-mixtral-instruct-8x7B      | 0.28B              |
-| LLaMA3-Instruct 8B                                                   | yuhuili/EAGLE-LLaMA3-Instruct-8B         | 0.25B              |
-| LLaMA3-Instruct 70B                                                  | yuhuili/EAGLE-LLaMA3-Instruct-70B        | 0.99B              |
-| Qwen2-7B-Instruct                                                    | yuhuili/EAGLE-Qwen2-7B-Instruct          | 0.26B              |
-| Qwen2-72B-Instruct                                                   | yuhuili/EAGLE-Qwen2-72B-Instruct         | 1.05B              |
+* https://huggingface.co/collections/RedHatAI/speculator-models
+* https://huggingface.co/yuhuili/models?search=eagle
 
 ## Lossless guarantees of Speculative Decoding
 
