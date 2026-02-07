@@ -126,14 +126,16 @@ thread_config_t small_batch_thread_configs[] = {
 
     // thread_k, thread_n, num_threads
     {128, 128, 256},
-    {64, 128, 128}};
+    {64, 128, 128},
+    {128, 64, 128}};
 
 thread_config_t large_batch_thread_configs[] = {
     // Ordered by priority
 
     // thread_k, thread_n, num_threads
     {64, 256, 256},
-    {64, 128, 128}};
+    {64, 128, 128},
+    {128, 64, 128}};
 
 typedef struct {
   int blocks_per_sm;
@@ -768,7 +770,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     b_bias = b_bias_or_none.value();
     TORCH_CHECK(b_bias.device().is_cuda(), "b_bias is not on GPU");
     TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
-    TORCH_CHECK(b_bias.size(1) == size_n, "b_bias.size(0) != size_n");
+    TORCH_CHECK(b_bias.size(1) == size_n, "b_bias.size(1) != size_n");
     TORCH_CHECK(b_bias.stride(1) == 1, "b_bias.stride(1) != 1");
   } else {
     b_bias = torch::empty({0}, options);

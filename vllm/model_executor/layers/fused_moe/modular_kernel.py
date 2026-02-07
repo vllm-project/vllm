@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
@@ -176,6 +180,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> PrepareResultType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
@@ -188,6 +193,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -216,6 +224,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> tuple[Callable, ReceiverType] | ReceiverType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
@@ -231,6 +240,9 @@ class FusedMoEPrepareAndFinalize(ABC):
           space to the local expert space of the expert parallel shard.
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a callback or a hook callback pair that when invoked waits for
         results from other workers and has the same return signature as
@@ -374,18 +386,49 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
         """
+        moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
+        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+            max_num_tokens is not None or num_dispatchers is not None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers should only be set for "
+                "BatchedExperts activation format."
+            )
+        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
+            max_num_tokens is None or num_dispatchers is None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers must be set for "
+                "BatchedExperts activation format."
+            )
+
+        self.moe_config = moe_config
         self.quant_config = quant_config
+        self.max_num_tokens = max_num_tokens
+        self.num_dispatchers = num_dispatchers
 
     @property
+    def expects_unquantized_inputs(self) -> bool:
+        """
+        Whether or not the PrepareFinalize should defer input quantization
+        in the prepare step. If True, then the Experts kernel will
+        execute the input quantization itself.
+
+        Sample subclasses that override are AITER and FlashInfer CUTLASS.
+        """
+        return False
+
+    @staticmethod
     @abstractmethod
-    def activation_formats(
-        self,
-    ) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+    def activation_format() -> FusedMoEActivationFormat:
         """
         A property which is a tuple of the input and output activation formats
         for the 'apply' method.
@@ -434,6 +477,78 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
+
+    #
+    # Various helpers for registering support for various features.
+    # Used by the oracle to select a particular kernel for a deployment.
+    #
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["FusedMoEPermuteExpertsUnpermute"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        def _make_reason(reason: str) -> str:
+            return f"kernel does not support {reason}"
+
+        if not cls._supports_current_device():
+            return False, _make_reason("current device")
+        elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
+            return False, _make_reason("no act_and_mul MLP layer")
+        elif not cls._supports_activation(moe_config.activation):
+            return False, _make_reason(f"{moe_config.activation} activation")
+        elif not cls._supports_quant_scheme(weight_key, activation_key):
+            return False, _make_reason("quantization scheme")
+        elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
+            return False, _make_reason("parallel config")
+        elif activation_format != cls.activation_format():
+            return False, _make_reason(f"{activation_format.value} activation format")
+        return True, None
+
+    @staticmethod
+    @abstractmethod
+    def _supports_current_device() -> bool:
+        """
+        Whether the kernel supports the current device type
+        (compute cability and current platform).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_no_act_and_mul() -> bool:
+        """
+        Whether the kernel supports act_and_mul=False, i.e.
+        non-gated MoE models like Nemotron-Nano.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_activation(activation: str) -> bool:
+        """
+        Whether the kernel supports a particular act function.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """
+        Whether the kernel supports deployment in expert parallel.
+        """
+        raise NotImplementedError
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -696,11 +811,13 @@ class FusedMoEModularKernel(torch.nn.Module):
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
+        inplace: bool = False,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        self.inplace = inplace
 
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).
@@ -715,12 +832,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         self._post_init_setup()
         assert (
-            prepare_finalize.activation_format == fused_experts.activation_formats[0]
+            prepare_finalize.activation_format == fused_experts.activation_format()
         ), (
             f"{prepare_finalize.__class__.__name__}."
             f"{prepare_finalize.activation_format} == "
             f"{fused_experts.__class__.__name__}."
-            f"{fused_experts.activation_formats[0]}"
+            f"{fused_experts.activation_format()}"
         )
 
     def _post_init_setup(self):
@@ -848,15 +965,17 @@ class FusedMoEModularKernel(torch.nn.Module):
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Construct the entire output that can then be processed in chunks.
-        # Reuse workspace13 for the output in the non-chunked case as long
-        # as it is large enough. This will not always be the case for standard
+        # Reuse workspace13 for the output in the non-chunked case.
+        # This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
-        if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
-            workspace13, workspace2 = current_workspace_manager().get_simultaneous(
-                (workspace13_shape, workspace_dtype),
+        if num_chunks == 1:
+            max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+            common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
+                ((max_shape_size,), workspace_dtype),
                 (workspace2_shape, workspace_dtype),
             )
-            fused_out = _resize_cache(workspace13, fused_out_shape)
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
         else:
             workspace13, workspace2, fused_out = (
                 current_workspace_manager().get_simultaneous(
@@ -958,6 +1077,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
         else:
             # Overlap shared expert compute with all2all dispatch.
@@ -970,6 +1090,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
 
             # TODO(lucas): refactor this in the alternative schedules followup
@@ -1173,7 +1294,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        inplace: bool = False,
         activation: str = "silu",
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
@@ -1190,8 +1310,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         - topk_weights (torch.Tensor): The topk weights applied at the end of
           the layer.
         - topk_ids (torch.Tensor): A map of row to expert id.
-        - inplace (bool): If True, perform the operation in-place.
-          Defaults to False.
         - activation (str): The activation function to apply after the first
           MoE layer.
         - global_num_experts (int): The total number of experts in the global
@@ -1207,7 +1325,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
 
-        if inplace and self.shared_experts is None and not disable_inplace():
+        if self.inplace:
+            assert self.shared_experts is None
+            assert not disable_inplace()
             output = hidden_states
         else:
             output = torch.zeros_like(hidden_states)

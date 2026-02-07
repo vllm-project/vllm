@@ -9,7 +9,7 @@ from transformers import AutoProcessor
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"

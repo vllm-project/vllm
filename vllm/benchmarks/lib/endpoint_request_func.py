@@ -139,6 +139,16 @@ def _update_headers_common(
         headers["x-request-id"] = request_func_input.request_id
 
 
+def _get_headers(content_type: str | None = None) -> dict[str, str]:
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -161,7 +171,6 @@ async def async_request_openai_completions(
         if request_func_input.model_name
         else request_func_input.model,
         "prompt": request_func_input.prompt,
-        "temperature": 0.0,
         "repetition_penalty": 1.0,
         "max_tokens": request_func_input.output_len,
         "logprobs": request_func_input.logprobs,
@@ -172,9 +181,7 @@ async def async_request_openai_completions(
     }
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers()
     _update_headers_common(headers, request_func_input)
 
     output = RequestFuncOutput()
@@ -295,7 +302,6 @@ async def async_request_openai_chat_completions(
         "messages": [
             {"role": "user", "content": content},
         ],
-        "temperature": 0.0,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
@@ -304,10 +310,7 @@ async def async_request_openai_chat_completions(
     }
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
     output = RequestFuncOutput()
@@ -390,7 +393,6 @@ async def async_request_openai_audio(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "temperature": 0.0,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "language": "en",
@@ -400,9 +402,7 @@ async def async_request_openai_audio(
     }
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers()
     _update_headers_common(headers, request_func_input)
 
     # Send audio file
@@ -545,10 +545,7 @@ async def async_request_openai_embeddings(
     }
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
@@ -584,10 +581,7 @@ async def async_request_vllm_rerank(
         "truncate_prompt_tokens": -1,
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
@@ -623,10 +617,7 @@ async def async_request_openai_embeddings_chat(
     }
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
@@ -729,10 +720,7 @@ async def async_request_infinity_embeddings(
 
     _update_payload_common(payload, request_func_input)
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(

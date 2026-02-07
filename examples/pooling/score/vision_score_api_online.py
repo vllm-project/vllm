@@ -17,30 +17,32 @@ e.g.
 """
 
 import argparse
-import json
 import pprint
 
 import requests
 
-headers = {"accept": "application/json", "Content-Type": "application/json"}
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
-text_1 = "slm markdown"
-text_2 = {
-    "content": [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-            },
-        },
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-            },
-        },
-    ]
-}
+query = "A woman playing with her dog on a beach at sunset."
+document = (
+    "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
+    "as the dog offers its paw in a heartwarming display of companionship and trust."
+)
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+documents = [
+    {
+        "type": "text",
+        "text": document,
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": image_url},
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
+    },
+]
 
 
 def parse_args():
@@ -55,15 +57,78 @@ def main(args):
     models_url = base_url + "/v1/models"
     score_url = base_url + "/score"
 
-    response = requests.get(models_url, headers=headers)
+    response = requests.get(models_url)
     model = response.json()["data"][0]["id"]
 
-    prompt = {"model": model, "text_1": text_1, "text_2": text_2}
-    response = requests.post(score_url, headers=headers, json=prompt)
-    print("\nPrompt when text_1 is string and text_2 is a image list:")
-    pprint.pprint(prompt)
-    print("\nScore Response:")
-    print(json.dumps(response.json(), indent=2))
+    print("Query: string & Document: string")
+    prompt = {"model": model, "queries": query, "documents": document}
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[0]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: image url")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[1]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: image base64")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[2]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text + image url")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[0], documents[1]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: list")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": [
+            document,
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: list & Document: list")
+    data = [
+        document,
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+    prompt = {
+        "model": model,
+        "queries": data,
+        "documents": data,
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
 
 
 if __name__ == "__main__":

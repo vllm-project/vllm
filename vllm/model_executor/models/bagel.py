@@ -30,11 +30,11 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.bagel import BagelProcessor
 from vllm.utils.tensor_schema import TensorSchema
@@ -48,6 +48,7 @@ from .interfaces import (
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -373,12 +374,13 @@ class BagelForConditionalGeneration(
 
         # Initialize language model (Qwen2)
         # Pass the llm_config from BagelConfig to initialize Qwen2 properly
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.llm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.llm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         # Initialize vision model (SigLIP) if visual understanding is enabled
         if config.visual_und:
@@ -398,34 +400,35 @@ class BagelForConditionalGeneration(
                 )
                 vit_config.vision_use_head = False
 
-            self.vit_model = SiglipVisionModel(
-                config=vit_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vit_model"),
-            )
+            with self._mark_tower_model(vllm_config, "image"):
+                self.vit_model = SiglipVisionModel(
+                    config=vit_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "vit_model"),
+                )
 
-            # Initialize connector (MLP)
-            vit_hidden_size = config.vit_config.hidden_size
-            llm_hidden_size = config.llm_config.hidden_size
+                # Initialize connector (MLP)
+                vit_hidden_size = config.vit_config.hidden_size
+                llm_hidden_size = config.llm_config.hidden_size
 
-            self.connector = BagelVisionMLP(
-                in_features=vit_hidden_size,
-                hidden_features=llm_hidden_size,
-                out_features=llm_hidden_size,
-                act_layer=config.connector_act,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "connector"),
-            )
+                self.connector = BagelVisionMLP(
+                    in_features=vit_hidden_size,
+                    hidden_features=llm_hidden_size,
+                    out_features=llm_hidden_size,
+                    act_layer=config.connector_act,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "connector"),
+                )
 
-            # Position embedding for vision tokens
-            self.vit_pos_embed = PositionEmbedding(
-                max_num_patch_per_side=config.vit_max_num_patch_per_side,
-                hidden_size=llm_hidden_size,
-            )
+                # Position embedding for vision tokens
+                self.vit_pos_embed = PositionEmbedding(
+                    max_num_patch_per_side=config.vit_max_num_patch_per_side,
+                    hidden_size=llm_hidden_size,
+                )
         else:
-            self.vit_model = None
-            self.connector = None
-            self.vit_pos_embed = None
+            self.vit_model = StageMissingLayer("image_tower")
+            self.connector = StageMissingLayer("image_tower")
+            self.vit_pos_embed = StageMissingLayer("image_tower")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -502,12 +505,9 @@ class BagelForConditionalGeneration(
 
         return self._process_image_input(image_input)
 
-    def get_language_model(self) -> nn.Module:
-        return self.language_model
-
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -540,14 +540,6 @@ class BagelForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from checkpoint."""
-        skip_prefixes = []
-        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
-        skip_prefixes.append("vit_pos_embed.pos_embed")
-
-        # If visual understanding is disabled, skip vision-related weights
-        if self.vit_model is None:
-            skip_prefixes.extend(["vit_model.", "connector.", "vit_pos_embed"])
-
         # Skip generation-related weights since we only support text2text and image2text
         # Filter out all image generation components:
         # - 'moe_gen': MoE generation weights
@@ -587,5 +579,6 @@ class BagelForConditionalGeneration(
 
             filtered_weights.append((name, tensor))
 
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
+        loader = AutoWeightsLoader(self, skip_prefixes=["vit_pos_embed.pos_embed"])
         return loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)
