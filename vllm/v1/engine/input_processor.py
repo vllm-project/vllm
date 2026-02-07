@@ -7,14 +7,13 @@ from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import (
+from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
     SingletonInputs,
     SingletonPrompt,
-    TextPrompt,
 )
-from vllm.inputs.parse import is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -30,6 +29,7 @@ from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -243,8 +243,8 @@ class InputProcessor:
         return mm_processor.info.parse_mm_data(mm_data)
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
-        if isinstance(prompt, str):
-            prompt = TextPrompt(prompt=prompt)
+        if not isinstance(prompt, dict):
+            return
 
         mm_data = cast(MultiModalDataDict, prompt.get("multi_modal_data") or {})
         mm_uuids = cast(MultiModalUUIDDict, prompt.get("multi_modal_uuids") or {})
@@ -297,7 +297,7 @@ class InputProcessor:
                         f"multi_modal_uuids[{modality!r}] is missing."
                     )
 
-    def _validate_mm_uuids(self, prompt: PromptType) -> None:
+    def _validate_mm_uuids(self, prompt: PromptType | DictPrompt | TokPrompt) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
         multi_modal_data in the incoming request prompt(s).
@@ -305,10 +305,10 @@ class InputProcessor:
         auto-hashed downstream.
         """
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
 
-            if (dec_prompt := prompt["decoder_prompt"]) is not None:
+            if (dec_prompt := prompt["decoder_prompt"]) is not None:  # type: ignore[typeddict-item]
                 self._validate_singleton_mm_uuids(dec_prompt)
         else:
             self._validate_singleton_mm_uuids(prompt)
@@ -449,21 +449,23 @@ class InputProcessor:
     def _extract_singleton_mm_data(
         self, prompt: SingletonPrompt
     ) -> MultiModalDataDict | None:
-        if isinstance(prompt, str):
+        if not isinstance(prompt, dict):
             return None
 
-        return prompt.get("multi_modal_data")  # type: ignore[return-value]
+        return prompt.get("multi_modal_data")
 
-    def _extract_mm_data(self, prompt: PromptType) -> MultiModalDataDict | None:
-        if is_explicit_encoder_decoder_prompt(prompt):
-            return self._extract_singleton_mm_data(prompt["encoder_prompt"])
+    def _extract_mm_data(
+        self, prompt: PromptType | DictPrompt | TokPrompt
+    ) -> MultiModalDataDict | None:
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            return self._extract_singleton_mm_data(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
         else:
             return self._extract_singleton_mm_data(prompt)
 
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
     ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
@@ -519,7 +521,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -784,7 +786,7 @@ class InputProcessor:
             decoder_mm_positions = prompt_inputs["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds
+                    embed_length = mm_position.get_num_embeds()
                     if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
