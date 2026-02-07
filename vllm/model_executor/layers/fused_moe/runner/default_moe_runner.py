@@ -11,7 +11,11 @@ from vllm.distributed import (
     get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -33,6 +37,95 @@ from vllm.utils.torch_utils import (
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
+
+
+def get_layer_from_name(layer_name: str) -> torch.nn.Module:
+    forward_context: ForwardContext = get_forward_context()
+    if layer_name == "from_forward_context":
+        all_moe_layers = forward_context.all_moe_layers
+        assert all_moe_layers is not None
+        moe_layer_index = forward_context.moe_layer_index
+        if moe_layer_index >= len(all_moe_layers):
+            raise AssertionError(
+                "We expected the number of MOE layers in `all_moe_layers` "
+                "to be equal to the number of "
+                "{vllm.moe_forward, vllm.moe_forward_shared} calls."
+            )
+        layer_name = all_moe_layers[moe_layer_index]
+        forward_context.moe_layer_index += 1
+    return forward_context.no_compile_layers[layer_name]
+
+
+def _moe_forward(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> torch.Tensor:
+    layer = get_layer_from_name(layer_name)
+    return layer.runner.forward_impl(
+        layer, hidden_states, router_logits, shared_experts_input
+    )
+
+
+def _moe_forward_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+def _moe_forward_shared(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    layer = get_layer_from_name(layer_name)
+    return layer.runner.forward_impl(
+        layer, hidden_states, router_logits, shared_experts_input
+    )
+
+
+def _moe_forward_shared_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Output shapes:
+    # - fused_out: same as hidden_states (routed experts use transformed size)
+    # - shared_out: same as shared_experts_input if provided, else same as
+    #               hidden_states
+    # (For latent MoE: shared experts use original hidden_size, not latent size)
+    fused_out = torch.empty_like(hidden_states)
+
+    if shared_experts_input is not None:
+        shared_out = torch.empty_like(shared_experts_input)
+    else:
+        shared_out = torch.empty_like(hidden_states)
+
+    return shared_out, fused_out
+
+
+direct_register_custom_op(
+    op_name="moe_forward",
+    op_func=_moe_forward,
+    mutates_args=["hidden_states"],
+    fake_impl=_moe_forward_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+direct_register_custom_op(
+    op_name="moe_forward_shared",
+    op_func=_moe_forward_shared,
+    mutates_args=["hidden_states"],
+    fake_impl=_moe_forward_shared_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 class DefaultMoERunner(MoERunner):
@@ -95,25 +188,8 @@ class DefaultMoERunner(MoERunner):
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
-        lname = layer.layer_name.replace(".", "_")
-
-        def _moe_forward(
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
-            shared_experts_input: torch.Tensor | None,
-        ) -> torch.Tensor:
-            return self.forward_impl(
-                layer, hidden_states, router_logits, shared_experts_input
-            )
-
-        def _moe_forward_shared(
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
-            shared_experts_input: torch.Tensor | None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            return self.forward_impl(
-                layer, hidden_states, router_logits, shared_experts_input
-            )
+        # Needed for string -> FusedMoE layer lookup in custom ops.
+        self.layer_name = layer.layer_name
 
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -125,59 +201,13 @@ class DefaultMoERunner(MoERunner):
                 self.moe_forward = _moe_forward_shared
         else:
             if self.shared_experts is None:
-                op_name = f"moe_forward{lname}"
-                if not hasattr(torch.ops.vllm, op_name):
-                    direct_register_custom_op(
-                        op_name=op_name,
-                        op_func=_moe_forward,
-                        mutates_args=["hidden_states"],
-                        fake_impl=DefaultMoERunner._moe_forward_fake,
-                        tags=(torch.Tag.needs_fixed_stride_order,),
-                    )
-                self.moe_forward = getattr(torch.ops.vllm, op_name)
+                self.moe_forward = torch.ops.vllm.moe_forward
             else:
-                op_name = f"moe_forward_shared{lname}"
-                if not hasattr(torch.ops.vllm, op_name):
-                    direct_register_custom_op(
-                        op_name=op_name,
-                        op_func=_moe_forward_shared,
-                        mutates_args=["hidden_states"],
-                        fake_impl=DefaultMoERunner._moe_forward_shared_fake,
-                        tags=(torch.Tag.needs_fixed_stride_order,),
-                    )
-                self.moe_forward = getattr(torch.ops.vllm, op_name)
+                self.moe_forward = torch.ops.vllm.moe_forward_shared
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
-
-    @staticmethod
-    def _moe_forward_fake(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return torch.empty_like(hidden_states)
-
-    @staticmethod
-    def _moe_forward_shared_fake(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Output shapes:
-        # - fused_out: same as hidden_states (routed experts use transformed size)
-        # - shared_out: same as shared_experts_input if provided, else same as
-        #               hidden_states
-        # (For latent MoE: shared experts use original hidden_size, not latent size)
-        fused_out = torch.empty_like(hidden_states)
-
-        if shared_experts_input is not None:
-            shared_out = torch.empty_like(shared_experts_input)
-        else:
-            shared_out = torch.empty_like(hidden_states)
-
-        return shared_out, fused_out
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -287,16 +317,36 @@ class DefaultMoERunner(MoERunner):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
+    def apply_routed_input_transform(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply transform for routed experts (e.g., latent projection).
+
+        This is called by FusedMoE.forward_native. The original hidden_states
+        is saved separately so shared experts get [S, hidden_size] while
+        routed experts get the transformed [S, moe_latent_size].
+
+        TODO: For latent MoE bandwidth optimization, fc2_latent_proj could be
+        moved inside SharedFusedMoE to all-reduce on the smaller latent
+        dimension.
+        """
+        if self.routed_input_transform is not None:
+            result = self.routed_input_transform(hidden_states)
+            # ReplicatedLinear returns (output, extra_bias) tuple.
+            # We only need the output tensor; extra_bias is not used here.
+            if isinstance(result, tuple):
+                return result[0]
+            return result
+        return hidden_states
+
     def _reduce_output(
         self,
         states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         trunc_sizes: list[int],
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        def trunc(idx: int, x: torch.Tensor) -> torch.Tensor:
-            return x[..., : trunc_sizes[idx]]
+        def trunc(x: torch.Tensor, trunc_size: int) -> torch.Tensor:
+            return x[..., :trunc_size]
 
-        def reduce_and_trunc(idx: int, x: torch.Tensor) -> torch.Tensor:
-            return trunc(idx, self.maybe_all_reduce_tensor_model_parallel(x))
+        def reduce_and_trunc(x: torch.Tensor, trunc_size: int) -> torch.Tensor:
+            return trunc(self.maybe_all_reduce_tensor_model_parallel(x), trunc_size)
 
         if (
             not self.moe_config.is_sequence_parallel
@@ -309,11 +359,21 @@ class DefaultMoERunner(MoERunner):
             func = trunc
 
         if isinstance(states, tuple):
-            assert len(trunc_sizes) == len(states)
-            return tuple([func(i, s) for i, s in enumerate(states)])
+            return tuple(
+                [func(s, trunc_size) for s, trunc_size in zip(states, trunc_sizes)]
+            )
         else:
             assert len(trunc_sizes) == 1
-            return func(0, states)
+            return func(states, trunc_sizes[0])
+
+    def _encode_layer_name(self) -> str:
+        # Can be unavailable or None in unittests
+        if (
+            is_forward_context_available()
+            and get_forward_context().all_moe_layers is not None
+        ):
+            return "from_forward_context"
+        return self.layer_name
 
     def forward(
         self,
@@ -326,12 +386,7 @@ class DefaultMoERunner(MoERunner):
         original_hidden_dim = hidden_states.shape[-1]
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
-        if self.routed_input_transform is not None:
-            transformed_states = self.routed_input_transform(hidden_states)
-            if isinstance(transformed_states, tuple):
-                hidden_states = transformed_states[0]
-            else:
-                hidden_states = transformed_states
+        hidden_states = self.apply_routed_input_transform(hidden_states)
 
         # This is the dimension after transform (for routed expert output slicing)
         transformed_hidden_dim = hidden_states.shape[-1]
@@ -344,7 +399,10 @@ class DefaultMoERunner(MoERunner):
             )
 
         fused_output = self.moe_forward(
-            hidden_states, router_logits, original_hidden_states
+            hidden_states,
+            router_logits,
+            original_hidden_states,
+            self._encode_layer_name(),
         )
 
         if isinstance(fused_output, tuple):
@@ -588,6 +646,9 @@ class DefaultMoERunner(MoERunner):
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:
                 assert self.shared_experts is not None
+                shared_input = (
+                    shared_input if shared_input is not None else hidden_states
+                )
                 shared_output = self.shared_experts(shared_input)
 
             # NOTE: Similar with DP, PCP also needs dispatch and combine. For
@@ -603,13 +664,16 @@ class DefaultMoERunner(MoERunner):
                     dim=0,
                 )
 
-            # Matrix multiply.
-            x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
-
             # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
             # Figure out nicer way to do this.
-            x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
+            if do_naive_dispatch_combine:
+                x = hidden_states_combined
+                x_orig = orig_hidden_states
+            else:
+                x = hidden_states
+                x_orig = hidden_states
 
+            # Matrix multiply.
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,

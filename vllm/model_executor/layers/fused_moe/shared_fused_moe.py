@@ -18,10 +18,6 @@ class SharedFusedMoE(FusedMoE):
     can be interleaved with the fused all2all dispatch communication step.
     """
 
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     def forward(
         self,
         hidden_states: torch.Tensor,
