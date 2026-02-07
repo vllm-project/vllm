@@ -3,6 +3,7 @@
 
 import json
 from http import HTTPStatus
+from typing import Annotated
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -14,6 +15,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.v1.engine import PauseMode
 
 logger = init_logger(__name__)
 
@@ -28,24 +30,29 @@ router = APIRouter()
 @router.post("/pause")
 async def pause_generation(
     raw_request: Request,
+    mode: Annotated[PauseMode, Query()] = "abort",
     wait_for_inflight_requests: bool = Query(False),
-    clear_cache: bool = Query(True),
+    clear_cache: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
     Args:
-        wait_for_inflight_requests: When ``True`` waits for in-flight
-            requests to finish before pausing. When ``False`` (default),
-            aborts any in-flight requests immediately.
-        clear_cache: Whether to clear KV/prefix caches after draining.
+        mode: How to handle in-flight requests:
+            - ``"abort"``: Abort all in-flight requests immediately (default).
+            - ``"wait"``: Wait for in-flight requests to complete.
+            - ``"keep"``: Freeze requests in queue; they resume on /resume.
+        wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
+        clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
+            draining. Ignored when mode="keep".
     """
 
     engine = engine_client(raw_request)
 
     try:
         await engine.pause_generation(
-            wait_for_inflight_requests=wait_for_inflight_requests,
+            mode=mode,
             clear_cache=clear_cache,
+            wait_for_inflight_requests=wait_for_inflight_requests,
         )
         return JSONResponse(
             content={"status": "paused"},
