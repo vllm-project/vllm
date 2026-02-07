@@ -1269,9 +1269,7 @@ class OpenAIServingChat(OpenAIServing):
                             # state and may not populate
                             # streamed_args_for_tool, so we guard against
                             # IndexError here.
-                            if index < len(
-                                tool_parser.streamed_args_for_tool
-                            ):
+                            if index < len(tool_parser.streamed_args_for_tool):
                                 actual_call = tool_parser.streamed_args_for_tool[index]
                                 if latest_delta_len > 0:
                                     actual_call = actual_call[:-latest_delta_len]
