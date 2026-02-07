@@ -247,6 +247,10 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.deterministic_prefix_caching = (
+            self.cache_config.enable_prefix_caching
+            and self.cache_config.deterministic_prefix_caching
+        )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -316,6 +320,56 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+        return num_new_tokens
+
+    def _prefix_cache_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_computed_tokens: int,
+    ) -> int:
+        """Ensure prefill splits at block boundaries for prefix caching
+        determinism.
+
+        When prefix caching is enabled, a cache-hit request computes only
+        the non-block-aligned suffix (M = num_tokens % block_size), while a
+        cache-miss request would normally compute all tokens in one pass
+        (M = num_tokens). Different M dimensions cause the GEMM backend to
+        select different tile configurations, which due to fp32
+        non-associativity in the K-dimension reduction can produce results
+        that differ by 1 ULP. That single-element difference then amplifies
+        through the residual stream of a deep transformer.
+
+        This method forces the cache-miss path to stop at the last block
+        boundary so that the suffix is always computed in a separate step
+        with the same M dimension as the cache-hit path.
+
+        Enabled via --deterministic-prefix-caching. Applies only when:
+        - The request is still in prefill (no output tokens yet)
+        - num_prompt_tokens > block_size
+        - num_prompt_tokens is not block-aligned
+        """
+        # Only applies during prefill.
+        if request.num_output_tokens > 0:
+            return num_new_tokens
+
+        num_prompt_tokens = request.num_prompt_tokens
+        remainder = num_prompt_tokens % self.block_size
+        if remainder == 0 or num_prompt_tokens <= self.block_size:
+            return num_new_tokens
+
+        # The position where a cache-hit would start computing: the last
+        # full-block boundary before the end of the prompt.
+        block_aligned_pos = num_prompt_tokens - remainder
+
+        # If this chunk would cross the block boundary, stop at it so the
+        # suffix is deferred to the next scheduling step.
+        if (
+            num_computed_tokens < block_aligned_pos
+            and num_computed_tokens + num_new_tokens > block_aligned_pos
+        ):
+            num_new_tokens = block_aligned_pos - num_computed_tokens
+
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -399,6 +453,13 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
+                )
+
+            # Prefix cache determinism: split prefill at block boundary
+            # so suffix GEMM M-dimension is cache-state-independent.
+            if self.deterministic_prefix_caching:
+                num_new_tokens = self._prefix_cache_aligned_split(
+                    request, num_new_tokens, request.num_computed_tokens
                 )
 
             if self.need_mamba_block_aligned_split:
@@ -684,6 +745,13 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+
+                # Prefix cache determinism: split prefill at block boundary
+                # so suffix GEMM M-dimension is cache-state-independent.
+                if self.deterministic_prefix_caching:
+                    num_new_tokens = self._prefix_cache_aligned_split(
+                        request, num_new_tokens, num_computed_tokens
+                    )
 
                 if self.need_mamba_block_aligned_split:
                     num_new_tokens = self._mamba_block_aligned_split(
