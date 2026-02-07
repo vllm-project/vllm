@@ -74,6 +74,45 @@ def sample_tools():
     ]
 
 
+@pytest.fixture
+def array_param_tools():
+    """Tools with array parameters"""
+    # Roo code read_file example
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_file",
+                "description": "Read one or more files and return their contents",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "description": "List of files to read",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Path to the file",
+                                    }
+                                },
+                                "required": ["path"],
+                                "additionalProperties": False,
+                            },
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        ),
+    ]
+
+
 def assert_tool_calls(
     actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
 ):
@@ -495,3 +534,186 @@ def test_streaming_tool_calls(
         actual_args = json.loads(arguments_str)
         expected_args = json.loads(expected_tool.function.arguments)
         assert actual_args == expected_args
+
+
+def test_array_parameter_parsing(seed_oss_tool_parser, array_param_tools):
+    """Array parameter types should be parsed correctly"""
+    model_output = (
+        """<seed:tool_call>\n<function=read_file>\n"""
+        """<parameter=files>[{"path": "file1.ts"}, {"path": "file2.ts"}]</parameter>\n"""
+        """</function>\n</seed:tool_call>"""
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=array_param_tools)
+    extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+
+    tool_call = extracted_tool_calls.tool_calls[0]
+    assert tool_call.function.name == "read_file"
+
+    # Parse arguments and verify it's a proper array, not a string
+    args = json.loads(tool_call.function.arguments)
+    assert "files" in args
+    assert isinstance(args["files"], list)
+    assert len(args["files"]) == 2
+    assert args["files"][0] == {"path": "file1.ts"}
+    assert args["files"][1] == {"path": "file2.ts"}
+
+
+def test_tool_calls_without_think_tokens(seed_oss_tool_parser, sample_tools):
+    """Tool calls should work without think tokens (e.g., when reasoning parser consumes them)"""
+    # Model output without any think tokens - simulates reasoning parser already consuming them
+    model_output = (
+        """<seed:tool_call>\n<function=get_weather>\n"""
+        """<parameter=location>Paris, France</parameter>\n"""
+        """<parameter=unit>celsius</parameter>\n"""
+        """</function>\n</seed:tool_call>"""
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+
+    tool_call = extracted_tool_calls.tool_calls[0]
+    assert tool_call.function.name == "get_weather"
+
+    args = json.loads(tool_call.function.arguments)
+    assert args == {"location": "Paris, France", "unit": "celsius"}
+
+    # Content should be None since there's no content before tool call
+    assert extracted_tool_calls.content is None or extracted_tool_calls.content == ""
+
+
+def test_streaming_array_parameter(
+    seed_oss_tool_parser, seed_oss_tokenizer, array_param_tools
+):
+    """Test streaming with array parameters"""
+    model_output = (
+        """<seed:think>Reading multiple files</seed:think>"""
+        """<seed:tool_call>\n<function=read_file>\n"""
+        """<parameter=files>[{"path": "src/app.ts"}, {"path": "src/utils.ts"}]</parameter>\n"""
+        """</function>\n</seed:tool_call>"""
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=array_param_tools)
+
+    tool_states = {}
+    other_content = ""
+
+    for delta_message in stream_delta_message_generator(
+        seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # Verify tool call was parsed
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["name"] == "read_file"
+
+    # Verify array parameter is valid JSON with proper structure
+    arguments_str = state["arguments"]
+    assert arguments_str is not None
+    args = json.loads(arguments_str)
+    assert "files" in args
+    assert isinstance(args["files"], list)
+    assert len(args["files"]) == 2
+    assert args["files"][0] == {"path": "src/app.ts"}
+    assert args["files"][1] == {"path": "src/utils.ts"}
+
+
+def test_streaming_without_think_tokens(
+    seed_oss_tool_parser, seed_oss_tokenizer, sample_tools
+):
+    """Test streaming when reasoning parser has already consumed think tokens"""
+    # Model output without think tokens - simulates reasoning parser consuming them first
+    model_output = (
+        """<seed:tool_call>\n<function=get_weather>\n"""
+        """<parameter=location>Tokyo, Japan</parameter>\n"""
+        """</function>\n</seed:tool_call>"""
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    tool_states = {}
+    other_content = ""
+
+    for delta_message in stream_delta_message_generator(
+        seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # Verify tool call was parsed, not returned as raw text
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["name"] == "get_weather"
+
+    # Verify arguments are valid JSON
+    arguments_str = state["arguments"]
+    assert arguments_str is not None
+    args = json.loads(arguments_str)
+    assert args == {"location": "Tokyo, Japan"}
+
+    # Verify raw XML tags were NOT returned as content
+    assert "<seed:tool_call>" not in other_content
+    assert "<function=" not in other_content
+    assert "<parameter=" not in other_content
