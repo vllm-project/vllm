@@ -296,7 +296,7 @@ def _set_max_num_batched_encoder_input_tokens(
             "Overriding max_num_batched_encoder_input_tokens with ",
             "max_tokens_per_mm_item=%d because it is larger than the "
             "user-specified value of %d. "
-            "You can silence this warning by passing a larger value of "
+            "You can silence this warning by setting a larger value of "
             "max_num_batched_encoder_input_tokens.",
             max_num_batched_encoder_input_tokens,
             scheduler_config.max_num_batched_encoder_input_tokens,
@@ -346,7 +346,7 @@ def _set_encoder_cache_size(
             "Overriding encoder_cache_size with ",
             "max_tokens_per_mm_item=%d because it is larger than the "
             "user-specified value of %d. "
-            "You can silence this warning by passing a larger value of "
+            "You can silence this warning by setting a larger value of "
             "encoder_cache_size.",
             encoder_cache_size,
             scheduler_config.encoder_cache_size,
