@@ -452,6 +452,10 @@ class AsyncTPPass(VllmPatternMatcherPass):
             )
 
             if envs.VLLM_USE_HELION_BACKEND:
+                import vllm.kernels.helion
+                from vllm.kernels.helion.distributed.all_gather_matmul_fp8 import (
+                    helion_all_gather_fp8_gemm,
+                )
                 HelionAllGatherScaledMMPattern(self.model_dtype, self.device).register(
                     self.patterns
                 )
