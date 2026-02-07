@@ -14,6 +14,7 @@ from .inputs import (
     DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDecoderTokPrompt,
+    SingletonDictPrompt,
     TokPrompt,
 )
 from .params import ChatParams, TokenizeParams
@@ -277,3 +278,109 @@ class BaseRenderer(ABC):
         return await asyncio.gather(
             *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
         )
+
+    # Step 3: Add extra keys to the prompts
+    def _apply_prompt_extras(
+        self,
+        prompts: Sequence[DictPrompt | TokPrompt],
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        if not prompt_extras:
+            return
+
+        for prompt in prompts:
+            target_prompt: SingletonDictPrompt = prompt.get("encoder_prompt", prompt)
+            target_prompt.update(prompt_extras)
+
+    # Top-level methods
+    def render_cmpl(
+        self,
+        prompts: Sequence[DictPrompt | bytes],
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        dict_prompts = self.render_prompts(prompts)
+
+        # NOTE: Some MM models have non-default `add_special_tokens`
+        # so we handle tokenization in multi-modal processor
+        tok_prompts = (
+            dict_prompts
+            if self.config.is_multimodal_model
+            else self.tokenize_prompts(dict_prompts, tok_params)
+        )
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return tok_prompts
+
+    async def render_cmpl_async(
+        self,
+        prompts: Sequence[DictPrompt | bytes],
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        dict_prompts = await self.render_prompts_async(prompts)
+
+        # NOTE: MM data cannot be passed to online Completions API
+        # so we don't have the special case that is in the offline version
+        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return tok_prompts
+
+    def render_chat(
+        self,
+        conversations: Sequence[list["ChatCompletionMessageParam"]],
+        chat_params: ChatParams,
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        rendered = [
+            self.render_messages(conversation, chat_params)
+            for conversation in conversations
+        ]
+
+        out_conversations = list[list[ConversationMessage]]()
+        dict_prompts = list[DictPrompt]()
+        for conv, prompt in rendered:
+            out_conversations.append(conv)
+            dict_prompts.append(prompt)
+
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return out_conversations, tok_prompts
+
+    async def render_chat_async(
+        self,
+        conversations: Sequence[list["ChatCompletionMessageParam"]],
+        chat_params: ChatParams,
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        rendered = [
+            self.render_messages_async(conversation, chat_params)
+            for conversation in conversations
+        ]
+
+        out_conversations = list[list[ConversationMessage]]()
+        dict_prompts = list[DictPrompt]()
+        for conv, prompt in await asyncio.gather(*rendered):
+            out_conversations.append(conv)
+            dict_prompts.append(prompt)
+
+        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return out_conversations, tok_prompts
