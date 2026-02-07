@@ -565,12 +565,15 @@ async def run_request(
     return batch_output
 
 
+WrapperFn: TypeAlias = Callable[[Callable], Callable]
+
+
 def handle_endpoint_request(
     request: BatchRequestInput,
     tracker: BatchProgressTracker,
     url_matcher: Callable[[str], bool],
     handler_getter: Callable[[], Callable | None],
-    wrapper_fn: Callable[[Callable], Callable] | None = None,
+    wrapper_fn: WrapperFn | None = None,
 ) -> Awaitable[BatchRequestOutput] | None:
     """
     Generic handler for endpoint requests.
@@ -602,7 +605,7 @@ def handle_endpoint_request(
     return run_request(handler_fn, request, tracker)
 
 
-def make_transcription_wrapper(is_translation: bool):
+def make_transcription_wrapper(is_translation: bool) -> WrapperFn:
     """
     Factory function to create a wrapper for transcription/translation handlers.
     The wrapper converts BatchTranscriptionRequest or BatchTranslationRequest
