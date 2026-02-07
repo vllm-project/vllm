@@ -440,8 +440,8 @@ class EngineArgs:
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_batched_encoder_input_tokens: int | None = (
-        SchedulerConfig.max_num_batched_encoder_input_tokens
+    max_num_batched_encoder_embeds: int | None = (
+        SchedulerConfig.max_num_batched_encoder_embeds
     )
     encoder_cache_size: int | None = SchedulerConfig.encoder_cache_size
     max_num_seqs: int | None = None
@@ -1132,8 +1132,8 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
         scheduler_group.add_argument(
-            "--max-num-batched-encoder-input-tokens",
-            **scheduler_kwargs["max_num_batched_encoder_input_tokens"],
+            "--max-num-batched-encoder-embeds",
+            **scheduler_kwargs["max_num_batched_encoder_embeds"],
         )
         scheduler_group.add_argument(
             "--encoder-cache-size",
@@ -1681,7 +1681,7 @@ class EngineArgs:
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            max_num_batched_encoder_input_tokens=self.max_num_batched_encoder_input_tokens,
+            max_num_batched_encoder_embeds=self.max_num_batched_encoder_embeds,
             encoder_cache_size=self.encoder_cache_size,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,

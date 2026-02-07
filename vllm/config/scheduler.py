@@ -84,28 +84,27 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    max_num_batched_encoder_input_tokens: int | None = None
-    """Maximum number of encoder input tokens to be processed in a single iteration;
-    defaults to `max_num_batched_tokens`.
+    max_num_batched_encoder_embeds: int | None = None
+    """Maximum number of encoder embeddings to be processed in a single iteration.
 
-    Notes:
-        - The relation between encoder and decoder input tokens is not necessarily
-          one-to-one. Usually, multimodal encoders will downsample the input tokens
-          so that there are fewer tokens in the multimodal embeddings passed from
-          the encoder to the decoder.
-        - It will be overridden by the maximum possible multimodal embedding size
-          if it is larger.
+    Defaults to `max_num_batched_tokens`. This will be overridden by the
+    maximum possible multimodal embedding size of the model if it is larger.
+
+    Note that the number of encoder embeddings might be smaller than the
+    number of input tokens used to represent the multimodal input; see
+    [vllm.v1.core.encoder_cache_manager.EncoderCacheManager][] for more details.
     """
 
     encoder_cache_size: int | None = None
-    """Multimodal encoder cache size;
-    defaults to `max_num_batched_encoder_input_tokens`.
+    """Maximum number of encoder embeddings that can be stored in the encoder cache;
+    it must be no smaller than `max_num_batched_encoder_embeds`.
 
-    It must be no smaller than `max_num_batched_encoder_input_tokens`.
+    Defaults to `max_num_batched_encoder_embeds`. This will be overridden by the
+    maximum possible multimodal embedding size of the model if it is larger.
 
-    Notes:
-        - It will be overridden by the maximum possible multimodal embedding size
-          if it is larger.
+    Note that the number of encoder embeddings might be smaller than the
+    number of input tokens used to represent the multimodal input; see
+    [vllm.v1.core.encoder_cache_manager.EncoderCacheManager][] for more details.
     """
 
     policy: SchedulerPolicy = "fcfs"
