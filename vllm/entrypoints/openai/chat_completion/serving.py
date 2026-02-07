@@ -1105,7 +1105,13 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         # only check if there are any tool calls
                         # detected by partial parsing
-                        if should_check and tool_parser and auto_tools_called:
+                        if (
+                            should_check
+                            and tool_parser
+                            and auto_tools_called
+                            and index < len(tool_parser.prev_tool_call_arr)
+                            and index < len(tool_parser.streamed_args_for_tool)
+                        ):
                             latest_delta_len = 0
                             if (
                                 isinstance(
