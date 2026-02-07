@@ -31,7 +31,7 @@ speculative decoding, breaking down the guarantees into three key areas:
     >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
     > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
     >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../tests/spec_decode/e2e).
+    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](/tests/v1/spec_decode).
     >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
