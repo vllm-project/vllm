@@ -340,7 +340,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: dict[str, list[MultiModalFeatureSpec]] = {}
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -477,8 +477,8 @@ class Scheduler(SchedulerInterface):
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
-                                    mm_feature.get_num_embeds()
-                                    for mm_feature in preempted_encoder_inputs
+                                    request.get_num_embeds(i)
+                                    for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
