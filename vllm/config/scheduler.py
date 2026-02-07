@@ -90,8 +90,9 @@ class SchedulerConfig:
 
     Notes:
         - The relation between encoder and decoder input tokens is not necessarily
-          one-to-one. Usually, multi-modal encoders will downsample the input tokens
-          so that there are fewer tokens passed from the encoder to the decoder.
+          one-to-one. Usually, multimodal encoders will downsample the input tokens
+          so that there are fewer tokens in the multimodal embeddings passed from
+          the encoder to the decoder.
         - It will be overridden by the maximum possible multimodal embedding size
           if it is larger.
     """
