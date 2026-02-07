@@ -1,13 +1,5 @@
 # Speculative Decoding
 
-!!! warning
-    Please note that speculative decoding in vLLM is not yet optimized and does
-    not usually yield inter-token latency reductions for all prompt datasets or sampling parameters.
-    The work to optimize it is ongoing and can be followed here: <https://github.com/vllm-project/vllm/issues/4630>
-
-!!! warning
-    Currently, speculative decoding in vLLM is not compatible with pipeline parallelism.
-
 This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM.
 Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
 
@@ -326,6 +318,10 @@ can occur due to following factors:
   due to non-deterministic behavior in batched operations or numerical instability.
 
 For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../../usage/faq.md).
+
+## Known Feature Incompatibility
+
+1. Pipeline parallelism
 
 ## Resources for vLLM contributors
 
