@@ -346,7 +346,7 @@ class BaseRenderer(ABC):
             for conversation in conversations
         ]
 
-        out_conversations = list[list[ConversationMessage]]()
+        out_conversations = list[list["ConversationMessage"]]()
         dict_prompts = list[DictPrompt]()
         for conv, prompt in rendered:
             out_conversations.append(conv)
@@ -372,7 +372,7 @@ class BaseRenderer(ABC):
             for conversation in conversations
         ]
 
-        out_conversations = list[list[ConversationMessage]]()
+        out_conversations = list[list["ConversationMessage"]]()
         dict_prompts = list[DictPrompt]()
         for conv, prompt in await asyncio.gather(*rendered):
             out_conversations.append(conv)
