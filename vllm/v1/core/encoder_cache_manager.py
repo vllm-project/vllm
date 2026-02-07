@@ -275,14 +275,6 @@ def _set_max_num_batched_encoder_tokens(
 
     if max_num_batched_encoder_tokens is None:
         max_num_batched_encoder_tokens = max_num_batched_tokens
-    elif max_num_batched_encoder_tokens > max_num_batched_tokens:
-        raise ValueError(
-            "Encoder tokens are a subset of total scheduled tokens, so "
-            f"{max_num_batched_encoder_tokens=} cannot be greater than "
-            f"{max_num_batched_tokens=}. "
-            "Please decrease max_num_batched_encoder_tokens "
-            "or increase max_num_batched_tokens."
-        )
 
     max_num_batched_encoder_tokens = max(
         max_num_batched_encoder_tokens, max_tokens_per_mm_item
