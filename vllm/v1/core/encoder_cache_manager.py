@@ -219,13 +219,11 @@ class EncoderCacheManager:
         in `freeable`); for such entries, freeing for this request will be a
         no-op.
         """
-        mm_features_by_id = {
-            mm_feature.identifier: mm_feature
+        return [
+            mm_feature
             for mm_feature in request.mm_features
             if mm_feature.identifier in self.cached
-        }
-
-        return list(mm_features_by_id.values())
+        ]
 
     def free_encoder_input(
         self,
