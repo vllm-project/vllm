@@ -579,6 +579,16 @@ class OpenAISpeechToText(OpenAIServing):
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
+            chunk_size_in_s = self.asr_config.max_audio_clip_s
+            if chunk_size_in_s is None:
+                logger.warning(
+                    "Setting max_audio_clip_s=None is deprecated and will be "
+                    "removed in a future release. Audio chunking will be enabled "
+                    "by default for long audio files."
+                )
+                assert len(list_result_generator) == 1, (
+                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
+                )
             for idx, result_generator in enumerate(list_result_generator):
                 start_time = chunk_start_times[idx]
                 async for op in result_generator:
