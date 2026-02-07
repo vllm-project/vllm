@@ -25,11 +25,11 @@ class TestDeltaMessageReasoningCompat:
         assert msg.reasoning_content == "thinking steps"
         assert msg.reasoning == "thinking steps"
 
-    def test_both_fields_set_explicitly(self):
-        """When both fields are set, both values should be preserved."""
+    def test_both_fields_set_reasoning_takes_precedence(self):
+        """When both fields are set, reasoning takes precedence as canonical."""
         msg = DeltaMessage(reasoning="a", reasoning_content="b")
         assert msg.reasoning == "a"
-        assert msg.reasoning_content == "b"
+        assert msg.reasoning_content == "a"  # Synced from reasoning
 
     def test_neither_field_set(self):
         """When neither field is set, both should remain None."""

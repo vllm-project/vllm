@@ -270,9 +270,9 @@ class DeltaMessage(OpenAIBaseModel):
         This validator ensures both fields stay in sync for backward
         compatibility with clients that expect reasoning_content.
         """
-        if self.reasoning is not None and self.reasoning_content is None:
+        if self.reasoning is not None:
             self.reasoning_content = self.reasoning
-        elif self.reasoning_content is not None and self.reasoning is None:
+        elif self.reasoning_content is not None:
             self.reasoning = self.reasoning_content
         return self
 
