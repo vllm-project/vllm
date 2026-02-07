@@ -45,6 +45,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -278,6 +279,7 @@ class BatchDCPPrefillWrapper:
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    forward_includes_kv_cache_update: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -1241,6 +1243,46 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Perform KV cache update separately from attention forward pass.
+
+        FlashInfer overrides the default implementation because it accesses
+        kv_cache differently (direct indexing vs unbind).
+
+        Args:
+            layer: The attention layer instance.
+            key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
+            value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
+            kv_cache: The KV cache tensor.
+            slot_mapping: Slot mapping tensor from forward context.
+        """
+        # Skip if sharing KV cache with an earlier attention layer
+        if self.kv_sharing_target_layer_name is not None:
+            return
+
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            kv_cache[:, 0],
+            kv_cache[:, 1],
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1332,32 +1374,9 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
-            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-            # to process the cache when the kv_cache_dtype is fp8
-            if self.kv_cache_dtype.startswith("fp8"):
-                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                    self.kv_cache_dtype
-                )
-                kv_cache = kv_cache.view(torch_dtype)
+        # NOTE: KV cache update is handled separately by do_kv_cache_update().
+        # The caller must invoke do_kv_cache_update() before calling forward()
+        # since forward_includes_kv_cache_update = False for this backend.
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
@@ -1365,6 +1384,14 @@ class FlashInferImpl(AttentionImpl):
         value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
+
+        # The FlashInfer API requires data to be in fp8_e4m3 or fp8_e5m2
+        # to process the cache when the kv_cache_dtype is fp8.
+        if self.kv_cache_dtype.startswith("fp8"):
+            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype
+            )
+            kv_cache = kv_cache.view(torch_dtype)
 
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).

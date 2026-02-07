@@ -277,7 +277,7 @@ class AttentionBackend(ABC):
 
 
 class AttentionMetadata:
-    pass
+    slot_mapping: torch.Tensor
 
 
 T = TypeVar("T", bound=AttentionMetadata)
@@ -612,6 +612,10 @@ class AttentionImplBase(ABC, Generic[T]):
     head_size: int
     scale: float
 
+    # KV cache configuration - set by subclasses in __init__
+    kv_cache_dtype: str
+    kv_sharing_target_layer_name: str | int | None
+
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
@@ -711,6 +715,51 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Perform KV cache update separately from attention forward pass.
+
+        This is the default implementation that uses the standard
+        reshape_and_cache_flash operation. Backends can override this method
+        if they need custom KV cache update logic (e.g., shuffle layouts,
+        different head sizes for K and V).
+
+        Args:
+            layer: The attention layer instance.
+            key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
+            value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
+            kv_cache: The KV cache tensor.
+            slot_mapping: Slot mapping tensor from forward context.
+        """
+        # Skip if sharing KV cache with an earlier attention layer
+        if self.kv_sharing_target_layer_name is not None:
+            return
+
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # Default implementation using the standard reshape_and_cache_flash op.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """

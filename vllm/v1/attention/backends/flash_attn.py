@@ -30,7 +30,6 @@ if is_flash_attn_varlen_func_available():
         flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
-        reshape_and_cache_flash,
     )
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
@@ -771,35 +770,8 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is not None
-            or key is None
-            or value is None
-        ):
-            return
-
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        # Reshape the input keys and values and store them in the cache.
-        # Skip this if sharing KV cache with an earlier attention layer.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens]
-        # and value[:num_actual_tokens] because the reshape_and_cache_flash
-        # op uses the slot_mapping's shape to determine the number of
-        # actual tokens.
-        reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+        # Use the default implementation from the base class
+        super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
 
     def _forward_with_dcp(
         self,
