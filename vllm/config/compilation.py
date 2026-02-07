@@ -127,6 +127,13 @@ class PassConfig:
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
     """Fuse the custom RMSNorm + padding ops."""
+    fuse_rope_kvcache: bool = Field(default=None)
+    """Fuse the QK rope + KV cache ops."""
+
+    aiter_rope_kvcache_fusion_max_token_num: int = 256
+    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -199,6 +206,7 @@ class PassConfig:
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
+        "fuse_rope_kvcache",
         mode="wrap",
     )
     @classmethod
@@ -244,6 +252,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
+        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "KV cache fusion enabled but the current platform is not ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache = False
 
 
 class DynamicShapesType(str, enum.Enum):
@@ -817,6 +831,16 @@ class CompilationConfig:
 
         if self.pass_config.enable_qk_norm_rope_fusion:
             # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+        if self.pass_config.fuse_rope_kvcache:
+            if envs.VLLM_ROCM_USE_AITER_TRITON_ROPE:
+                logger.warning(
+                    "Cannot use VLLM_ROCM_USE_AITER_TRITON_ROPE with "
+                    "fuse_rope_kvcache. Disabling fuse_rope_kvcache."
+                )
+                self.pass_config.fuse_rope_kvcache = False
+            # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
 
