@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import ProcessorInputs
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -779,6 +780,16 @@ class Platform:
         raise NotImplementedError(
             "num_compute_units is not implemented for the current platform."
         )
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        """Get the default IR op priority for the current platform."""
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native always used by default. Platforms can override this behavior.
+        return IrOpPriorityConfig.with_default(["native"])
 
 
 class UnspecifiedPlatform(Platform):

@@ -884,6 +884,12 @@ class VllmConfig:
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
+        # This populates IR op priorities,
+        # needs to happen after compilation mode and backend are decided.
+        # TODO(luka): it's hard to figure out where to put this because it shouldn't
+        #  affect any of the passes or anything else - a great problem to have :)
+        self.kernel_config.set_platform_defaults(self)
+
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
         if HAS_OPAQUE_TYPE:

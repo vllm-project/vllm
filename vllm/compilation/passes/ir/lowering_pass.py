@@ -132,3 +132,5 @@ class VllmIRLoweringPass(VllmInductorPass):
         if failed_nodes or failed_ops:
             logger.warning("Failed to lower vLLM IR ops: %s", ",".join(failed_ops))
             logger.warning("Full node list: %s", failed_nodes)
+
+        self.selected_impls.clear()
