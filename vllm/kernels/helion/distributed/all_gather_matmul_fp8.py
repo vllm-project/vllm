@@ -6,10 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 from helion._testing import DEVICE
 import helion.language as hl
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-)
-# Define Helion Config globally for collective fusion
+
 HELION_CONFIG = helion.Config(
     block_sizes=[8, 256, 64],
     num_warps=8,
