@@ -890,3 +890,121 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer_one_chunk(
         assert expected_content == ""
     else:
         assert delta_message.content == expected_content
+
+
+def test_streamed_args_for_tool_populated_v11(
+    mistral_tool_parser,
+    mistral_tokenizer,
+):
+    """
+    Regression test for https://github.com/vllm-project/vllm/issues/33916
+
+    Verify that streamed_args_for_tool is populated during streaming
+    for v11+ tokenizer, preventing IndexError in serving_chat.py when
+    it accesses tool_parser.streamed_args_for_tool[index].
+    """
+    tools = [("add", '{"a": 3, "b": 4}')]
+    expected_args = json.dumps({"a": 3, "b": 4})
+
+    for _ in stream_delta_message_generator(
+        mistral_tool_parser, mistral_tokenizer, None, tools
+    ):
+        pass
+
+    # After streaming completes, streamed_args_for_tool must have at
+    # least one entry so that serving_chat.py can safely index into it.
+    assert len(mistral_tool_parser.streamed_args_for_tool) >= 1, (
+        "streamed_args_for_tool should be populated after streaming tool "
+        "calls but was empty, which would cause IndexError in "
+        "serving_chat.py"
+    )
+    # The accumulated arguments string should match the expected arguments
+    assert mistral_tool_parser.streamed_args_for_tool[0] == expected_args
+
+
+def test_streamed_args_for_tool_populated_v11_multiple_tools(
+    mistral_tool_parser,
+    mistral_tokenizer,
+):
+    """
+    Regression test for https://github.com/vllm-project/vllm/issues/33916
+
+    Verify that streamed_args_for_tool is populated for multiple tool calls
+    during streaming for v11+ tokenizer.
+    """
+    tools = [
+        ("add", '{"a": 3.5, "b": 4}'),
+        (
+            "get_current_weather",
+            '{"city": "San Francisco", "state": "CA", "unit": "celsius"}',
+        ),
+    ]
+
+    for _ in stream_delta_message_generator(
+        mistral_tool_parser, mistral_tokenizer, None, tools
+    ):
+        pass
+
+    assert len(mistral_tool_parser.streamed_args_for_tool) >= 2, (
+        "streamed_args_for_tool should have entries for each tool call "
+        f"but had {len(mistral_tool_parser.streamed_args_for_tool)}"
+    )
+
+
+def test_streamed_args_for_tool_populated_pre_v11(
+    mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
+):
+    """
+    Regression test for https://github.com/vllm-project/vllm/issues/33916
+
+    Verify that streamed_args_for_tool is populated during streaming
+    for pre-v11 tokenizer.
+    """
+    model_output = (
+        '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 3, "b": 4}}]'
+    )
+
+    for _ in stream_delta_message_generator(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        None,
+    ):
+        pass
+
+    assert len(mistral_pre_v11_tool_parser.streamed_args_for_tool) >= 1, (
+        "streamed_args_for_tool should be populated after streaming tool "
+        "calls but was empty, which would cause IndexError in "
+        "serving_chat.py"
+    )
+
+
+def test_streamed_args_for_tool_populated_pre_v11_multiple_tools(
+    mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
+):
+    """
+    Regression test for https://github.com/vllm-project/vllm/issues/33916
+
+    Verify that streamed_args_for_tool is populated for multiple tool calls
+    during streaming for pre-v11 tokenizer.
+    """
+    model_output = (
+        '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 3.5, "b": 4}}, '
+        '{"name": "get_current_weather", "arguments":'
+        '{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]'
+    )
+
+    for _ in stream_delta_message_generator(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        None,
+    ):
+        pass
+
+    assert len(mistral_pre_v11_tool_parser.streamed_args_for_tool) >= 2, (
+        "streamed_args_for_tool should have entries for each tool call "
+        f"but had {len(mistral_pre_v11_tool_parser.streamed_args_for_tool)}"
+    )
