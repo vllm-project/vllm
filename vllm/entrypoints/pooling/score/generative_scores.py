@@ -241,7 +241,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         # Build prompts for each item
         try:
             engine_prompts, prompt_token_counts = await self._build_prompts(
-                request, tokenizer
+                request, tokenizer, self.model_config.max_model_len
             )
         except (ValueError, TypeError) as e:
             logger.exception("Error building prompts")
@@ -388,12 +388,14 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         self,
         request: GenerativeScoreRequest,
         tokenizer,
+        max_model_len: int,
     ) -> tuple[list[TokensPrompt], list[int]]:
         """Build prompts by concatenating query and items.
 
         Args:
             request: The request containing query, items, and settings.
             tokenizer: The tokenizer to use.
+            max_model_len: Maximum model context length for truncation.
 
         Returns:
             Tuple of (list of TokensPrompt, list of prompt token counts).
@@ -431,6 +433,11 @@ class OpenAIServingGenerativeScores(OpenAIServing):
                 prompt_token_ids = item_token_ids + query_token_ids
             else:
                 prompt_token_ids = query_token_ids + item_token_ids
+
+            # Truncate to max_model_len - 1 to leave room for 1 output token
+            max_prompt_len = max_model_len - 1
+            if len(prompt_token_ids) > max_prompt_len:
+                prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
             engine_prompts.append(
                 TokensPrompt(prompt_token_ids=prompt_token_ids)
