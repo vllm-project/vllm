@@ -85,7 +85,7 @@ class SchedulerConfig:
     """True if the model is multimodal."""
 
     max_num_batched_encoder_tokens: int | None = None
-    """MMaximum number of encoder tokens to be processed in a single iteration,
+    """Maximum number of encoder tokens to be processed in a single iteration,
     defaults to `max_num_batched_tokens`.
 
     It must be no greater than `max_num_batched_tokens`.
