@@ -91,7 +91,7 @@ class MultiModalBudget:
             )
 
         if embed_only_modalities:
-            logger.info(
+            logger.info_once(
                 "enable_mm_embeds is True; modalities handled as embedding-only: %s",
                 embed_only_modalities,
             )

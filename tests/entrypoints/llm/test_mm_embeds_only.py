@@ -65,5 +65,3 @@ def test_text_only_prompt(llm: LLM):
     )
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].text) > 0
-
-

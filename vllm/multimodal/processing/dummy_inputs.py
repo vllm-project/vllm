@@ -95,8 +95,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data,
-                                                 validate=False)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         tokenization_kwargs = {"truncation": False}
 
