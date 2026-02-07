@@ -30,6 +30,7 @@ th {
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
 | HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 
@@ -269,6 +270,22 @@ vllm bench serve \
     --num-prompts 90 \
     --blazedit-min-distance 0.01 \
     --blazedit-max-distance 0.99
+```
+
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+
+```bash
+vllm bench serve \
+    --model openai/whisper-large-v3-turbo \
+    --backend openai-audio \
+    --dataset-name hf \
+    --dataset-path facebook/voxpopuli --hf-subset en --hf-split test --no-stream --trust-remote-code \
+    --num-prompts 99999999 \
+    --no-oversample \
+    --endpoint /v1/audio/transcriptions \
+    --ready-check-timeout-sec 600 \
+    --save-result \
+    --max-concurrency 512
 ```
 
 #### Running With Sampling Parameters
