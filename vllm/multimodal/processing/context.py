@@ -681,7 +681,7 @@ class BaseProcessingInfo:
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
         if validate:
-            mm_config = self.ctx.model_config.get_multimodal_config()
+            mm_config = self.ctx.get_mm_config()
 
             for modality, items in mm_items.items():
                 if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
