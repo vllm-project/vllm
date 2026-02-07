@@ -38,6 +38,7 @@ def test_runai_model_loader_download_files(vllm_runner):
         assert deserialized_outputs
 
 
+@pytest.skip("Cannot access model on GCS")
 def test_runai_model_loader_download_files_gcs(
     vllm_runner, monkeypatch: pytest.MonkeyPatch
 ):
