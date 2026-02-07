@@ -610,10 +610,10 @@ def make_transcription_wrapper(is_translation: bool):
 
     Args:
         is_translation: If True, process as translation; otherwise process
-            as transcription
+            as transcription.
 
     Returns:
-        A function that takes a handler and returns a wrapped handler
+        Callable: A function that takes a handler and returns a wrapped handler.
     """
 
     def wrapper(handler_fn: Callable):
