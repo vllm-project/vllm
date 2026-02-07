@@ -8,7 +8,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.compilation.backends import split_graph
-from vllm.compilation.fx_utils import find_op_nodes
+from vllm.compilation.passes.fx_utils import find_op_nodes
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
