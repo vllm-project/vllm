@@ -613,7 +613,7 @@ def make_transcription_wrapper(is_translation: bool):
             as transcription.
 
     Returns:
-        Callable: A function that takes a handler and returns a wrapped handler.
+        Function that takes a handler and returns a wrapped handler.
     """
 
     def wrapper(handler_fn: Callable):
