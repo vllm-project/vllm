@@ -152,8 +152,11 @@ def test_schedule_multimodal_requests_multi_batch(
     total_len = start_idx
 
     max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
+
+    # mult < 1 should be automatically overridden by MAX_MM_ITEM_TOKS
     max_num_batched_encoder_embeds = int(encoder_budget_mult * MAX_MM_ITEM_TOKS)
     encoder_cache_size = int(encoder_cache_mult * MAX_MM_ITEM_TOKS)
+
     print(
         f"{max_num_batched_tokens=}, {max_num_batched_encoder_embeds=}, "
         f"{encoder_cache_size=}"
