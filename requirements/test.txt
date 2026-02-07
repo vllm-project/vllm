@@ -3,9 +3,7 @@
 absl-py==2.1.0
     # via rouge-score
 accelerate==1.0.1
-    # via
-    #   lm-eval
-    #   peft
+    # via peft
 aenum==3.1.16
     # via lightly
 affine==2.4.0
@@ -144,7 +142,6 @@ colorama==0.4.6
     #   perceptron
     #   sacrebleu
     #   schemathesis
-    #   tqdm-multiprocess
 colorful==0.5.6
     # via ray
 colorlog==6.10.1
@@ -394,6 +391,7 @@ jinja2==3.1.6
     #   datamodel-code-generator
     #   flask
     #   genai-perf
+    #   lm-eval
     #   mlflow
     #   torch
 jiwer==3.0.5
@@ -458,7 +456,7 @@ lightning-utilities==0.14.3
     #   torchmetrics
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.9.2
+lm-eval==0.4.10
     # via -r requirements/test.in
 lxml==5.3.0
     # via
@@ -531,8 +529,6 @@ numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
-numexpr==2.10.1
-    # via lm-eval
 numpy==2.2.6
     # via
     #   -r requirements/test.in
@@ -556,12 +552,12 @@ numpy==2.2.6
     #   librosa
     #   lightly
     #   lightly-utils
+    #   lm-eval
     #   matplotlib
     #   mistral-common
     #   mlflow
     #   mteb
     #   numba
-    #   numexpr
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -723,9 +719,7 @@ pathvalidate==3.2.1
 patsy==1.0.1
     # via statsmodels
 peft==0.16.0
-    # via
-    #   -r requirements/test.in
-    #   lm-eval
+    # via -r requirements/test.in
 perceptron==0.1.4
     # via -r requirements/test.in
 perf-analyzer==0.1.0
@@ -803,8 +797,6 @@ pyasn1==0.6.1
     #   rsa
 pyasn1-modules==0.4.2
     # via google-auth
-pybind11==2.13.6
-    # via lm-eval
 pycocotools==2.0.8
     # via terratorch
 pycountry==24.6.1
@@ -1168,7 +1160,6 @@ torch==2.9.1+cu129
     #   kornia
     #   lightly
     #   lightning
-    #   lm-eval
     #   mteb
     #   open-clip-torch
     #   peft
@@ -1227,15 +1218,11 @@ tqdm==4.66.6
     #   pytorch-lightning
     #   segmentation-models-pytorch
     #   sentence-transformers
-    #   tqdm-multiprocess
     #   transformers
-tqdm-multiprocess==0.0.11
-    # via lm-eval
 transformers==4.57.5
     # via
     #   -r requirements/test.in
     #   genai-perf
-    #   lm-eval
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -1271,6 +1258,7 @@ typing-extensions==4.15.0
     #   librosa
     #   lightning
     #   lightning-utilities
+    #   lm-eval
     #   mistral-common
     #   mlflow-skinny
     #   mteb

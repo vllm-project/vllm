@@ -3,7 +3,7 @@
 # We use this for fp8, which HF does not support.
 #
 # Make sure you have lm-eval-harness installed:
-#   pip install "lm-eval[api]>=0.4.9.2"
+#   pip install "lm-eval[api]>=0.4.10"
 
 usage() {
     echo``

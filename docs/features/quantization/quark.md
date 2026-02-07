@@ -20,7 +20,7 @@ for more installation details.
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm "lm-eval[api]>=0.4.9.2"
+pip install vllm "lm-eval[api]>=0.4.10"
 ```
 
 ## Quantization Process
