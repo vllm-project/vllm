@@ -112,7 +112,8 @@ def set_default_torch_num_threads(num_threads: int | None = None):
     """
     if num_threads is None:
         from vllm._cpu_detection import get_available_cpus
-        num_threads = max(1, get_available_cpus() // 2)
+
+        num_threads = max(1, get_available_cpus())
 
         try:
             num_threads = int(os.environ["OMP_NUM_THREADS"])

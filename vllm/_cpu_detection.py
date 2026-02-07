@@ -1,14 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CFS-aware CPU detection utilities.
 
 Provides container-aware CPU counting that respects cgroup CFS quotas,
-for use by subsystems that size thread pools (e.g., PyTorch default
-thread count via set_default_torch_num_threads).
+for use by subsystems that size thread pools (structured output grammar
+compilation, numba parallel processing, CPU backend OMP configuration).
 """
 
 import functools
 import math
 import os
-from typing import Optional
 
 
 def _get_cgroup_v2_path() -> str:
@@ -29,7 +30,7 @@ def _get_cgroup_v2_path() -> str:
     return ""
 
 
-def _get_cfs_cpu_limit() -> Optional[int]:
+def _get_cfs_cpu_limit() -> int | None:
     """Get CPU limit from CFS quota (cgroup v2/v1).
 
     Only returns a value when a real CFS quota is set (i.e., inside a
@@ -53,8 +54,7 @@ def _get_cfs_cpu_limit() -> Optional[int]:
                 quota = int(parts[0])
                 period = int(parts[1])
                 return max(1, math.ceil(quota / period))
-    except (FileNotFoundError, PermissionError, ValueError, IndexError,
-            OSError):
+    except (FileNotFoundError, PermissionError, ValueError, IndexError, OSError):
         pass
 
     # 2. CFS quota (cgroup v1)
