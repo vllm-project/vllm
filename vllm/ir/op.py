@@ -77,6 +77,8 @@ def register_op(
 class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
+    maybe_inplace: "IrOpInplaceOverload | None"
+
     def __init__(
         self,
         name: str,
@@ -132,6 +134,8 @@ class IrOp:
 
         if self.allow_inplace:
             self.maybe_inplace = IrOpInplaceOverload(self)
+        else:
+            self.maybe_inplace = None
 
         assert name not in self.registry
         self.registry[name] = self
