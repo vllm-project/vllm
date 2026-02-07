@@ -11,7 +11,7 @@ This directory used to contain vLLM's benchmark scripts and utilities for perfor
 
 ## Usage
 
-For detailed usage instructions, examples, and dataset information, see the [Benchmark CLI documentation](https://docs.vllm.ai/en/latest/contributing/benchmarks.html#benchmark-cli).
+For detailed usage instructions, examples, and dataset information, see the [Benchmark CLI documentation](https://docs.vllm.ai/en/latest/benchmarking/cli/#benchmark-cli).
 
 For full CLI reference see:
 

@@ -332,7 +332,7 @@ httpx==0.27.2
     #   -r requirements/test.in
     #   perceptron
     #   schemathesis
-huggingface-hub==0.36.1
+huggingface-hub==0.36.2
     # via
     #   accelerate
     #   datasets
