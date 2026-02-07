@@ -1240,6 +1240,8 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_message, output
                             )
                             and tool_parser
+                            and index < len(tool_parser.prev_tool_call_arr)
+                            and index < len(tool_parser.streamed_args_for_tool)
                         ):
                             latest_delta_len = 0
                             if (
