@@ -457,6 +457,22 @@ class Worker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         # We skip EPLB here since we don't want to record dummy metrics
+        # The first _dummy_run call triggers torch.compile via the decorator.
+        # Running this with a small batch size (1) is much faster than using
+        # max_num_batched_tokens, since Dynamo only needs to capture the
+        # computational graph structure.
+        model = self.model_runner.get_model()
+        is_compiled = getattr(model, "compiled", False)
+        if warmup_sizes and not is_compiled:
+            compile_trigger_size = 1
+            logger.info(
+                "Triggering torch.compile with minimal batch size %d",
+                compile_trigger_size,
+            )
+            self.model_runner._dummy_run(
+                compile_trigger_size, skip_eplb=True, remove_lora=False
+            )
+
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
