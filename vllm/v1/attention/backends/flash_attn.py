@@ -771,16 +771,6 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is not None
-            or key is None
-            or value is None
-        ):
-            return
-
         key_cache, value_cache = kv_cache.unbind(0)
 
         # Reshape the input keys and values and store them in the cache.
