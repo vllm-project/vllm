@@ -399,14 +399,6 @@ def compute_mm_encoder_budget(
         scheduler_config, max_tokens_per_mm_item
     )
 
-    if max_num_batched_encoder_embeds > encoder_cache_size:
-        raise ValueError(
-            f"{max_num_batched_encoder_embeds=} cannot be greater than "
-            f"{encoder_cache_size=}. "
-            "Please decrease max_num_batched_encoder_embeds or "
-            "increase encoder_cache_size."
-        )
-
     _set_max_num_batched_encoder_embeds(
         scheduler_config, max_num_batched_encoder_embeds
     )
