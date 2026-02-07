@@ -63,20 +63,21 @@ class MultiModalBudget:
 
             self.cache = cache
             mm_config = model_config.get_multimodal_config()
-            enable_mm_embeds = (mm_config is not None
-                                and mm_config.enable_mm_embeds)
+            enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
             supported_mm_limits = processor.info.supported_mm_limits
             self.mm_limits = mm_limits = processor.info.allowed_mm_limits
 
             # Modalities that pass through the MM encoder tower
             tower_modalities = {
-                modality for modality in supported_mm_limits
+                modality
+                for modality in supported_mm_limits
                 if mm_limits.get(modality, 0) > 0
             }
             # Modalities that bypass the tower (pre-computed embeddings only)
             embed_only_modalities = {
-                modality for modality in supported_mm_limits
+                modality
+                for modality in supported_mm_limits
                 if enable_mm_embeds and mm_limits.get(modality, 0) == 0
             }
 
@@ -91,8 +92,7 @@ class MultiModalBudget:
 
         if embed_only_modalities:
             logger.info(
-                "enable_mm_embeds is True; modalities handled as "
-                "embedding-only: %s",
+                "enable_mm_embeds is True; modalities handled as embedding-only: %s",
                 embed_only_modalities,
             )
 
