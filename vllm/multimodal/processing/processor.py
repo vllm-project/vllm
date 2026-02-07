@@ -1395,7 +1395,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        mm_missing_items = self.info.parse_mm_data(mm_missing_data)
+        mm_missing_items = self.info.parse_mm_data(mm_missing_data,
+                                                     validate=False)
 
         return mm_is_cached, mm_missing_items
 
