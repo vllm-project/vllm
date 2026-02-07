@@ -154,6 +154,10 @@ def test_schedule_multimodal_requests_multi_batch(
     max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
     max_num_batched_encoder_embeds = int(encoder_budget_mult * MAX_MM_ITEM_TOKS)
     encoder_cache_size = int(encoder_cache_mult * MAX_MM_ITEM_TOKS)
+    print(
+        f"{max_num_batched_tokens=}, {max_num_batched_encoder_embeds=}, "
+        f"{encoder_cache_size=}"
+    )
 
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
