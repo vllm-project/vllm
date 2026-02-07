@@ -586,7 +586,7 @@ def calculate_metrics(
         ],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
-        rtfx=input_audio_duration / dur_s if input_audio_duration > 0 else 0.0,
+        rtfx=input_audio_duration / dur_s,
     )
 
     return metrics, actual_output_lens
