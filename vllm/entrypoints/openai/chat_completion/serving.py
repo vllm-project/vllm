@@ -1272,13 +1272,9 @@ class OpenAIServingChat(OpenAIServing):
                             if index < len(
                                 tool_parser.streamed_args_for_tool
                             ):
-                                actual_call = (
-                                    tool_parser.streamed_args_for_tool[index]
-                                )
+                                actual_call = tool_parser.streamed_args_for_tool[index]
                                 if latest_delta_len > 0:
-                                    actual_call = actual_call[
-                                        :-latest_delta_len
-                                    ]
+                                    actual_call = actual_call[:-latest_delta_len]
 
                                 # check to see if there's anything left
                                 # to stream
@@ -1286,10 +1282,8 @@ class OpenAIServingChat(OpenAIServing):
                                     actual_call, "", 1
                                 )
                                 # set that as a delta message
-                                delta_message = (
-                                    self._create_remaining_args_delta(
-                                        delta_message, remaining_call, index
-                                    )
+                                delta_message = self._create_remaining_args_delta(
+                                    delta_message, remaining_call, index
                                 )
 
                         # Send the finish response for each request.n only once
