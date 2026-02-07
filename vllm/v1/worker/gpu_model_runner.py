@@ -93,6 +93,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
@@ -2325,7 +2326,7 @@ class GPUModelRunner(
 
                 # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
                 num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds
+                    pos_info.get_num_embeds()
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
@@ -4111,6 +4112,7 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
+    @instrument(span_name="Loading (GPU)")
     def load_model(self, eep_scale_up: bool = False) -> None:
         """
         Args:
@@ -5165,6 +5167,7 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    @instrument(span_name="Capture model")
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
