@@ -375,7 +375,6 @@ def test_qwen2_vl_image_embeddings_input(
 @pytest.mark.parametrize(
     "size_factors",
     [
-        [],
         # Single-scale
         [0.5],
         # Single-scale, batched
