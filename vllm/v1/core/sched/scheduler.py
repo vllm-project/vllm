@@ -511,9 +511,10 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.allocate(request_id, mm_feature)
                 encoder_compute_budget = new_encoder_compute_budget
             if external_load_encoder_input:
-                for i, mm_feature in enumerate(external_load_encoder_input):
+                for mm_feature in external_load_encoder_input:
                     self.encoder_cache_manager.allocate(request_id, mm_feature)
                     if self.ec_connector is not None:
+                        i = request.mm_features.index(mm_feature)
                         self.ec_connector.update_state_after_alloc(request, i)
 
         # Record the LoRAs in scheduled_running_reqs
@@ -794,9 +795,10 @@ class Scheduler(SchedulerInterface):
                     encoder_compute_budget = new_encoder_compute_budget
                 # Allocate for external load encoder cache
                 if external_load_encoder_input:
-                    for i, mm_feature in enumerate(external_load_encoder_input):
+                    for mm_feature in external_load_encoder_input:
                         self.encoder_cache_manager.allocate(request_id, mm_feature)
                         if self.ec_connector is not None:
+                            i = request.mm_features.index(mm_feature)
                             self.ec_connector.update_state_after_alloc(request, i)
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
