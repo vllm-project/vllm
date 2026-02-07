@@ -624,7 +624,7 @@ class FusedMoE(CustomOp):
 
         self.runner = self._init_runner()
 
-    def _init_runner(self, reconstruct=False):
+    def _init_runner(self):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
@@ -711,7 +711,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return False
+        return self._gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,
@@ -1443,6 +1443,7 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        self.ensure_moe_quant_config_init()
         return self.runner.forward(
             hidden_states,
             router_logits,
