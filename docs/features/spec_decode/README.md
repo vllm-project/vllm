@@ -30,6 +30,7 @@ The following code configures vLLM in an offline mode to use speculative decodin
         speculative_config={
             "model": "facebook/opt-125m",
             "num_speculative_tokens": 5,
+            "method": "draft_model",
         },
     )
     outputs = llm.generate(prompts, sampling_params)
