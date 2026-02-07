@@ -283,7 +283,7 @@ class BaseRenderer(ABC):
     def _apply_prompt_extras(
         self,
         prompts: Sequence[DictPrompt | TokPrompt],
-        prompt_extras: dict[str, Any] | None = None,
+        prompt_extras: dict[str, Any] | None,
     ):
         if not prompt_extras:
             return
