@@ -333,7 +333,7 @@ def select_fp8_moe_backend(
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
-    # of AVAILBLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
+    # of AVAILABLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
     # a temporary measure until these register APIs are complete.
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
