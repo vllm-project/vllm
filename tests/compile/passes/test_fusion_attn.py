@@ -339,15 +339,6 @@ def test_attention_quant_pattern(
         pytest.skip("FlashAttention 3 FP8 output fusion requires Hopper (SM90+)")
     if backend == AttentionBackendEnum.FLASH_ATTN and dtype == torch.float16:
         pytest.skip("FlashAttention 3 with FP8 KV cache requires bfloat16 output")
-    if (
-        backend == AttentionBackendEnum.FLASH_ATTN
-        and model_class == TestAttentionFp8StaticQuantPatternModel
-    ):
-        pytest.skip(
-            "FlashAttention 3 cannot write FP8 output directly - "
-            "fused FP8 output quantization is not supported"
-        )
-
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     device = torch.device("cuda:0")
@@ -469,9 +460,7 @@ def test_attention_quant_pattern(
             layer.impl.fused_output_quant_supported(quant_key)
             for key, layer in static_forward_context.items()
         ]
-        assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
-            "All layers should support attention fusion"
-        )
+        num_fused = sum(attn_fusion_supported)
 
         # Check quantization ops in the graph before and after fusion
         quant_op = (
@@ -480,14 +469,21 @@ def test_attention_quant_pattern(
             else QUANT_OPS[quant_key]
         )
 
-        # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
-        # Only output quant ops are fused into attention.
-        test_backend.check_before_ops(
-            [quant_op], fully_replaced=quant_key is kNvfp4Dynamic
-        )
+        if num_fused > 0:
+            # When fusion is supported, all layers should support it
+            assert num_fused == len(attn_fusion_supported), (
+                "All layers should support attention fusion"
+            )
+            # Note: for fp8, fully_replaced=False because query quant ops remain
+            # in graph.
+            # Only output quant ops are fused into attention.
+            test_backend.check_before_ops(
+                [quant_op],
+                fully_replaced=quant_key is kNvfp4Dynamic,
+            )
 
         # access the underlying `AttnFusionPass` on the `LazyInitPass`
-        assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+        assert attn_pass.pass_.matched_count == num_fused
 
         # Check attention ops in the graph before and after fusion
         attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
@@ -500,9 +496,15 @@ def test_attention_quant_pattern(
         assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
             "Attention should not have output_scale before fusion"
         )
-        assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-            "Attention should have output_scale after fusion"
-        )
+
+        if num_fused > 0:
+            assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+                "Attention should have output_scale after fusion"
+            )
+        else:
+            assert attn_nodes_post[0].kwargs.get("output_scale") is None, (
+                "Attention should not have output_scale when fusion is not supported"
+            )
 
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
