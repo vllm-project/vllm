@@ -129,7 +129,16 @@ def test_schedule_multimodal_requests_one_batch():
 
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
-    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 2.0)],
+    [
+        (0.5, 0.5),
+        (0.5, 1.0),
+        (1.0, 0.5),
+        (1.0, 1.0),
+        (1.0, 1.5),
+        (1.5, 1.0),
+        (1.5, 2.0),
+        (2.0, 1.5),
+    ],
 )
 @pytest.mark.parametrize("chunk_mult", [0.5, 1.0, 2.0])
 def test_schedule_multimodal_requests_multi_batch(

@@ -319,13 +319,6 @@ def _get_encoder_cache_size(
 
     if encoder_cache_size is None:
         encoder_cache_size = max_num_batched_encoder_embeds
-    elif encoder_cache_size < max_num_batched_encoder_embeds:
-        raise ValueError(
-            "The encoder cache must be able to store all "
-            f"encoder inputs in a single batch, so {encoder_cache_size=} "
-            f"cannot be less than {max_num_batched_encoder_embeds=}. "
-            "Please increase encoder_cache_size."
-        )
 
     return max(encoder_cache_size, max_tokens_per_mm_item)
 

@@ -98,8 +98,7 @@ class SchedulerConfig:
     """
 
     encoder_cache_size: int | None = None
-    """Maximum number of encoder embeddings that can be stored in the encoder cache;
-    it must be no smaller than `max_num_batched_encoder_embeds`.
+    """Maximum number of encoder embeddings that can be stored in the encoder cache.
 
     Defaults to `max_num_batched_encoder_embeds`. This will be overridden by the
     maximum possible multimodal embedding count of the model if it is larger,
