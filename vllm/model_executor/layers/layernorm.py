@@ -9,13 +9,11 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import ir
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
-from vllm.platforms import current_platform
 
 
 def rms_norm(
@@ -72,25 +70,6 @@ def poly_norm(
     return out
 
 
-def dispatch_rocm_rmsnorm_func(
-    with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
-):
-    use_aiter = use_aiter and dtype in [
-        torch.float16,
-        torch.bfloat16,
-    ]
-
-    if use_aiter and with_fused_add:
-        return rocm_aiter_ops.rms_norm2d_with_add
-    if use_aiter:
-        return rocm_aiter_ops.rms_norm
-
-    # fall back to CUDA implementation
-    if with_fused_add:
-        return fused_add_rms_norm
-    return rms_norm
-
-
 # --8<-- [start:rms_norm]
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
@@ -122,17 +101,6 @@ class RMSNorm(CustomOp):
         self.weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
-
-        if current_platform.is_rocm():
-            aiter_rmsnorm_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
-            self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
-                with_fused_add=False,
-                dtype=weight_dtype,
-                use_aiter=aiter_rmsnorm_enabled,
-            )
-            self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
-                with_fused_add=True, dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
-            )
 
     @staticmethod
     def forward_static(
@@ -186,22 +154,15 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        add_residual = residual is not None
         weight = self.weight.data if self.has_weight else None
-        if not add_residual:
+        if residual is None:
             return ir.ops.rms_norm(
                 x, weight, self.variance_epsilon, self.variance_size_override
             )
-
-        return self.forward_static(
-            x,
-            self.variance_epsilon,
-            self.hidden_size,
-            x.dtype,
-            self.weight.data if self.has_weight else None,
-            residual,
-            self.variance_size_override,
-        )
+        else:
+            return ir.ops.fused_add_rms_norm.maybe_inplace(
+                x, residual, weight, self.variance_epsilon, self.variance_size_override
+            )
 
     def forward_cuda(
         self,
@@ -210,43 +171,26 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         add_residual = residual is not None
         weight = self.weight.data if self.has_weight else None
-        if not add_residual and not vllm_is_batch_invariant():
+        if residual is None and not vllm_is_batch_invariant():
             return ir.ops.rms_norm(
                 x, weight, self.variance_epsilon, self.variance_size_override
             )
+        elif not vllm_is_batch_invariant():
+            return ir.ops.fused_add_rms_norm.maybe_inplace(
+                x, residual, weight, self.variance_epsilon, self.variance_size_override
+            )
 
+        # TODO move into IR once batch invariance is supported
+        assert vllm_is_batch_invariant()
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
         if add_residual:
-            return fused_add_rms_norm(
-                x, residual, self.weight.data, self.variance_epsilon
-            )
+            return rms_norm_batch_invariant(
+                x + residual, weight, self.variance_epsilon
+            ), x + residual
         else:
-            return rms_norm(x, self.weight.data, self.variance_epsilon)
-
-    def forward_hip(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        add_residual = residual is not None
-        weight = self.weight.data if self.has_weight else None
-        if not add_residual:
-            return ir.ops.rms_norm(
-                x, weight, self.variance_epsilon, self.variance_size_override
-            )
-
-        if self.variance_size_override is not None:
-            return self.forward_native(x, residual)
-
-        add_residual = residual is not None
-        if add_residual:
-            return self.rocm_norm_func_with_add(
-                x, residual, self.weight.data, self.variance_epsilon
-            )
-        else:
-            return self.rocm_norm_func(x, self.weight.data, self.variance_epsilon)
+            return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(
         self,
