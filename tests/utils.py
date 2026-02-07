@@ -982,7 +982,8 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
+        with suppress(PermissionError):
+            os.setpgrp()
         from _pytest.outcomes import Skipped
 
         # Create a unique temporary file to store exception info from child

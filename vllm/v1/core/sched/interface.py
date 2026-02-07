@@ -193,6 +193,15 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def unpin_all_pinned_prefixes(self) -> int:
+        """Unpin all pinned KV blocks across all requests.
+
+        Returns:
+            int: Number of blocks unpinned.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError

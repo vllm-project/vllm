@@ -613,6 +613,9 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.scheduler.unpin_all_pinned_prefixes()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

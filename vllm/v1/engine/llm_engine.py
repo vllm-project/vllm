@@ -344,6 +344,9 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.engine_core.unpin_all_pinned_prefixes()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 

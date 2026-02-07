@@ -176,6 +176,8 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+        # Track total number of pinned blocks to avoid O(N) scans.
+        self.num_pinned_blocks: int = 0
 
         self.metrics_collector = metrics_collector
 
@@ -332,7 +334,8 @@ class BlockPool:
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
-        metadata and evict it from the cache.
+        metadata and evict it from the cache. Pinned blocks are protected from
+        eviction.
 
         Args:
             block: The block to evict.
@@ -340,6 +343,9 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        # Check if the block is pinned and should not be evicted
+        if block.is_pinned:
+            return False
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
@@ -488,3 +494,69 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+    def pin_blocks(self, blocks: list[KVCacheBlock]) -> None:
+        """Pin a list of blocks to prevent them from being evicted.
+
+        Pinned blocks will have their reference count increased to ensure
+        they remain in use and are not added to the free queue.
+
+        This operation is idempotent: pinning an already-pinned block has no
+        effect.
+
+        Args:
+            blocks: A list of blocks to pin.
+        """
+        for block in blocks:
+            # Idempotency check: skip if already pinned.
+            if block.is_pinned:
+                continue
+
+            # Mark as pinned.
+            block.is_pinned = True
+
+            # If the block is currently on the free list (ref_cnt == 0),
+            # remove it from the free list before increasing the ref count.
+            if block.ref_cnt == 0 and (
+                block.prev_free_block is not None
+                or block.next_free_block is not None
+                or self.free_block_queue.fake_free_list_head.next_free_block == block
+            ):
+                self.free_block_queue.remove(block)
+
+            # Increase ref count to reflect the pin reference (pin itself is
+            # an additional reference).
+            block.ref_cnt += 1
+
+            # Update global counter.
+            self.num_pinned_blocks += 1
+
+    def unpin_blocks(self, blocks: list[KVCacheBlock]) -> None:
+        """Unpin a list of blocks, allowing them to be evicted.
+
+        This operation is idempotent: unpinning an already-unpinned block has
+        no effect.
+
+        Args:
+            blocks: A list of blocks to unpin.
+        """
+        for block in blocks:
+            # Idempotency check: skip if already unpinned.
+            if not block.is_pinned:
+                continue
+
+            # Clear pinned flag.
+            block.is_pinned = False
+
+            # Drop the pin reference.
+            if block.ref_cnt > 0:
+                block.ref_cnt -= 1
+
+            # Update global counter.
+            if self.num_pinned_blocks > 0:
+                self.num_pinned_blocks -= 1
+
+            # If this drop brings ref_cnt to 0, add back to the free queue
+            # (unless it is the null block).
+            if block.ref_cnt == 0 and not block.is_null:
+                self.free_block_queue.append_n([block])

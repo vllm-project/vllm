@@ -205,6 +205,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
+    pin_prefix: bool = Field(
+        default=False,
+        description=(
+            "If true, the prefix of this request will be pinned in the cache, "
+            "preventing it from being evicted. Pinned prefixes are protected "
+            "from LRU eviction and will remain in cache even when memory is "
+            "under pressure."
+        ),
+    )
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -476,7 +485,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = (
                     StructuredOutputsParams(**structured_outputs_kwargs)
                     if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                    else replace(  # type: ignore[type-var]
+                        self.structured_outputs,
+                        **structured_outputs_kwargs,
+                    )
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -516,6 +528,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            pin_prefix=self.pin_prefix,
         )
 
     @model_validator(mode="before")

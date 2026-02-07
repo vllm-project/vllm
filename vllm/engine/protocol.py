@@ -138,6 +138,15 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def unpin_all_pinned_prefixes(self) -> int:
+        """Unpin all pinned KV blocks across the engine instance.
+
+        Returns:
+            int: Number of blocks unpinned.
+        """
+        ...
+
+    @abstractmethod
     async def sleep(self, level: int = 1) -> None:
         """Sleep the engine"""
         ...
