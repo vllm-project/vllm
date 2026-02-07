@@ -38,12 +38,13 @@ logger = init_logger(__name__)
 
 Transfer = tuple[int, float]
 EngineId = str
-ReqId = str
+ReqId = str  # Internal scheduler request ID
+TransferId = str  # KV transfer coordination ID (shared by P/D)
 
 
 @dataclass
 class WriteTask:
-    request_id: str
+    transfer_id: TransferId
     dst_engine_id: str
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
@@ -59,7 +60,7 @@ class WriteTask:
 class LayerTransferPlan:
     """Plan for transferring a single layer."""
 
-    request_id: str
+    transfer_id: TransferId
     layer_name: str
     sess_idx: int
     transfer_local_offsets: list[int]
@@ -247,6 +248,7 @@ class MoRIIOConstants:
 class ReqMeta:
     """Metadata for a single request."""
 
+    transfer_id: TransferId
     local_block_ids: list[int]
     remote_block_ids: list[int]
     remote_host: str
@@ -286,7 +288,10 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
+        transfer_id: TransferId = kv_transfer_params["transfer_id"]
+
         _req = ReqMeta(
+            transfer_id=transfer_id,
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
