@@ -8,7 +8,7 @@ from copy import deepcopy
 
 import depyf
 from torch import fx
-from torch._ops import OpOverload
+from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
 from vllm.compilation.passes.fx_utils import find_op_nodes
@@ -90,7 +90,9 @@ class TestBackend:
         # assign by reference, will reflect the final state of the graph
         self.final_graph = graph
 
-    def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced=True):
+    def check_before_ops(
+        self, ops: Sequence[OpOverload | OpOverloadPacket], fully_replaced=True
+    ):
         for op in ops:
             num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
             num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
@@ -99,14 +101,14 @@ class TestBackend:
             if fully_replaced:
                 assert num_post == 0, f"Unexpected op {op.name()} in post-pass graph"
 
-    def check_after_ops(self, ops: Sequence[OpOverload]):
+    def check_after_ops(self, ops: Sequence[OpOverload | OpOverloadPacket]):
         for op in ops:
             num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
             num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
             assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
             assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
 
-    def op_count(self, op: OpOverload, before=False) -> int:
+    def op_count(self, op: OpOverload | OpOverloadPacket, before=False) -> int:
         graph = self.graph_pre_pass if before else self.graph_post_pass
         return len(list(find_op_nodes(op, graph)))
 
