@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib.util import find_spec
 from types import ModuleType
-import os
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
