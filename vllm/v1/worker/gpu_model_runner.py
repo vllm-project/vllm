@@ -2326,7 +2326,7 @@ class GPUModelRunner(
 
                 # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
                 num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds
+                    pos_info.get_num_embeds()
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)

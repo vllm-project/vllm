@@ -303,8 +303,12 @@ graphql-relay==3.2.0
     # via graphene
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.76.0
-    # via ray
+grpcio==1.78.0
+    # via
+    #   grpcio-tools
+    #   ray
+grpcio-tools==1.78.0
+    # via -r requirements/test.in
 gunicorn==23.0.0
     # via mlflow
 h11==0.14.0
@@ -777,6 +781,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
+    #   grpcio-tools
     #   mlflow-skinny
     #   opentelemetry-proto
     #   proto-plus
@@ -1046,6 +1051,7 @@ sentence-transformers==5.2.0
     #   mteb
 setuptools==77.0.3
     # via
+    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   torch
