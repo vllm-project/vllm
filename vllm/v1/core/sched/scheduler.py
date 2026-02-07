@@ -385,15 +385,15 @@ class Scheduler(SchedulerInterface):
             )
 
             # Schedule encoder inputs.
-            encoder_inputs_to_schedule = None
-            external_load_encoder_input: list[MultiModalFeatureSpec] = []
+            encoder_feats_to_schedule: list[MultiModalFeatureSpec] = []
+            external_load_encoder_feats: list[MultiModalFeatureSpec] = []
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (
-                    encoder_inputs_to_schedule,
+                    encoder_feats_to_schedule,
                     num_new_tokens,
                     new_encoder_compute_budget,
-                    external_load_encoder_input,
+                    external_load_encoder_feats,
                 ) = self._try_schedule_encoder_inputs(
                     request,
                     request.num_computed_tokens,
@@ -401,6 +401,24 @@ class Scheduler(SchedulerInterface):
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
+
+                encoder_ids_to_schedule = {
+                    f.identifier for f in encoder_feats_to_schedule
+                }
+                encoder_idxs_to_schedule = [
+                    i
+                    for i, f in enumerate(request.mm_features)
+                    if f.identifier in encoder_ids_to_schedule
+                ]
+
+                external_load_encoder_ids = {
+                    f.identifier for f in external_load_encoder_feats
+                }
+                external_load_encoder_idxs = [
+                    i
+                    for i, f in enumerate(request.mm_features)
+                    if f.identifier in external_load_encoder_ids
+                ]
 
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
@@ -504,21 +522,17 @@ class Scheduler(SchedulerInterface):
                 request.spec_token_ids = []
 
             # Encoder-related.
-            if encoder_inputs_to_schedule:
-                scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+            if encoder_feats_to_schedule:
+                scheduled_encoder_inputs[request_id] = encoder_idxs_to_schedule
                 # Allocate the encoder cache.
-                for mm_feature in encoder_inputs_to_schedule:
+                for mm_feature in encoder_feats_to_schedule:
                     self.encoder_cache_manager.allocate(request_id, mm_feature)
                 encoder_compute_budget = new_encoder_compute_budget
-            if external_load_encoder_input:
-                for mm_feature in external_load_encoder_input:
+            if external_load_encoder_feats:
+                for mm_feature in external_load_encoder_feats:
                     self.encoder_cache_manager.allocate(request_id, mm_feature)
-                    if self.ec_connector is not None:
-                        i = next(
-                            i
-                            for i, f in enumerate(request.mm_features)
-                            if f.identifier == mm_feature.identifier
-                        )
+                if self.ec_connector is not None:
+                    for i in external_load_encoder_idxs:
                         self.ec_connector.update_state_after_alloc(request, i)
 
         # Record the LoRAs in scheduled_running_reqs
@@ -642,8 +656,8 @@ class Scheduler(SchedulerInterface):
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
-                encoder_inputs_to_schedule = None
-                external_load_encoder_input = []
+                encoder_feats_to_schedule = []
+                external_load_encoder_feats = []
                 new_encoder_compute_budget = encoder_compute_budget
 
                 if load_kv_async:
@@ -676,10 +690,10 @@ class Scheduler(SchedulerInterface):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (
-                            encoder_inputs_to_schedule,
+                            encoder_feats_to_schedule,
                             num_new_tokens,
                             new_encoder_compute_budget,
-                            external_load_encoder_input,
+                            external_load_encoder_feats,
                         ) = self._try_schedule_encoder_inputs(
                             request,
                             num_computed_tokens,
@@ -791,22 +805,18 @@ class Scheduler(SchedulerInterface):
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
-                if encoder_inputs_to_schedule:
-                    scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if encoder_feats_to_schedule:
+                    scheduled_encoder_inputs[request_id] = encoder_idxs_to_schedule
                     # Allocate the encoder cache.
-                    for mm_feature in encoder_inputs_to_schedule:
+                    for mm_feature in encoder_feats_to_schedule:
                         self.encoder_cache_manager.allocate(request_id, mm_feature)
                     encoder_compute_budget = new_encoder_compute_budget
                 # Allocate for external load encoder cache
-                if external_load_encoder_input:
-                    for mm_feature in external_load_encoder_input:
+                if external_load_encoder_feats:
+                    for mm_feature in external_load_encoder_feats:
                         self.encoder_cache_manager.allocate(request_id, mm_feature)
-                        if self.ec_connector is not None:
-                            i = next(
-                                i
-                                for i, f in enumerate(request.mm_features)
-                                if f.identifier == mm_feature.identifier
-                            )
+                    if self.ec_connector is not None:
+                        for i in external_load_encoder_idxs:
                             self.ec_connector.update_state_after_alloc(request, i)
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -1100,12 +1110,13 @@ class Scheduler(SchedulerInterface):
 
         encoder_cache_manager = self.encoder_cache_manager
 
-        encoder_inputs_to_schedule: list[MultiModalFeatureSpec] = []
         request_id = request.request_id
         mm_features = request.mm_features
         assert mm_features is not None
         assert len(mm_features) > 0
-        external_load_encoder_input = []
+
+        encoder_feats_to_schedule: list[MultiModalFeatureSpec] = []
+        external_load_encoder_feats: list[MultiModalFeatureSpec] = []
 
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
@@ -1215,20 +1226,20 @@ class Scheduler(SchedulerInterface):
                 item_identifier
             ):
                 mm_hashes_to_schedule.add(item_identifier)
-                external_load_encoder_input.append(mm_feature)
+                external_load_encoder_feats.append(mm_feature)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule.add(item_identifier)
-            encoder_inputs_to_schedule.append(mm_feature)
+            encoder_feats_to_schedule.append(mm_feature)
 
         return (
-            encoder_inputs_to_schedule,
+            encoder_feats_to_schedule,
             num_new_tokens,
             encoder_compute_budget,
-            external_load_encoder_input,
+            external_load_encoder_feats,
         )
 
     def get_grammar_bitmask(
