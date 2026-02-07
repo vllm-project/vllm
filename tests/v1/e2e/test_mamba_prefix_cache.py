@@ -13,6 +13,7 @@ import torch
 
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -402,6 +403,9 @@ def _run_ref_mamba_state_worker():
         }
         torch.save(cpu_state_ref, "mamba_kv_cache_dict_ref.pth")
         mamba_kv_cache_dict.clear()
+        del engine
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
     except Exception:
         traceback.print_exc()
         raise
@@ -759,3 +763,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
+    del engine
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
