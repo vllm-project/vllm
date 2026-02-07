@@ -14,9 +14,9 @@ from .inputs import (
     DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDecoderTokPrompt,
-    SingletonDictPrompt,
     TokPrompt,
 )
+from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -289,8 +289,8 @@ class BaseRenderer(ABC):
             return
 
         for prompt in prompts:
-            target_prompt: SingletonDictPrompt = prompt.get("encoder_prompt", prompt)
-            target_prompt.update(prompt_extras)
+            target_prompt = extract_target_prompt(self.config, prompt)
+            target_prompt.update(prompt_extras)  # type: ignore[arg-type]
 
     # Top-level methods
     def render_cmpl(
@@ -304,11 +304,11 @@ class BaseRenderer(ABC):
 
         # NOTE: Some MM models have non-default `add_special_tokens`
         # so we handle tokenization in multi-modal processor
-        tok_prompts = (
-            dict_prompts
-            if self.config.is_multimodal_model
-            else self.tokenize_prompts(dict_prompts, tok_params)
-        )
+        if self.config.is_multimodal_model:
+            self._apply_prompt_extras(dict_prompts, prompt_extras)
+            return dict_prompts
+
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
