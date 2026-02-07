@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -339,7 +340,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: dict[str, list[int]] = {}
+        scheduled_encoder_inputs: dict[str, list[MultiModalFeatureSpec]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -385,7 +386,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
-            external_load_encoder_input: list[int] = []
+            external_load_encoder_input: list[MultiModalFeatureSpec] = []
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (
@@ -458,8 +459,8 @@ class Scheduler(SchedulerInterface):
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
+                                    mm_feature.mm_position.get_num_embeds()
+                                    for mm_feature in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
@@ -506,12 +507,12 @@ class Scheduler(SchedulerInterface):
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                 # Allocate the encoder cache.
-                for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
+                for mm_feature in encoder_inputs_to_schedule:
+                    self.encoder_cache_manager.allocate(request_id, mm_feature)
                 encoder_compute_budget = new_encoder_compute_budget
             if external_load_encoder_input:
-                for i in external_load_encoder_input:
-                    self.encoder_cache_manager.allocate(request, i)
+                for i, mm_feature in enumerate(external_load_encoder_input):
+                    self.encoder_cache_manager.allocate(request_id, mm_feature)
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
 
@@ -788,13 +789,13 @@ class Scheduler(SchedulerInterface):
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                     # Allocate the encoder cache.
-                    for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
+                    for mm_feature in encoder_inputs_to_schedule:
+                        self.encoder_cache_manager.allocate(request_id, mm_feature)
                     encoder_compute_budget = new_encoder_compute_budget
                 # Allocate for external load encoder cache
                 if external_load_encoder_input:
-                    for i in external_load_encoder_input:
-                        self.encoder_cache_manager.allocate(request, i)
+                    for i, mm_feature in enumerate(external_load_encoder_input):
+                        self.encoder_cache_manager.allocate(request_id, mm_feature)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
         # Put back any skipped requests at the head of the waiting queue
@@ -1063,7 +1064,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         encoder_compute_budget: int,
         shift_computed_tokens: int = 0,
-    ) -> tuple[list[int], int, int, list[int]]:
+    ) -> tuple[list[MultiModalFeatureSpec], int, int, list[MultiModalFeatureSpec]]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -1086,7 +1087,11 @@ class Scheduler(SchedulerInterface):
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget, []
-        encoder_inputs_to_schedule: list[int] = []
+
+        encoder_cache_manager = self.encoder_cache_manager
+
+        encoder_inputs_to_schedule: list[MultiModalFeatureSpec] = []
+        request_id = request.request_id
         mm_features = request.mm_features
         assert mm_features is not None
         assert len(mm_features) > 0
@@ -1097,7 +1102,7 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
-        for i, mm_feature in enumerate(mm_features):
+        for mm_feature in mm_features:
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
@@ -1141,7 +1146,7 @@ class Scheduler(SchedulerInterface):
                     # current step.
                     continue
 
-                if self.encoder_cache_manager.check_and_update_cache(request, i):
+                if encoder_cache_manager.check_and_update_cache(request_id, mm_feature):
                     # The encoder input is already computed and cached from a
                     # previous step.
                     continue
@@ -1157,8 +1162,10 @@ class Scheduler(SchedulerInterface):
             ):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
-            if not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+            if not encoder_cache_manager.can_allocate(
+                mm_feature,
+                encoder_compute_budget,
+                num_embeds_to_schedule,
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -1198,14 +1205,14 @@ class Scheduler(SchedulerInterface):
                 item_identifier
             ):
                 mm_hashes_to_schedule.add(item_identifier)
-                external_load_encoder_input.append(i)
+                external_load_encoder_input.append(mm_feature)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule.add(item_identifier)
-            encoder_inputs_to_schedule.append(i)
+            encoder_inputs_to_schedule.append(mm_feature)
 
         return (
             encoder_inputs_to_schedule,
@@ -1554,28 +1561,20 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
-        cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
-            request
-        )
-        # OPTIMIZATION: Avoid list(set) if the set is empty.
-        if not cached_encoder_input_ids:
-            return
+        request_id = request.request_id
 
-        # Here, we use list(set) to avoid modifying the set while iterating
-        # over it.
-        for input_id in list(cached_encoder_input_ids):
-            mm_feature = request.mm_features[input_id]
+        for mm_feature in self.encoder_cache_manager.get_cached_features(request):
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self.encoder_cache_manager.free_encoder_input(request_id, mm_feature)
             elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self.encoder_cache_manager.free_encoder_input(request_id, mm_feature)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(

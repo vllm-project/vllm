@@ -34,20 +34,23 @@ class MockRequest:
 # ------------------ Unit Tests ------------------ #
 def test_basic_allocate_and_reuse():
     cache = EncoderCacheManager(cache_size=10)
+
     req = MockRequest("r1", ["imgA"], [4])
+    req_id = req.request_id
+    mm_feats = req.mm_features
 
-    assert not cache.check_and_update_cache(req, 0)
-    assert cache.can_allocate(req, 0, int(1e9), 0)
+    assert not cache.check_and_update_cache(req_id, mm_feats[0])
+    assert cache.can_allocate(mm_feats[0], int(1e9), 0)
 
-    cache.allocate(req, 0)
+    cache.allocate(req_id, mm_feats[0])
 
-    assert cache.check_and_update_cache(req, 0)
+    assert cache.check_and_update_cache(req_id, mm_feats[0])
     assert "r1" in cache.cached["imgA"]
     assert cache.num_free_slots == 6
 
     # Free twice to bring refcount to 0.
-    cache.free_encoder_input(req, 0)
-    cache.free_encoder_input(req, 0)
+    cache.free_encoder_input(req_id, mm_feats[0])
+    cache.free_encoder_input(req_id, mm_feats[0])
 
     assert not cache.cached["imgA"]
     assert "imgA" in cache.freeable
@@ -57,14 +60,17 @@ def test_basic_allocate_and_reuse():
 
 def test_freeing_decreases_refcount_and_moves_to_freeable():
     manager = EncoderCacheManager(cache_size=10)
-    req = MockRequest("req2", ["img3"], [5])
 
-    assert manager.can_allocate(req, 0, int(1e9), 0)
-    manager.allocate(req, 0)
+    req = MockRequest("req2", ["img3"], [5])
+    req_id = req.request_id
+    mm_feats = req.mm_features
+
+    assert manager.can_allocate(mm_feats[0], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[0])
 
     assert len(manager.cached["img3"]) == 1
 
-    manager.free_encoder_input(req, 0)
+    manager.free_encoder_input(req_id, mm_feats[0])
 
     assert not manager.cached["img3"]
     assert "img3" in manager.freeable
@@ -73,13 +79,16 @@ def test_freeing_decreases_refcount_and_moves_to_freeable():
 
 def test_free_request_frees_all_inputs():
     manager = EncoderCacheManager(cache_size=10)
+
     req = MockRequest("req3", ["a", "b"], [2, 3])
+    req_id = req.request_id
+    mm_feats = req.mm_features
 
-    assert manager.can_allocate(req, 0, int(1e9), 0)
-    manager.allocate(req, 0)
+    assert manager.can_allocate(mm_feats[0], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[0])
 
-    assert manager.can_allocate(req, 1, int(1e9), 0)
-    manager.allocate(req, 1)
+    assert manager.can_allocate(mm_feats[1], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[1])
 
     assert len(manager.cached["a"]) == 1
     assert len(manager.cached["b"]) == 1
@@ -97,45 +106,55 @@ def test_eviction_when_cache_is_full():
     manager = EncoderCacheManager(cache_size=10)
 
     req1 = MockRequest("req1", ["x"], [6])
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
+
     req2 = MockRequest("req2", ["y"], [5])
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
 
-    assert manager.can_allocate(req1, 0, int(1e9), 0)
-    manager.allocate(req1, 0)
-    manager.free_encoder_input(req1, 0)
+    assert manager.can_allocate(mm_feats1[0], int(1e9), 0)
+    manager.allocate(req_id1, mm_feats1[0])
+    manager.free_encoder_input(req_id1, mm_feats1[0])
 
-    assert manager.can_allocate(req2, 0, int(1e9), 0)
-    manager.allocate(req2, 0)
+    assert manager.can_allocate(mm_feats2[0], int(1e9), 0)
+    manager.allocate(req_id2, mm_feats2[0])
 
     # 'x' should have been evicted.
     assert "x" not in manager.cached
     assert "x" in manager.get_freed_mm_hashes()
 
 
-def test_get_cached_input_ids():
+def test_get_cached_features():
     manager = EncoderCacheManager(cache_size=10)
+
     req = MockRequest("reqX", ["m", "n", "o"], [2, 4, 3])
+    req_id = req.request_id
+    mm_feats = req.mm_features
 
-    assert manager.can_allocate(req, 0, int(1e9), 0)
-    manager.allocate(req, 0)
+    assert manager.can_allocate(mm_feats[0], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[0])
 
-    assert manager.can_allocate(req, 2, int(1e9), 0)
-    manager.allocate(req, 2)
+    assert manager.can_allocate(mm_feats[2], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[2])
 
-    cached_ids = manager.get_cached_input_ids(req)
-    assert cached_ids == {0, 2}
+    cached_ids = manager.get_cached_features(req)
+    assert cached_ids == [mm_feats[0], mm_feats[2]]
 
 
 def test_has_cache_restores_from_freeable():
     manager = EncoderCacheManager(cache_size=10)
+
     req = MockRequest("reqY", ["imgZ"], [4])
+    req_id = req.request_id
+    mm_feats = req.mm_features
 
-    assert manager.can_allocate(req, 0, int(1e9), 0)
-    manager.allocate(req, 0)
-
-    manager.free_encoder_input(req, 0)
+    assert manager.can_allocate(mm_feats[0], int(1e9), 0)
+    manager.allocate(req_id, mm_feats[0])
+    manager.free_encoder_input(req_id, mm_feats[0])
 
     # Should restore from freeable.
-    assert manager.check_and_update_cache(req, 0)
+    assert manager.check_and_update_cache(req_id, mm_feats[0])
     assert len(manager.cached["imgZ"]) == 1
     assert "imgZ" not in manager.freeable
     assert manager.num_freeable_slots == 6
@@ -143,16 +162,22 @@ def test_has_cache_restores_from_freeable():
 
 def test_get_freed_mm_hashes_clears_freed_list():
     manager = EncoderCacheManager(cache_size=10)
-    req1 = MockRequest("reqA", ["a"], [5])
-    req2 = MockRequest("reqB", ["b"], [6])
 
-    assert manager.can_allocate(req1, 0, int(1e9), 0)
-    manager.allocate(req1, 0)
-    manager.free_encoder_input(req1, 0)
+    req1 = MockRequest("reqA", ["a"], [5])
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
+
+    req2 = MockRequest("reqB", ["b"], [6])
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
+
+    assert manager.can_allocate(mm_feats1[0], int(1e9), 0)
+    manager.allocate(req_id1, mm_feats1[0])
+    manager.free_encoder_input(req_id1, mm_feats1[0])
 
     # Should trigger eviction of 'a'.
-    assert manager.can_allocate(req2, 0, int(1e9), 0)
-    manager.allocate(req2, 0)
+    assert manager.can_allocate(mm_feats2[0], int(1e9), 0)
+    manager.allocate(req_id2, mm_feats2[0])
 
     freed = manager.get_freed_mm_hashes()
     assert "a" in freed
@@ -161,39 +186,41 @@ def test_get_freed_mm_hashes_clears_freed_list():
 
 def test_schedule_request_multi_images_respect_space_limit():
     manager = EncoderCacheManager(cache_size=10)
-    req = MockRequest("reqA", ["a", "b"], [5, 6])
-    compute_budget = 100
 
+    req = MockRequest("reqA", ["a", "b"], [5, 6])
+    mm_feats = req.mm_features
+
+    compute_budget = 100
     num_tokens_to_schedule = 0
-    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
+
+    assert manager.can_allocate(mm_feats[0], compute_budget, num_tokens_to_schedule)
     num_tokens_to_schedule += req.get_num_encoder_embeds(0)
     compute_budget -= req.get_num_encoder_embeds(0)
 
-    assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
+    assert not manager.can_allocate(mm_feats[1], compute_budget, num_tokens_to_schedule)
 
 
 def test_schedule_request_multi_images_respect_compute_limit():
     manager = EncoderCacheManager(cache_size=100)
+
     req = MockRequest("reqA", ["a", "b"], [5, 6])
+    mm_feats = req.mm_features
+
     compute_budget = 10
     num_tokens_to_schedule = 0
-    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
+
+    assert manager.can_allocate(mm_feats[0], compute_budget, num_tokens_to_schedule)
     num_tokens_to_schedule += req.get_num_encoder_embeds(0)
     compute_budget -= req.get_num_encoder_embeds(0)
 
-    assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
+    assert not manager.can_allocate(mm_feats[1], compute_budget, num_tokens_to_schedule)
 
 
 def test_encoder_cache_with_is_embed_mask():
-    class MockRequestWithMask(MockRequest):
-        def get_num_encoder_embeds(self, input_id: int) -> int:
-            return self.mm_features[input_id].mm_position.get_num_embeds()
-
     is_embed = torch.zeros(100, dtype=torch.bool)
     is_embed[torch.tensor([5, 15, 25, 35, 45, 55, 65, 75])] = True
 
-    request = MockRequestWithMask("r1", ["img1"], [100])
-    request.mm_features[0] = MultiModalFeatureSpec(
+    mm_feature = MultiModalFeatureSpec(
         data=None,
         modality="image",
         identifier="img1",
@@ -201,29 +228,24 @@ def test_encoder_cache_with_is_embed_mask():
     )
 
     manager = EncoderCacheManager(cache_size=100)
-    manager.allocate(request, 0)
+    manager.allocate("r1", mm_feature)
 
     assert manager.num_free_slots == 92
     assert "img1" in manager.cached
 
     old_size = 100
-    new_size = request.mm_features[0].mm_position.get_num_embeds()
+    new_size = mm_feature.mm_position.get_num_embeds()
     assert new_size == 8
     savings_ratio = old_size / new_size
     assert savings_ratio == 12.5
 
 
 def test_encoder_cache_mask_based_retrieval():
-    class MockRequestWithMask(MockRequest):
-        def get_num_encoder_embeds(self, input_id: int) -> int:
-            return self.mm_features[input_id].mm_position.get_num_embeds()
-
     is_embed = torch.tensor(
         [False, False, True, True, False, True, True, True, False, False]
     )
 
-    request = MockRequestWithMask("r1", ["img1"], [10])
-    request.mm_features[0] = MultiModalFeatureSpec(
+    mm_feature = MultiModalFeatureSpec(
         data=None,
         modality="image",
         identifier="img1",
@@ -231,9 +253,9 @@ def test_encoder_cache_mask_based_retrieval():
     )
 
     manager = EncoderCacheManager(cache_size=50)
-    manager.allocate(request, 0)
+    manager.allocate("r1", mm_feature)
 
-    assert request.mm_features[0].mm_position.get_num_embeds() == 5
+    assert mm_feature.mm_position.get_num_embeds() == 5
 
     start_idx = 2
     end_idx = 8
@@ -257,18 +279,26 @@ def test_reset_clears_all_state():
     manager = EncoderCacheManager(cache_size=20)
 
     req1 = MockRequest("req1", ["img1", "img2"], [5, 3])
-    req2 = MockRequest("req2", ["img3"], [4])
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
 
-    manager.allocate(req1, 0)
-    manager.allocate(req1, 1)
-    manager.allocate(req2, 0)
-    manager.free_encoder_input(req1, 0)
+    req2 = MockRequest("req2", ["img3"], [4])
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
+
+    manager.allocate(req_id1, mm_feats1[0])
+    manager.allocate(req_id1, mm_feats1[1])
+    manager.allocate(req_id2, mm_feats2[0])
+    manager.free_encoder_input(req_id1, mm_feats1[0])
 
     req3 = MockRequest("req3", ["img4"], [10])
-    manager.free_encoder_input(req1, 1)
-    manager.free_encoder_input(req2, 0)
-    manager.can_allocate(req3, 0, int(1e9), 0)
-    manager.allocate(req3, 0)
+    req_id3 = req3.request_id
+    mm_feats3 = req3.mm_features
+
+    manager.free_encoder_input(req_id1, mm_feats1[1])
+    manager.free_encoder_input(req_id2, mm_feats2[0])
+    manager.can_allocate(mm_feats3[0], int(1e9), 0)
+    manager.allocate(req_id3, mm_feats3[0])
 
     assert len(manager.cached) > 0
     assert manager.num_free_slots < 20
@@ -286,14 +316,20 @@ def test_reset_allows_fresh_allocations():
     manager = EncoderCacheManager(cache_size=10)
 
     req1 = MockRequest("req1", ["img1"], [10])
-    manager.allocate(req1, 0)
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
+
+    manager.allocate(req_id1, mm_feats1[0])
     assert manager.num_free_slots == 0
 
     manager.reset()
 
     req2 = MockRequest("req2", ["img2"], [8])
-    assert manager.can_allocate(req2, 0, int(1e9), 0)
-    manager.allocate(req2, 0)
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
+
+    assert manager.can_allocate(mm_feats2[0], int(1e9), 0)
+    manager.allocate(req_id2, mm_feats2[0])
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.cached
@@ -304,10 +340,15 @@ def test_encoder_decoder_cache_manager_reset():
     manager = EncoderDecoderCacheManager(cache_size=20)
 
     req1 = MockRequest("req1", ["img1"], [5])
-    req2 = MockRequest("req2", ["img2"], [3])
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
 
-    manager.allocate(req1, 0)
-    manager.allocate(req2, 0)
+    req2 = MockRequest("req2", ["img2"], [3])
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
+
+    manager.allocate(req_id1, mm_feats1[0])
+    manager.allocate(req_id2, mm_feats2[0])
     manager.free(req1)
     manager.get_freed_mm_hashes()
 
@@ -324,14 +365,20 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
     manager = EncoderDecoderCacheManager(cache_size=10)
 
     req1 = MockRequest("req1", ["img1"], [10])
-    manager.allocate(req1, 0)
+    req_id1 = req1.request_id
+    mm_feats1 = req1.mm_features
+
+    manager.allocate(req_id1, mm_feats1[0])
     assert manager.num_free_slots == 0
 
     manager.reset()
 
     req2 = MockRequest("req2", ["img2"], [8])
-    assert manager.can_allocate(req2, 0, int(1e9), 0)
-    manager.allocate(req2, 0)
+    req_id2 = req2.request_id
+    mm_feats2 = req2.mm_features
+
+    assert manager.can_allocate(mm_feats2[0], int(1e9), 0)
+    manager.allocate(req_id2, mm_feats2[0])
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
