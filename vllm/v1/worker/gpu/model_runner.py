@@ -156,6 +156,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prefill_len=self.req_states.prefill_len.gpu,
             output_len=self.req_states.output_len.gpu,
             logprobs_mode=self.model_config.logprobs_mode,
+            num_speculative_tokens=self.num_speculative_steps + 1,
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 

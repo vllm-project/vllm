@@ -75,6 +75,9 @@ class PenaltiesState:
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        num_speculative_tokens: int,
     ) -> None:
         if not np.any(self.use_penalty[idx_mapping_np]):
             # No request uses penalties. Skip the kernel launch.
@@ -83,11 +86,14 @@ class PenaltiesState:
         apply_penalties(
             logits,
             idx_mapping,
+            input_ids,
+            expanded_local_pos,
             self.repetition_penalty.gpu,
             self.frequency_penalty.gpu,
             self.presence_penalty.gpu,
             self.prompt_bin_mask,
             self.output_bin_counts,
+            num_speculative_tokens,
         )
 
 
@@ -96,6 +102,8 @@ def _penalties_kernel(
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
+    token_ids_ptr,
+    expanded_local_pos_ptr,
     repetition_penalty_ptr,
     frequency_penalty_ptr,
     presence_penalty_ptr,
@@ -105,9 +113,10 @@ def _penalties_kernel(
     output_bin_counts_stride,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    MAX_SPEC_LEN: tl.constexpr,
 ):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    token_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + token_idx)
     rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
     freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
     pres_penalty = tl.load(presence_penalty_ptr + req_state_idx)
@@ -123,13 +132,27 @@ def _penalties_kernel(
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
-    logits = tl.load(logits_ptr + batch_idx * logits_stride + block, mask=mask)
+    logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
     logits = logits.to(tl.float32)
 
-    output_bin_counts = tl.load(
+    base_output_counts = tl.load(
         output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
         mask=mask,
+        other=0,
     )
+
+    # Compute cumulative draft_counts from previous positions in this request
+    pos = tl.load(expanded_local_pos_ptr + token_idx)
+    start_idx = token_idx - pos
+    draft_counts = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
+    for prev_pos in tl.static_range(MAX_SPEC_LEN):
+        if prev_pos < pos:
+            prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
+            token_match = block == prev_token
+            draft_counts = draft_counts + token_match.to(tl.int32)
+
+    # Total counts = base output counts + cumulative draft counts
+    output_bin_counts = base_output_counts + draft_counts
     output_bin_mask = output_bin_counts > 0
 
     # Apply repetition penalties.
@@ -138,6 +161,7 @@ def _penalties_kernel(
         packed_mask = tl.load(
             prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
             mask=packed_block < tl.cdiv(vocab_size, 32),
+            other=0,
         )
         prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
         prompt_bin_mask = prompt_bin_mask.to(tl.int1)
@@ -153,25 +177,30 @@ def _penalties_kernel(
     # Apply presence penalties.
     logits -= pres_penalty * output_bin_mask
     # Store back to logits.
-    tl.store(logits_ptr + batch_idx * logits_stride + block, logits, mask=mask)
+    tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
 def apply_penalties(
     logits: torch.Tensor,
     idx_mapping: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
     repetition_penalty: torch.Tensor,
     frequency_penalty: torch.Tensor,
     presence_penalty: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
+    num_speculative_tokens: int,
 ) -> None:
-    num_reqs, vocab_size = logits.shape
+    num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _penalties_kernel[(num_reqs, num_blocks)](
+    _penalties_kernel[(num_tokens, num_blocks)](
         logits,
         logits.stride(0),
         idx_mapping,
+        token_ids,
+        expanded_local_pos,
         repetition_penalty,
         frequency_penalty,
         presence_penalty,
@@ -181,6 +210,7 @@ def apply_penalties(
         output_bin_counts.stride(0),
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+        MAX_SPEC_LEN=num_speculative_tokens,
     )
 
 

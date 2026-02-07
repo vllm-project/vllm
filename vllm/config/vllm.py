@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -18,10 +18,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -41,9 +39,10 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import SpeculativeConfig
+from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import SupportsHash, config, replace
+from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -110,6 +109,7 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
 
@@ -187,8 +187,7 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -257,6 +256,9 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+
+    weight_transfer_config: WeightTransferConfig | None = None
+    """The configurations for weight transfer during RL training."""
 
     def compute_hash(self) -> str:
         """
@@ -603,10 +605,13 @@ class VllmConfig:
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
+                if (
+                    self.speculative_config.method not in get_args(EagleModelTypes)
+                    and self.speculative_config.method != "draft_model"
+                ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding."
+                        "with EAGLE/MTP/Draft Model kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -769,7 +774,12 @@ class VllmConfig:
         if self.compilation_config.pass_config.fuse_gemm_comms:
             self.compilation_config.pass_config.enable_sp = True
         if self.compilation_config.pass_config.enable_sp:
-            if "-rms_norm" in self.compilation_config.custom_ops:
+            if self.parallel_config.tensor_parallel_size == 1:
+                logger.warning("Sequence Parallelism requires TP>1, disabling")
+                self.compilation_config.pass_config.enable_sp = False
+                self.compilation_config.pass_config.fuse_gemm_comms = False
+
+            elif "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
                 )
@@ -1292,16 +1302,21 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding with draft model, the compile range must be extended
-        # by 1 for each sequence.
+        # For speculative decoding, the compile range must be extended
+        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
+        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            do_extend: bool = (
-                self.speculative_config is not None
-                and self.speculative_config.uses_draft_model()
-            )
-            if do_extend:
-                compile_range_end += self.scheduler_config.max_num_seqs
+            if self.speculative_config is not None and (
+                self.speculative_config.uses_draft_model()
+                or self.speculative_config.use_eagle()
+            ):
+                multiplier = (
+                    self.speculative_config.num_speculative_tokens
+                    if self.speculative_config.parallel_drafting
+                    else 1
+                )
+                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
 
             computed_compile_ranges_split_points.append(compile_range_end)
 
@@ -1394,14 +1409,6 @@ class VllmConfig:
         append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
-
-    def replace(self, **kwargs):
-        """
-        Replace attributes of the config, and 'recompute' the config.
-        dataclass.replace() calls __init__() and __post_init__(), source:
-        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
-        """
-        return replace(self, **kwargs)
 
     def __str__(self):
         return (

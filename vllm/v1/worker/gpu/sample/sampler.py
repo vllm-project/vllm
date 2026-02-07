@@ -30,6 +30,7 @@ class Sampler:
         prefill_len: torch.Tensor,
         output_len: torch.Tensor,
         logprobs_mode: LogprobsMode = "raw_logprobs",
+        num_speculative_tokens: int = 1,
     ):
         if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
@@ -39,6 +40,7 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.num_speculative_tokens = num_speculative_tokens
         self.bad_words_state = BadWordsState(
             max_num_reqs,
             device,
@@ -76,8 +78,8 @@ class Sampler:
         idx_mapping_np: np.ndarray,
         cu_num_logits_np: np.ndarray,
         pos: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-        expanded_local_pos: torch.Tensor | None = None,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -130,7 +132,14 @@ class Sampler:
         self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
 
         # Apply penalties in place.
-        self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
+        self.penalties_state.apply_penalties(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+            self.num_speculative_tokens,
+        )
 
         # Apply bad words masking in place.
         self.bad_words_state.apply_bad_words(

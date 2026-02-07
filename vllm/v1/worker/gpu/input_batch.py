@@ -40,9 +40,8 @@ class InputBatch:
     idx_mapping_np: np.ndarray
     # Identical to idx_mapping except for spec decoding.
     expanded_idx_mapping: torch.Tensor
-    # Per-request relative token position for spec decoding.
-    # e.g., [0, 1, 2, 0, 1, 2] for two requests with 3 tokens each.
-    expanded_local_pos: torch.Tensor | None
+    # [total_num_logits] position within request for each logit
+    expanded_local_pos: torch.Tensor
 
     # [num_reqs]
     # batch_idx -> num_scheduled_tokens
