@@ -318,11 +318,11 @@ class CrossAttentionSpec(AttentionSpec):
 
         # For cross-attention, we need to cache encoder states
         # Get encoder length (e.g., 1500 for Whisper).
-        max_encoder_len = scheduler_config.max_num_batched_encoder_tokens
+        max_encoder_len = scheduler_config.max_num_batched_encoder_input_tokens
         if max_encoder_len is None:
             logger.warning_once(
                 "You should call `compute_mm_encoder_budget` to set "
-                "`scheduler_config.max_num_batched_encoder_tokens` "
+                "`scheduler_config.max_num_batched_encoder_input_tokens` "
                 "before calculating the maximum memory usage."
             )
 

@@ -84,22 +84,28 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    max_num_batched_encoder_tokens: int | None = None
-    """Maximum number of encoder tokens to be processed in a single iteration,
+    max_num_batched_encoder_input_tokens: int | None = None
+    """Maximum number of encoder input tokens to be processed in a single iteration;
     defaults to `max_num_batched_tokens`.
 
-    It must be no greater than `max_num_batched_tokens`.
-
-    NOTE: It will be overridden by the maximum possible multimodal embedding size
-    if it is larger."""
+    Notes:
+        - The relation between encoder and decoder input tokens is not necessarily
+          one-to-one. Usually, multi-modal encoders will downsample the input tokens
+          so that there are fewer tokens passed from the encoder to the decoder.
+        - It will be overridden by the maximum possible multimodal embedding size
+          if it is larger.
+    """
 
     encoder_cache_size: int | None = None
-    """Multimodal encoder cache size, defaults to `max_num_batched_encoder_tokens`.
+    """Multimodal encoder cache size;
+    defaults to `max_num_batched_encoder_input_tokens`.
 
-    It must be no smaller than `max_num_batched_encoder_tokens`.
+    It must be no smaller than `max_num_batched_encoder_input_tokens`.
 
-    NOTE: It will be overridden by the maximum possible multimodal embedding size
-    if it is larger."""
+    Notes:
+        - It will be overridden by the maximum possible multimodal embedding size
+          if it is larger.
+    """
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
