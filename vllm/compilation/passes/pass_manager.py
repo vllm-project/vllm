@@ -18,6 +18,7 @@ from .vllm_inductor_pass import VllmInductorPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.rocm_aiter_fusion import (
+        ROCmAiterTritonRopeReshapeKVCacheFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -134,6 +135,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache and rocm_aiter_ops.is_enabled():
+                self.passes += [ROCmAiterTritonRopeReshapeKVCacheFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
