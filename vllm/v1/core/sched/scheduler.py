@@ -1561,20 +1561,21 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
+        encoder_cache_manager = self.encoder_cache_manager
         request_id = request.request_id
 
-        for mm_feature in self.encoder_cache_manager.get_cached_features(request):
+        for mm_feature in encoder_cache_manager.get_cached_features(request):
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
-                self.encoder_cache_manager.free_encoder_input(request_id, mm_feature)
+                encoder_cache_manager.free_encoder_input(request_id, mm_feature)
             elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
-                self.encoder_cache_manager.free_encoder_input(request_id, mm_feature)
+                encoder_cache_manager.free_encoder_input(request_id, mm_feature)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
