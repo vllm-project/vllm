@@ -753,7 +753,7 @@ steps:
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite"
@@ -764,7 +764,7 @@ steps:
 
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
