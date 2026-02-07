@@ -6,7 +6,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention.layer import Attention
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -22,6 +21,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -174,6 +174,7 @@ class MiMoV2MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             scoring_func="sigmoid",
+            router_logits_dtype=self.gate_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

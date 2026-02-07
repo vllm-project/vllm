@@ -33,12 +33,15 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
+  - tests/models/test_terratorch.py
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
   commands:
-    - pytest -v -s models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
 - label: Basic Models Test (Other CPU) # 5min
+  depends_on: 
+  - image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
   - vllm/

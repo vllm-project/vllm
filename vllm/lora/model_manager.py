@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig, ModelConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -35,9 +35,9 @@ from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.worker.utils import MultiModalBudget
 
 logger = init_logger(__name__)
 
@@ -142,7 +142,6 @@ class LoRAModelManager:
         vllm_config: VllmConfig,
         max_num_batched_tokens: int,
     ) -> None:
-        model_config: ModelConfig = vllm_config.model_config
         mm_registry = MULTIMODAL_REGISTRY
 
         self.supports_tower_connector_lora = False
@@ -162,7 +161,6 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         if self.lora_config.enable_tower_connector_lora:
-            self.mm_processor_info = mm_registry.create_processor(model_config).info
             self.supports_tower_connector_lora = self.supports_mm and hasattr(
                 self.model, "get_num_mm_encoder_tokens"
             )
@@ -176,9 +174,7 @@ class LoRAModelManager:
         )
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
-        limit_per_prompt: int = max(
-            self.mm_processor_info.get_allowed_mm_limits().values()
-        )
+        limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
         num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
             mm_budget.get_encoder_budget()
         )
@@ -456,16 +452,23 @@ class LoRAModelManager:
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (
-                        module.base_layer.org_vocab_size
-                        if hasattr(module.base_layer, "org_vocab_size")
-                        else module.base_layer.weight.shape[1]
-                    )
-                    output_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[0]
-                    )
+                    # Special-case lm_head: wrapped by LogitsProcessorWithLoRA.
+                    # LoRA input dim is hidden_size, output dim is vocab size.
+                    # LogitsProcessorWithLoRA handles extra vocab size directly.
+                    if parts[-1] == "lm_head":
+                        input_dim = module.lora_a_stacked[0].shape[-1]
+                        output_dim = module.lora_b_stacked[0].shape[-2]
+                    else:
+                        input_dim = (
+                            module.base_layer.org_vocab_size
+                            if hasattr(module.base_layer, "org_vocab_size")
+                            else module.base_layer.weight.shape[1]
+                        )
+                        output_dim = (
+                            module.base_layer.embedding_dim
+                            if hasattr(module.base_layer, "embedding_dim")
+                            else module.base_layer.weight.shape[0]
+                        )
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
