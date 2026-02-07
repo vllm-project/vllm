@@ -3,45 +3,38 @@
 This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM.
 Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
 
-!!! tip
-    To train your own draft models for speculative decoding, see [Speculators](speculators.md), a library for training draft models that integrates seamlessly with vLLM.
+To train your own draft models for optimized speculative decoding, see the official vLLM [Speculators](speculators.md) library.
 
 ## Speculating with a draft model
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
-!!! warning
-    In vllm v0.10.0, speculative decoding with a draft model is not supported.
-    If you use the following code, you will get a `NotImplementedError`.
+```python
+from vllm import LLM, SamplingParams
 
-??? code
+prompts = [
+    "The future of AI is",
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    ```python
-    from vllm import LLM, SamplingParams
+llm = LLM(
+    model="facebook/opt-6.7b",
+    tensor_parallel_size=1,
+    speculative_config={
+        "model": "facebook/opt-125m",
+        "num_speculative_tokens": 5,
+        "method": "draft_model",
+    },
+)
+outputs = llm.generate(prompts, sampling_params)
 
-    prompts = [
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
 
-    llm = LLM(
-        model="facebook/opt-6.7b",
-        tensor_parallel_size=1,
-        speculative_config={
-            "model": "facebook/opt-125m",
-            "num_speculative_tokens": 5,
-            "method": "draft_model",
-        },
-    )
-    outputs = llm.generate(prompts, sampling_params)
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    ```
-
-To perform the same with an online mode launch the server:
+To perform the equivalent launch in online mode, use the following server-side code:
 
 ```bash
 vllm serve facebook/opt-6.7b \
@@ -50,13 +43,10 @@ vllm serve facebook/opt-6.7b \
     --seed 42 \
     -tp 1 \
     --gpu_memory_utilization 0.8 \
-    --speculative_config '{"model": "facebook/opt-125m", "num_speculative_tokens": 5}'
+    --speculative_config '{"model": "facebook/opt-125m", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
-!!! warning
-    Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately has been deprecated now.
-
-Then use a client:
+The code used to request as completions as a client remains unchanged:
 
 ??? code
 
@@ -93,6 +83,9 @@ Then use a client:
     else:
         print(completion)
     ```
+
+!!! warning
+    Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately has been deprecated.
 
 ## Speculating by matching n-grams in the prompt
 
@@ -322,7 +315,8 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 
 ## Known Feature Incompatibility
 
-1. Pipeline parallelism
+1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
+2. Speculative decoding with a draft model is not supported in `vllm<=0.10.0` 
 
 ## Resources for vLLM contributors
 
