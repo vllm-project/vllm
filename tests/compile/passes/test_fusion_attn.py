@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
+from typing import Any
 
 import pytest
+import regex as re
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
+from tests.compile.fusion_test_utils import (
+    CUSTOM_OPS_FP8,
+    MODELS_FP4,
+    MODELS_FP8,
+    Matches,
+    has_cuda_graph_wrapper_metadata,
+    is_blackwell,
+    run_model,
+)
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
@@ -19,6 +31,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -34,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
