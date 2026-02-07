@@ -127,12 +127,13 @@ def test_schedule_multimodal_requests_one_batch():
         assert len(encoder_input) == 1
 
 
+@pytest.mark.parametrize("chunk_mult", [0.5, 1.0, 2.0])
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
     [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 2.0)],
 )
 def test_schedule_multimodal_requests_multi_batch(
-    encoder_budget_mult, encoder_cache_mult
+    chunk_mult, encoder_budget_mult, encoder_cache_mult
 ):
     NUM_MM_ITEMS = 10
     MAX_MM_ITEM_TOKS = 576
@@ -147,15 +148,19 @@ def test_schedule_multimodal_requests_multi_batch(
         )
         mm_positions.append(mm_position)
 
-        print(f"{mm_position.length=}")
         start_idx += mm_position.length
     total_len = start_idx
+
+    max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
+    max_num_batched_encoder_embeds = int(encoder_budget_mult * MAX_MM_ITEM_TOKS)
+    encoder_cache_size = int(encoder_cache_mult * MAX_MM_ITEM_TOKS)
 
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=total_len,
-        max_num_batched_encoder_embeds=int(encoder_budget_mult * MAX_MM_ITEM_TOKS),
-        encoder_cache_size=int(encoder_cache_mult * MAX_MM_ITEM_TOKS),
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_batched_encoder_embeds=max_num_batched_encoder_embeds,
+        encoder_cache_size=encoder_cache_size,
     )
 
     assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
@@ -168,7 +173,7 @@ def test_schedule_multimodal_requests_multi_batch(
         scheduler.add_request(request)
 
     total_scheduled_tokens = 0
-    for _ in range(NUM_MM_ITEMS):  # Allow at most NUM_MM_ITEMS iterations
+    while total_scheduled_tokens < total_len:
         output = scheduler.schedule()
 
         req_to_index = {request.request_id: i for i, request in enumerate(requests)}
@@ -182,12 +187,13 @@ def test_schedule_multimodal_requests_multi_batch(
         )
         scheduler.update_from_output(output, model_runner_output)
 
-        print(f"{output.num_scheduled_tokens=}")
-        total_scheduled_tokens += sum(output.num_scheduled_tokens.values())
+        new_scheduled_tokens = sum(output.num_scheduled_tokens.values())
+        print(f"{total_scheduled_tokens=}, {new_scheduled_tokens=}, {total_len=}")
+        assert new_scheduled_tokens > 0, "Detected hanging condition"
 
-    assert total_scheduled_tokens == total_len, (
-        "Failed to finish scheduling all tokens in the request"
-    )
+        total_scheduled_tokens += new_scheduled_tokens
+
+    assert total_scheduled_tokens == total_len
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
