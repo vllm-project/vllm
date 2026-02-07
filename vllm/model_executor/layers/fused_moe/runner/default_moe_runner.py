@@ -567,10 +567,13 @@ class DefaultMoERunner(MoERunner):
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
-        return self.moe_config.dp_size > 1 and self.quant_method.moe_mk is None
+        return (
+            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
+        )
 
     def _maybe_dispatch(
         self,
+        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -588,7 +591,7 @@ class DefaultMoERunner(MoERunner):
             if post_quant_allgather:
                 hidden_states_to_dispatch, extra_tensors = (
                     self.quant_method.prepare_dp_allgather_tensor(
-                        self, hidden_states, router_logits
+                        layer, hidden_states, router_logits
                     )
                 )
             else:
@@ -633,10 +636,6 @@ class DefaultMoERunner(MoERunner):
             hidden_states = get_ep_group().combine(
                 hidden_states, self.moe_config.is_sequence_parallel
             )
-            if shared_output is not None:
-                shared_output = get_ep_group().combine(
-                    shared_output, self.moe_config.is_sequence_parallel
-                )
 
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(
@@ -812,6 +811,7 @@ class DefaultMoERunner(MoERunner):
         # #32567 lands and the remaining kernels are made MKs.  The PCP
         # code will probably remain
         hidden_states, router_logits, extra_tensor = self._maybe_dispatch(
+            layer,
             hidden_states,
             router_logits,
         )
