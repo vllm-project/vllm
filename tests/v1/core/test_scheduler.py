@@ -127,13 +127,13 @@ def test_schedule_multimodal_requests_one_batch():
         assert len(encoder_input) == 1
 
 
-@pytest.mark.parametrize("chunk_mult", [0.5, 1.0, 2.0])
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
     [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 2.0)],
 )
+@pytest.mark.parametrize("chunk_mult", [0.5, 1.0, 2.0])
 def test_schedule_multimodal_requests_multi_batch(
-    chunk_mult, encoder_budget_mult, encoder_cache_mult
+    encoder_budget_mult, encoder_cache_mult, chunk_mult
 ):
     NUM_MM_ITEMS = 10
     MAX_MM_ITEM_TOKS = 576
