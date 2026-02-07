@@ -46,6 +46,7 @@ class FlashAttnMLABackend(MLACommonBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "float16",
     ]
 
     @staticmethod

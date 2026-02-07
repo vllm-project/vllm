@@ -282,6 +282,7 @@ class FlashInferBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "float16",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
