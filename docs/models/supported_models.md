@@ -224,13 +224,13 @@ If you prefer, you can use the Hugging Face CLI to [download a model](https://hu
 
 ```bash
 # Download a model
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta
+hf download HuggingFaceH4/zephyr-7b-beta
 
 # Specify a custom cache directory
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
+hf download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
 
 # Download a specific file from a model repo
-huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
+hf download HuggingFaceH4/zephyr-7b-beta eval_results.json
 ```
 
 #### List the downloaded models
@@ -239,13 +239,13 @@ Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingf
 
 ```bash
 # List cached models
-huggingface-cli scan-cache
+hf scan-cache
 
 # Show detailed (verbose) output
-huggingface-cli scan-cache -v
+hf scan-cache -v
 
 # Specify a custom cache directory
-huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
+hf scan-cache --dir ~/.cache/huggingface/hub
 ```
 
 #### Delete a cached model
@@ -260,7 +260,7 @@ Use the Hugging Face CLI to interactively [delete downloaded model](https://hugg
 # Please run `pip install huggingface_hub[cli]` to install them.
 
 # Launch the interactive TUI to select models to delete
-$ huggingface-cli delete-cache
+$ hf delete-cache
 ? Select revisions to delete: 1 revisions selected counting for 438.9M.
   ○ None of the following (if selected, nothing will be deleted).
 Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
@@ -297,7 +297,7 @@ export https_proxy=http://your.proxy.server:port
 - Set the proxy for just the current command:
 
 ```shell
-https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+https_proxy=http://your.proxy.server:port hf download <model_name>
 
 # or use vllm cmd directly
 https_proxy=http://your.proxy.server:port  vllm serve <model_name>
@@ -471,7 +471,7 @@ th {
 | `StableLMEpochForCausalLM` | StableLM Epoch | `stabilityai/stablelm-zephyr-3b`, etc. | | ✅︎ |
 | `Starcoder2ForCausalLM` | Starcoder2 | `bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc. | | ✅︎ |
 | `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
-| `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/step-3.5-flash`, etc. |  | ✅︎ |
+| `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. |  | ✅︎ |
 | `TeleChatForCausalLM` | TeleChat | `chuhac/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
 | `TeleChat2ForCausalLM` | TeleChat2 | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
 | `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
@@ -519,6 +519,7 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 | `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
 | `Qwen2Model`<sup>C</sup>, `Qwen2ForCausalLM`<sup>C</sup> | Qwen2-based | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc. | ✅︎ | ✅︎ |
 | `Qwen3Model`<sup>C</sup>, `Qwen3ForCausalLM`<sup>C</sup> | Qwen3-based | `Qwen/Qwen3-Embedding-0.6B`, etc. | ✅︎ | ✅︎ |
+| `VoyageQwen3BidirectionalEmbedModel`<sup>C</sup> | Voyage Qwen3-based with bidirectional attention | `voyageai/voyage-4-nano`, etc. | ✅︎ | ✅︎ |
 | `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
@@ -673,7 +674,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
-| `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A<sup>+</sup> | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-2601-hf` | ✅︎ | ✅︎ |
+| `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-2601-hf` | ✅︎ | ✅︎ |
 | `AyaVisionForConditionalGeneration` | Aya Vision | T + I<sup>+</sup> | `CohereLabs/aya-vision-8b`, `CohereLabs/aya-vision-32b`, etc. | | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
 | `BeeForConditionalGeneration` | Bee-8B | T + I<sup>E+</sup> | `Open-Bee/Bee-8B-RL`, `Open-Bee/Bee-8B-SFT` | | ✅︎ |

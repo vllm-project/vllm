@@ -105,7 +105,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-    ) -> "MPClient":
+    ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
             vllm_config,
@@ -1191,6 +1191,18 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue."""
+        raise NotImplementedError(
+            "pause_scheduler_async is not yet supported for data parallel"
+        )
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        raise NotImplementedError(
+            "resume_scheduler_async is not yet supported for data parallel"
+        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
