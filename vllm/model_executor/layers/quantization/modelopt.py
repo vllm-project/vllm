@@ -52,9 +52,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     process_fp8_input_tensor_strategy_moe,
@@ -88,6 +85,9 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.utils.flashinfer import (
+    apply_fi_trtllm_fp8_per_tensor_moe,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

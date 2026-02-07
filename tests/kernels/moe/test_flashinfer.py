@@ -21,15 +21,15 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
+from vllm.model_executor.models.llama4 import Llama4MoE
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
-from vllm.model_executor.models.llama4 import Llama4MoE
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 try:
