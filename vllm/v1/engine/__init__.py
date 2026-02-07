@@ -3,7 +3,7 @@
 
 import enum
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import msgspec
@@ -159,6 +159,40 @@ class EngineCoreOutput(
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
+
+
+# Sentinel returned by a deferred utility resolver to mean "not ready yet".
+# Any other return value (including None) is sent as the utility result.
+DEFERRED_NOT_READY = object()
+
+
+class DeferredUtilityResult:
+    """Return this from a utility handler to send the result later.
+
+    Use when the utility cannot complete immediately (e.g. waiting for
+    requests to drain). The engine will call ``resolver`` every loop
+    until it returns a value other than :const:`DEFERRED_NOT_READY`,
+    then send that value via the output queue and remove the resolver.
+
+    Example::
+
+        from vllm.v1.engine import DeferredUtilityResult, DEFERRED_NOT_READY
+
+
+        def do_some_utility(self, clear_cache: bool):
+            # do some work
+            def resolve():
+                if something_is_ready():
+                    return result
+                return DEFERRED_NOT_READY
+
+            return DeferredUtilityResult(resolve)
+    """
+
+    __slots__ = ("resolver",)
+
+    def __init__(self, resolver: Callable[[], Any]) -> None:
+        self.resolver = resolver
 
 
 class UtilityOutput(

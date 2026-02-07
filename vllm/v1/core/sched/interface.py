@@ -122,9 +122,9 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
-    ) -> None:
+    ) -> list[str]:
         """Finish the requests in the scheduler's internal queue. If the request
-        is not in the queue, this method will do nothing.
+        is not in the queue, this method will do nothing for that request.
 
         This method is called in two cases:
         1. When the request is aborted by the client.
@@ -134,6 +134,10 @@ class SchedulerInterface(ABC):
         Args:
             request_ids: A single or a list of request IDs.
             finished_status: The finished status of the given requests.
+
+        Returns:
+            List of request IDs that were actually finished (were in the
+            scheduler and not already finished).
         """
         raise NotImplementedError
 
@@ -166,6 +170,11 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
+
+    @abstractmethod
+    def get_all_request_ids(self) -> list[str]:
+        """Return all request IDs currently in the scheduler (running or waiting)."""
+        raise NotImplementedError
 
     @abstractmethod
     def reset_prefix_cache(

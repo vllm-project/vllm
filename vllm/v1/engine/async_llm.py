@@ -167,9 +167,6 @@ class AsyncLLM(EngineClient):
             )
             self.logger_manager.log_engine_initialized()
 
-        # Pause / resume state for async RL workflows.
-        self._pause_cond = asyncio.Condition()
-        self._paused = False
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
@@ -381,10 +378,6 @@ class AsyncLLM(EngineClient):
         # we can call __init__ before the event loop, which enables us
         # to handle startup failure gracefully in the OpenAI server.
         self._run_output_handler()
-
-        # Respect pause state before accepting new requests.
-        async with self._pause_cond:
-            await self._pause_cond.wait_for(lambda: not self._paused)
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(params.output_kind, request.request_id)
@@ -715,13 +708,17 @@ class AsyncLLM(EngineClient):
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
-        """Abort RequestId in OutputProcessor and EngineCore."""
+        """Abort request(s) on the engine only.
 
+        Pass internal=True and internal request IDs (the ones the engine knows).
+        The engine aborts whichever of those it has and reports back via normal
+        output; requests not yet on the engine are left in queue. No client-side
+        resolution or cleanup; OutputProcessor is unchanged.
+        """
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
-        await self.engine_core.abort_requests_async(all_request_ids)
+        await self.engine_core.abort_requests_async(request_ids)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
@@ -736,7 +733,9 @@ class AsyncLLM(EngineClient):
         """
         Pause generation to allow model weight updates.
 
-        New generation/encoding requests are blocked until resume.
+        All mode handling (abort / wait / keep) and cache clearing is done
+        in the engine. New generation/encoding requests are queued by the
+        engine while paused and flushed on resume.
 
         Args:
             mode: How to handle in-flight requests:
@@ -746,11 +745,8 @@ class AsyncLLM(EngineClient):
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED: use mode argument.
-                Whether to wait for in-flight requests to complete before pausing.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
-                Default is ``True`` (clear caches).
-
         """
         if wait_for_inflight_requests:
             warnings.warn(
@@ -761,50 +757,20 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-
-        if mode == "keep":
-            # Freeze requests in the scheduler - they will resume on
-            # resume_generation().
-            await self.engine_core.pause_scheduler_async()
-        else:
-            if self._client_count > 1:
-                raise NotImplementedError(
-                    "pause_generation is not supported with --api-server-count > 1"
-                    " when mode is not 'keep'"
-                )
-            async with self._pause_cond:
-                if not self._paused:
-                    self._paused = True
-
-                    if mode == "abort":
-                        request_ids = list(self.output_processor.request_states.keys())
-                        if request_ids:
-                            await self.abort(request_ids, internal=True)
-                    elif mode == "wait":
-                        if self.output_processor.has_unfinished_requests():
-                            await self.output_processor.wait_for_requests_to_drain()
-                    else:
-                        raise ValueError(f"Invalid mode: {mode}")
-
-        # Clear cache
-        if clear_cache:
-            await self.reset_prefix_cache()
-            await self.reset_mm_cache()
-            await self.reset_encoder_cache()
+        if self._client_count > 1 and mode != "keep":
+            raise NotImplementedError(
+                "pause_generation is not supported with --api-server-count > 1 "
+                "when mode is not 'keep'"
+            )
+        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
-
-        async with self._pause_cond:
-            await self.engine_core.resume_scheduler_async()
-            self._paused = False
-            self._pause_cond.notify_all()  # Wake up all waiting requests
+        await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
-
-        async with self._pause_cond:
-            return self._paused
+        return await self.engine_core.is_scheduler_paused_async()
 
     async def encode(
         self,
