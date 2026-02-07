@@ -33,7 +33,7 @@ def get_mm_max_toks_per_item(
     )
 
     return {
-        modality: sum(item.get_num_embeds for item in placeholders)
+        modality: sum(item.get_num_embeds() for item in placeholders)
         for modality, placeholders in mm_inputs["mm_placeholders"].items()
     }
 
@@ -54,17 +54,17 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        cache = mm_registry.processor_only_cache_from_config(vllm_config)
-        processor = mm_registry.create_processor(model_config, cache=cache)
-
-        self.cache = cache
-        self.mm_limits = mm_limits = processor.info.allowed_mm_limits
-
-        active_modalities = {
-            modality for modality, limit in mm_limits.items() if limit > 0
-        }
-
         with set_default_torch_num_threads():  # Avoid hang during startup
+            cache = mm_registry.processor_only_cache_from_config(vllm_config)
+            processor = mm_registry.create_processor(model_config, cache=cache)
+
+            self.cache = cache
+            self.mm_limits = mm_limits = processor.info.allowed_mm_limits
+
+            active_modalities = {
+                modality for modality, limit in mm_limits.items() if limit > 0
+            }
+
             all_mm_max_toks_per_item = get_mm_max_toks_per_item(
                 model_config,
                 mm_registry,
@@ -72,9 +72,14 @@ class MultiModalBudget:
                 mm_counts=dict.fromkeys(active_modalities, 1),
             )
 
+        # Some models (e.g., Qwen3Omni with use_audio_in_video=True) share
+        # placeholders between modalities, so not all active modalities will
+        # have their own entry in the returned dict. We filter to only include
+        # modalities that have independent placeholder tokens.
         mm_max_toks_per_item = {
             modality: all_mm_max_toks_per_item[modality]
             for modality in active_modalities
+            if modality in all_mm_max_toks_per_item
         }
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
