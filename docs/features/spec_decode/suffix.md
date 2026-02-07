@@ -1,4 +1,4 @@
-# Speculating using Suffix Decoding
+# Suffix Decoding
 
 The following code configures vLLM to use speculative decoding where proposals are generated using Suffix Decoding ([technical report](https://arxiv.org/abs/2411.04975)).
 

@@ -1,4 +1,4 @@
-# Speculating with a Draft Model
+# Draft Models
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
