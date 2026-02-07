@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -1438,7 +1439,6 @@ class ModelConfig:
         Returns True if any architecture in hf_config.architectures matches
         the pattern .*ForCausalLM.* (e.g., LlamaForCausalLM, Qwen2ForCausalLM).
         """
-        import re
         architectures = getattr(self.hf_config, "architectures", [])
         pattern = re.compile(r".*ForCausalLM.*")
         return any(pattern.match(arch) for arch in architectures)

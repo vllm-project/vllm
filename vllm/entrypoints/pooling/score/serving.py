@@ -26,6 +26,10 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
+from vllm.entrypoints.pooling.score.generative_scores import (
+    GenerativeScoreRequest,
+    OpenAIServingGenerativeScores,
+)
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -55,7 +59,7 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
-        generative_scores_handler: Any = None,  # OpenAIServingGenerativeScores
+        generative_scores_handler: OpenAIServingGenerativeScores | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -358,10 +362,6 @@ class ServingScores(OpenAIServing):
         generative scores handler, and converts the response back to
         the standard score response format.
         """
-        from vllm.entrypoints.pooling.score.generative_scores import (
-            GenerativeScoreRequest,
-        )
-
         if self.generative_scores_handler is None:
             return self.create_error_response(
                 "Generative scores handler not initialized. "

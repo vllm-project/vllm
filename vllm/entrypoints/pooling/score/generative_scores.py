@@ -31,6 +31,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
@@ -480,12 +485,6 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         headers: Mapping[str, str],
     ) -> Mapping[str, str] | None:
         """Extract trace headers from request headers."""
-        from vllm.tracing import (
-            contains_trace_headers,
-            extract_trace_headers,
-            log_tracing_disabled_warning,
-        )
-
         if not contains_trace_headers(headers):
             return None
 
@@ -506,7 +505,6 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         if raw_request:
             return getattr(raw_request.state, "request_id", None) or \
                    str(id(raw_request))
-        from vllm.utils import random_uuid
         return random_uuid()
 
     def _log_inputs(
