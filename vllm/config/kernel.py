@@ -110,7 +110,7 @@ class KernelConfig:
         from vllm.platforms import current_platform
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
-        logger.info(
+        logger.debug(
             "Setting platform-specific IR op priority defaults: %s",
             platform_op_priority,
         )
@@ -126,3 +126,8 @@ class KernelConfig:
                     op for op in op_priority if op not in current_op_priority
                 ]
                 current_op_priority.extend(unique_op_priority)
+
+        logger.info(
+            "Final IR op priority after setting platform defaults: %s",
+            self.ir_op_priority,
+        )
