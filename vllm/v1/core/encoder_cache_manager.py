@@ -315,15 +315,15 @@ def _set_encoder_cache_size(
     max_tokens_per_mm_item: int,
 ) -> int:
     encoder_cache_size = scheduler_config.encoder_cache_size
-    max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+    max_num_batched_encoder_tokens = scheduler_config.max_num_batched_encoder_tokens
 
     if encoder_cache_size is None:
-        encoder_cache_size = max_num_batched_tokens
-    elif encoder_cache_size < max_num_batched_tokens:
+        encoder_cache_size = max_num_batched_encoder_tokens
+    elif encoder_cache_size < max_num_batched_encoder_tokens:
         raise ValueError(
             "The encoder cache must be able to store all "
             f"encoder inputs in a single batch, so {encoder_cache_size=}"
-            f"cannot be less than {max_num_batched_tokens=}. "
+            f"cannot be less than {max_num_batched_encoder_tokens=}. "
             "Please increase encoder_cache_size."
         )
 

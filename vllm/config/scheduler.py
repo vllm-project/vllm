@@ -94,9 +94,9 @@ class SchedulerConfig:
     if it is larger."""
 
     encoder_cache_size: int | None = None
-    """Multimodal encoder cache size, defaults to `max_num_batched_tokens`.
+    """Multimodal encoder cache size, defaults to `max_num_batched_encoder_tokens`.
 
-    It must be no smaller than `max_num_batched_tokens`.
+    It must be no smaller than `max_num_batched_encoder_tokens`.
 
     NOTE: It will be overridden by the maximum possible multimodal embedding size
     if it is larger."""
