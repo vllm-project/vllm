@@ -806,6 +806,12 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
 
+        # This populates IR op priorities,
+        # needs to happen after compilation mode and backend are decided.
+        # TODO(luka): it's hard to figure out where to put this because it shouldn't
+        #  affect any of the passes or anything else - a great problem to have :)
+        self.kernel_config.set_platform_defaults(self)
+
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
             if model_config := self.model_config:
