@@ -259,7 +259,22 @@ class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
+    reasoning_content: str | None = None  # Deprecated: use reasoning instead
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sync_reasoning_fields(self) -> "DeltaMessage":
+        """Maintain backward compatibility by syncing reasoning fields.
+
+        The reasoning_content field is deprecated in favor of reasoning.
+        This validator ensures both fields stay in sync for backward
+        compatibility with clients that expect reasoning_content.
+        """
+        if self.reasoning is not None and self.reasoning_content is None:
+            self.reasoning_content = self.reasoning
+        elif self.reasoning_content is not None and self.reasoning is None:
+            self.reasoning = self.reasoning_content
+        return self
 
 
 ####### Tokens IN <> Tokens OUT #######
