@@ -320,8 +320,13 @@ class CrossAttentionSpec(AttentionSpec):
         # Get encoder length (e.g., 1500 for Whisper).
         max_encoder_len = scheduler_config.max_num_batched_encoder_tokens
         if max_encoder_len is None:
-            # Fallback in case `compute_mm_encoder_budget` hasn't been called yet
-            # and the user didn't specify the value explicitly
+            logger.warning_once(
+                "You should call `compute_mm_encoder_budget` to set "
+                "`scheduler_config.max_num_batched_encoder_tokens` "
+                "before calculating the maximum memory usage."
+            )
+
+            # Sane fallback
             max_encoder_len = scheduler_config.max_num_batched_tokens
 
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
