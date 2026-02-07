@@ -260,7 +260,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        return self.mm_features[input_id].mm_position.get_num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
         self,

@@ -199,7 +199,6 @@ class PlaceholderRange:
     def embeds_cumsum(self) -> torch.Tensor | None:
         return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
-    @cached_property
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
