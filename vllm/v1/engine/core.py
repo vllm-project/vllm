@@ -212,6 +212,10 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Pause state for "keep" mode - freezes requests in queue.
+        self._scheduler_paused = False
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -325,6 +329,20 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pause_scheduler(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+
+        Requests are kept frozen in queue and can be resumed later.
+        """
+        self._scheduler_paused = True
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler after a pause.
+
+        Resumes processing of frozen requests in the queue.
+        """
+        self._scheduler_paused = False
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -432,6 +450,10 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
+
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -1050,6 +1072,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and (not self.scheduler.has_requests() or self.scheduling_paused)
             and not self.batch_queue
+            and not self._scheduler_paused
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.

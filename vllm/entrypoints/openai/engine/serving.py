@@ -106,7 +106,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
-    SingletonDictPrompt,
     extract_prompt_components,
     extract_prompt_len,
     parse_model_prompt,
@@ -963,8 +962,6 @@ class OpenAIServing:
         renderer = self.renderer
         model_config = self.model_config
 
-        tok_params = request.build_tok_params(model_config)
-
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
@@ -979,22 +976,17 @@ class OpenAIServing:
             )
             for prompt in prompts
         ]
-        in_prompts = await renderer.render_prompts_async(parsed_prompts)
+        tok_params = request.build_tok_params(model_config)
 
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        for in_prompt in in_prompts:
-            target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-                "encoder_prompt", in_prompt
-            )
-            target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
-
-        return engine_prompts
+        return await renderer.render_cmpl_async(
+            parsed_prompts,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
 
     async def _preprocess_chat(
         self,
@@ -1023,21 +1015,16 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        conversation, in_prompt = await renderer.render_messages_async(
-            messages, chat_params
+        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+            [messages],
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
         )
-        target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-            "encoder_prompt", in_prompt
-        )
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompt = await renderer.tokenize_prompt_async(target_prompt, tok_params)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1176,7 +1163,7 @@ class OpenAIServing:
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
-                    context.request,
+                    context.request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
                 )

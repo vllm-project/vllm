@@ -30,6 +30,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
+from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -109,6 +110,7 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
 
@@ -128,6 +130,9 @@ OPTIMIZATION_LEVEL_00 = {
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": False,
+    },
 }
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
@@ -143,6 +148,9 @@ OPTIMIZATION_LEVEL_01 = {
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -160,6 +168,9 @@ OPTIMIZATION_LEVEL_02 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
+    },
 }
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
@@ -175,6 +186,9 @@ OPTIMIZATION_LEVEL_03 = {
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
     },
 }
 
@@ -210,6 +224,8 @@ class VllmConfig:
     """Load configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    kernel_config: KernelConfig = Field(default_factory=KernelConfig)
+    """Kernel configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -755,6 +771,11 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        if self.kernel_config.enable_flashinfer_autotune is None:
+            raise ValueError(
+                "KernelConfig.enable_flashinfer_autotune must be set after applying "
+                "optimization level defaults."
+            )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
