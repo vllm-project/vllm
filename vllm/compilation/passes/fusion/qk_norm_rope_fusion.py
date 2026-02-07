@@ -10,6 +10,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -17,7 +18,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
+from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
@@ -64,7 +65,6 @@ class QkNormRopePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
         self.rope_matcher = MatcherRotaryEmbedding(
@@ -129,14 +129,14 @@ class QkNormRopePattern:
             q_by_head = q.view(
                 *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
             )
-            q_normed_by_head = self.rmsnorm_matcher(q_by_head, q_weight)
+            q_normed_by_head = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
             q_flat = q_normed_by_head.view(q.shape)
 
             # K path: view -> RMS -> view back to k.shape
             k_by_head = k.view(
                 *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
             )
-            k_normed_by_head = self.rmsnorm_matcher(k_by_head, k_weight)
+            k_normed_by_head = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
             k_flat = k_normed_by_head.view(k.shape)
 
             # RoPE: apply to flattened q/k

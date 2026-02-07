@@ -137,6 +137,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 f"auto_functionalized as auto_functionalized\n"
                 f"from torch._inductor.pattern_matcher import *\n"
                 f"vllm = torch.ops.vllm",
+                "vllm_ir = torch.ops.vllm_ir",
                 file=f,
             )
 

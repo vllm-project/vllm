@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.config
+import vllm.ir.ops
 import vllm.plugins
 from tests.compile.backend import TestBackend
 from tests.utils import TestBlockFP8Layer, TestFP8Layer
@@ -59,7 +60,6 @@ from vllm.utils.deep_gemm import (
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
-RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
 # Kernel and group_shape combinations: (kernel, group_shape)
@@ -254,10 +254,8 @@ class TestModel(torch.nn.Module):
         ]
 
     def ops_in_model_before_partial(self):
-        return (
-            [RMS_OP, RMS_ADD_OP]
-            if self.enable_rms_norm_custom_op
-            else [torch.ops.aten.rsqrt]
+        return [torch.ops.vllm_ir.rms_norm] + (
+            [RMS_ADD_OP] if self.enable_rms_norm_custom_op else [torch.ops.aten.rsqrt]
         )
 
 
@@ -348,7 +346,10 @@ def test_fusion_rmsnorm_quant(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config):
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         # Setup device before model creation
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
@@ -378,8 +379,9 @@ def test_fusion_rmsnorm_quant(
         # Hence, we check only 2 add nodes are left (final fused rmsnorm add).
         if not enable_rms_norm_custom_op:
             n_add_nodes = lambda g: sum(1 for _ in find_op_nodes(torch.ops.aten.add, g))
-            # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)
-            assert n_add_nodes(backend.graph_pre_pass) == 7
+            # rms_norm is IR, not included
+            # 6 = 3x2 (3xRMS_ADD, 2 each)
+            assert n_add_nodes(backend.graph_pre_pass) == 6
             assert n_add_nodes(backend.graph_post_pass) == 2
 
 
