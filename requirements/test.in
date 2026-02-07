@@ -48,7 +48,7 @@ buildkite-test-collector==0.1.9
 genai_perf>=0.0.8
 tritonclient>=2.51.0
 
-grpcio-tools>=1.78.0 # Required for grpc entrypoints
+grpcio-tools==1.78.0 # Required for grpc entrypoints
 arctic-inference == 0.1.1 # Required for suffix decoding test
 numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
