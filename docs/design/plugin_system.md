@@ -24,7 +24,7 @@ vLLM's plugin system uses the standard Python `entry_points` mechanism. This mec
             ["register_dummy_model = vllm_add_dummy_model:register"]
         })
 
-    # inside `vllm_add_dummy_model.py` file
+    # inside `vllm_add_dummy_model/__init__.py` file
     def register():
         from vllm import ModelRegistry
 
