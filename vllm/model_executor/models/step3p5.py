@@ -36,7 +36,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -770,37 +769,17 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        self.config = config
-        self.vllm_config = vllm_config
-
         self.model = Step3p5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-
-        self.moe_layers: list[FusedMoEBlock] = []
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            assert isinstance(layer, Step3p5DecoderLayer)
-            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
-                self.moe_layers.append(layer.moe)
-
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                if not lora_config
-                else lora_config.lora_vocab_padding_size,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
-            self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size
-            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -809,6 +788,14 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         )
 
         # Set MoE hyperparameters
+        self.moe_layers: list[FusedMoEBlock] = []
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, Step3p5DecoderLayer)
+            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
+                self.moe_layers.append(layer.moe)
+
         self.expert_weights = []
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
         example_layer = self.moe_layers[0]
