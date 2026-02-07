@@ -318,12 +318,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
-        DeepGemm supports packed ue8m0 activation scales format in devices == sm100
+        DeepGemm supports packed ue8m0 activation scales format on Blackwell-class
+        devices (SM10x, SM11x, SM12x). The E8M0 format is architecture-family
+        compatible across all Blackwell variants.
         """
-        return (
-            is_deep_gemm_e8m0_used()
-            and current_platform.is_device_capability_family(100)
-        )
+        return is_deep_gemm_e8m0_used() and current_platform.is_blackwell_class()
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.

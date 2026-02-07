@@ -61,6 +61,8 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        # FlashInfer MLA only supports SM100/SM103 (B200/GB200), NOT SM12x (GB10).
+        # SM12x devices should use other attention backends.
         return capability.major == 10
 
     @classmethod
