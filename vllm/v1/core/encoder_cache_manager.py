@@ -292,8 +292,11 @@ def _set_max_num_batched_encoder_input_tokens(
         max_num_batched_encoder_input_tokens
         != scheduler_config.max_num_batched_encoder_input_tokens
     ):
-        logger.info_once(
-            "Overriding max_num_batched_encoder_input_tokens from %d to %d.",
+        logger.warning_once(
+            "Overriding max_num_batched_encoder_input_tokens from %d to "
+            "max_tokens_per_mm_item=%d because it is larger. "
+            "You can silence this warning by passing a larger value of "
+            "max_num_batched_encoder_input_tokens.",
             scheduler_config.max_num_batched_encoder_input_tokens,
             max_num_batched_encoder_input_tokens,
             scope="local",
@@ -315,6 +318,10 @@ def _set_encoder_cache_size(
         scheduler_config.max_num_batched_encoder_input_tokens
     )
 
+    assert max_num_batched_encoder_input_tokens is not None, (
+        "Should be called after `_set_max_num_batched_encoder_input_tokens`"
+    )
+
     if encoder_cache_size is None:
         encoder_cache_size = max_num_batched_encoder_input_tokens
     elif encoder_cache_size < max_num_batched_encoder_input_tokens:
@@ -334,8 +341,11 @@ def _set_encoder_cache_size(
             scope="local",
         )
     elif encoder_cache_size != scheduler_config.encoder_cache_size:
-        logger.info_once(
-            "Overriding encoder_cache_size from %d to %d.",
+        logger.warning_once(
+            "Overriding encoder_cache_size from %d to ",
+            "max_tokens_per_mm_item=%d because it is larger. "
+            "You can silence this warning by passing a larger value of "
+            "encoder_cache_size.",
             scheduler_config.encoder_cache_size,
             encoder_cache_size,
             scope="local",

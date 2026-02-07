@@ -1125,7 +1125,7 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
         scheduler_group.add_argument(
-            "--max-num-batched-encoder-tokens",
+            "--max-num-batched-encoder-input-tokens",
             **scheduler_kwargs["max_num_batched_encoder_input_tokens"],
         )
         scheduler_group.add_argument(
