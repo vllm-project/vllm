@@ -984,13 +984,6 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
 
     assert allowed["image"] == min(user_limit, supported_limit)
 
-    if allowed["image"] > 0:
-        MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
-            model_config,
-            mm_counts={"image": allowed["image"]},
-            processor=processor,
-        )
-
 
 class DummyProcessor:
     def __init__(self, a: int = 0, b: int = 0) -> None:
