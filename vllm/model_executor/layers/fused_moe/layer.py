@@ -254,7 +254,9 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
+    if quant_config and (
+        quant_config.get_name() == "mxfp4" or quant_config.get_name() == "quark"
+    ):
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -398,7 +400,10 @@ class FusedMoE(CustomOp):
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
 
+        self._is_mxfp4 = self.is_mxfp4_quant(quant_config=quant_config)
+
         # Round up hidden size if needed.
+        unpadded_hidden_size = hidden_size
         hidden_size = maybe_roundup_hidden_size(
             hidden_size,
             moe_in_dtype,
@@ -615,6 +620,7 @@ class FusedMoE(CustomOp):
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
+            "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
@@ -1147,16 +1153,42 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        if self._is_mxfp4:
+            assert self.quant_config is not None
+            if self.quant_config.get_name() == "mxfp4":
+                # (FIXME) for gpt-oss all experts are combined
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            elif self.quant_config.get_name() == "quark":
+                # When self._is_mxfp4 is true, model_dtype must be gpt_oss
+                expert_data = param.data[expert_id]
+                if "input_scale" in weight_name:
+                    assert loaded_weight.numel() == 1
+                    expert_data.data.copy_(loaded_weight)
+                    return True if return_success else None
+
+                shard_dim = (
+                    0 if shard_id in ("w1", "w3") or "bias" in weight_name else 1
+                )
+                if shard_id == "w2":
+                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                    loaded_weight = loaded_weight.narrow(
+                        shard_dim, shard_size * self.tp_rank, shard_size
+                    )
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[0]
+                    expert_data.data[:dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[0]
+                    dim2 = loaded_weight.shape[1]
+                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
@@ -2038,6 +2070,26 @@ class FusedMoE(CustomOp):
         )
 
         return s
+
+    def is_mxfp4_quant(self, quant_config: QuantizationConfig | None = None) -> bool:
+        if quant_config is None:
+            return False
+
+        name = quant_config.get_name()
+        if name == "mxfp4":
+            return True
+        elif name == "quark":
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+            model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+            from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+            assert isinstance(quant_config, QuarkConfig)
+            # Padding for triton kernel only is enabled when it is gpt_oss
+            return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
+
+        return False
 
 
 def get_layer_from_name(layer_name: str) -> FusedMoE:
