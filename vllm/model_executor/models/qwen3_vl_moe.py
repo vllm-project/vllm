@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
+import torch.nn as nn
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeConfig,
 )
@@ -372,6 +373,12 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    def _get_lm_layers_or_none(self):
+        lm = getattr(self, "language_model", None)
+        lm_model = getattr(lm, "model", None)
+        layers = getattr(lm_model, "layers", None)
+        return layers
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -381,7 +388,15 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.language_model.model.layers:
+
+        layers = self._get_lm_layers_or_none()
+        if layers is None:
+            logger.warning(
+                "Skipping update_pysical_exports_metadata in mm_encoder_only mode."
+            )
+            return
+
+        for layer in layers:
             if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
                 moe = layer.mlp
                 moe.n_local_physical_experts = num_local_physical_experts
@@ -391,10 +406,15 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 
     def set_moe_parameters(self):
         self.expert_weights = []
-
         self.moe_layers = []
+
+        layers = self._get_lm_layers_or_none()
+        if layers is None:
+            logger.warning("Skipping set_moe_parameters in mm_encoder_only mode.")
+            return
+
         example_moe = None
-        for layer in self.language_model.model.layers:
+        for layer in layers:
             if hasattr(layer, "mlp") and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
@@ -489,3 +509,11 @@ class Qwen3VLMoeForConditionalGeneration(
 
         # Set MoE hyperparameters
         self.set_moe_parameters()
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return (Qwen3MoeLLMForCausalLM, "language_model")
