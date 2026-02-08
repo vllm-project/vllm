@@ -1,0 +1,15 @@
+model_name: "nvidia/DeepSeek-R1-NVFP4"
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.89
+      - name: "exact_match,flexible-extract"
+        value: 0.89
+limit: 1319
+num_fewshot: 5
+batch_size: 1
+kv_cache_dtype: nvfp4
+attention_backend: FLASHINFER_MLA
+env_vars:
+  VLLM_USE_FLASHINFER_MOE_FP4: "0"

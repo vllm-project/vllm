@@ -67,6 +67,7 @@ class AttentionSpec(KVCacheSpec):
     head_size: int
     dtype: torch.dtype
     page_size_padded: int | None = None
+    cache_dtype_str: str | None = None  # For NVFP4 and other quantized cache types
 
     @property
     def page_size_bytes(self) -> int:
@@ -78,6 +79,22 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # For NVFP4, data is packed: 2 FP4 values per uint8, so head_size/2
+        # Scales are stored in kv_cache itself (as float32), one per 16 elements
+        if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
+            # NVFP4: packed data (head_size/2 uint8) + scales
+            # (head_size/16 * 4 bytes float32)
+            packed_data_size = (self.head_size // 2) * get_dtype_size(
+                self.dtype
+            )  # uint8 = 1 byte
+            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * (packed_data_size + scale_size)
+            )
         return (
             2
             * self.block_size
@@ -153,6 +170,15 @@ class FullAttentionSpec(AttentionSpec):
         assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         )
+        cache_dtype_str_set = set(
+            spec.cache_dtype_str for spec in specs if spec.cache_dtype_str is not None
+        )
+        assert len(cache_dtype_str_set) <= 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "cache dtype string."
+        )
+        cache_dtype_str = cache_dtype_str_set.pop() if cache_dtype_str_set else None
+
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -160,6 +186,7 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -179,6 +206,19 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # For NVFP4, data is packed: 2 FP4 values per uint8
+        # Scales are stored in kv_cache itself (as float32), one per 16 elements
+        if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
+            # NVFP4: packed data (head_size/2 uint8) + scales
+            # (head_size/16 * 4 bytes float32)
+            packed_data_size = (
+                (self.head_size + self.head_size_v) // 2
+            ) * get_dtype_size(self.dtype)  # uint8 = 1 byte
+            scale_size = (
+                (self.head_size + self.head_size_v) // 16
+            ) * 4  # float32 = 4 bytes
+            return self.block_size * self.num_kv_heads * (packed_data_size + scale_size)
         return (
             self.block_size
             * self.num_kv_heads
@@ -194,16 +234,32 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        """Calculate the real page size in bytes based on cache dtype."""
+        # Special case for fp8_ds_mla: fixed size per token (656 bytes)
+        # Each token's KV cache is 656 bytes, structured as:
+        # - 512 bytes: quantized NoPE part (512 float8_e4m3 values)
+        # - 16 bytes: scale factors (4 float32 values, 4 bytes each)
+        # - 128 bytes: RoPE part (64 bfloat16 values, 2 bytes each)
+        # Total: 512 + 16 + 128 = 656 bytes per token
+        # See `vllm/v1/attention/backends/mla/flashmla_sparse.py` for details.
         if self.cache_dtype_str == "fp8_ds_mla":
-            # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
-            #  for details.
             return self.block_size * 656
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
-        )
+
+        # Special case for NVFP4: packed data + scales
+        # - Data is packed: 2 FP4 values per uint8, so head_size/2 uint8 bytes
+        # - Scales are stored in kv_cache itself (as float32), one per 16 elements
+        # - MLA stores a single vector (kv_c + k_pe concatenated), not separate K and V
+        if self.cache_dtype_str == "nvfp4":
+            assert self.dtype == torch.uint8, "nvfp4 cache expects uint8 storage"
+            # NVFP4 packs 2 FP4 values into 1 uint8, so packed data is head_size/2 bytes
+            packed_data_size = self.head_size // 2  # uint8 = 1 byte per packed element
+            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes per scale
+            element_size = packed_data_size + scale_size
+            return self.block_size * self.num_kv_heads * element_size
+
+        # Default case: standard calculation
+        element_size = self.head_size * get_dtype_size(self.dtype)
+        return self.block_size * self.num_kv_heads * element_size
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
