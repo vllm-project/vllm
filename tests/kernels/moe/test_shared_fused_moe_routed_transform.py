@@ -14,6 +14,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 class SimpleLinear(nn.Module):
@@ -60,6 +61,10 @@ def setup_cuda():
 @pytest.mark.parametrize("num_tokens", [1, 32])
 @pytest.mark.parametrize("hidden_size,latent_size", [(256, 128), (128, 64)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(
+    is_torch_equal_or_newer("2.10.0"),
+    reason="Test fails with PyTorch 2.10.0 see: https://github.com/vllm-project/vllm/issues/33995",
+)
 def test_routed_input_transform_inside_vs_outside(
     num_tokens: int,
     hidden_size: int,

@@ -233,7 +233,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+        supports_aot = is_torch_equal_or_newer("2.10.0")
 
         if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             logger.error(
