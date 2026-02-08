@@ -5124,13 +5124,13 @@ class GPUModelRunner(
 
                 if mm_budget.get_encoder_budget() > 0:
                     if not mm_budget.mm_max_items_per_batch:
-                        # All modality limits are 0 — embedding-only mode.
-                        # Budget is non-zero for embedding storage, but
-                        # there's no encoder to profile.
+                        # All modality limits are zero
+                        # but embedding inputs are still enabled
+                        # This skips the multimodal encoder but we still store
+                        # embedding inputs in the encoder cache
                         logger.info(
-                            "Skipping encoder profiling for embedding-only "
-                            "mode (all modality limits=0 with "
-                            "enable_mm_embeds=True).",
+                            "Skipping memory profiling for multimodal encoder "
+                            "under embedding-only mode.",
                         )
                     else:
                         # NOTE: Currently model is profiled with a single
@@ -5142,7 +5142,7 @@ class GPUModelRunner(
                         ]
 
                         logger.info(
-                            "Encoder model will be profiled with %d %s items "
+                            "Multimodal encoder will be profiled with %d %s items "
                             "of the maximum feature size (%d per item).",
                             max_mm_items_per_batch,
                             dummy_modality,
@@ -5169,7 +5169,7 @@ class GPUModelRunner(
 
                     # Fill up the encoder cache to its maximum capacity
                     num_embeds_in_cache = sum(
-                        len(embeds) for embeds in self.encoder_cache.values()
+                        len(emb) for emb in self.encoder_cache.values()
                     )
                     num_embeds_to_pad = (
                         mm_budget.encoder_cache_size - num_embeds_in_cache
@@ -5180,6 +5180,14 @@ class GPUModelRunner(
                             dtype=self.dtype,
                             device=self.device,
                         )
+
+                    logger.info(
+                        "Encoder cache contains up to %d embeddings (%s GiB). ",
+                        mm_budget.encoder_cache_size,
+                        format_gib(
+                            sum(emb.nbytes for emb in self.encoder_cache.values())
+                        ),
+                    )
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
