@@ -31,6 +31,13 @@ class EagleCudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
+        # cudagraph mode and sizes will be set in set_cudagraph_mode_and_sizes
+        self.cudagraph_mode = CUDAGraphMode.NONE
+        self.cudagraph_sizes: dict[int, int] = {}
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+
+    def set_cudagraph_mode_and_sizes(self) -> None:
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
         if self.cudagraph_mode == CUDAGraphMode.FULL:
             # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
@@ -42,9 +49,6 @@ class EagleCudaGraphManager:
             self.max_num_tokens,
             self.cudagraph_mode,
         )
-
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = torch.cuda.graph_pool_handle()
 
     def get_cudagraph_size(self, num_tokens: int) -> int | None:
         return self.cudagraph_sizes.get(num_tokens)
