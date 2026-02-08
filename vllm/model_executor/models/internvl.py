@@ -20,6 +20,7 @@ from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.intern_vit import (
@@ -1079,6 +1080,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self._patch_quant_config(config, quant_config)
@@ -1189,7 +1191,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         return x
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        vit_embeds = self.vision_model(pixel_values=pixel_values)
+        with set_forward_context(None, self.vllm_config):
+            vit_embeds = self.vision_model(pixel_values=pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1] ** 0.5)

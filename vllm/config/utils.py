@@ -284,7 +284,17 @@ def normalize_value(x):
 
     # PretrainedConfig
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        return x.to_json_string()
+        try:
+            return x.to_json_string()
+        except TypeError:
+            # Some configs (like InternVLChatConfig) have nested config objects
+            # that aren't JSON serializable. Fall back to using to_dict() and
+            # recursively normalize the values.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
+
+    # Unsupported type
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid

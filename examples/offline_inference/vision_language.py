@@ -2437,6 +2437,7 @@ def main(args):
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
         "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
+        "compilation_config": {"compile_mm_encoder": True},
     }
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
