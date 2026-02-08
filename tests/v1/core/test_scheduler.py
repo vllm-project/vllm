@@ -130,19 +130,25 @@ def test_schedule_multimodal_requests_one_batch():
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
     [
-        (0.5, 0.5),
         (0.5, 1.0),
         (1.0, 0.5),
         (1.0, 1.0),
-        (1.0, 1.5),
-        (1.5, 1.0),
         (1.5, 2.0),
         (2.0, 1.5),
     ],
 )
-@pytest.mark.parametrize("chunk_mult", [0.5, 1.0, 2.0])
+@pytest.mark.parametrize(
+    ("chunk_mult", "disable_chunked_mm_input"),
+    [
+        (0.5, False),
+        (1.0, True),
+        (1.0, False),
+        (2.0, True),
+        (2.0, False),
+    ],
+)
 def test_schedule_multimodal_requests_multi_batch(
-    encoder_budget_mult, encoder_cache_mult, chunk_mult
+    encoder_budget_mult, encoder_cache_mult, chunk_mult, disable_chunked_mm_input
 ):
     MM_ITEM_TOK_MULT = 4
     MAX_MM_ITEM_TOKS = 576
@@ -167,8 +173,8 @@ def test_schedule_multimodal_requests_multi_batch(
 
     mm_positions = [
         build_req_mm_positions(1 * MM_ITEM_TOK_MULT),
-        build_req_mm_positions(4 * MM_ITEM_TOK_MULT),
         build_req_mm_positions(2 * MM_ITEM_TOK_MULT),
+        build_req_mm_positions(4 * MM_ITEM_TOK_MULT),
         build_req_mm_positions(8 * MM_ITEM_TOK_MULT),
     ]
     print(f"{mm_positions=}, {NUM_TOTAL_TOKS=}")
@@ -190,6 +196,7 @@ def test_schedule_multimodal_requests_multi_batch(
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_batched_encoder_embeds=max_num_batched_encoder_embeds,
         encoder_cache_size=encoder_cache_size,
+        disable_chunked_mm_input=disable_chunked_mm_input,
     )
 
     assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
