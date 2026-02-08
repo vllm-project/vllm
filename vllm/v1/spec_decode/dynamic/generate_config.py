@@ -166,6 +166,7 @@ def run_profiling_sweep(args):
         dry_run=False,
         resume=None,
         link_vars=[],
+        server_ready_timeout=600,
     )
 
     result_df = run_main(sweep_args)
