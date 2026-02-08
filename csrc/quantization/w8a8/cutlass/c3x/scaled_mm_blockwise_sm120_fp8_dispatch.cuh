@@ -51,7 +51,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using ElementAccumulator = float;
   using ElementCompute = float;
-  using ElementBlockScale = float; 
+  using ElementBlockScale = float;
 
   using ScaleConfig = cutlass::detail::Sm120BlockwiseScaleConfig<
         ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
@@ -84,9 +84,9 @@ struct cutlass_3x_gemm_fp8_blockwise {
       EpilogueScheduler,
       DefaultOperation
   >::CollectiveOp;
- 
-  using StageCountType = cutlass::gemm::collective::StageCountAuto; 
-  using CollectiveMainloop = 
+
+  using StageCountType = cutlass::gemm::collective::StageCountAuto;
+  using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag,
           OperatorClass,
@@ -140,9 +140,9 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   c_stride =
       cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(m, n, 1));
 
-  LayoutSFA layout_SFA = 
+  LayoutSFA layout_SFA =
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
-  LayoutSFB layout_SFB = 
+  LayoutSFB layout_SFB =
       ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
   auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
