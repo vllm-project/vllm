@@ -694,7 +694,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     for part in content:
                         if isinstance(part, dict):
                             part_type = part.get("type")
-                            # Infer type for content parts without an explicit 'type' field
+                            # Infer type when 'type' field is not explicit
                             if part_type is None:
                                 if "image_url" in part or "image_pil" in part:
                                     part_type = "image_url"
