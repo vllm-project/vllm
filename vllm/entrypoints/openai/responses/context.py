@@ -299,12 +299,15 @@ class ParsableContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
+        self._accumulated_token_ids: list[int] = []
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         self.parser.process(output.outputs[0])
+        output_token_ids = output.outputs[0].token_ids or []
+        self._accumulated_token_ids.extend(output_token_ids)
 
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
