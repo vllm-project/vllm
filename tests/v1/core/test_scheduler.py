@@ -3789,12 +3789,11 @@ def test_variable_length_cross_attn_block_allocation():
     """Test that cross-attention blocks are allocated per-request based on
     actual encoder input length, not a fixed maximum.
 
-    This verifies the change from static max-encoder-length allocation to
-    dynamic per-request allocation based on actual encoder input sizes.
-
-    With the old code, every request would get ceil(max_encoder_tokens / block_size)
-    blocks regardless of actual encoder input size. The new code should allocate
-    exactly ceil(actual_encoder_tokens / block_size) blocks per request.
+    Fixed max-encoder-length allocation would assign
+    `ceil(max_encoder_tokens / block_size)` blocks to
+    every request whereas with dynamic allocation, exactly
+    `ceil(actual_encoder_tokens / block_size)` blocks are assigned
+    to each request.
     """
     block_size = 16
     scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
@@ -3840,8 +3839,7 @@ def test_variable_length_cross_attn_block_allocation():
     # Verify that different encoder lengths produce different block counts,
     # confirming variable-length (not fixed-max) allocation.
     block_counts = [
-        _get_num_cross_attn_blocks(scheduler, req.request_id)
-        for req in requests
+        _get_num_cross_attn_blocks(scheduler, req.request_id) for req in requests
     ]
     assert len(set(block_counts)) > 1, (
         "All requests have the same number of cross-attn blocks, "
@@ -3851,12 +3849,7 @@ def test_variable_length_cross_attn_block_allocation():
 
 def test_cross_attn_blocks_not_over_allocated():
     """Test that cross-attention blocks are not over-allocated compared to
-    what each request actually needs.
-
-    The old approach would allocate max_encoder_tokens worth of blocks for
-    every request regardless of actual input size. The new approach should
-    only allocate what's needed, saving KV cache memory.
-    """
+    what each request actually needs."""
     from math import ceil
 
     block_size = 16
@@ -3908,13 +3901,13 @@ def test_cross_attn_blocks_not_under_allocated():
 
     # Test various encoder lengths including edge cases around block boundaries.
     test_cases = [
-        1,                     # Minimum: single encoder token
-        block_size - 1,        # Just under one full block
-        block_size,            # Exactly one full block
-        block_size + 1,        # Just over one block (needs 2 blocks)
-        block_size * 10,       # Exact multiple of block size
-        block_size * 10 + 1,   # One over exact multiple
-        1500,                  # Whisper's typical max
+        1,  # Minimum: single encoder token
+        block_size - 1,  # Just under one full block
+        block_size,  # Exactly one full block
+        block_size + 1,  # Just over one block (needs 2 blocks)
+        block_size * 10,  # Exact multiple of block size
+        block_size * 10 + 1,  # One over exact multiple
+        1500,  # Whisper's typical max
     ]
 
     for enc_len in test_cases:
@@ -3933,9 +3926,7 @@ def test_cross_attn_blocks_not_under_allocated():
 
         assert len(output.scheduled_new_reqs) == 1
 
-        actual_blocks = _get_num_cross_attn_blocks(
-            scheduler, request.request_id
-        )
+        actual_blocks = _get_num_cross_attn_blocks(scheduler, request.request_id)
         expected_blocks = ceil(enc_len / block_size)
 
         # Number of blocks must be exactly ceil(enc_len / block_size).
@@ -3974,9 +3965,7 @@ def test_cross_attn_zero_blocks_without_encoder_inputs():
     assert len(output.scheduled_new_reqs) == 1
 
     # No cross-attention blocks should be allocated.
-    actual_blocks = _get_num_cross_attn_blocks(
-        scheduler, request.request_id
-    )
+    actual_blocks = _get_num_cross_attn_blocks(scheduler, request.request_id)
     assert actual_blocks == 0, (
         f"Text-only request should have 0 cross-attn blocks, got {actual_blocks}"
     )
@@ -3985,10 +3974,6 @@ def test_cross_attn_zero_blocks_without_encoder_inputs():
 def test_cross_attn_blocks_multiple_requests_different_lengths():
     """Test that multiple concurrent requests with widely different encoder
     lengths are each allocated the correct number of cross-attention blocks.
-
-    This is the key test for the variable-length generalization: unlike the
-    old code which used a single max for all requests, the new code must
-    allocate per-request based on actual encoder input sizes.
     """
     from math import ceil
 

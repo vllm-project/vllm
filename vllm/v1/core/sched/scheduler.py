@@ -201,6 +201,14 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
+        # For encoder-decoder models, allocate the maximum number of tokens for Cross
+        # Attn blocks, as for Whisper its input is always padded to the maximum length.
+        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
+        self._num_encoder_max_input_tokens = (
+            mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
+            if mm_budget and mm_budget.mm_max_toks_per_item
+            else 0
+        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -696,17 +704,22 @@ class Scheduler(SchedulerInterface):
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
-                # Determine if we need to allocate cross-attention blocks.
-                num_encoder_tokens = 0
-                if (
-                    self.is_encoder_decoder
-                    and request.has_encoder_inputs
-                    and encoder_inputs_to_schedule
-                ):
-                    num_encoder_tokens = sum(
-                        request.get_num_encoder_embeds(i)
-                        for i in encoder_inputs_to_schedule
-                    )
+                num_encoder_tokens = (
+                    self._num_encoder_max_input_tokens
+                    if self.is_encoder_decoder and request.has_encoder_inputs
+                    else 0
+                )
+                # # Determine if we need to allocate cross-attention blocks.
+                # num_encoder_tokens = 0
+                # if (
+                #     self.is_encoder_decoder
+                #     and request.has_encoder_inputs
+                #     and encoder_inputs_to_schedule
+                # ):
+                #     num_encoder_tokens = sum(
+                #         request.get_num_encoder_embeds(i)
+                #         for i in encoder_inputs_to_schedule
+                #     )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
