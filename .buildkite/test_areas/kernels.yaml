@@ -22,6 +22,11 @@ steps:
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_8
+      depends_on:
+      - image-build-amd
 
 - label: Kernels Quantization Test %N
   timeout_in_minutes: 90
@@ -46,6 +51,11 @@ steps:
   commands:
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_8
+      depends_on:
+      - image-build-amd
 
 - label: Kernels Mamba Test
   timeout_in_minutes: 45
