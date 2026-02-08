@@ -311,7 +311,12 @@ def test_user_message_accepts_image():
 @pytest.mark.parametrize(
     "audio_content",
     [
-        [{"type": "input_audio", "input_audio": {"data": "base64data", "format": "wav"}}],
+        [
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "base64data", "format": "wav"},
+            }
+        ],
         [{"input_audio": {"data": "base64data", "format": "wav"}}],
     ],
 )
