@@ -2326,12 +2326,6 @@ class GPUModelRunner(
             lora_requests = set()
             encoder_token_counts = []
 
-            # Connector LoRA needs per-item post-connector token counts; some
-            # modalities (e.g. audio) may contribute zero connector tokens.
-            has_connector_tokens = hasattr(self.model, "get_num_mm_connector_tokens")
-
-            connector_post_op_counts = []
-
             for req_id, modality, pos_info in mm_lora_refs:
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
@@ -2344,15 +2338,6 @@ class GPUModelRunner(
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
                 encoder_token_counts.append(num_tokens)
-
-                if has_connector_tokens:
-                    connector_tokens = self.model.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
-                        num_tokens,
-                        modality=modality,
-                    )
-                else:
-                    connector_tokens = 0
-                connector_post_op_counts.append(connector_tokens)
 
                 if lora_id > 0:
                     lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
@@ -2368,10 +2353,15 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-            if has_connector_tokens and any(connector_post_op_counts):
+            if hasattr(self.model, "get_num_mm_connector_tokens"):
+                post_op_counts = [
+                    self.model.get_num_mm_connector_tokens(num_tokens, modality)  # type: ignore[attr-defined]
+                    for num_tokens in encoder_token_counts
+                ]
+
                 connector_token_mapping = np.repeat(
                     np.array(prompt_lora_mapping, dtype=np.int32),
-                    np.array(connector_post_op_counts, dtype=np.int32),
+                    np.array(post_op_counts, dtype=np.int32),
                 )
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(connector_token_mapping.tolist()),
