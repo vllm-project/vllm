@@ -9,6 +9,7 @@ Qwen3-30B-A3B-NvFp4-ModelOpt-vllm-cutlass.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-marlin.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass.yaml
+Nemotron-Nano-30B-NvFp4-fi-cutlass.yaml
 Llama-4-Scout-BF16-fi-cutlass.yaml
 Llama-4-Scout-BF16-triton.yaml
 Mixtral-8x7B-BF16-fi-cutlass.yaml
