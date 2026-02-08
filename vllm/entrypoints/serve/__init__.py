@@ -82,6 +82,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_health_router(app)
 
+    from vllm.entrypoints.serve.dashboard.api_router import (
+        attach_router as attach_dashboard_router,
+    )
+
+    attach_dashboard_router(app)
+
     from vllm.entrypoints.serve.instrumentator.offline_docs import (
         attach_router as attach_offline_docs_router,
     )

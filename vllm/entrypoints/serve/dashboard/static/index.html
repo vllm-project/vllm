@@ -1,0 +1,2418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>vLLM Dashboard</title>
+    <style>
+        /* vLLM Design System Variables */
+        :root {
+            --vllm-yellow: #fdb517;
+            --vllm-blue: #30a2ff;
+            --vllm-yellow-hover: #e5a315;
+            --vllm-blue-hover: #2891e6;
+
+            /* Dark theme colors (default) */
+            --background: #0f1117;
+            --foreground: #f8fafc;
+            --card: #1a1d27;
+            --card-foreground: #f8fafc;
+            --muted: #282d3a;
+            --muted-foreground: #94a3b8;
+            --border: rgba(255, 255, 255, 0.1);
+            --input: rgba(255, 255, 255, 0.15);
+            --ring: #475569;
+            --scrollbar-track: rgba(255, 255, 255, 0.05);
+            --scrollbar-thumb: rgba(255, 255, 255, 0.2);
+            --scrollbar-hover: rgba(255, 255, 255, 0.3);
+            --input-area-bg: rgba(0, 0, 0, 0.2);
+            --hover-bg: rgba(255, 255, 255, 0.03);
+            --shadow-color: rgba(0, 0, 0, 0.5);
+
+            /* Status colors */
+            --success: #22c55e;
+            --warning: #eab308;
+            --error: #ef4444;
+
+            --radius: 0.625rem;
+            --font-sans: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        }
+
+        /* Light theme */
+        :root.light {
+            --background: #f8fafc;
+            --foreground: #0f172a;
+            --card: #ffffff;
+            --card-foreground: #0f172a;
+            --muted: #f1f5f9;
+            --muted-foreground: #64748b;
+            --border: rgba(0, 0, 0, 0.1);
+            --input: rgba(0, 0, 0, 0.05);
+            --ring: #cbd5e1;
+            --scrollbar-track: rgba(0, 0, 0, 0.05);
+            --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+            --scrollbar-hover: rgba(0, 0, 0, 0.3);
+            --input-area-bg: rgba(0, 0, 0, 0.03);
+            --hover-bg: rgba(0, 0, 0, 0.03);
+            --shadow-color: rgba(0, 0, 0, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--background);
+            color: var(--foreground);
+            line-height: 1.5;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--scrollbar-track);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--scrollbar-thumb);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--scrollbar-hover);
+        }
+
+        /* Main Layout - top bar + 3 columns */
+        .dashboard {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            grid-template-columns: 280px 1fr 280px;
+            grid-template-areas:
+                "topbar topbar topbar"
+                "left center right";
+            height: 100vh;
+            gap: 12px;
+            padding: 12px;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            grid-area: topbar;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 8px 12px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-right: 10px;
+            border-right: 1px solid var(--border);
+        }
+
+        .status-indicator .dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-indicator .version {
+            font-size: 12px;
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        .load-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 10px;
+            border-left: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--muted-foreground);
+        }
+
+        .load-indicator .load-label {
+            font-weight: 500;
+        }
+
+        .load-indicator .load-value {
+            font-family: var(--font-mono);
+            color: var(--vllm-blue);
+            font-weight: 600;
+        }
+
+        .sleeping-indicator, .paused-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            margin-left: 8px;
+            background: rgba(234, 179, 8, 0.15);
+            border: 1px solid var(--warning);
+            border-radius: calc(var(--radius) - 2px);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--warning);
+        }
+
+        .paused-indicator {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        .sleeping-indicator.hidden, .paused-indicator.hidden {
+            display: none;
+        }
+
+        .theme-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 6px 10px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .theme-toggle:hover {
+            background: var(--input);
+            border-color: var(--vllm-blue);
+        }
+
+        .theme-toggle .icon {
+            width: 16px;
+            height: 16px;
+            transition: transform 0.3s ease;
+        }
+
+        .theme-toggle .icon svg {
+            width: 100%;
+            height: 100%;
+            fill: var(--muted-foreground);
+            stroke: var(--muted-foreground);
+            transition: all 0.2s ease;
+        }
+
+        .theme-toggle:hover .icon svg {
+            fill: var(--vllm-yellow);
+            stroke: var(--vllm-yellow);
+        }
+
+        /* Panel base style */
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: box-shadow 0.3s ease;
+        }
+
+        .panel:hover {
+            box-shadow: 0 4px 20px var(--shadow-color);
+        }
+
+        .panel-header {
+            padding: 14px 16px;
+            background: linear-gradient(90deg, rgba(48, 162, 255, 0.08) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--vllm-blue);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .panel-header::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--vllm-blue);
+        }
+
+        /* Left Panel - Info */
+        .left-panel {
+            grid-area: left;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .left-panel-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        /* Config section */
+        .config-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            transition: background 0.15s ease;
+        }
+
+        .config-item:hover {
+            background: rgba(48, 162, 255, 0.08);
+        }
+
+        .config-item.explicit {
+            background: rgba(253, 181, 23, 0.1);
+            border-left: 3px solid var(--vllm-yellow);
+        }
+
+        .config-item.explicit .config-key {
+            color: var(--vllm-yellow);
+            font-weight: 600;
+        }
+
+        .config-key {
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding-right: 8px;
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        a.config-key:hover {
+            color: var(--vllm-blue);
+            text-decoration: underline;
+        }
+
+        .config-val {
+            color: var(--vllm-blue);
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+            max-width: 50%;
+            text-align: right;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: help;
+        }
+
+        /* Interactive Tooltip */
+        .tooltip {
+            display: none;
+            position: fixed;
+            background: var(--card);
+            border: 1px solid var(--vllm-blue);
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 12px;
+            font-family: var(--font-mono);
+            color: var(--foreground);
+            max-width: 500px;
+            max-height: 300px;
+            overflow: auto;
+            word-break: break-all;
+            white-space: pre-wrap;
+            z-index: 10000;
+            box-shadow: 0 8px 32px var(--shadow-color);
+            user-select: text;
+            cursor: text;
+        }
+
+        .tooltip.visible {
+            display: block;
+            animation: fade-in 0.15s ease-out;
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .config-item {
+            position: relative;
+        }
+
+        /* Icon buttons for filter and search */
+        .panel-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+        }
+
+        .icon-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border: none;
+            background: transparent;
+            color: var(--muted-foreground);
+            cursor: pointer;
+            border-radius: calc(var(--radius) - 4px);
+            transition: all 0.15s ease;
+        }
+
+        .icon-btn:hover {
+            background: var(--muted);
+            color: var(--foreground);
+        }
+
+        .icon-btn.active {
+            background: rgba(48, 162, 255, 0.15);
+            color: var(--vllm-blue);
+        }
+
+        .icon-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Expandable search input */
+        .search-wrapper {
+            display: flex;
+            align-items: center;
+            overflow: hidden;
+            max-width: 24px;
+            transition: max-width 0.2s ease;
+        }
+
+        .search-wrapper.expanded {
+            max-width: 120px;
+        }
+
+        .search-wrapper .search-input {
+            width: 90px;
+            opacity: 0;
+            padding: 4px 8px;
+            margin-left: 4px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            color: var(--foreground);
+            font-size: 11px;
+            outline: none;
+            transition: opacity 0.15s ease;
+        }
+
+        .search-wrapper.expanded .search-input {
+            opacity: 1;
+        }
+
+        .search-wrapper .search-input:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        .search-wrapper .search-input::placeholder {
+            color: var(--muted-foreground);
+        }
+
+        /* Center Panel - Chat */
+        .center-panel {
+            grid-area: center;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        /* Right Panel - Environment */
+        .right-panel {
+            grid-area: right;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Parameters Panel */
+        .params-panel {
+            border-bottom: 1px solid var(--border);
+            background: var(--muted);
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+
+        .params-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 11px;
+            color: var(--muted-foreground);
+            gap: 8px;
+        }
+
+        .params-header:hover {
+            background: rgba(48, 162, 255, 0.05);
+        }
+
+        .params-header .params-icon {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+        }
+
+        .params-header .params-summary {
+            display: flex;
+            gap: 16px;
+            flex: 1;
+        }
+
+        .params-header .params-summary code {
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            font-size: 10px;
+            background: none;
+        }
+
+        .params-header .params-summary code span {
+            color: var(--vllm-blue);
+        }
+
+        .params-header .expand-icon {
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            transition: transform 0.2s ease;
+        }
+
+        .params-panel.expanded .params-header .expand-icon {
+            transform: rotate(180deg);
+        }
+
+        .params-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+
+        .params-panel.expanded .params-content {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .params-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .params-content::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        .params-grid {
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .param-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .param-label {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--muted-foreground);
+            min-width: 120px;
+            flex-shrink: 0;
+            background: none;
+        }
+
+        .param-control {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Slider */
+        .param-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            outline: none;
+        }
+
+        .param-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.1s ease;
+        }
+
+        .param-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .param-slider::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+        }
+
+        .param-value {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--vllm-blue);
+            min-width: 45px;
+            text-align: right;
+        }
+
+        /* Number input */
+        .param-input {
+            width: 80px;
+            padding: 4px 8px;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            color: var(--foreground);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            outline: none;
+        }
+
+        .param-input:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        /* Toggle switch */
+        .param-toggle {
+            position: relative;
+            width: 36px;
+            height: 20px;
+            background: var(--border);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .param-toggle.active {
+            background: var(--vllm-blue);
+        }
+
+        .param-toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            background: white;
+            border-radius: 50%;
+            transition: left 0.2s ease;
+        }
+
+        .param-toggle.active::after {
+            left: 18px;
+        }
+
+        /* Select dropdown */
+        .param-select {
+            padding: 4px 24px 4px 8px;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            color: var(--foreground);
+            font-size: 11px;
+            outline: none;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 6px center;
+        }
+
+        .param-select:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        /* Reset button */
+        .params-footer {
+            display: flex;
+            justify-content: flex-end;
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .params-reset {
+            font-size: 10px;
+            color: var(--muted-foreground);
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: calc(var(--radius) - 4px);
+        }
+
+        .params-reset:hover {
+            background: var(--border);
+            color: var(--foreground);
+        }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .chat-messages::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: var(--muted);
+            border-radius: 2px;
+        }
+
+        .chat-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--muted-foreground);
+            font-size: 14px;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            max-width: 80%;
+            animation: slideIn 0.2s ease;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-user {
+            margin-left: auto;
+        }
+
+        .message-bubble {
+            padding: 10px 14px;
+            border-radius: var(--radius);
+            font-size: 13px;
+        }
+
+        .message-user .message-bubble {
+            background: linear-gradient(135deg, var(--vllm-blue) 0%, var(--vllm-blue-hover) 100%);
+            color: white;
+            border-radius: var(--radius) var(--radius) 4px var(--radius);
+        }
+
+        .message-assistant .message-bubble {
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius) var(--radius) var(--radius) 4px;
+        }
+
+        .thinking-block {
+            background: rgba(48, 162, 255, 0.1);
+            border-left: 2px solid var(--vllm-blue);
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            border-radius: 0 6px 6px 0;
+            font-size: 11px;
+        }
+
+        .thinking-header {
+            display: flex;
+            justify-content: space-between;
+            cursor: pointer;
+            color: var(--vllm-blue);
+            font-weight: 600;
+        }
+
+        .thinking-content {
+            display: none;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+            color: var(--muted-foreground);
+            font-style: italic;
+        }
+
+        .thinking-content.expanded {
+            display: block;
+        }
+
+        .message-meta {
+            font-size: 10px;
+            color: var(--muted-foreground);
+            margin-top: 4px;
+            padding: 0 4px;
+        }
+
+        .message-user .message-meta {
+            text-align: right;
+        }
+
+        /* Chat Input */
+        .chat-input-area {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--input-area-bg);
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 14px;
+            color: var(--foreground);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .chat-input:focus {
+            border-color: var(--vllm-blue);
+            box-shadow: 0 0 0 2px rgba(48, 162, 255, 0.2);
+        }
+
+        .chat-input::placeholder {
+            color: var(--muted-foreground);
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, var(--vllm-blue) 0%, var(--vllm-blue-hover) 100%);
+            border: none;
+            border-radius: var(--radius);
+            padding: 10px 20px;
+            color: white;
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(48, 162, 255, 0.4);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .chat-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .chat-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 10px;
+            color: var(--muted-foreground);
+        }
+
+        .chat-stats span {
+            display: flex;
+            gap: 4px;
+        }
+
+        .chat-stats .val {
+            color: var(--vllm-blue);
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+
+        .clear-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 4px 10px;
+            color: var(--muted-foreground);
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        /* Upload button */
+        .upload-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            color: var(--muted-foreground);
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .upload-btn:hover {
+            border-color: var(--vllm-blue);
+            color: var(--vllm-blue);
+        }
+
+        .upload-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* Image preview area */
+        .image-preview-area {
+            display: none;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px 0;
+        }
+
+        .image-preview-area.has-images {
+            display: flex;
+        }
+
+        .image-preview-item {
+            position: relative;
+            width: 60px;
+            height: 60px;
+            border-radius: calc(var(--radius) - 2px);
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .image-preview-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .image-preview-item .remove-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 18px;
+            height: 18px;
+            background: rgba(0, 0, 0, 0.7);
+            border: none;
+            border-radius: 50%;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+        }
+
+        .image-preview-item:hover .remove-btn {
+            opacity: 1;
+        }
+
+        /* Message with images */
+        .message-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .message-images img {
+            max-width: 200px;
+            max-height: 150px;
+            border-radius: calc(var(--radius) - 2px);
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+
+        .message-images img:hover {
+            transform: scale(1.02);
+        }
+
+        /* Typing indicator */
+        .typing {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            padding: 8px 16px;
+            font-size: 12px;
+            color: var(--muted-foreground);
+        }
+
+        .typing.visible {
+            display: flex;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.16s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.32s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .copy-success {
+            color: var(--success) !important;
+        }
+
+        .github-link {
+            display: flex;
+            align-items: center;
+            padding: 0 10px 0 0;
+            border-right: 1px solid var(--border);
+            color: var(--muted-foreground);
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        .github-link:hover {
+            color: var(--foreground);
+        }
+
+        .github-link svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <a href="https://github.com/vllm-project/vllm" target="_blank" class="github-link" title="vLLM on GitHub">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+            </a>
+            <div class="status-indicator">
+                <div class="dot" id="status-dot"></div>
+                <span class="version" id="version">vLLM</span>
+            </div>
+            <div class="load-indicator">
+                <span class="load-label">Load:</span>
+                <span class="load-value" id="server-load">-</span>
+            </div>
+            <div class="sleeping-indicator hidden" id="sleeping-indicator">
+                Sleeping
+            </div>
+            <div class="paused-indicator hidden" id="paused-indicator">
+                Paused
+            </div>
+            <div style="flex:1"></div>
+            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">
+                <span class="icon" id="theme-icon">
+                    <svg id="moon-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                    <svg id="sun-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:none">
+                        <circle cx="12" cy="12" r="5"/>
+                        <line x1="12" y1="1" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="12" y1="21" x2="12" y2="23" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="1" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="21" y1="12" x2="23" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </span>
+            </button>
+        </div>
+
+        <!-- Left Panel: Configuration + Environment -->
+        <div class="panel left-panel">
+            <div class="left-panel-section">
+                <div class="panel-header">
+                    Configuration
+                    <div class="panel-actions">
+                        <button class="icon-btn" id="config-filter-btn" title="Show only set values" onclick="toggleFilter('config')">
+                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                        </button>
+                        <div class="search-wrapper" id="config-search-wrapper">
+                            <button class="icon-btn" title="Search" onclick="toggleSearch('config')">
+                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                            </button>
+                            <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+                        </div>
+                    </div>
+                </div>
+                <div class="config-scroll" id="config-list">
+                    <div class="config-item">
+                        <span class="config-key">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="left-panel-section" style="border-top: 1px solid var(--border);">
+                <div class="panel-header">
+                    Environment
+                    <div class="panel-actions">
+                        <button class="icon-btn" id="env-filter-btn" title="Show only set values" onclick="toggleFilter('env')">
+                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                        </button>
+                        <div class="search-wrapper" id="env-search-wrapper">
+                            <button class="icon-btn" title="Search" onclick="toggleSearch('env')">
+                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                            </button>
+                            <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                        </div>
+                    </div>
+                </div>
+                <div class="config-scroll" id="env-list">
+                    <div class="config-item">
+                        <span class="config-key">Loading...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Panel: Chat -->
+        <div class="panel center-panel">
+            <div class="panel-header">
+                <span id="model-name" style="color:var(--vllm-yellow);text-transform:none;letter-spacing:0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="">-</span>
+                <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
+            </div>
+
+            <!-- Parameters Panel -->
+            <div class="params-panel" id="params-panel">
+                <div class="params-header" onclick="toggleParamsPanel()">
+                    <svg class="params-icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                    <div class="params-summary">
+                        <code>temperature=<span id="summary-temp">0.7</span></code>
+                        <code>max_tokens=<span id="summary-max">512</span></code>
+                        <code id="summary-thinking" style="display:none"></code>
+                    </div>
+                    <svg class="expand-icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                </div>
+                <div class="params-content">
+                    <div class="params-grid">
+                        <div class="param-row">
+                            <code class="param-label">temperature</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-temperature"
+                                       min="0" max="2" step="0.1" value="0.7"
+                                       oninput="updateParam('temperature', this.value)">
+                                <span class="param-value" id="val-temperature">0.7</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">max_tokens</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-max-tokens"
+                                       min="1" max="32768" value="512"
+                                       oninput="updateParam('max_tokens', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">top_p</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-top-p"
+                                       min="0" max="1" step="0.05" value="1.0"
+                                       oninput="updateParam('top_p', this.value)">
+                                <span class="param-value" id="val-top-p">1.0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">top_k</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-top-k"
+                                       min="0" max="100" value="0" placeholder="0"
+                                       oninput="updateParam('top_k', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">frequency_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-freq-penalty"
+                                       min="-2" max="2" step="0.1" value="0"
+                                       oninput="updateParam('frequency_penalty', this.value)">
+                                <span class="param-value" id="val-freq-penalty">0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">presence_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-pres-penalty"
+                                       min="-2" max="2" step="0.1" value="0"
+                                       oninput="updateParam('presence_penalty', this.value)">
+                                <span class="param-value" id="val-pres-penalty">0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">repetition_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-rep-penalty"
+                                       min="0.1" max="2" step="0.1" value="1.0"
+                                       oninput="updateParam('repetition_penalty', this.value)">
+                                <span class="param-value" id="val-rep-penalty">1.0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">seed</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-seed"
+                                       placeholder="null"
+                                       oninput="updateParam('seed', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">stop</code>
+                            <div class="param-control">
+                                <input type="text" class="param-input" id="param-stop"
+                                       placeholder="[]" style="width:100px"
+                                       oninput="updateParam('stop', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">reasoning_effort</code>
+                            <div class="param-control">
+                                <select class="param-select" id="param-reasoning" onchange="updateParam('reasoning_effort', this.value)">
+                                    <option value="">-</option>
+                                    <option value="low">low</option>
+                                    <option value="medium">medium</option>
+                                    <option value="high">high</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label" title="chat_template_kwargs: {enable_thinking: ...}">enable_thinking</code>
+                            <div class="param-control">
+                                <select class="param-select" id="param-thinking" onchange="updateParam('thinking', this.value)">
+                                    <option value="">-</option>
+                                    <option value="enable">true</option>
+                                    <option value="disable">false</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="params-footer">
+                        <button class="params-reset" onclick="resetParams()">Reset to Defaults</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-area">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="chat-empty">Send a message to start chatting</div>
+                </div>
+
+                <div class="typing" id="typing">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <span style="margin-left:4px">Generating...</span>
+                </div>
+
+                <div class="chat-input-area">
+                    <div class="chat-controls">
+                        <div class="chat-stats">
+                            <span>Context: <span class="val" id="stat-context">0</span> chars</span>
+                            <span>Messages: <span class="val" id="stat-messages">0</span></span>
+                        </div>
+                        <button class="clear-btn" onclick="clearChat()">Clear</button>
+                    </div>
+
+                    <!-- Image preview area -->
+                    <div class="image-preview-area" id="image-preview-area"></div>
+
+                    <div class="input-row">
+                        <input type="file" id="image-input" accept="image/*" multiple style="display:none" onchange="handleImageUpload(event)">
+                        <button class="upload-btn" onclick="document.getElementById('image-input').click()" title="Upload image">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                        </button>
+                        <input type="text" class="chat-input" id="chat-input"
+                               placeholder="Type your message..."
+                               onkeypress="if(event.key==='Enter')sendMessage()">
+                        <button class="send-btn" id="send-btn" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Runtime Stats -->
+        <div class="panel right-panel">
+            <div class="panel-header">
+                Runtime Stats
+                <div class="panel-actions">
+                    <div class="search-wrapper" id="stats-search-wrapper">
+                        <button class="icon-btn" title="Search" onclick="toggleSearch('stats')">
+                            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                        </button>
+                        <input type="text" class="search-input" id="stats-search" placeholder="Search..." oninput="filterList('stats')">
+                    </div>
+                </div>
+            </div>
+            <div class="config-scroll" id="stats-list">
+                <div class="config-item">
+                    <span class="config-key">Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Interactive Tooltip (supports text selection) -->
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        let currentModel = null;
+        let conversationHistory = [];
+        let tooltipTimeout = null;
+        const tooltip = document.getElementById('tooltip');
+
+        // Chat parameters with defaults
+        const defaultParams = {
+            temperature: 0.7,
+            max_tokens: 512,
+            top_p: 1.0,
+            top_k: 0,
+            frequency_penalty: 0,
+            presence_penalty: 0,
+            repetition_penalty: 1.0,
+            seed: null,
+            stop: '',
+            thinking: '',  // '': default, 'enable': on, 'disable': off
+            reasoning_effort: ''
+        };
+
+        let chatParams = { ...defaultParams };
+
+        // Pending images for multimodal messages
+        let pendingImages = [];  // Array of {dataUrl: string, file: File}
+
+        // Handle image file upload
+        function handleImageUpload(event) {
+            const files = event.target.files;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const dataUrl = e.target.result;
+                        pendingImages.push({ dataUrl, file });
+                        renderImagePreviews();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            }
+            // Reset input so same file can be selected again
+            event.target.value = '';
+        }
+
+        // Render image previews
+        function renderImagePreviews() {
+            const area = document.getElementById('image-preview-area');
+            if (pendingImages.length === 0) {
+                area.classList.remove('has-images');
+                area.innerHTML = '';
+                return;
+            }
+
+            area.classList.add('has-images');
+            area.innerHTML = pendingImages.map((img, idx) => `
+                <div class="image-preview-item">
+                    <img src="${img.dataUrl}" alt="Preview">
+                    <button class="remove-btn" onclick="removeImage(${idx})">×</button>
+                </div>
+            `).join('');
+        }
+
+        // Remove an image from pending list
+        function removeImage(index) {
+            pendingImages.splice(index, 1);
+            renderImagePreviews();
+        }
+
+        // Clear all pending images
+        function clearPendingImages() {
+            pendingImages = [];
+            renderImagePreviews();
+        }
+
+        // Handle drag & drop for images
+        function setupDragDrop() {
+            const chatArea = document.querySelector('.chat-input-area');
+            if (!chatArea) return;
+
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(event => {
+                chatArea.addEventListener(event, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+
+            ['dragenter', 'dragover'].forEach(event => {
+                chatArea.addEventListener(event, () => {
+                    chatArea.style.borderColor = 'var(--vllm-blue)';
+                    chatArea.style.background = 'rgba(48, 162, 255, 0.1)';
+                });
+            });
+
+            ['dragleave', 'drop'].forEach(event => {
+                chatArea.addEventListener(event, () => {
+                    chatArea.style.borderColor = '';
+                    chatArea.style.background = '';
+                });
+            });
+
+            chatArea.addEventListener('drop', (e) => {
+                const files = e.dataTransfer.files;
+                for (const file of files) {
+                    if (file.type.startsWith('image/')) {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                            pendingImages.push({ dataUrl: ev.target.result, file });
+                            renderImagePreviews();
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                }
+            });
+        }
+
+        // Load saved parameters from localStorage
+        function loadParams() {
+            const saved = localStorage.getItem('vllm-dashboard-params');
+            if (saved) {
+                try {
+                    chatParams = { ...defaultParams, ...JSON.parse(saved) };
+                } catch (e) {
+                    chatParams = { ...defaultParams };
+                }
+            }
+            applyParamsToUI();
+        }
+
+        // Save parameters to localStorage
+        function saveParams() {
+            localStorage.setItem('vllm-dashboard-params', JSON.stringify(chatParams));
+            updateParamsSummary();
+        }
+
+        // Apply parameters to UI controls
+        function applyParamsToUI() {
+            // Sliders
+            setSliderValue('temperature', chatParams.temperature);
+            setSliderValue('top-p', chatParams.top_p);
+            setSliderValue('freq-penalty', chatParams.frequency_penalty);
+            setSliderValue('pres-penalty', chatParams.presence_penalty);
+            setSliderValue('rep-penalty', chatParams.repetition_penalty);
+
+            // Number inputs
+            const maxTokensEl = document.getElementById('param-max-tokens');
+            if (maxTokensEl) maxTokensEl.value = chatParams.max_tokens;
+
+            const topKEl = document.getElementById('param-top-k');
+            if (topKEl) topKEl.value = chatParams.top_k;
+
+            const seedEl = document.getElementById('param-seed');
+            if (seedEl) seedEl.value = chatParams.seed || '';
+
+            const stopEl = document.getElementById('param-stop');
+            if (stopEl) stopEl.value = chatParams.stop || '';
+
+            // Selects
+            const thinkingEl = document.getElementById('param-thinking');
+            if (thinkingEl) thinkingEl.value = chatParams.thinking || '';
+
+            const reasoningEl = document.getElementById('param-reasoning');
+            if (reasoningEl) reasoningEl.value = chatParams.reasoning_effort || '';
+
+            updateParamsSummary();
+        }
+
+        // Helper to set slider value and display
+        function setSliderValue(name, value) {
+            const slider = document.getElementById('param-' + name);
+            const display = document.getElementById('val-' + name);
+            if (slider) slider.value = value;
+            if (display) display.textContent = value;
+        }
+
+        // Update parameter value
+        function updateParam(name, value) {
+            // Convert to appropriate type
+            if (['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'repetition_penalty'].includes(name)) {
+                chatParams[name] = parseFloat(value);
+            } else if (['max_tokens', 'top_k', 'seed'].includes(name)) {
+                chatParams[name] = value === '' ? null : parseInt(value);
+            } else {
+                chatParams[name] = value;
+            }
+
+            // Update display for sliders
+            const displayMap = {
+                'temperature': 'val-temperature',
+                'top_p': 'val-top-p',
+                'frequency_penalty': 'val-freq-penalty',
+                'presence_penalty': 'val-pres-penalty',
+                'repetition_penalty': 'val-rep-penalty'
+            };
+
+            if (displayMap[name]) {
+                const display = document.getElementById(displayMap[name]);
+                if (display) display.textContent = value;
+            }
+
+            saveParams();
+        }
+
+        // Toggle boolean parameter
+        function toggleBoolParam(name) {
+            chatParams[name] = !chatParams[name];
+            const el = document.getElementById('param-' + name);
+            if (el) el.classList.toggle('active', chatParams[name]);
+            saveParams();
+        }
+
+        // Update summary display in collapsed header
+        function updateParamsSummary() {
+            document.getElementById('summary-temp').textContent = chatParams.temperature;
+            document.getElementById('summary-max').textContent = chatParams.max_tokens;
+
+            const thinkingEl = document.getElementById('summary-thinking');
+            if (thinkingEl) {
+                if (chatParams.thinking === 'enable') {
+                    thinkingEl.innerHTML = 'enable_thinking=<span>true</span>';
+                    thinkingEl.style.display = '';
+                } else if (chatParams.thinking === 'disable') {
+                    thinkingEl.innerHTML = 'enable_thinking=<span>false</span>';
+                    thinkingEl.style.display = '';
+                } else {
+                    thinkingEl.style.display = 'none';
+                }
+            }
+        }
+
+        // Toggle params panel expand/collapse
+        function toggleParamsPanel() {
+            const panel = document.getElementById('params-panel');
+            panel.classList.toggle('expanded');
+            localStorage.setItem('vllm-dashboard-params-expanded', panel.classList.contains('expanded') ? '1' : '0');
+        }
+
+        // Restore params panel state
+        function restoreParamsPanel() {
+            if (localStorage.getItem('vllm-dashboard-params-expanded') === '1') {
+                document.getElementById('params-panel')?.classList.add('expanded');
+            }
+        }
+
+        // Reset parameters to defaults
+        function resetParams() {
+            chatParams = { ...defaultParams };
+            applyParamsToUI();
+            saveParams();
+        }
+
+        // Build request body with parameters
+        function buildRequestParams() {
+            const params = {
+                model: currentModel,
+                temperature: chatParams.temperature,
+                max_tokens: chatParams.max_tokens,
+                top_p: chatParams.top_p,
+                stream: true
+            };
+
+            // Only include non-default values
+            if (chatParams.top_k > 0) params.top_k = chatParams.top_k;
+            if (chatParams.frequency_penalty !== 0) params.frequency_penalty = chatParams.frequency_penalty;
+            if (chatParams.presence_penalty !== 0) params.presence_penalty = chatParams.presence_penalty;
+            if (chatParams.repetition_penalty !== 1.0) params.repetition_penalty = chatParams.repetition_penalty;
+            if (chatParams.seed !== null) params.seed = chatParams.seed;
+            if (chatParams.stop) {
+                params.stop = chatParams.stop.split(',').map(s => s.trim()).filter(s => s);
+            }
+            if (chatParams.reasoning_effort) params.reasoning_effort = chatParams.reasoning_effort;
+
+            // chat_template_kwargs for thinking mode
+            if (chatParams.thinking === 'enable') {
+                params.chat_template_kwargs = { enable_thinking: true };
+            } else if (chatParams.thinking === 'disable') {
+                params.chat_template_kwargs = { enable_thinking: false };
+            }
+
+            return params;
+        }
+
+        // Theme toggle
+        function initTheme() {
+            const savedTheme = localStorage.getItem('vllm-dashboard-theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const isDark = savedTheme ? savedTheme === 'dark' : prefersDark;
+
+            if (!isDark) {
+                document.documentElement.classList.add('light');
+            }
+            updateThemeIcon(!isDark);
+        }
+
+        function toggleTheme() {
+            const isLight = document.documentElement.classList.toggle('light');
+            localStorage.setItem('vllm-dashboard-theme', isLight ? 'light' : 'dark');
+            updateThemeIcon(isLight);
+        }
+
+        function updateThemeIcon(isLight) {
+            const moonIcon = document.getElementById('moon-icon');
+            const sunIcon = document.getElementById('sun-icon');
+            if (moonIcon && sunIcon) {
+                moonIcon.style.display = isLight ? 'none' : 'block';
+                sunIcon.style.display = isLight ? 'block' : 'none';
+            }
+        }
+
+        // Initialize theme immediately
+        initTheme();
+
+        // Tooltip handling - supports text selection
+        function showTooltip(e, text) {
+            if (!text) return;
+            clearTimeout(tooltipTimeout);
+            tooltip.textContent = text;
+            tooltip.classList.add('visible');
+
+            // Position tooltip
+            const rect = e.target.getBoundingClientRect();
+            let left = rect.right + 10;
+            let top = rect.top;
+
+            // Keep tooltip in viewport
+            const tooltipRect = tooltip.getBoundingClientRect();
+            if (left + 400 > window.innerWidth) {
+                left = rect.left - 410;
+            }
+            if (top + 200 > window.innerHeight) {
+                top = window.innerHeight - 210;
+            }
+
+            tooltip.style.left = Math.max(10, left) + 'px';
+            tooltip.style.top = Math.max(10, top) + 'px';
+        }
+
+        function hideTooltip() {
+            tooltipTimeout = setTimeout(() => {
+                tooltip.classList.remove('visible');
+            }, 200);
+        }
+
+        // Keep tooltip visible when mouse enters it
+        tooltip.addEventListener('mouseenter', () => clearTimeout(tooltipTimeout));
+        tooltip.addEventListener('mouseleave', () => hideTooltip());
+
+        // Delegate tooltip events for config items
+        document.addEventListener('mouseover', (e) => {
+            const item = e.target.closest('.config-item[data-tooltip]');
+            if (item) {
+                showTooltip(e, item.dataset.tooltip);
+            }
+        });
+
+        document.addEventListener('mouseout', (e) => {
+            const item = e.target.closest('.config-item[data-tooltip]');
+            if (item) {
+                hideTooltip();
+            }
+        });
+
+        // Fetch server info
+        async function fetchServerInfo() {
+            try {
+                const resp = await fetch('/dashboard/api/info');
+                const data = await resp.json();
+
+                document.getElementById('version').textContent = 'vLLM v' + data.version;
+
+                if (data.models?.length > 0) {
+                    currentModel = data.models[0].id;
+                    const modelEl = document.getElementById('model-name');
+                    modelEl.textContent = currentModel;
+                    modelEl.title = currentModel;  // Show full name on hover
+                }
+
+                // Update server load
+                const loadEl = document.getElementById('server-load');
+                if (data.server_load != null) {
+                    loadEl.textContent = data.server_load;
+                } else {
+                    loadEl.textContent = '-';
+                }
+
+                // Update sleeping status
+                const sleepingEl = document.getElementById('sleeping-indicator');
+                const pausedEl = document.getElementById('paused-indicator');
+                const statusDot = document.getElementById('status-dot');
+
+                if (data.is_sleeping === true) {
+                    sleepingEl.classList.remove('hidden');
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else {
+                    sleepingEl.classList.add('hidden');
+                }
+
+                if (data.is_paused === true) {
+                    pausedEl.classList.remove('hidden');
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else {
+                    pausedEl.classList.add('hidden');
+                }
+
+                // Set status dot color based on state priority: error > paused > sleeping > running
+                if (data.status === 'unhealthy') {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_paused === true) {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_sleeping === true) {
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else if (data.status === 'running') {
+                    statusDot.style.background = 'var(--success)';
+                    statusDot.style.boxShadow = '0 0 10px var(--success)';
+                }
+
+                // Render config and env
+                fetchConfig(data);
+            } catch (e) {
+                const dot = document.getElementById('status-dot');
+                dot.style.background = 'var(--error)';
+                dot.style.boxShadow = '0 0 8px var(--error)';
+            }
+        }
+
+        // Fetch metrics
+        async function fetchMetrics() {
+            try {
+                const resp = await fetch('/dashboard/api/metrics');
+                if (!resp.ok) return;  // Silently ignore errors
+                const data = await resp.json();
+
+                // Update Runtime Stats panel
+                renderRuntimeStats(data);
+                // Reapply search filter if active
+                filterList('stats');
+
+            } catch (e) {
+                // Silently ignore - avoid console spam
+            }
+        }
+
+        // Fetch detailed config (from dashboard API, no dev mode needed)
+        async function fetchConfig(data) {
+            const configList = document.getElementById('config-list');
+            const envList = document.getElementById('env-list');
+            const cfg = data.vllm_config;
+            const explicitArgs = new Set(data.explicit_args || []);
+            const explicitEnvs = new Set(data.explicit_envs || []);
+
+            if (!cfg) {
+                configList.innerHTML = '<div class="config-item"><span class="config-key">No config available</span></div>';
+                document.getElementById('config-search').style.display = 'none';
+                envList.innerHTML = '<div class="config-item"><span class="config-key">No env available</span></div>';
+                document.getElementById('env-search').style.display = 'none';
+                return;
+            }
+
+            try {
+                let configHtml = '';
+
+                // Recursively flatten config with prefix
+                function flattenConfig(obj, prefix = '') {
+                    let items = [];
+                    for (const [key, val] of Object.entries(obj)) {
+                        const fullKey = prefix ? `${prefix}.${key}` : key;
+                        if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+                            // For nested objects, add section header then recurse
+                            items.push({ key: fullKey, val: null, isSection: true });
+                            items = items.concat(flattenConfig(val, fullKey));
+                        } else {
+                            items.push({ key: fullKey, val: val, isSection: false });
+                        }
+                    }
+                    return items;
+                }
+
+                // Generate doc link for config item
+                function getDocUrl(fullKey) {
+                    const parts = fullKey.split('.');
+                    if (parts.length < 2) return null;
+                    const sectionPart = parts[0].replace(/_config$/, '');
+                    const keyName = parts[parts.length - 1];
+                    const sectionClass = sectionPart.split('_').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('') + 'Config';
+                    return `https://docs.vllm.ai/en/latest/api/vllm/config/${sectionPart}/#vllm.config.${sectionPart}.${sectionClass}.${keyName}`;
+                }
+
+                const flatConfig = flattenConfig(cfg);
+                for (const item of flatConfig) {
+                    if (item.isSection) {
+                        const sectionName = item.key.split('.').pop();
+                        configHtml += `<div class="config-item" style="background:rgba(48,162,255,0.1);margin-top:4px;border-left:3px solid var(--vllm-blue)">
+                            <span class="config-key" style="color:var(--vllm-blue);font-weight:600">${sectionName}</span>
+                        </div>`;
+                    } else {
+                        const shortKey = item.key.split('.').pop();
+                        const fullVal = formatFullValue(item.val);
+                        const isExplicit = explicitArgs.has(shortKey) || explicitArgs.has(shortKey.replace(/_/g, '-'));
+                        const docUrl = getDocUrl(item.key);
+                        const keyHtml = docUrl
+                            ? `<a href="${docUrl}" target="_blank" class="config-key" title="View documentation">${shortKey}</a>`
+                            : `<span class="config-key">${shortKey}</span>`;
+                        configHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${item.key}: ${esc(fullVal)}">
+                            ${keyHtml}
+                            <span class="config-val">${formatValue(item.val)}</span>
+                        </div>`;
+                    }
+                }
+                configList.innerHTML = configHtml || '<div class="config-item"><span class="config-key">No config</span></div>';
+
+                // Render environment variables in separate panel
+                const env = data.vllm_env;
+                let envHtml = '';
+                if (env && Object.keys(env).length > 0) {
+                    for (const key of Object.keys(env).sort()) {
+                        const val = env[key];
+                        const isExplicit = explicitEnvs.has(key);
+                        const fullVal = formatFullValue(val);
+                        const valColor = val === true ? 'var(--success)' : val === false ? 'var(--muted-foreground)' : 'var(--vllm-blue)';
+                        const envDocUrl = `https://docs.vllm.ai/en/latest/api/vllm/envs/#vllm.envs.${key}`;
+                        envHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${key}: ${esc(fullVal)}">
+                            <a href="${envDocUrl}" target="_blank" class="config-key" title="View documentation">${key}</a>
+                            <span class="config-val" style="color:${valColor}">${formatValue(val)}</span>
+                        </div>`;
+                    }
+                }
+                envList.innerHTML = envHtml || '<div class="config-item"><span class="config-key">No env vars</span></div>';
+
+                // Apply filters after rendering (respect saved toggle states)
+                filterList('config');
+                filterList('env');
+
+            } catch (e) {
+                console.error('Config render error:', e);
+            }
+        }
+
+        // Render runtime stats in right panel
+        function renderRuntimeStats(metricsData) {
+            const statsList = document.getElementById('stats-list');
+            let html = '';
+
+            // Helper to add section header
+            const addSection = (title, tooltip = '') => {
+                const hint = tooltip ? `<span style="margin-left:6px;cursor:help;opacity:0.6" title="${tooltip}">?</span>` : '';
+                html += `<div class="config-item" style="background:rgba(48,162,255,0.1);border-left:3px solid var(--vllm-blue)">
+                    <span class="config-key" style="color:var(--vllm-blue);font-weight:600">${title}${hint}</span>
+                </div>`;
+            };
+
+            // Helper to add stat item
+            const addStat = (key, val, color = '') => {
+                const c = color || 'var(--vllm-blue)';
+                html += `<div class="config-item">
+                    <span class="config-key">${key}</span>
+                    <span class="config-val" style="color:${c}">${val}</span>
+                </div>`;
+            };
+
+            // Extract all metrics
+            // Gauges
+            const running = metricsData['vllm:num_requests_running']?.value || 0;
+            const waiting = metricsData['vllm:num_requests_waiting']?.value || 0;
+            const kv = metricsData['vllm:kv_cache_usage_perc'] || metricsData['vllm:gpu_cache_usage_perc'];
+
+            // Counters
+            const promptTokens = metricsData['vllm:prompt_tokens']?.value || 0;
+            const genTokens = metricsData['vllm:generation_tokens']?.value || 0;
+            const preemptions = metricsData['vllm:num_preemptions']?.value || 0;
+            const corrupted = metricsData['vllm:corrupted_requests']?.value || 0;
+            const cacheQueries = metricsData['vllm:prefix_cache_queries']?.value || 0;
+            const cacheHits = metricsData['vllm:prefix_cache_hits']?.value || 0;
+            const mmCacheQueries = metricsData['vllm:mm_cache_queries']?.value || 0;
+            const mmCacheHits = metricsData['vllm:mm_cache_hits']?.value || 0;
+            const extCacheQueries = metricsData['vllm:external_prefix_cache_queries']?.value || 0;
+            const extCacheHits = metricsData['vllm:external_prefix_cache_hits']?.value || 0;
+
+            // Histograms
+            const e2e = metricsData['vllm:e2e_request_latency_seconds'];
+            const ttft = metricsData['vllm:time_to_first_token_seconds'];
+            const itl = metricsData['vllm:inter_token_latency_seconds'];
+            const queueTime = metricsData['vllm:request_queue_time_seconds'];
+            const inferenceTime = metricsData['vllm:request_inference_time_seconds'];
+            const prefill = metricsData['vllm:request_prefill_time_seconds'];
+            const decode = metricsData['vllm:request_decode_time_seconds'];
+            const tpot = metricsData['vllm:request_time_per_output_token_seconds'];
+            const reqPromptTokens = metricsData['vllm:request_prompt_tokens'];
+            const reqGenTokens = metricsData['vllm:request_generation_tokens'];
+            const iterTokens = metricsData['vllm:iteration_tokens_total'];
+            const maxGenTokens = metricsData['vllm:request_max_num_generation_tokens'];
+            const paramsN = metricsData['vllm:request_params_n'];
+            const paramsMaxTokens = metricsData['vllm:request_params_max_tokens'];
+            const prefillKvComputed = metricsData['vllm:request_prefill_kv_computed_tokens'];
+            const kvLifetime = metricsData['vllm:kv_block_lifetime_seconds'];
+            const kvIdle = metricsData['vllm:kv_block_idle_before_evict_seconds'];
+            const kvReuseGap = metricsData['vllm:kv_block_reuse_gap_seconds'];
+
+            // Request success by finish reason (labels: stop, length, abort)
+            const reqSuccessStop = metricsData['vllm:request_success:stop']?.value || 0;
+            const reqSuccessLength = metricsData['vllm:request_success:length']?.value || 0;
+            const reqSuccessAbort = metricsData['vllm:request_success:abort']?.value || 0;
+
+            // Speculative decoding counters
+            const specDrafts = metricsData['vllm:spec_decode_num_drafts']?.value || 0;
+            const specDraftTokens = metricsData['vllm:spec_decode_num_draft_tokens']?.value || 0;
+            const specAcceptedTokens = metricsData['vllm:spec_decode_num_accepted_tokens']?.value || 0;
+
+            // LoRA info (find any key starting with vllm:lora_requests_info)
+            const loraKey = Object.keys(metricsData).find(k => k.startsWith('vllm:lora_requests_info'));
+            const loraInfo = loraKey ? metricsData[loraKey] : null;
+
+            // Request Stats
+            addSection('Request Stats');
+            addStat('Running Requests', running, 'var(--success)');
+            addStat('Waiting Requests', waiting, 'var(--vllm-yellow)');
+            addStat('Total Requests', e2e?.count || 0);
+            addStat('Finished (stop)', reqSuccessStop, 'var(--success)');
+            addStat('Finished (length)', reqSuccessLength);
+            addStat('Finished (abort)', reqSuccessAbort, reqSuccessAbort > 0 ? 'var(--vllm-yellow)' : '');
+            addStat('Preemptions', preemptions, preemptions > 0 ? 'var(--vllm-yellow)' : '');
+            addStat('Corrupted Requests', corrupted, corrupted > 0 ? 'var(--error)' : '');
+
+            // Latency Stats
+            addSection('Latency Stats');
+            addStat('Avg TTFT', ttft?.count > 0 ? ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg ITL', itl?.count > 0 ? ((itl.sum / itl.count) * 1000).toFixed(1) + 'ms' : '-');
+            addStat('Avg TPOT', tpot?.count > 0 ? ((tpot.sum / tpot.count) * 1000).toFixed(1) + 'ms' : '-');
+            addStat('Avg Queue Time', queueTime?.count > 0 ? ((queueTime.sum / queueTime.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg Prefill Time', prefill?.count > 0 ? ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg Decode Time', decode?.count > 0 ? (decode.sum / decode.count).toFixed(2) + 's' : '-');
+            addStat('Avg Inference Time', inferenceTime?.count > 0 ? (inferenceTime.sum / inferenceTime.count).toFixed(2) + 's' : '-');
+            addStat('Avg E2E Latency', e2e?.count > 0 ? (e2e.sum / e2e.count).toFixed(2) + 's' : '-');
+
+            // Cache Stats
+            addSection('Cache Stats');
+            addStat('KV Cache Usage', kv ? (kv.value * 100).toFixed(1) + '%' : '-');
+            addStat('Prefix Cache Hit', cacheQueries > 0 ? (cacheHits / cacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('MM Cache Hit', mmCacheQueries > 0 ? (mmCacheHits / mmCacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('Ext Cache Hit', extCacheQueries > 0 ? (extCacheHits / extCacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('Avg Prefill KV Computed', prefillKvComputed?.count > 0 ? (prefillKvComputed.sum / prefillKvComputed.count).toFixed(0) : '-');
+
+            // Token Stats
+            addSection('Token Stats');
+            addStat('Prompt Tokens (Total)', promptTokens.toLocaleString());
+            addStat('Generation Tokens (Total)', genTokens.toLocaleString());
+            addStat('Avg Prompt Tokens/Req', reqPromptTokens?.count > 0 ? (reqPromptTokens.sum / reqPromptTokens.count).toFixed(0) : '-');
+            addStat('Avg Gen Tokens/Req', reqGenTokens?.count > 0 ? (reqGenTokens.sum / reqGenTokens.count).toFixed(0) : '-');
+            addStat('Avg Tokens/Iteration', iterTokens?.count > 0 ? (iterTokens.sum / iterTokens.count).toFixed(0) : '-');
+
+            // Request Params
+            addSection('Request Params');
+            addStat('Avg max_tokens Param', paramsMaxTokens?.count > 0 ? (paramsMaxTokens.sum / paramsMaxTokens.count).toFixed(0) : '-');
+            addStat('Avg n Param', paramsN?.count > 0 ? (paramsN.sum / paramsN.count).toFixed(1) : '-');
+            addStat('Avg Max Gen Tokens', maxGenTokens?.count > 0 ? (maxGenTokens.sum / maxGenTokens.count).toFixed(0) : '-');
+
+            // KV Block Stats (requires --kv-cache-metrics)
+            addSection('KV Block Stats', 'Requires --kv-cache-metrics flag');
+            addStat('Avg KV Block Lifetime', kvLifetime?.count > 0 ? (kvLifetime.sum / kvLifetime.count).toFixed(2) + 's' : '-');
+            addStat('Avg KV Idle Before Evict', kvIdle?.count > 0 ? (kvIdle.sum / kvIdle.count).toFixed(2) + 's' : '-');
+            addStat('Avg KV Reuse Gap', kvReuseGap?.count > 0 ? (kvReuseGap.sum / kvReuseGap.count).toFixed(2) + 's' : '-');
+
+            // Speculative Decoding Stats (requires speculative decoding enabled)
+            addSection('Spec Decode Stats', 'Requires speculative decoding enabled');
+            addStat('Draft Rounds', specDrafts.toLocaleString());
+            addStat('Draft Tokens', specDraftTokens.toLocaleString());
+            addStat('Accepted Tokens', specAcceptedTokens.toLocaleString());
+            const specAcceptRate = specDraftTokens > 0 ? (specAcceptedTokens / specDraftTokens * 100).toFixed(1) + '%' : '-';
+            addStat('Acceptance Rate', specAcceptRate, specDraftTokens > 0 ? 'var(--success)' : '');
+            const meanAcceptLen = specDrafts > 0 ? (1 + specAcceptedTokens / specDrafts).toFixed(2) : '-';
+            addStat('Mean Accept Length', meanAcceptLen);
+
+            // LoRA Stats (requires LoRA enabled)
+            addSection('LoRA Stats', 'Requires LoRA enabled');
+            const runningAdapters = loraInfo?.labels?.running_lora_adapters || '';
+            const waitingAdapters = loraInfo?.labels?.waiting_lora_adapters || '';
+            addStat('Max LoRA', loraInfo?.labels?.max_lora || '-');
+            addStat('Running Adapters', runningAdapters ? runningAdapters.split(',').length : '-', runningAdapters ? 'var(--success)' : '');
+            addStat('Waiting Adapters', waitingAdapters ? waitingAdapters.split(',').length : '-');
+
+            statsList.innerHTML = html || '<div class="config-item"><span class="config-key">No stats available</span></div>';
+        }
+
+        function getNestedValue(obj, path) {
+            return path.split('.').reduce((o, k) => o?.[k], obj);
+        }
+
+        function formatValue(val) {
+            if (val === null) return '-';
+            if (val === true) return '✓';
+            if (val === false) return '✗';
+            if (typeof val === 'number') return val.toLocaleString();
+            if (typeof val === 'string' && val.length > 20) return val.substring(0, 18) + '...';
+            if (typeof val === 'object') return JSON.stringify(val).substring(0, 18) + '...';
+            return String(val);
+        }
+
+        function formatFullValue(val) {
+            if (val === true) return 'true';
+            if (val === false) return 'false';
+            if (typeof val === 'object') return JSON.stringify(val, null, 2);
+            return String(val);
+        }
+
+        // Toggle filter (show only set values)
+        function toggleFilter(type) {
+            const btn = document.getElementById(type + '-filter-btn');
+            const isActive = btn.classList.toggle('active');
+            localStorage.setItem(`vllm-dashboard-${type}-explicit`, isActive ? '1' : '0');
+            filterList(type);
+        }
+
+        // Toggle search input
+        function toggleSearch(type) {
+            const wrapper = document.getElementById(type + '-search-wrapper');
+            const input = document.getElementById(type + '-search');
+            const isExpanded = wrapper.classList.toggle('expanded');
+            if (isExpanded) {
+                input.focus();
+            } else {
+                input.value = '';
+                filterList(type);
+            }
+        }
+
+        // Filter config/env/stats list
+        function filterList(type) {
+            const searchInput = document.getElementById(type + '-search');
+            const filterBtn = document.getElementById(type + '-filter-btn');
+            const list = document.getElementById(type + '-list');
+            const query = (searchInput?.value || '').toLowerCase();
+            const onlyExplicit = filterBtn?.classList.contains('active') || false;
+            const items = list.querySelectorAll('.config-item');
+
+            items.forEach(item => {
+                const key = item.querySelector('.config-key')?.textContent?.toLowerCase() || '';
+                const val = item.querySelector('.config-val')?.textContent?.toLowerCase() || '';
+                const tooltip = (item.dataset.tooltip || '').toLowerCase();
+                const isExplicit = item.classList.contains('explicit');
+                const isSection = !item.dataset.tooltip && item.style.background; // Section headers
+
+                // Match search query
+                const matchesSearch = key.includes(query) || val.includes(query) || tooltip.includes(query);
+
+                // Match explicit filter (section headers always show if any explicit items exist)
+                const matchesExplicit = !onlyExplicit || isExplicit || isSection;
+
+                item.style.display = (matchesSearch && matchesExplicit) ? '' : 'none';
+            });
+
+            // Hide section headers that have no visible children
+            if (onlyExplicit) {
+                hideSectionHeadersWithoutChildren(list);
+            }
+        }
+
+        // Hide section headers if they have no visible explicit items after them
+        function hideSectionHeadersWithoutChildren(list) {
+            const items = Array.from(list.querySelectorAll('.config-item'));
+            let currentSection = null;
+            let hasVisibleChild = false;
+
+            // First pass: determine which sections have visible children
+            const sectionsWithChildren = new Set();
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                const isSection = !item.dataset.tooltip && item.style.background;
+
+                if (isSection) {
+                    if (currentSection && hasVisibleChild) {
+                        sectionsWithChildren.add(currentSection);
+                    }
+                    currentSection = item;
+                    hasVisibleChild = false;
+                } else if (item.style.display !== 'none' && item.classList.contains('explicit')) {
+                    hasVisibleChild = true;
+                }
+            }
+            // Don't forget the last section
+            if (currentSection && hasVisibleChild) {
+                sectionsWithChildren.add(currentSection);
+            }
+
+            // Second pass: hide sections without visible children
+            for (const item of items) {
+                const isSection = !item.dataset.tooltip && item.style.background;
+                if (isSection && !sectionsWithChildren.has(item)) {
+                    item.style.display = 'none';
+                }
+            }
+        }
+
+        // Restore filter toggle states from localStorage
+        function restoreFilterToggles() {
+            if (localStorage.getItem('vllm-dashboard-config-explicit') === '1') {
+                document.getElementById('config-filter-btn')?.classList.add('active');
+            }
+            if (localStorage.getItem('vllm-dashboard-env-explicit') === '1') {
+                document.getElementById('env-filter-btn')?.classList.add('active');
+            }
+        }
+
+        // Update context stats
+        function updateContextStats() {
+            let totalChars = 0;
+            let imageCount = 0;
+
+            for (const msg of conversationHistory) {
+                if (typeof msg.content === 'string') {
+                    totalChars += msg.content.length;
+                } else if (Array.isArray(msg.content)) {
+                    for (const part of msg.content) {
+                        if (part.type === 'text') {
+                            totalChars += part.text?.length || 0;
+                        } else if (part.type === 'image_url') {
+                            imageCount++;
+                        }
+                    }
+                }
+            }
+
+            const statsText = imageCount > 0 ? `${totalChars.toLocaleString()} + ${imageCount} img` : totalChars.toLocaleString();
+            document.getElementById('stat-context').textContent = statsText;
+            document.getElementById('stat-messages').textContent = conversationHistory.length;
+        }
+
+        // Clear chat
+        function clearChat() {
+            document.getElementById('chat-messages').innerHTML = '<div class="chat-empty">Send a message to start chatting</div>';
+            conversationHistory = [];
+            clearPendingImages();
+            updateContextStats();
+        }
+
+        // Parse thinking tags
+        function parseThinking(text) {
+            const match = text.match(/<think>([\s\S]*?)<\/think>/);
+            if (match) {
+                return { thinking: match[1].trim(), response: text.replace(/<think>[\s\S]*?<\/think>/, '').trim() };
+            }
+            return { thinking: null, response: text };
+        }
+
+        // Escape HTML
+        function esc(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Send message
+        async function sendMessage() {
+            const input = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('send-btn');
+            const messages = document.getElementById('chat-messages');
+            const typing = document.getElementById('typing');
+
+            const msg = input.value.trim();
+            if (!msg && pendingImages.length === 0) return;
+
+            // Clear empty state
+            const empty = messages.querySelector('.chat-empty');
+            if (empty) empty.remove();
+
+            // Build message content (multimodal if images present)
+            let messageContent;
+            let displayImagesHtml = '';
+
+            if (pendingImages.length > 0) {
+                // Multimodal content array
+                messageContent = [];
+
+                // Add images first
+                for (const img of pendingImages) {
+                    messageContent.push({
+                        type: 'image_url',
+                        image_url: { url: img.dataUrl }
+                    });
+                    displayImagesHtml += `<img src="${img.dataUrl}" alt="Uploaded image">`;
+                }
+
+                // Add text if present
+                if (msg) {
+                    messageContent.push({ type: 'text', text: msg });
+                }
+            } else {
+                // Text only
+                messageContent = msg;
+            }
+
+            // Add user message to history
+            conversationHistory.push({ role: 'user', content: messageContent });
+            updateContextStats();
+
+            // Display user message with images
+            const imagesSection = displayImagesHtml ? `<div class="message-images">${displayImagesHtml}</div>` : '';
+            messages.innerHTML += `
+                <div class="message message-user">
+                    <div class="message-bubble">${imagesSection}${msg ? esc(msg) : ''}</div>
+                </div>`;
+
+            // Clear pending images
+            clearPendingImages();
+
+            input.value = '';
+            sendBtn.disabled = true;
+            typing.classList.add('visible');
+            messages.scrollTop = messages.scrollHeight;
+
+            const startTime = Date.now();
+            let tokens = 0;
+            let fullContent = '';
+
+            try {
+                const requestParams = buildRequestParams();
+                requestParams.messages = conversationHistory;
+
+                const resp = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestParams)
+                });
+
+                // Create assistant message
+                const assistantDiv = document.createElement('div');
+                assistantDiv.className = 'message message-assistant';
+                assistantDiv.innerHTML = '<div class="message-bubble"><div class="message-content"></div></div>';
+                messages.appendChild(assistantDiv);
+                typing.classList.remove('visible');
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                const responseEl = assistantDiv.querySelector('.message-content');
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    for (const line of chunk.split('\n')) {
+                        if (line.startsWith('data: ') && line.slice(6) !== '[DONE]') {
+                            try {
+                                const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta?.content;
+                                if (delta) {
+                                    fullContent += delta;
+                                    tokens++;
+
+                                    const { thinking, response } = parseThinking(fullContent);
+                                    let html = '';
+                                    if (thinking) {
+                                        html = `<div class="thinking-block">
+                                            <div class="thinking-header" onclick="this.nextElementSibling.classList.toggle('expanded')">
+                                                <span>Thinking</span><span style="font-size:9px;color:var(--muted-foreground)">Click to expand</span>
+                                            </div>
+                                            <div class="thinking-content">${esc(thinking)}</div>
+                                        </div>`;
+                                    }
+                                    html += esc(response);
+                                    responseEl.innerHTML = html;
+                                    messages.scrollTop = messages.scrollHeight;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+
+                conversationHistory.push({ role: 'assistant', content: fullContent });
+                updateContextStats();
+
+                // Stats for message meta
+                const elapsed = (Date.now() - startTime) / 1000;
+                const speed = tokens / elapsed;
+
+                // Add meta
+                const meta = document.createElement('div');
+                meta.className = 'message-meta';
+                meta.textContent = `${tokens} tokens · ${elapsed.toFixed(2)}s · ${speed.toFixed(1)} tok/s`;
+                assistantDiv.appendChild(meta);
+
+            } catch (e) {
+                typing.classList.remove('visible');
+                messages.innerHTML += `<div class="message message-assistant">
+                    <div class="message-bubble" style="border-color:var(--error)">Error: ${esc(e.message)}</div>
+                </div>`;
+            }
+
+            sendBtn.disabled = false;
+            input.focus();
+        }
+
+        // Refresh dynamic server info (load, sleeping, paused status)
+        async function refreshServerStatus() {
+            try {
+                const resp = await fetch('/dashboard/api/info');
+                if (!resp.ok) return;  // Silently ignore errors
+                const data = await resp.json();
+
+                // Update server load
+                const loadEl = document.getElementById('server-load');
+                if (data.server_load != null) {
+                    loadEl.textContent = data.server_load;
+                } else {
+                    loadEl.textContent = '-';
+                }
+
+                // Update sleeping and paused status
+                const sleepingEl = document.getElementById('sleeping-indicator');
+                const pausedEl = document.getElementById('paused-indicator');
+                const statusDot = document.getElementById('status-dot');
+
+                if (data.is_sleeping === true) {
+                    sleepingEl.classList.remove('hidden');
+                } else {
+                    sleepingEl.classList.add('hidden');
+                }
+
+                if (data.is_paused === true) {
+                    pausedEl.classList.remove('hidden');
+                } else {
+                    pausedEl.classList.add('hidden');
+                }
+
+                // Set status dot color based on state priority
+                if (data.status === 'unhealthy') {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_paused === true) {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_sleeping === true) {
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else if (data.status === 'running') {
+                    statusDot.style.background = 'var(--success)';
+                    statusDot.style.boxShadow = '0 0 10px var(--success)';
+                }
+            } catch (e) {
+                // Silently ignore - avoid console spam
+            }
+        }
+
+        // Init
+        async function init() {
+            loadParams();            // Load saved chat parameters
+            restoreParamsPanel();    // Restore params panel expand state
+            restoreFilterToggles();  // Restore saved toggle states
+            setupDragDrop();         // Enable drag & drop for images
+            await fetchServerInfo();  // Also fetches config & env
+            await fetchMetrics();
+            setInterval(fetchMetrics, 5000);
+            setInterval(refreshServerStatus, 5000);  // Refresh load/sleeping status
+            // Auto focus chat input
+            document.getElementById('chat-input').focus();
+        }
+
+        init();
+    </script>
+</body>
+</html>
