@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
