@@ -33,7 +33,7 @@ def get_mm_max_toks_per_item(
     )
 
     return {
-        modality: sum(item.get_num_embeds for item in placeholders)
+        modality: sum(item.get_num_embeds() for item in placeholders)
         for modality, placeholders in mm_inputs["mm_placeholders"].items()
     }
 
