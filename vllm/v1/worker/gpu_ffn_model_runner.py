@@ -81,13 +81,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
             reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes)
         )
 
-        # Storage for captured graphs
-        self._cuda_graphs: dict[
-            tuple[int, int], torch.cuda.CUDAGraph
-        ] = {}  # {(layer_idx, num_tokens): CUDAGraph}
+        # Storage for captured graphs, keyed by dp_metadata graph key
+        # {dp_metadata_graph_key: {"graph": CUDAGraph, ...}}
+        self._cuda_graphs: dict[tuple, dict] = {}
         self._graph_memory_pool = None
-        self._cuda_graphs_full: dict[int, dict] = {}  # {num_tokens: graph info}
-        self._cuda_graphs_ubatch_full: dict[int, dict] = {}  # {num_tokens: graph info}
         self.dummy_run_call_cnt = 0
 
         assert self.afd_config.is_ffn_server
@@ -132,6 +129,18 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
         logger.info("AFD FFN Model loaded successfully")
 
+    @staticmethod
+    def _make_graph_key(dp_metadata_list: dict) -> tuple:
+        """Extract a hashable key from dp_metadata_list for CUDA graph lookup.
+
+        The key is a tuple of (stage_idx, tuple(num_tokens_across_dp_cpu))
+        for each stage, sorted by stage_idx.
+        """
+        return tuple(
+            (stage_idx, tuple(meta.num_tokens_across_dp_cpu.tolist()))
+            for stage_idx, meta in sorted(dp_metadata_list.items())
+        )
+
     def _ffn_forward(self,
                      dp_metadata_list: dict | None = None,
                      is_graph_capturing: bool = False):
@@ -139,7 +148,9 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         rank_ffn_output = None
 
         assert dp_metadata_list is not None
-        self.connector.update_state_from_dp_metadata(dp_metadata_list)
+        self.connector.update_state_from_dp_metadata(
+            dp_metadata_list, is_graph_capturing=is_graph_capturing
+        )
         
         # TODO(jcz): process first_k_dense_replace
         # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
@@ -172,6 +183,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         logger.info(f"jcz ffn_forward end")
         self._execute_model_count += 1
         return rank_ffn_output
+
     
     @torch.inference_mode()
     def execute_model(
@@ -184,32 +196,25 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         """Execute FFN computation for a single request"""
         self.profiler.step()
         try:
-            if self.use_cuda_graph:
-                # TODO(jcz): need to replay cudagraph
-                pass
-                # # replay
-                # if self.connector_name == "camm2nconnector":
-                #     # TODO(yxj): self.decode_max_num_token * self.attn_size * (self.topk // self.ffn_size)
-                #     max_num_tokens = (
-                #         self.decode_max_num_token 
-                #         * self.attn_size 
-                #         * (self.n_routed_experts // self.ffn_size)
-                #     )
-                # else:
-                #     max_num_tokens = (
-                #         self.decode_max_num_token 
-                #         * self.topk 
-                #         * self.attn_size
-                #     )
-                # cuda_graph_info = self._cuda_graphs_ubatch_full.get(max_num_tokens)
-                # graph = cuda_graph_info["graph"]
-                # graph.replay()
-                # logger.info(f"ffn replay cudagraph")
+            if self.use_cuda_graph and dp_metadata_list is not None:
+                graph_key = self._make_graph_key(dp_metadata_list)
+                cuda_graph_info = self._cuda_graphs.get(graph_key)
+                if cuda_graph_info is not None:
+                    cuda_graph_info["graph"].replay()
+                    logger.info(f"ffn replay cudagraph for key {graph_key}")
+                else:
+                    logger.warning(
+                        f"No CUDA graph found for key {graph_key}, "
+                        f"falling back to eager mode")
+                    self._ffn_forward(
+                        dp_metadata_list=dp_metadata_list,
+                        is_graph_capturing=is_graph_capturing,
+                    )
             else:
                 logger.info(f"ffn_forward, dp_metadata_list is {dp_metadata_list}")
                 self._ffn_forward(
                     dp_metadata_list=dp_metadata_list,
-                    is_graph_capturing=is_graph_capturing
+                    is_graph_capturing=is_graph_capturing,
                 )
         except Exception as e:
             raise ValueError(f"Error computing FFN: {e}") from e
@@ -264,16 +269,6 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         dp_metadata_list: dict,
         is_attn_graph_capturing: bool,
     ):
-        is_ubatch = len(dp_metadata_list) > 1
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-        num_tokens = sum(
-            dp_metadata_list[i].num_tokens_across_dp_cpu[dp_rank].item()
-            for i in range(len(dp_metadata_list))
-        )
-        logger.info(
-            "jcz is_ubatch=%s num_tokens=%s from dp_metadata_list", is_ubatch, num_tokens
-        )
-
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL,
@@ -282,25 +277,19 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
             if self._graph_memory_pool is None:
                 self._graph_memory_pool = torch.cuda.graph_pool_handle()
+            graph_key = self._make_graph_key(dp_metadata_list)
             cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(cudagraph, pool=self._graph_memory_pool):
                 output = self._ffn_forward(
                     dp_metadata_list=dp_metadata_list,
                     is_graph_capturing=is_attn_graph_capturing,
                 )
-            logger.debug("captured output shape is %s", output.shape)
-            if is_ubatch:
-                self._cuda_graphs_ubatch_full[output.shape[0]] = {
-                    "graph": cudagraph,
-                    "input_hidden_states": output,
-                    "output": output,
-                }
-            else:
-                self._cuda_graphs_full[output.shape[0]] = {
-                    "graph": cudagraph,
-                    "input_hidden_states": output,
-                    "output": output,
-                }
+            self._cuda_graphs[graph_key] = {
+                "graph": cudagraph,
+                "input_hidden_states": output,
+                "output": output,
+            }
+            logger.info(f"Captured CUDA graph for key {graph_key}")
         else:
             self._ffn_forward(
                 dp_metadata_list=dp_metadata_list,
@@ -311,7 +300,6 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
     def capture_model(
         self,
         dp_metadata_list: Optional[dict] = None,
-        is_graph_capturing: bool = False,
     ) -> int:
         """Capture CUDA graphs for FFN operations.
         When dp_metadata_list and is_graph_capturing are provided (e.g. from attn
@@ -336,9 +324,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         with graph_capture(device=self.device):
             self._capture_graphs(
                 cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                dp_metadata_list=dp_metadata_list,
-                is_graph_capturing=is_graph_capturing,
-            )
+                dp_metadata_list=dp_metadata_list)
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
@@ -357,13 +343,12 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         self,
         cudagraph_runtime_mode: CUDAGraphMode,
         dp_metadata_list: dict,
-        is_graph_capturing: bool = False,
     ):
         assert cudagraph_runtime_mode == CUDAGraphMode.FULL
         self._dummy_run(
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             dp_metadata_list=dp_metadata_list,
-            is_graph_capturing=is_graph_capturing,
+            is_attn_graph_capturing=True,
         )
 
     def _run_ffn_computation(
@@ -394,19 +379,6 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
             )
 
         return rank_ffn_output
-
-    def _find_cuda_graph(self, layer_idx: int, num_tokens: int):
-        """Find the smallest graph that can handle the given layer and
-        number of tokens."""
-        if not self.use_cuda_graph:
-            return None
-
-        # Find the minimum capture size that can handle num_tokens for this
-        # layer
-        for capture_size in self.cudagraph_batch_sizes:
-            if num_tokens <= capture_size:
-                return self._cuda_graphs.get((layer_idx, capture_size))
-        return None
 
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         """FFN servers don't use samplers."""

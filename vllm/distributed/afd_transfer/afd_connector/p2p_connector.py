@@ -133,6 +133,8 @@ class P2PAFDConnector(AFDConnectorBase):
         self.ffn_size: int = 0
         self.min_size: int = 0
         self.dst_list = []
+        # Fixed recv buffers for FFN side when graph capturing; key = (stage_idx, size)
+        self._recv_attn_buffers: dict[tuple[int, tuple[int, ...]], torch.Tensor] = {}
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -307,9 +309,11 @@ class P2PAFDConnector(AFDConnectorBase):
                 and ref_tensor.dtype == tensor_metadata.dtype
                 and ref_tensor.device == tensor_metadata.device
             ):
+                logger.info(f"jcz _recv_hidden_states ref_tensor is not None:{ref_tensor.shape}")
                 hidden_states = ref_tensor
             else:
                 # Note: If using cudagraph, this branch should not be taken
+                logger.info("jcz _recv_hidden_states ref_tensor is None")
                 hidden_states = torch.empty(
                     tuple(size),
                     dtype=tensor_metadata.dtype,
@@ -348,6 +352,32 @@ class P2PAFDConnector(AFDConnectorBase):
                 self.config.model_config.dtype,
                 torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
             )
+
+        # When graph capturing, pre-allocate fixed recv buffers so each recv writes
+        # into the same buffer (required for CUDA graph capture).
+        # Key is (stage_idx, meta.size) so different shapes get separate buffers.
+        logger.info(f"jcz update_state_from_dp_metadata is_graph_capturing:{is_graph_capturing}")
+        if is_graph_capturing:
+            for stage_idx in range(num_of_stages):
+                meta = self._tensor_metadata_list[stage_idx]
+                buffer_key = (stage_idx, tuple(meta.size))
+                existing = self._recv_attn_buffers.get(buffer_key)
+                if (
+                    existing is not None
+                    and existing.shape == meta.size
+                    and existing.dtype == meta.dtype
+                    and existing.device == meta.device
+                ):
+                    logger.info(f"jcz update_state_from_dp_metadata existing is not None:{existing.shape} {buffer_key}")
+                    continue
+                logger.info(f"jcz update_state_from_dp_metadata existing is None:{buffer_key}")
+                self._recv_attn_buffers[buffer_key] = torch.empty(
+                    tuple(meta.size),
+                    dtype=meta.dtype,
+                    device=meta.device,
+                )
+        # When not capturing, we do not clear _recv_attn_buffers so that
+        # replayed graphs still have valid buffer addresses to write into.
 
     # -------------------------------------------------------------------------
     #                                attn -> ffn
@@ -406,12 +436,20 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         Called by the FFN side to receive intermediate tensors from ATTN.
         Handles receiving and possibly dispatching tensors.
+        When graph capturing, recv uses fixed pre-allocated buffers so the graph
+        can be replayed without dynamic allocation.
         """
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
+        ref_tensor = None
+        if getattr(self, "is_graph_capturing", False):
+            meta = self._tensor_metadata_list[ubatch_idx]
+            buffer_key = (ubatch_idx, tuple(meta.size))
+            ref_tensor = self._recv_attn_buffers.get(buffer_key)
         hidden_states = self._recv_hidden_states(
             src,
             self.a2e_group,
             self._tensor_metadata_list[ubatch_idx],
+            ref_tensor=ref_tensor,
         )
 
         # TODO(jcz): remove this after.
