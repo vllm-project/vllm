@@ -198,6 +198,14 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
                 "quant_method": "fp8",
                 "activation_scheme": "dynamic" if is_dynamic else "static",
             }
+        elif (
+            str(quantization.get("quant_method", "")).lower().replace("_", "-")
+            == "compressed-tensors"
+        ):
+            # Pass through compressed-tensors config, while normalizing
+            # quant_method to the canonical community spelling.
+            quantization["quant_method"] = "compressed-tensors"
+            config["quantization_config"] = quantization
         else:
             raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
