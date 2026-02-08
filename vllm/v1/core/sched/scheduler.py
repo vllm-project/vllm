@@ -213,6 +213,7 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
+        self.spec_decoding_stats_all = None
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             self.spec_decoding_stats_all = SpecDecodingStats.new(self.num_spec_tokens)

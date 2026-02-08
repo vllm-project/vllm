@@ -106,14 +106,7 @@ def parse_itl_from_dataframe(result_df):
 
 
 def run_profiling_sweep(args):
-    """Run profiling benchmarks using vllm bench sweep serve.
-
-    This replaces the custom profiling_client/profiling_server by leveraging
-    the existing vllm bench sweep serve utility which handles:
-    - Server lifecycle management (start, wait-for-ready, stop)
-    - Cartesian product of serve_params x bench_params
-    - Result saving and aggregation
-    """
+    """Run profiling benchmarks using vllm bench sweep serve."""
     # Base serve command (static params shared across all serve configs)
     serve_cmd = [
         "vllm", "serve", args.model_dir,
