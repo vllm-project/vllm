@@ -320,7 +320,7 @@ def test_attention_quant_pattern(
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{current_platform.device_type}:0")
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 

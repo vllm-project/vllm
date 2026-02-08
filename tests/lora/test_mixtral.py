@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -31,10 +30,11 @@ def do_sample(
 
 
 @pytest.mark.parametrize("tp_size", [4])
+@pytest.mark.skipif(current_platform.is_xpu(), reason="will hang on xpu")
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
     if (
-        torch.cuda.device_count() < tp_size
+        current_platform.device_count() < tp_size
         and tp_size > 1
         and current_platform.is_cuda_alike()
     ):
