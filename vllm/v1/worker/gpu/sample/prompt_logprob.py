@@ -36,7 +36,7 @@ class PromptLogprobsWorker:
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         # [max_num_reqs, max_model_len]
-        prefill_token_ids: torch.Tensor,
+        request_token_ids: torch.Tensor,
         # [max_num_reqs]
         num_computed_tokens: torch.Tensor,
         # [max_num_reqs]
@@ -70,7 +70,7 @@ class PromptLogprobsWorker:
             input_batch.query_start_loc,
             input_batch.idx_mapping,
             num_computed_tokens,
-            prefill_token_ids,
+            request_token_ids,
         )
         # Compute the prompt logprobs.
         prompt_logprobs, prompt_ranks = compute_prompt_logprobs_with_chunking(
@@ -132,8 +132,8 @@ def _prompt_logprobs_token_ids_kernel(
     query_start_loc_ptr,
     idx_mapping_ptr,
     num_computed_tokens_ptr,
-    prefill_token_ids_ptr,
-    prefill_token_ids_stride,
+    request_token_ids_ptr,
+    request_token_ids_stride,
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
@@ -151,8 +151,8 @@ def _prompt_logprobs_token_ids_kernel(
         # because the logprob is computed for the next token.
         target_pos = num_computed_tokens + 1 + block
         token_ids = tl.load(
-            prefill_token_ids_ptr
-            + req_state_idx * prefill_token_ids_stride
+            request_token_ids_ptr
+            + req_state_idx * request_token_ids_stride
             + target_pos,
             mask=mask,
         )
@@ -166,7 +166,7 @@ def get_prompt_logprobs_token_ids(
     query_start_loc: torch.Tensor,
     idx_mapping: torch.Tensor,
     num_computed_tokens: torch.Tensor,
-    prefill_token_ids: torch.Tensor,
+    request_token_ids: torch.Tensor,
 ) -> torch.Tensor:
     token_ids = torch.empty(num_tokens, dtype=torch.int64, device=idx_mapping.device)
     num_reqs = idx_mapping.shape[0]
@@ -175,8 +175,8 @@ def get_prompt_logprobs_token_ids(
         query_start_loc,
         idx_mapping,
         num_computed_tokens,
-        prefill_token_ids,
-        prefill_token_ids.stride(0),
+        request_token_ids,
+        request_token_ids.stride(0),
         BLOCK_SIZE=1024,
     )
     return token_ids

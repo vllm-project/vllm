@@ -27,17 +27,20 @@ class RequestState:
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
 
-        self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.prompt_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
         # To save GPU memory, we use UVA instead of GPU for this tensor.
-        self.prefill_token_ids = StagedWriteTensor(
+        self.request_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32,
             device=device,
             uva_instead_of_gpu=True,
         )
         self.prefill_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        # Number of output tokens generated after prefill.
+        # actual output len = (prefill_len - prompt_len) + output_len
+        self.output_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
 
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -72,7 +75,7 @@ class RequestState:
         self,
         req_id: str,
         prompt_len: int,
-        prefill_token_ids: list[int],
+        request_token_ids: list[int],
         num_computed_tokens: int,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
@@ -80,19 +83,22 @@ class RequestState:
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
 
-        self.prompt_len[req_idx] = prompt_len
-        prefill_len = len(prefill_token_ids)
+        self.prompt_len.np[req_idx] = prompt_len
+        prefill_len = len(request_token_ids)
         assert prefill_len >= prompt_len, (
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.prefill_token_ids.stage_write(req_idx, 0, prefill_token_ids)
+        self.output_len.np[req_idx] = 0
+        self.request_token_ids.stage_write(req_idx, 0, request_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
     def apply_staged_writes(self) -> None:
+        self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
-        self.prefill_token_ids.apply_write()
+        self.output_len.copy_to_uva()
+        self.request_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
     def remove_request(self, req_id: str) -> None:
