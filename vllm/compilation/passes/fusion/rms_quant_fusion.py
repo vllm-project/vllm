@@ -121,6 +121,7 @@ class RMSNormQuantPattern:
         key: FusedRMSQuantKey,
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
+        is_tma_aligned: bool = False,
     ) -> None:
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
@@ -136,7 +137,10 @@ class RMSNormQuantPattern:
             else MatcherFusedAddRMSNorm(epsilon)
         )
         self.quant_matcher = MatcherQuantFP8(
-            key.quant, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            key.quant,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=is_tma_aligned,
         )
 
 
@@ -274,7 +278,11 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            epsilon,
+            key,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=False,
         )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -336,7 +344,11 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         )
         self.group_shape = group_shape
         super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
+            epsilon,
+            key,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=False,
         )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -378,6 +390,188 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             pattern,
             replacement,
             self.rmsnorm_matcher.inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class FusedAddRMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+        is_e8m0: bool = False,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        self.is_e8m0 = is_e8m0
+        super().__init__(
+            epsilon,
+            key,
+            has_col_major_scales=True,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=True,
+        )
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+            result = torch.empty(
+                result_rms.shape,
+                device=result_rms.device,
+                dtype=self.quant_matcher.quant_key.dtype,
+            )
+            assert scale is not None
+            finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
+            fp8_min = finfo.min
+            fp8_max = finfo.max
+
+            _, result, scale = auto_functionalized(
+                self.quant_matcher.QUANT_OP,
+                input=result_rms,
+                output_q=result,
+                output_s=scale,
+                group_size=self.quant_matcher.quant_key.scale.group_shape[1],
+                eps=1e-10,
+                fp8_min=fp8_min,
+                fp8_max=fp8_max,
+                scale_ue8m0=self.quant_matcher.is_e8m0,
+            )
+
+            return result, residual, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=residual,
+                group_size=self.group_shape[1],
+                is_scale_transposed=True,
+            )
+
+            # result, residual, scale
+            return at[1], at[3], at[2]
+
+        scale = self.quant_matcher.empty_f32(1, 1)
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.rmsnorm_matcher.inputs() + [scale],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class RMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+        is_e8m0: bool = False,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        super().__init__(
+            epsilon,
+            key,
+            has_col_major_scales=True,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=True,
+        )
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms = self.rmsnorm_matcher(input, weight)
+            result = torch.empty(
+                result_rms.shape,
+                device=result_rms.device,
+                dtype=self.quant_matcher.quant_key.dtype,
+            )
+            assert scale is not None
+            finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
+            fp8_min = finfo.min
+            fp8_max = finfo.max
+
+            _, result, scale = auto_functionalized(
+                self.quant_matcher.QUANT_OP,
+                input=result_rms,
+                output_q=result,
+                output_s=scale,
+                group_size=self.quant_matcher.quant_key.scale.group_shape[1],
+                eps=1e-10,
+                fp8_min=fp8_min,
+                fp8_max=fp8_max,
+                scale_ue8m0=self.quant_matcher.is_e8m0,
+            )
+
+            return result, scale
+
+        def replacement(
+            input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=None,
+                group_size=self.group_shape[1],
+                is_scale_transposed=True,
+            )
+
+            # result, scale
+            return at[1], at[2]
+
+        scale = self.quant_matcher.empty_f32(1, 1)
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.rmsnorm_matcher.inputs() + [scale],
             pm.fwd_only,
             pm_pass,
         )
@@ -550,6 +744,22 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                                 is_e8m0=is_e8m0,
                             ).register(self.patterns)
 
+                            if has_col_major_scales:
+                                FusedAddRMSNormGroupTMAQuantPattern(
+                                    epsilon,
+                                    FP8_DTYPE,
+                                    group_shape=group_shape,
+                                    is_e8m0=is_e8m0,
+                                ).register(self.patterns)
+
+                                # Fuse rms_norm + fp8 group quant
+                                RMSNormGroupTMAQuantPattern(
+                                    epsilon,
+                                    FP8_DTYPE,
+                                    group_shape=group_shape,
+                                    is_e8m0=is_e8m0,
+                                ).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -567,4 +777,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
+            FusedAddRMSNormGroupTMAQuantPattern,
+            RMSNormGroupTMAQuantPattern,
         )
