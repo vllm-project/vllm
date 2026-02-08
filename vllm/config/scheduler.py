@@ -120,7 +120,7 @@ class SchedulerConfig:
     cache budget to at least temporarily store its embeddings for decoder execution).
 
     Increasing this enables more encoder embeddings to be reused across requests,
-    but this will also lead to a corresponding increase in memory usage.
+    but doing so also leads to a corresponding increase in memory usage.
 
     Note that the number of encoder embeddings might be smaller than the
     number of input tokens used to represent the multimodal input; see
