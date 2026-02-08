@@ -19,7 +19,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -2306,3 +2306,38 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_cache_hit_local_and_external():
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[2:]
+    req_id = "test"
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    top_blocks = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for i in range(10):
+        top_blocks.append(head.next_free_block)
+        head = head.next_free_block
+    cache_hit = KVCacheBlocks((top_blocks[:5], top_blocks[5:]))
+
+    _new_blocks = manager.allocate_slots(
+        make_request(req_id, [0] * (8 * block_size), block_size, sha256),
+        16,
+        5 * block_size,
+        cache_hit,
+        0,
+        2 * block_size,
+    )
+
+    req_blocks = manager.get_blocks(req_id)
+    req_block_ids = req_blocks.get_block_ids()
+    all_block_ids = req_block_ids[0] + req_block_ids[1]
+    assert len(set(all_block_ids)) == len(all_block_ids), "Block IDs are not unique"
