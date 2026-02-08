@@ -61,6 +61,8 @@ def _supports_routing_method(
     routing_method: RoutingMethodType,
 ) -> bool:
     """Monolithic kernels need to express router support."""
+    # NOTE(dbari): TopK routing could also be enabled, but need to validate models
+    # NOTE(dbari): Default is not implemented and should not be enabled until it is
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
         return routing_method in [
@@ -72,10 +74,8 @@ def _supports_routing_method(
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
             RoutingMethodType.Llama4,
-            # NOTE(mgoin): Disabled to investigate accuracy issues.
-            # See https://github.com/vllm-project/vllm/issues/33532
-            # RoutingMethodType.Renormalize,
-            # RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
         ]
     else:
         raise ValueError("Unsupported quantization scheme.")
@@ -302,6 +302,8 @@ def fi_trtllm_fp8_per_tensor_moe(
         per_act_token_quant=False,
     )
 
+    from flashinfer.fused_moe.core import ActivationType
+
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
 
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
@@ -323,6 +325,9 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        # TODO: Required for flashinfer==0.6.3, remove with update
+        # https://github.com/flashinfer-ai/flashinfer/pull/2508
+        activation_type=ActivationType.Swiglu,
     )
 
 
