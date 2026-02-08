@@ -129,8 +129,19 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
+            # The scheduler_metadata size is computed as:
+            #   metadata_size = scheduler_needs_semaphore + b_rounded *
+            #   num_prepare_batch_vectors
+            # where b_rounded = round_up(batch_size, 4) and
+            # num_prepare_batch_vectors can be up to 4
+            # (use_prepare_varlen + use_dynamic_split + varlen_sort_batches
+            # + head_swizzle). We allocate for the worst case to avoid buffer
+            # overflows.
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            max_num_seqs_rounded = (max_num_seqs + 3) // 4 * 4
+            max_scheduler_metadata_size = 1 + max_num_seqs_rounded * 4
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs + 1,
+                max_scheduler_metadata_size,
                 dtype=torch.int32,
                 device=self.device,
             )
