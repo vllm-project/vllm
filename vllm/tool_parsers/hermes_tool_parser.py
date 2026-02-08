@@ -297,7 +297,7 @@ class Hermes2ProToolParser(ToolParser):
                             json.decoder.JSONDecodeError,
                         ):
                             pass
-                    else:
+                    if not self.prev_tool_call_arr:
                         logger.debug("attempting to close tool call, but no tool call")
                         return None
 
