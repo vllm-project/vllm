@@ -1036,8 +1036,12 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+            if not scheduled_in_prev_step and self.scheduler_config.async_scheduling:
+                num_out = req.num_output_tokens + req.num_output_placeholders
+                if num_out > 0:
+                    out_token_ids = req.output_token_ids.copy()
+                    out_token_ids.extend([-1] * req.num_output_placeholders)
+                    all_token_ids[req_id] = out_token_ids
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
