@@ -91,6 +91,14 @@ class LogitsProcessor(ABC):
         """
         raise NotImplementedError
 
+    def needs_output_token_ids(self) -> bool:
+        """True if this logits processor needs access to output token IDs.
+
+        Override and return True if the processor needs to read the actual
+        generated token IDs (not just their count).
+        """
+        return False
+
     @abstractmethod
     def update_state(
         self,
