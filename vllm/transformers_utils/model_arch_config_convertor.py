@@ -242,6 +242,7 @@ class ModelArchConfigConvertorBase:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
+            "longcat_flash_ngram",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
         ):
@@ -255,6 +256,28 @@ class ModelArchConfigConvertorBase:
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False
+
+    def _get_ngram_neighbor_num(self) -> int | None:
+        value = getattr(self.hf_text_config, "emb_neighbor_num", None)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def uses_ngram_embedding(self) -> bool:
+        n = self._get_ngram_neighbor_num()
+        if n is None or n < 2:
+            return False
+        return all(
+            getattr(self.hf_text_config, name, None) is not None
+            for name in ("emb_split_num", "ngram_vocab_size_ratio")
+        )
+
+    def get_ngram_context_len(self) -> int:
+        n = self._get_ngram_neighbor_num()
+        return n - 1 if n is not None and n >= 2 else 0
 
     def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
         derived_max_model_len = float("inf")
@@ -305,6 +328,8 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
+            uses_ngram_embedding=self.uses_ngram_embedding(),
+            ngram_context_len=self.get_ngram_context_len(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
 

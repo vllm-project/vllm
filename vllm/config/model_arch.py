@@ -53,5 +53,11 @@ class ModelArchitectureConfig:
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""
 
+    uses_ngram_embedding: bool
+    """Whether the model uses N-gram embeddings."""
+
+    ngram_context_len: int
+    """Context length for N-gram embeddings (N-1)."""
+
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""

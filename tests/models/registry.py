@@ -360,6 +360,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "LongcatFlashForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
     ),
+    "LongcatFlashNgramForCausalLM": _HfExamplesInfo(
+        "meituan-longcat/LongCat-Flash-Lite",
+        trust_remote_code=True,
+        min_transformers_version="4.57.6",
+    ),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",
