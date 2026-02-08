@@ -104,6 +104,17 @@ def materialize_layer(layer: torch.nn.Module) -> None:
             setattr(layer, name, materialize_meta_tensor(tensor))
 
 
+def materialize_layer_tensors_with_device_meta(layer: torch.nn.Module) -> None:
+    """Materialize all meta tensors in a layer to actual tensors."""
+    if layer.__class__.__name__ in SKIP_MODULES:
+        return
+
+    for name, tensor in get_layer_tensors(layer).items():
+        if name in SKIP_TENSORS or tensor.device != torch.device("meta"):
+            continue
+        setattr(layer, name, materialize_meta_tensor(tensor))
+
+
 class MetaCopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
