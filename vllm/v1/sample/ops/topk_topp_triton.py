@@ -5,6 +5,7 @@ Combined Top-K and Top-P Triton kernels.
 
 Based on the paper "Qrita: High-performance Top-k and Top-p Algorithm for GPUs
 using Pivot-based Truncation and Selection" By Park et al.
+(https://arxiv.org/abs/2602.01518)
 
 """
 
