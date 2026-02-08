@@ -12,64 +12,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
 
-
-@triton.jit
-def _get_lora_id(
-    lora_ids,
-    token_lora_mapping_ptr,
-    lora_idx,
-    pid_m,
-    top_k_num,
-    naive_block_assignment: tl.constexpr,
-):
-    """Returns lora_id"""
-    if naive_block_assignment:
-        token_idx = pid_m // top_k_num
-        return tl.load(token_lora_mapping_ptr + token_idx)
-    else:
-        return tl.load(lora_ids + lora_idx)
-
-
-@triton.jit
-def _get_expert_id(
-    expert_ids_ptr,
-    lora_id,
-    pid_m,
-    stride_el,
-    max_loras,
-    naive_block_assignment: tl.constexpr,
-):
-    """Returns expert_id"""
-    if naive_block_assignment:
-        return tl.load(expert_ids_ptr + pid_m)
-    else:
-        ind = lora_id * stride_el + pid_m
-        return tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
-
-
-@triton.jit
-def _get_token_offs(
-    sorted_token_ids_ptr,
-    lora_id,
-    pid_m,
-    offs,
-    stride_tl,
-    max_loras,
-    num_valid_tokens,
-    naive_block_assignment: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-):
-    """Returns token offsets"""
-    if naive_block_assignment:
-        return tl.where(offs == 0, pid_m, num_valid_tokens)
-    else:
-        offs_token_id = pid_m * BLOCK_SIZE_M + offs
-        token_ind = stride_tl * lora_id + offs_token_id
-        return tl.load(
-            sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
-        )
-
-
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
@@ -94,31 +36,10 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     return _LORA_PTR_DICT.get(key)
 
 
-def _adjust_kernel_inputs(
-    num_active_loras: int,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-):
-    """
-    helper function to adjust kernel inputs when sorted_token_ids is None
-    """
-    if sorted_token_ids is None:
-        stride_tl = 0
-        stride_el = 0
-        grid_lora_dim = 1
-    else:
-        stride_tl = sorted_token_ids.stride(0)
-        stride_el = expert_ids.stride(0)
-        grid_lora_dim = num_active_loras
-    return grid_lora_dim, stride_tl, stride_el
-
-
 @triton.jit(
     do_not_specialize=[
         "num_valid_tokens",
         "EM",
-        "stride_tl",
-        "stride_el",
         "slice_a_size",
         "slice_c_size",
     ]
@@ -132,6 +53,7 @@ def _fused_moe_lora_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     token_lora_mapping_ptr,
+    lora_ids_ptr,  # Mapping from lora_slot to lora_id
     # Matrix dimensions
     N,
     K,
@@ -139,9 +61,8 @@ def _fused_moe_lora_kernel(
     num_valid_tokens,
     num_experts,
     top_k_num,
-    lora_ids,
     adapter_enabled,
-    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
+    max_loras,  # Used for bounds checking lora_id in weight tensor
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -154,8 +75,6 @@ def _fused_moe_lora_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
-    stride_tl,
-    stride_el,
     slice_a_size,
     slice_c_size,
     # Meta-parameters
@@ -178,12 +97,22 @@ def _fused_moe_lora_kernel(
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
 ):
+    """
+    Fused MoE LoRA kernel using combined virtual expert indexing.
+
+    expert_ids contains combined (lora_id, expert_id) encoded as:
+        virtual_expert_id = lora_id * num_experts + expert_id
+
+    We decode:
+        lora_id = virtual_expert_id // num_experts
+        expert_id = virtual_expert_id % num_experts
+    """
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
+
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
-    # calculate pid_m,pid_n
-    lora_idx = tl.program_id(axis=2)
+    # calculate pid_m, pid_n
     pid_sk = pid % SPLIT_K
     pid_m_n = pid // SPLIT_K
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
@@ -196,55 +125,37 @@ def _fused_moe_lora_kernel(
     pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
     pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
-    offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    # Non-naive only: check num_tokens_post_padded for early exit
+    if not naive_block_assignment:
+        num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+        if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+            return
 
-    # Get lora_id
-    lora_id = _get_lora_id(
-        lora_ids,
-        token_lora_mapping_ptr,
-        lora_idx,
-        pid_m,
-        top_k_num,
-        naive_block_assignment,
-    )
+    # Get lora_id and expert_id based on mode
+    if naive_block_assignment:
+        token_idx = pid_m // top_k_num
+        lora_id = tl.load(token_lora_mapping_ptr + token_idx)
+        expert_id = tl.load(expert_ids_ptr + pid_m)
+    else:
+        # Non-naive mode: combined encoding uses lora_slot
+        # expert_ids contains: lora_slot * num_experts + expert_id
+        expert_id_lora = tl.load(expert_ids_ptr + pid_m)
+        if expert_id_lora == -1:
+            return
+        lora_slot = expert_id_lora // num_experts
+        expert_id = expert_id_lora % num_experts
+        # Decode lora_slot to actual lora_id using lora_ids lookup
+        lora_id = tl.load(lora_ids_ptr + lora_slot)
+
     if lora_id == -1:
+        return
+    if lora_id >= max_loras:
         return
     moe_enabled = tl.load(adapter_enabled + lora_id)
     if moe_enabled == 0:
         return
-    if lora_id >= max_loras:
-        return
-
-    # Non-naive only: check num_tokens_post_padded
-    if not naive_block_assignment:
-        num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id)
-        if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
-            return
-
-    # Get expert_id
-    expert_id = _get_expert_id(
-        expert_ids_ptr,
-        lora_id,
-        pid_m,
-        stride_el,
-        max_loras,
-        naive_block_assignment,
-    )
     if expert_id == -1:
         return
-
-    # Get token offsets
-    offs_token = _get_token_offs(
-        sorted_token_ids_ptr,
-        lora_id,
-        pid_m,
-        offs,
-        stride_tl,
-        max_loras,
-        num_valid_tokens,
-        naive_block_assignment,
-        BLOCK_SIZE_M,
-    )
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
@@ -253,9 +164,23 @@ def _fused_moe_lora_kernel(
     # remove modulo wrap-around
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+
+    # Get token offsets based on mode
+    offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    if naive_block_assignment:
+        # Naive mode: only first element is valid token, rest are masked out
+        offs_token = tl.where(offs == 0, pid_m, num_valid_tokens)
+    else:
+        # Non-naive mode: load from sorted_token_ids
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        offs_token = tl.load(
+            sorted_token_ids_ptr + offs_token_id,
+            offs_token_id < num_tokens_post_padded,
+            0,
+        )
     token_mask = offs_token < num_valid_tokens
 
-    # get a_ptrs,b_ptrs
+    # get a_ptrs, b_ptrs
     a_ptrs = cur_a_ptr + (
         offs_token[:, None] // token_mapping_factor * stride_am
         + offs_k[None, :] * stride_ak
@@ -335,8 +260,8 @@ def _fused_moe_lora_shrink(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     top_k_num: int,
-    lora_ids: torch.Tensor,
     adapter_enabled: torch.Tensor,
     ## adding for kernel
     device: torch.device,
@@ -354,7 +279,6 @@ def _fused_moe_lora_shrink(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -373,15 +297,11 @@ def _fused_moe_lora_shrink(
 
     b_ptr = _get_ptr(lora_a_stacked, device)
 
-    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
-        num_active_loras, sorted_token_ids, expert_ids
-    )
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        grid_lora_dim,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -392,13 +312,13 @@ def _fused_moe_lora_shrink(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         N,
         K,
         EM,
         num_tokens,
         num_experts,
         top_k_num,
-        lora_ids,
         adapter_enabled,
         lora_a_stacked[0].shape[0],
         qcurr_hidden_states.stride(0),
@@ -409,8 +329,6 @@ def _fused_moe_lora_shrink(
         w1_lora_a_stacked.stride(2),
         a_intermediate_cache1.stride(2),
         a_intermediate_cache1.stride(3),
-        stride_tl,
-        stride_el,
         slice_a_size=qcurr_hidden_states.numel(),
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
@@ -437,8 +355,8 @@ def _fused_moe_lora_expand(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     top_k_num: int,
-    lora_ids: torch.Tensor,
     adapter_enabled: torch.Tensor,
     ## adding for kernel
     device: torch.device,
@@ -458,7 +376,6 @@ def _fused_moe_lora_expand(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
@@ -485,14 +402,9 @@ def _fused_moe_lora_expand(
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
 
-    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
-        num_active_loras, sorted_token_ids, expert_ids
-    )
-
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        grid_lora_dim,
     )
 
     # Fast path: directly accumulate into the corresponding slice interval of output.
@@ -508,13 +420,13 @@ def _fused_moe_lora_expand(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         N,
         K,
         EM,
         num_tokens,
         num_experts,
         top_k_num,
-        lora_ids,
         adapter_enabled,
         lora_b_stacked[0].shape[0],
         a_intermediate_cache1.stride(0),
@@ -525,8 +437,6 @@ def _fused_moe_lora_expand(
         w1_lora_b_stacked.stride(2),
         out_view.stride(1),
         out_view.stride(2),
-        stride_tl,
-        stride_el,
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
@@ -556,10 +466,9 @@ def _fused_moe_lora(
     expert_ids: torch.Tensor,  # (max_loras, _ ,) or (num_tokens * top_k,)
     num_tokens_post_padded: torch.Tensor | None,  # (max_loras, )
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,  # Mapping from lora_slot to lora_id
     max_lora_rank: int,
     top_k_num: int,
-    lora_ids: torch.Tensor,
-    num_active_loras: int,
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
@@ -584,20 +493,9 @@ def _fused_moe_lora(
     if sorted_token_ids is None:
         assert expert_ids.dim() == 1
     else:
-        assert sorted_token_ids is not None
+        assert sorted_token_ids.dim() == 1
+        assert expert_ids.dim() == 1
         assert num_tokens_post_padded is not None
-        assert (
-            sorted_token_ids.dim()
-            == expert_ids.dim()
-            == topk_weights.dim()
-            == qcurr_hidden_states.dim()
-            == 2
-        )
-        assert (
-            sorted_token_ids.shape[0]
-            == expert_ids.shape[0]
-            == num_tokens_post_padded.shape[0]
-        )
     assert output.shape[0] == topk_weights.shape[0]
     assert top_k_num == topk_weights.shape[1]
     device = qcurr_hidden_states.device
@@ -610,8 +508,10 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
     assert shrink_block_size_m == expand_block_size_m
+    # EM: total token slots after block alignment padding
+    # sorted_token_ids is a 1D tensor of size EM
     EM = (
-        sorted_token_ids.shape[1]
+        sorted_token_ids.shape[0]
         if sorted_token_ids is not None
         else num_tokens * shrink_block_size_m
     )
@@ -632,8 +532,8 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
-        top_k_num,
         lora_ids,
+        top_k_num,
         adapter_enabled,
         ## adding for kernel
         device,
@@ -651,7 +551,6 @@ def _fused_moe_lora(
         shrink_num_warps,
         shrink_num_stages,
         shrink_split_k,
-        num_active_loras,
         mul_routed_weight,
         use_gdc=use_gdc,
     )
@@ -678,8 +577,8 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
-        top_k_num,
         lora_ids,
+        top_k_num,
         adapter_enabled,
         ## adding for kernel
         device,
@@ -699,7 +598,6 @@ def _fused_moe_lora(
         expand_num_warps,
         expand_num_stages,
         expand_split_k,
-        num_active_loras,
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
@@ -716,10 +614,9 @@ def _fused_moe_lora_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
+    lora_ids: torch.Tensor,
     max_lora_rank: int,
     top_k_num: int,
-    lora_ids: torch.Tensor,
-    num_active_loras: int,
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
@@ -751,8 +648,8 @@ def _fused_moe_lora_shrink_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
-    top_k_num: int,
     lora_ids: torch.Tensor,
+    top_k_num: int,
     adapter_enabled: torch.Tensor,
     device: torch.device,
     N: int,
@@ -769,7 +666,6 @@ def _fused_moe_lora_shrink_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -785,8 +681,8 @@ def _fused_moe_lora_expand_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor | None,
     token_lora_mapping: torch.Tensor,
-    top_k_num: int,
     lora_ids: torch.Tensor,
+    top_k_num: int,
     adapter_enabled: torch.Tensor,
     device: torch.device,
     N: int,
@@ -805,7 +701,6 @@ def _fused_moe_lora_expand_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
