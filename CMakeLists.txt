@@ -870,25 +870,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  # Only build W4A8 kernels if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
+  # Only build Cutlass W4AN kernels if we are building for something compatible with sm90a
+  cuda_archs_loose_intersection(W4AN_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4AN_ARCHS)
     set(SRCS
        "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
        "csrc/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
+       "csrc/quantization/cutlass_w4a8/w4a16_grouped_mm_entry.cu"
        "csrc/quantization/cutlass_w4a8/w4a8_utils.cu"
        )
 
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${W4A8_ARCHS}")
+      CUDA_ARCHS "${W4AN_ARCHS}")
 
     list(APPEND VLLM_EXT_SRC "${SRCS}")
 
-    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+    message(STATUS "Building W4A8 kernels for archs: ${W4AN_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
-        AND W4A8_ARCHS)
+        AND W4AN_ARCHS)
       message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
                      "later if you intend on running w4a16 quantized models on "

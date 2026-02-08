@@ -365,6 +365,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor)");
   // conditionally compiled so impl registration is in source file
 
+  // CUTLASS w4a16 grouped GEMM
+  ops.def(
+      "cutlass_w4a16_moe_mm("
+      "   Tensor! out_tensors,"
+      "   Tensor a_tensors,"
+      "   Tensor b_tensors,"
+      "   Tensor b_group_scales,"
+      "   int b_group_size,"
+      "   Tensor expert_offsets,"
+      "   Tensor problem_sizes,"
+      "   Tensor a_strides,"
+      "   Tensor b_strides,"
+      "   Tensor c_strides,"
+      "   Tensor group_scale_strides,"
+      "   str? maybe_schedule"
+      ") -> ()");
+  ops.def(
+      "cutlass_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
+      "Tensor)");
+  // conditionally compiled so impl registration is in source file
+
 #endif
 
   // Dequantization for GGML.
