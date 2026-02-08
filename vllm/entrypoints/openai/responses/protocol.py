@@ -394,6 +394,25 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
+    def normalize_tool_choice(cls, data):
+        """Tool Choice Default Normalization.
+
+        Ensures tool_choice="auto" is normalized to "none" when no tools are provided,
+        ensuring tool suppression mechanisms are applied.
+        """
+        tools = data.get("tools")
+        has_tools = tools is not None and isinstance(tools, list) and len(tools) > 0
+
+        if data.get("tool_choice") is None:
+            data["tool_choice"] = "auto" if has_tools else "none"
+        elif data.get("tool_choice") == "auto" and not has_tools:
+            # Normalize "auto" to "none" when no tools provided to trigger suppression
+            data["tool_choice"] = "none"
+
+        return data
+
+    @model_validator(mode="before")
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
         This ensures Pydantic can properly resolve union types in the input field.

@@ -614,13 +614,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
-        # if "tool_choice" is not specified but tools are provided,
-        # default to "auto" tool_choice
-        if "tool_choice" not in data and data.get("tools"):
-            data["tool_choice"] = "auto"
+        # Tool Choice Default Normalization
+        tools = data.get("tools")
+        has_tools = tools is not None and isinstance(tools, list) and len(tools) > 0
+
+        if data.get("tool_choice") is None:
+            data["tool_choice"] = "auto" if has_tools else "none"
+        elif data.get("tool_choice") == "auto" and not has_tools:
+            # Normalize "auto" to "none" when no tools provided to trigger suppression
+            data["tool_choice"] = "none"
 
         # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
+        if data.get("tool_choice") == "none":
             return data
 
         # if "tool_choice" is specified -- validation
