@@ -325,6 +325,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: torch.Tensor,
         handle_oov_mm_token: bool = False,
+        modality_types: list[str] | None = None,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -354,6 +355,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        modality_types: list[str] | None = None,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
