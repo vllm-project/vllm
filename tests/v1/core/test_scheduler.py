@@ -138,10 +138,10 @@ def test_schedule_multimodal_requests_one_batch():
 def test_schedule_multimodal_requests_multi_batch(
     encoder_budget_mult, encoder_cache_mult, chunk_mult, disable_chunked_mm_input
 ):
-    MM_ITEM_TOK_MULT = 4
+    MM_TOK_MULT = 4
     MAX_MM_ITEM_TOKS = 576
     NUM_TEXT_TOKS = 100
-    NUM_TOTAL_TOKS = NUM_TEXT_TOKS + MM_ITEM_TOK_MULT * MAX_MM_ITEM_TOKS
+    NUM_TOTAL_TOKS = NUM_TEXT_TOKS + MM_TOK_MULT * MAX_MM_ITEM_TOKS
 
     def build_req_mm_positions(n_mm_items: int):
         req_mm_positions = []
@@ -150,7 +150,7 @@ def test_schedule_multimodal_requests_multi_batch(
         for _ in range(n_mm_items):
             mm_position = PlaceholderRange(
                 offset=start_idx,
-                length=MM_ITEM_TOK_MULT * MAX_MM_ITEM_TOKS // n_mm_items,
+                length=MM_TOK_MULT * MAX_MM_ITEM_TOKS // n_mm_items,
             )
 
             req_mm_positions.append(mm_position)
@@ -160,10 +160,10 @@ def test_schedule_multimodal_requests_multi_batch(
         return req_mm_positions
 
     mm_positions = [
-        build_req_mm_positions(1 * MM_ITEM_TOK_MULT),
-        build_req_mm_positions(2 * MM_ITEM_TOK_MULT),
-        build_req_mm_positions(4 * MM_ITEM_TOK_MULT),
-        build_req_mm_positions(8 * MM_ITEM_TOK_MULT),
+        build_req_mm_positions(1 * MM_TOK_MULT),
+        build_req_mm_positions(2 * MM_TOK_MULT),
+        build_req_mm_positions(4 * MM_TOK_MULT),
+        build_req_mm_positions(8 * MM_TOK_MULT),
     ]
 
     max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
