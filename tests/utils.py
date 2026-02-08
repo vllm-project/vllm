@@ -128,6 +128,9 @@ class RemoteOpenAIServer:
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
         )
 
     def __init__(
@@ -189,6 +192,15 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
+        # Record GPU memory before server start so we know what
+        # "released" looks like.
+        self._pre_server_gpu_memory = self._get_gpu_memory_used()
+        if self._pre_server_gpu_memory is not None:
+            pre_gb = self._pre_server_gpu_memory / 1e9
+            print(
+                f"[RemoteOpenAIServer] GPU memory before server start: {pre_gb:.2f} GB"
+            )
+
         self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
@@ -198,26 +210,68 @@ class RemoteOpenAIServer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         pid = self.proc.pid
-        # Graceful shutdown
-        self.proc.terminate()
+
+        # Get the process group ID. Because we used
+        # start_new_session=True the pgid equals the server's pid.
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        # Phase 1: graceful SIGTERM to the entire process group
+        if pgid is not None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(pgid, signal.SIGTERM)
+                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
+        else:
+            self.proc.terminate()
+
         try:
             self.proc.wait(timeout=15)
             print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
+            # Phase 2: SIGKILL the entire process group
             print(
                 f"[RemoteOpenAIServer] Server {pid} did not respond "
-                "to SIGTERM, sending SIGKILL"
+                "to SIGTERM, sending SIGKILL to process group"
             )
-            self.proc.kill()
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+
             try:
-                self.proc.wait(timeout=5)
+                self.proc.wait(timeout=10)
                 print(f"[RemoteOpenAIServer] Server {pid} killed")
-            except subprocess.TimeoutExpired as err:
-                raise RuntimeError(
-                    f"[RemoteOpenAIServer] Failed to kill server process {pid}"
-                ) from err
-        # Wait for GPU memory to be released
+            except subprocess.TimeoutExpired:
+                # Phase 3: last resort - find and kill any orphaned children
+                self._kill_orphaned_children(pid)
+
+        # Wait for GPU memory to actually be *freed*, not just
+        # "stabilized at whatever level it's at".
         self._wait_for_gpu_memory_release()
+
+    def _kill_orphaned_children(self, parent_pid: int) -> None:
+        """Best-effort cleanup of any lingering child processes."""
+        try:
+            import psutil
+
+            parent = psutil.Process(parent_pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                print(
+                    f"[RemoteOpenAIServer] Killing orphaned child "
+                    f"pid={child.pid} name={child.name()}"
+                )
+                child.kill()
+            psutil.wait_procs(children, timeout=5)
+        except Exception as e:
+            # psutil may not be installed, or processes already gone
+            print(f"[RemoteOpenAIServer] Orphan cleanup failed: {e}")
+            # Fallback: try to kill by pgid one more time
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(parent_pid, signal.SIGKILL)
 
     def _get_gpu_memory_used(self) -> float | None:
         """Get total GPU memory used across all visible devices in bytes."""
@@ -244,10 +298,26 @@ class RemoteOpenAIServer:
             return None
         return None
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
-        """Poll GPU memory until it stabilizes, indicating cleanup is complete."""
+    def _wait_for_gpu_memory_release(self, timeout: float = 60.0):
+        """Wait for GPU memory to drop back toward pre-server levels.
+
+        Two-phase strategy:
+          1. Try to wait for memory to return close to pre-server baseline.
+          2. If that doesn't happen, fall back to waiting for stabilization
+             and log a warning (the next server might still OOM).
+        """
+        baseline = self._pre_server_gpu_memory
+        if baseline is None:
+            # Can't query GPU memory - nothing to do
+            return
+
+        # Allow up to 2 GiB overhead above baseline for driver/context state
+        # that may persist between server instances.
+        headroom_bytes = 2 * 1024 * 1024 * 1024
+        target = baseline + headroom_bytes
+
         start = time.time()
-        prev_used: float | None = None
+        last_used: float | None = None
         stable_count = 0
 
         while time.time() - start < timeout:
@@ -256,26 +326,49 @@ class RemoteOpenAIServer:
             if used is None:
                 return  # Can't query, assume ok
 
-            if prev_used is not None and abs(used - prev_used) < 100 * 1024 * 1024:
-                stable_count += 1
-                if stable_count >= 3:
-                    used_gb = used / 1e9
-                    print(
-                        f"[RemoteOpenAIServer] GPU memory stabilized "
-                        f"at {used_gb:.2f} GB"
-                    )
-                    return
-            else:
-                stable_count = 0
+            used_gb = used / 1e9
+            target_gb = target / 1e9
+            elapsed = time.time() - start
 
-            prev_used = used
-            time.sleep(0.1)
+            # Phase 1: memory dropped to near baseline - we're done.
+            if used <= target:
+                print(
+                    f"[RemoteOpenAIServer] GPU memory released to "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"in {elapsed:.1f}s"
+                )
+                return
 
-        last_reading = prev_used / 1e9 if prev_used is not None else 0.0
+            # Phase 2 (after 40s): fall back to stabilization check.
+            # This handles cases where another process is using GPU memory
+            # and we'll never reach baseline.
+            if elapsed > 40.0 and last_used is not None:
+                delta = abs(used - last_used)
+                if delta < 200 * 1024 * 1024:  # 200 MB
+                    stable_count += 1
+                    if stable_count >= 3:
+                        print(
+                            f"[RemoteOpenAIServer] WARNING: GPU memory "
+                            f"stabilized at {used_gb:.2f} GB "
+                            f"(target was {target_gb:.2f} GB). "
+                            f"Proceeding - next server may OOM."
+                        )
+                        return
+                else:
+                    stable_count = 0
+
+            last_used = used
+            time.sleep(1.0)
+
+        # Timeout - log clearly so CI failures are diagnosable
+        final_used = self._get_gpu_memory_used()
+        final_gb = final_used / 1e9 if final_used else 0.0
         raise RuntimeError(
-            f"[RemoteOpenAIServer] GPU memory did not stabilize within {timeout}s. "
-            f"Last reading: {last_reading:.2f} GB. "
-            "Child processes may still be holding GPU memory."
+            f"[RemoteOpenAIServer] GPU memory did not release within "
+            f"{timeout}s. Current: {final_gb:.2f} GB, "
+            f"target: {target / 1e9:.2f} GB, "
+            f"baseline: {baseline / 1e9:.2f} GB. "
+            f"Child processes may still be holding GPU memory."
         )
 
     def _poll(self) -> int | None:
