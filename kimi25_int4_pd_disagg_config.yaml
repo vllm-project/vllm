@@ -1,0 +1,166 @@
+# Kimi K2.5 INT4 P/D Disaggregated Inference with vLLM Sidecar and NIXL
+# Prefill: gang_size=4 (4 nodes x 2 GPUs = DP8) + Decode: gang_size=4 (4 nodes x 2 GPUs = DP8)
+#
+# Uses NixlConnector for KV cache transfer between prefill and decode services.
+# Based on: Inferact_int4_pd_disagg_raw_note.md (strictly matching raw note config)
+# Reference: ds_r1_gb200_disagg_nixl_vllm_sidecar.yaml
+
+server:
+  fbpkg: vllm-sidecar:prod/sidecar
+  num_of_gpus: 2
+  envs:
+    # Env vars
+    - VLLM_USE_FLASHINFER_MOE_INT4=1
+    - VLLM_NIXL_SIDE_CHANNEL_HOST=%((tw_task_ip_addr))%
+    - VLLM_NIXL_SIDE_CHANNEL_PORT=5600
+    # DOCKER_ENV (system-level vars passed to vLLM container for multi-node networking)
+    - DOCKER_ENV=HOME=/root/ NCCL_DEBUG=WARN SAFETENSORS_FAST_GPU=1 NVSHMEM_DEBUG=INFO NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=eth0 NVSHMEM_IB_GID_INDEX=3 NVSHMEM_IB_ENABLE_IBGDA=1 GLOO_SOCKET_IFNAME=eth0 NIXL_LOG_LEVEL=DEBUG UCX_TLS=all UCX_NET_DEVICES=eth0
+  flags:
+    # Sidecar arguments (required for RIFT)
+    - --port=%port.thrift%
+    - --vllm-port=%port.https%
+    - --podman-image=vmvm-registry.fbinfra.net/vllm/vllm-openai:cu130-aarch64-2b569e501
+    - --model-manifold-path=oss_models/tree/vllm/moonshotai/Kimi-K2.5
+    - --enable-gang-scheduling
+    # Router for P/D disagg
+    - --router-settings={"prefill_smc_tier":"$prefill_smc_tier"}
+    - --  # separator for vllm args
+    # vLLM serve arguments from raw note (decode)
+    - --tensor-parallel-size=1
+    - --data-parallel-size=%((gang_size*2))%
+    - --data-parallel-size-local=2
+    - --data-parallel-address=%((gang_leader_ip))%
+    - --data-parallel-rpc-port=13345
+    - --data-parallel-hybrid-lb
+    - --data-parallel-start-rank=%((gang_member_id*2))%
+    - --enable-expert-parallel
+    - --mm-encoder-tp-mode=data
+    - --tool-call-parser=kimi_k2
+    - --reasoning-parser=kimi_k2
+    - --trust-remote-code
+    - >-
+      --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both"}
+
+deployment:
+  tupperware:
+    attach_thrift_port_flag: false
+    entitlement: epp_mslinfrarift_m2139502956_t20_cic_gb200_186gb_hbm3e_nvlso_dsf_hp
+    tw_image_fbpkg: tupperware.image.sendstream.rift_docker_boot:prod
+    host_hardware_name: gb200
+    run_as_root: true
+    gang_size: 4
+    ports:
+      https: 8081
+    smc_tier:
+      aggregate: true
+      parent_tier: rift.graders
+      default_routing_config: rift.graders
+  mast:
+    attribution: <your_mast_attribution>
+    tw_image_fbpkg: tupperware.image.sendstream.rift_docker_boot:prod
+    task_count: 1
+    enable_ip_per_task: true
+    gang_size: 4
+    ports:
+      https: 8081
+    logical_server_sub_types:
+      - T20_CIC_GB200_186GB_HBM3E_NVLSO_DSF
+    smc_tier:
+      aggregate: true
+      parent_tier: rift.graders
+      default_routing_config: rift.graders
+
+dependencies:
+  prefill:
+    server:
+      fbpkg: vllm-sidecar:prod/sidecar
+      num_of_gpus: 2
+      envs:
+        # Env vars
+        - VLLM_USE_FLASHINFER_MOE_INT4=1
+        - VLLM_NIXL_SIDE_CHANNEL_HOST=%((tw_task_ip_addr))%
+        - VLLM_NIXL_SIDE_CHANNEL_PORT=5600
+        # DOCKER_ENV (system-level vars passed to vLLM container for multi-node networking)
+        - DOCKER_ENV=HOME=/root/ NCCL_DEBUG=WARN SAFETENSORS_FAST_GPU=1 NVSHMEM_DEBUG=INFO NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=eth0 NVSHMEM_IB_GID_INDEX=3 NVSHMEM_IB_ENABLE_IBGDA=1 GLOO_SOCKET_IFNAME=eth0 NIXL_LOG_LEVEL=DEBUG UCX_TLS=all UCX_NET_DEVICES=eth0
+      flags:
+        # Sidecar arguments (required for RIFT)
+        - --port=%port.thrift%
+        - --vllm-port=%port.https%
+        - --podman-image=vmvm-registry.fbinfra.net/vllm/vllm-openai:cu130-aarch64-2b569e501
+        - --model-manifold-path=oss_models/tree/vllm/moonshotai/Kimi-K2.5
+        - --enable-gang-scheduling
+        - --  # separator for vllm args
+        # vLLM serve arguments from raw note (prefill)
+        - --tensor-parallel-size=1
+        - --data-parallel-size=%((gang_size*2))%
+        - --data-parallel-size-local=2
+        - --data-parallel-address=%((gang_leader_ip))%
+        - --data-parallel-rpc-port=13345
+        - --data-parallel-hybrid-lb
+        - --data-parallel-start-rank=%((gang_member_id*2))%
+        - --enable-expert-parallel
+        - --mm-encoder-tp-mode=data
+        - --tool-call-parser=kimi_k2
+        - --reasoning-parser=kimi_k2
+        - --trust-remote-code
+        - >-
+          --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both"}
+    deployment:
+      tupperware:
+        attach_thrift_port_flag: false
+        entitlement: epp_mslinfrarift_m2139502956_t20_cic_gb200_186gb_hbm3e_nvlso_dsf_hp
+        tw_image_fbpkg: tupperware.image.sendstream.rift_docker_boot:prod
+        host_hardware_name: gb200
+        run_as_root: true
+        gang_size: 4
+        ports:
+          https: 8081
+        smc_tier:
+          aggregate: true
+          parent_tier: rift.graders
+          default_routing_config: rift.graders
+      mast:
+        attribution: <your_mast_attribution>
+        tw_image_fbpkg: tupperware.image.sendstream.rift_docker_boot:prod
+        task_count: 1
+        enable_ip_per_task: true
+        gang_size: 4
+        ports:
+          https: 8081
+        logical_server_sub_types:
+          - T20_CIC_GB200_186GB_HBM3E_NVLSO_DSF
+        smc_tier:
+          aggregate: true
+          parent_tier: rift.graders
+          default_routing_config: rift.graders
+
+eval:
+  command:
+    program: gen_ai_evals_ip
+    args:
+      - --tasks=gsm8k.8_shot.1_gen
+      - --dataset-dir=manifold://llm_evals/tree/tasks
+      - --tokenizer-path=manifold://cindy/tree/MOE/17b_moe_phase2/l4_200k_base
+      - --tokenizer-version=pretrain_tiktoken
+      - --max-concurrent-requests=64
+      - --untokenized-prompt-requests
+      - --request-timeout-ms=100000000
+      - --max-samples=10
+      - --top-p=1.0
+      - --top-k=0
+      - --request-chat-mode=true
+      - --disable-streaming
+
+bench:
+  use_command_output_metrics: true
+  command:
+    args:
+      - --num-sessions=-1
+      - --fixed-input=7000
+      - --fixed-output=7000
+      - --force-no-stop-token
+      - --benchmark-mode
+      - --report-perf-details
+      - --prompt-type=chat_history
+      - --spawn-rate=4
+      - --predict-api=predict
