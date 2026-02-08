@@ -694,6 +694,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     for part in content:
                         if isinstance(part, dict):
                             part_type = part.get("type")
+                            # Infer type for content parts without an explicit 'type' field
+                            if part_type is None:
+                                if "image_url" in part or "image_pil" in part:
+                                    part_type = "image_url"
+                                elif "image_embeds" in part:
+                                    part_type = "image_embeds"
+                                elif "audio_url" in part:
+                                    part_type = "audio_url"
+                                elif "input_audio" in part:
+                                    part_type = "input_audio"
+                                elif "audio_embeds" in part:
+                                    part_type = "audio_embeds"
+                                elif "video_url" in part:
+                                    part_type = "video_url"
+
                             # Reject any content type that is not text
                             if part_type and part_type != "text":
                                 raise VLLMValidationError(
