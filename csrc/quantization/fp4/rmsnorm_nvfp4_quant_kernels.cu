@@ -38,14 +38,19 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
   __shared__ float s_rms_inv;
 
-  const int32_t num_k_tiles = (hidden_size + 63) / 64;
+  // SF count along K, padded to a multiple of 4 (swizzle tile requirement).
+  const int sf_k_unpadded = hidden_size / CVT_FP4_SF_VEC_SIZE;
+  static constexpr int SF_KTILE_SIZE = 4;
+  const int sf_k_padded =
+      ((sf_k_unpadded + SF_KTILE_SIZE - 1) / SF_KTILE_SIZE) * SF_KTILE_SIZE;
+  const int32_t num_k_tiles = sf_k_padded / SF_KTILE_SIZE;
   const float global_scale = (scale == nullptr) ? 1.0f : scale[0];
   const int vecs_per_row = hidden_size / CVT_FP4_ELTS_PER_THREAD;
 
-  // SF layout requires rows padded to 128 and cols padded to 64
+  // SF layout requires rows padded to 128 and SF cols padded to 4.
   const int sf_rows = (num_tokens + 127) / 128 * 128;
-  const int sf_cols = (hidden_size + 63) / 64 * 64;
-  const int vecs_per_row_padded = sf_cols / CVT_FP4_ELTS_PER_THREAD;
+  const int vecs_per_row_padded =
+      sf_k_padded * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
 
   for (int row_idx = blockIdx.x; row_idx < sf_rows; row_idx += gridDim.x) {
     const bool valid_row = row_idx < num_tokens;
@@ -155,14 +160,19 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
   __shared__ float s_rms_inv;
 
-  const int32_t num_k_tiles = (hidden_size + 63) / 64;
+  // SF count along K, padded to a multiple of 4 (swizzle tile requirement).
+  const int sf_k_unpadded = hidden_size / CVT_FP4_SF_VEC_SIZE;
+  static constexpr int SF_KTILE_SIZE = 4;
+  const int sf_k_padded =
+      ((sf_k_unpadded + SF_KTILE_SIZE - 1) / SF_KTILE_SIZE) * SF_KTILE_SIZE;
+  const int32_t num_k_tiles = sf_k_padded / SF_KTILE_SIZE;
   const float global_scale = (scale == nullptr) ? 1.0f : scale[0];
   const int vecs_per_row = hidden_size / CVT_FP4_ELTS_PER_THREAD;
 
-  // SF layout requires rows padded to 128 and cols padded to 64
+  // SF layout requires rows padded to 128 and SF cols padded to 4.
   const int sf_rows = (num_tokens + 127) / 128 * 128;
-  const int sf_cols = (hidden_size + 63) / 64 * 64;
-  const int vecs_per_row_padded = sf_cols / CVT_FP4_ELTS_PER_THREAD;
+  const int vecs_per_row_padded =
+      sf_k_padded * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
 
   for (int row_idx = blockIdx.x; row_idx < sf_rows; row_idx += gridDim.x) {
     const bool valid_row = row_idx < num_tokens;
@@ -203,19 +213,18 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
         // Write back updated residual
         if constexpr (CVT_FP4_PACK16) {
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 4] =
-              reinterpret_cast<uint64_t*>(&added_vec)[0];
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 4 + 1] =
-              reinterpret_cast<uint64_t*>(&added_vec)[1];
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 4 + 2] =
-              reinterpret_cast<uint64_t*>(&added_vec)[2];
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 4 + 3] =
-              reinterpret_cast<uint64_t*>(&added_vec)[3];
+          // 32 bytes = 2 x uint4 (128-bit)
+          *(reinterpret_cast<uint4*>(row_residual +
+                                     col_idx * CVT_FP4_ELTS_PER_THREAD)) =
+              *(reinterpret_cast<const uint4*>(&added_vec));
+          *(reinterpret_cast<uint4*>(row_residual +
+                                     col_idx * CVT_FP4_ELTS_PER_THREAD + 8)) =
+              *(reinterpret_cast<const uint4*>(&added_vec) + 1);
         } else {
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 2] =
-              reinterpret_cast<uint64_t*>(&added_vec)[0];
-          reinterpret_cast<uint64_t*>(row_residual)[col_idx * 2 + 1] =
-              reinterpret_cast<uint64_t*>(&added_vec)[1];
+          // 16 bytes = 1 x uint4 (128-bit)
+          *(reinterpret_cast<uint4*>(row_residual +
+                                     col_idx * CVT_FP4_ELTS_PER_THREAD)) =
+              *(reinterpret_cast<const uint4*>(&added_vec));
         }
       }
     }
@@ -310,10 +319,16 @@ void rms_norm_nvfp4_quant_sm1xxa(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  dim3 block(std::min(hidden_size / ELTS_PER_THREAD, 1024));
+
+  // Use same block size convention as fused_fp8 kernels for consistency
+  // Kernel internally handles the case where blockDim.x > vecs_per_row
+  dim3 block(std::min(hidden_size, 1024));
   int const num_blocks_per_sm =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
-  dim3 grid(std::min(num_tokens, multi_processor_count * num_blocks_per_sm));
+  // SF layout pads rows to 128, so we need to process those padded rows too
+  int effective_rows = (num_tokens + 127) / 128 * 128;
+  dim3 grid(
+      std::min(effective_rows, multi_processor_count * num_blocks_per_sm));
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "rms_norm_nvfp4_quant_kernel", [&] {
@@ -352,10 +367,16 @@ void fused_add_rms_norm_nvfp4_quant_sm1xxa(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  dim3 block(std::min(hidden_size / ELTS_PER_THREAD, 1024));
+
+  // Use same block size convention as fused_fp8 kernels for consistency
+  // Kernel internally handles the case where blockDim.x > vecs_per_row
+  dim3 block(std::min(hidden_size, 1024));
   int const num_blocks_per_sm =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
-  dim3 grid(std::min(num_tokens, multi_processor_count * num_blocks_per_sm));
+  // SF layout pads rows to 128, so we need to process those padded rows too
+  int effective_rows = (num_tokens + 127) / 128 * 128;
+  dim3 grid(
+      std::min(effective_rows, multi_processor_count * num_blocks_per_sm));
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "fused_add_rms_norm_nvfp4_quant_kernel", [&] {
