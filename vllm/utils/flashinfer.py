@@ -758,62 +758,10 @@ def register_scales_for_trtllm_fp8_per_tensor_moe(
     layer.output2_scales_scalar = g2_alphas
 
 
-def apply_fi_trtllm_fp8_per_tensor_moe(
-    layer: torch.nn.Module,
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    routing_bias: torch.Tensor | None,
-    top_k: int,
-    num_expert_group: int | None,
-    topk_group: int | None,
-    global_num_experts: int,
-    apply_router_weight_on_input: bool,
-) -> torch.Tensor:
-    from flashinfer.fused_moe import RoutingMethodType
-
-    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
-    from vllm.model_executor.models.llama4 import Llama4MoE
-
-    # Added to the layer by: register_scales_for_trtllm_fp8_per_tensor_moe
-    assert (
-        hasattr(layer, "output1_scales_scalar")
-        and hasattr(layer, "output1_scales_gate_scalar")
-        and hasattr(layer, "output2_scales_scalar")
-    )
-
-    if layer.routing_method_type == RoutingMethodType.Llama4:
-        assert (
-            not layer.renormalize
-            and layer.custom_routing_function == Llama4MoE.custom_routing_function
-        ), (
-            "FusedMoE flashinfer kernels with Llama4 routing method are only "
-            "supported for Llama4"
-        )
-    else:
-        assert layer.custom_routing_function is None, (
-            "Custom routing function is only supported for Llama4"
-        )
-
-    return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
-        routing_logits=router_logits,
-        routing_bias=routing_bias,
-        hidden_states=hidden_states,
-        input_scale=layer.w13_input_scale,
-        gemm1_weights=layer.w13_weight,
-        gemm2_weights=layer.w2_weight,
-        output1_scales_scalar=layer.output1_scales_scalar,
-        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
-        output2_scales_scalar=layer.output2_scales_scalar,
-        num_experts=global_num_experts,
-        top_k=top_k,
-        num_expert_group=num_expert_group,
-        topk_group=topk_group,
-        intermediate_size=layer.intermediate_size_per_partition,
-        local_expert_offset=layer.ep_rank * layer.local_num_experts,
-        local_num_experts=layer.local_num_experts,
-        use_routing_scales_on_input=apply_router_weight_on_input,
-        routing_method_type=layer.routing_method_type,
-    )
+# Import from the new unified location
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (  # noqa: F401
+    apply_fi_trtllm_fp8_per_tensor_moe,
+)
 
 
 def make_fp8_moe_alpha_scales_for_fi(
