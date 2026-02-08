@@ -91,6 +91,7 @@ def nvfp4_marlin_process_global_scale(global_scale):
 def marlin_input_scale(
     x: torch.Tensor,
     input_scale_factor: torch.Tensor | None,
+    bias: torch.Tensor | None,
 ) -> torch.Tensor | None:
     """
     Through practical testing, it was observed that `input` might contain NaN.
@@ -109,13 +110,12 @@ def marlin_input_scale(
         return None
 
     acc_factor = x.shape[-1]
-    x_abs = x.abs().nan_to_num(nan=0.0)
-    max_x = x_abs.max().float()
+    max_x = x.abs().nan_to_num(nan=0.0).max().float()
     k = max_x * acc_factor * input_scale_factor
-    torch.clamp_(k, min=1.0, max=1024.0)
-    torch.log2_(k)
-    torch.floor_(k)
-    torch.exp2_(k)
+    if bias is not None:
+        max_bias = bias.abs().nan_to_num(nan=0.0).max().float()
+        k.add_(max_bias)
+    k.clamp_(min=1.0, max=1024.0).log2_().ceil_().exp2_()
     return k.to(dtype=x.dtype)
 
 
@@ -135,10 +135,13 @@ def apply_fp4_marlin_linear(
     # For GPUs that lack FP4 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP4 quantization
 
-    input_scale = marlin_input_scale(input, input_scale_factor)
+    input_scale = marlin_input_scale(input, input_scale_factor, bias)
 
     if input_scale is not None:
-        input.mul_(torch.reciprocal(input_scale))
+        input_scale_inv = torch.reciprocal(input_scale)
+        input.mul_(input_scale_inv)
+        if bias is not None:
+            bias.mul_(input_scale_inv)
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
@@ -199,8 +202,8 @@ def marlin_input_scale_factor(
 
     Therefore, we need to calculate a scaling value (K) to scale down the input and
     then restore it after the GEMM operation. Based on the principle of matrix
-    multiplication, for MMA, if there is no `C`, it can be simply expressed as
-    `A x B = A / scale x B * scale`, which is lossless.
+    multiplication, for MMA, it can be simply expressed as
+    `O = A x B + C` -> `O' = (A/K x B) + (C/K); O = O' * K`.
 
     The calculation of K requires evaluating the possible maximum value of
     `input x weight` and dividing it by the maximum representable value of float16.
