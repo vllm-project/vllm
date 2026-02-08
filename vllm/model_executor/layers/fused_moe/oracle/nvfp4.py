@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.parallel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -103,6 +104,18 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
 
+def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend | None:
+    """Map user's MoEBackend to NvFp4MoeBackend."""
+    mapping = {
+        "cutlass": NvFp4MoeBackend.VLLM_CUTLASS,
+        "flashinfer_trtllm": NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        "marlin": NvFp4MoeBackend.MARLIN,
+    }
+    return mapping.get(runner_backend)
+
+
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -169,6 +182,30 @@ def select_nvfp4_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
+
+    # Handle explicit moe_backend from user.
+    runner_backend = config.moe_parallel_config.moe_backend
+    if runner_backend != "auto":
+        requested_backend = map_nvfp4_backend(runner_backend)
+        if requested_backend is not None:
+            if requested_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                supported, reason = is_supported_config_trtllm(
+                    config, weight_key, activation_key, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(requested_backend))
+                    return requested_backend, None
+                raise ValueError(_make_log_unsupported(requested_backend, reason))
+
+            return _return_or_raise(
+                requested_backend, config, weight_key, activation_key, activation_format
+            )
+        else:
+            logger.warning(
+                "moe_backend='%s' is not supported for NvFP4 quantization, "
+                "falling back to auto selection.",
+                runner_backend,
+            )
 
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
