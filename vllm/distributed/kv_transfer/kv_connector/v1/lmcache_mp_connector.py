@@ -658,7 +658,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            list(request.all_token_ids),
+            token_ids=list(request.all_token_ids),
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
