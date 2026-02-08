@@ -287,15 +287,7 @@ def create_forward_context(
     skip_compiled: bool = False,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
-        if vllm_config.speculative_config is None:
-            all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
-        else:
-            logger.warning_once(
-                "vllm_config.compilation_config.fast_moe_cold_start is not "
-                "compatible with speculative decoding so we are ignoring "
-                "fast_moe_cold_start."
-            )
-            all_moe_layers = None
+        all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
     else:
         all_moe_layers = None
 

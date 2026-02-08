@@ -806,6 +806,14 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
 
+        if self.compilation_config.fast_moe_cold_start is None:
+            # resolve default behavior: try to be as safe as possible
+            # this config is unsafe if any spec decoding draft model has a MOE.
+            # We'll conservatively turn it off if we see spec decoding.
+            self.compilation_config.fast_moe_cold_start = (
+                self.speculative_config is None
+            )
+
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
             if model_config := self.model_config:
