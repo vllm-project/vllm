@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from prometheus_client import Gauge
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
@@ -53,6 +54,25 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+# Prometheus metrics for EPLB balancedness
+# These are module-level gauges with 'model_name' label to support multi-model EPLB
+_eplb_balancedness_gauge = Gauge(
+    "vllm_moe_eplb_balancedness",
+    "EPLB balancedness ratio: avg_tokens / max_tokens across EP ranks. "
+    "Range [0, 1] where 1.0 = perfect balance.",
+    labelnames=["model_name"],
+)
+_eplb_avg_tokens_gauge = Gauge(
+    "vllm_moe_eplb_avg_tokens",
+    "Average token load across EP ranks (aggregated across all MoE layers).",
+    labelnames=["model_name"],
+)
+_eplb_max_tokens_gauge = Gauge(
+    "vllm_moe_eplb_max_tokens",
+    "Maximum token load across EP ranks (aggregated across all MoE layers).",
+    labelnames=["model_name"],
+)
 
 
 @dataclass
@@ -263,6 +283,18 @@ class EplbState:
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
+        """
+        self.latest_balancedness_metrics: dict[str, dict[str, float]] = {}
+        """
+        Latest computed balancedness metrics per model.
+        Format: {
+            model_name: {
+                "balancedness": float,
+                "avg_tokens": float,
+                "max_tokens": float
+            }
+        }
+        Updated when log_balancedness is enabled. Can be used for trace enrichment.
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -610,6 +642,24 @@ class EplbState:
                         self.expert_rearrangement_step_interval
                         - self.expert_rearrangement_step,
                     )
+
+                    # Store latest balancedness metrics for trace enrichment
+                    self.latest_balancedness_metrics[eplb_model_state.model_name] = {
+                        "balancedness": balancedness,
+                        "avg_tokens": avg_tokens,
+                        "max_tokens": max_tokens,
+                    }
+
+                    # Export Prometheus metrics
+                    _eplb_balancedness_gauge.labels(
+                        model_name=eplb_model_state.model_name
+                    ).set(balancedness)
+                    _eplb_avg_tokens_gauge.labels(
+                        model_name=eplb_model_state.model_name
+                    ).set(avg_tokens)
+                    _eplb_max_tokens_gauge.labels(
+                        model_name=eplb_model_state.model_name
+                    ).set(max_tokens)
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -1168,6 +1218,34 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+    def get_latest_balancedness_metrics(
+        self, model_name: str | None = None
+    ) -> dict[str, float] | None:
+        """
+        Get the latest balancedness metrics for a given model.
+
+        Args:
+            model_name: Name of the model. If None, returns metrics for the first
+                model in the state (useful for single-model deployments).
+
+        Returns:
+            Dictionary with keys: "balancedness", "avg_tokens", "max_tokens",
+            or None if no metrics are available yet.
+
+        Note:
+            This method is intended for trace enrichment and observability.
+            Metrics are only available when log_balancedness is enabled and
+            only on EP rank 0.
+        """
+        if not self.latest_balancedness_metrics:
+            return None
+
+        if model_name is None:
+            # Return first model's metrics (common case: single model)
+            return next(iter(self.latest_balancedness_metrics.values()), None)
+
+        return self.latest_balancedness_metrics.get(model_name)
 
 
 @dataclass
