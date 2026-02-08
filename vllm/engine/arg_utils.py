@@ -561,6 +561,9 @@ class EngineArgs:
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    kv_cache_dtype_skip_layers: list[str] = get_field(
+        CacheConfig, "kv_cache_dtype_skip_layers"
+    )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
@@ -946,6 +949,13 @@ class EngineArgs:
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
+        )
+        cache_group.add_argument(
+            "--kv-cache-dtype-skip-layers",
+            nargs="*",
+            default=[],
+            help="Layer patterns to skip KV cache quantization. Accepts layer "
+            "indices (e.g., 0 2 4) or attention types (sliding_window).",
         )
         cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
@@ -1443,6 +1453,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
