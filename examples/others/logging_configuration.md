@@ -181,9 +181,23 @@ vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
 | `/ping`    | SageMaker health check | SageMaker infrastructure                             |
 | `/load`    | Server load metrics    | Custom monitoring                                    |
 
+**Quick shorthand for `/health` and `/metrics`:**
+
+If you only need to suppress the most common monitoring endpoints, use the
+`--disable-uvicorn-metrics-access-log` flag instead of listing them explicitly:
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --disable-uvicorn-metrics-access-log
+```
+
+This is equivalent to `--disable-access-log-for-endpoints /health,/metrics`.
+Both options can be combined -- paths from each are merged with duplicates
+removed.
+
 **Notes:**
 
-- This option only affects uvicorn access logs, not vLLM application logs
+- These options only affect uvicorn access logs, not vLLM application logs
 - Specify multiple endpoints by separating them with commas (no spaces)
 - The filter uses exact path matching, query parameters are ignored (e.g., `/health?verbose=true` matches `/health`)
 - If you need to completely disable all access logs, use `--disable-uvicorn-access-log` instead
