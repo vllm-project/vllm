@@ -1325,6 +1325,7 @@ def _parse_chat_message_content_parts(
         parse_res = _parse_chat_message_content_part(
             part,
             mm_parser,
+            role=role,
             wrap_dicts=wrap_dicts,
             interleave_strings=interleave_strings,
         )
@@ -1350,6 +1351,7 @@ def _parse_chat_message_content_part(
     part: ChatCompletionContentPartParam,
     mm_parser: BaseMultiModalContentParser,
     *,
+    role: str,
     wrap_dicts: bool,
     interleave_strings: bool,
 ) -> _ContentPart | None:
@@ -1362,6 +1364,30 @@ def _parse_chat_message_content_part(
     """
     if isinstance(part, str):  # Handle plain text parts
         return part
+
+    # Validate text-only roles (system / developer) before doing any
+    # multimodal parsing.  This covers both parts with an explicit ``type``
+    # field and parts that only carry a multimodal key (e.g.
+    # ``{"image_url": "..."}`` without ``"type"``).
+    if role in _ROLES_TEXT_ONLY:
+        part_type_raw = part.get("type")
+        has_explicit_mm_type = (
+            isinstance(part_type_raw, str) and part_type_raw not in _TEXT_CONTENT_TYPES
+        )
+        has_mm_key = bool(set(part.keys()) & _MULTIMODAL_CONTENT_KEYS)
+        if has_explicit_mm_type or has_mm_key:
+            # Build a descriptive label for the error message.
+            label = (
+                part_type_raw
+                if has_explicit_mm_type
+                else next(k for k in part if k in _MULTIMODAL_CONTENT_KEYS)
+            )
+            raise ValueError(
+                f"Content part type '{label}' is not supported "
+                f"in '{role}' messages. Only text content is accepted "
+                f"for '{role}' role messages."
+            )
+
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
@@ -1432,6 +1458,36 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
+_ROLES_TEXT_ONLY = frozenset({"system", "developer"})
+"""Roles whose ``content`` field must only contain text parts,
+per the OpenAI Chat Completion API specification."""
+
+_TEXT_CONTENT_TYPES = frozenset(
+    {
+        "text",
+        "input_text",
+        "output_text",
+        "thinking",
+        "refusal",
+    }
+)
+"""Content part types that are considered text-only."""
+
+_MULTIMODAL_CONTENT_KEYS = frozenset(
+    {
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+    }
+)
+"""Keys whose presence in a content part dict indicates multimodal content,
+even when an explicit ``type`` field is absent."""
+
+
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
@@ -1446,6 +1502,7 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore

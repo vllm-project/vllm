@@ -2682,3 +2682,157 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+# -- Tests for system/developer message content validation (issue #33925) -----
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize(
+    ("part", "part_type_label"),
+    [
+        (
+            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+            "image_url",
+        ),
+        (
+            {"type": "input_audio", "input_audio": {"data": "abc", "format": "wav"}},
+            "input_audio",
+        ),
+        (
+            {"type": "video_url", "video_url": {"url": "https://example.com/vid.mp4"}},
+            "video_url",
+        ),
+    ],
+    ids=["image_url", "input_audio", "video_url"],
+)
+def test_system_message_rejects_non_text_content(
+    phi3v_model_config, role, part, part_type_label
+):
+    """System and developer messages must only accept text content.
+
+    Per the OpenAI API specification, sending multimodal content (e.g.
+    ``image_url``) in a system message should be rejected with an error.
+    See https://github.com/vllm-project/vllm/issues/33925
+    """
+    messages = [
+        {
+            "role": role,
+            "content": [part],
+        },
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+    ]
+
+    with pytest.raises(ValueError, match=f"'{part_type_label}' is not supported"):
+        parse_chat_messages(
+            messages,
+            phi3v_model_config,
+            content_format="string",
+        )
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize(
+    ("part", "part_type_label"),
+    [
+        (
+            {"image_url": "https://example.com/img.png"},
+            "image_url",
+        ),
+        (
+            {"audio_url": "https://example.com/audio.mp3"},
+            "audio_url",
+        ),
+        (
+            {"video_url": "https://example.com/vid.mp4"},
+            "video_url",
+        ),
+        (
+            {"input_audio": {"data": "abc", "format": "wav"}},
+            "input_audio",
+        ),
+    ],
+    ids=[
+        "image_url_no_type",
+        "audio_url_no_type",
+        "video_url_no_type",
+        "input_audio_no_type",
+    ],
+)
+def test_system_message_rejects_mm_content_without_type_key(
+    phi3v_model_config, role, part, part_type_label
+):
+    """Parts without an explicit ``type`` field but with a multimodal key
+    (e.g. ``{"image_url": "..."}`` ) must also be rejected for text-only
+    roles.
+
+    See https://github.com/vllm-project/vllm/issues/33925
+    """
+    messages = [
+        {
+            "role": role,
+            "content": [part],
+        },
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+    ]
+
+    with pytest.raises(ValueError, match=f"'{part_type_label}' is not supported"):
+        parse_chat_messages(
+            messages,
+            phi3v_model_config,
+            content_format="string",
+        )
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_system_message_accepts_text_content(phi3v_model_config, role):
+    """System and developer messages with text-only content should work."""
+    messages = [
+        {
+            "role": role,
+            "content": [{"type": "text", "text": "You are helpful."}],
+        },
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+    ]
+
+    # Should not raise
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        content_format="string",
+    )
+    assert conversation[0]["role"] == role
+    assert conversation[0]["content"] == "You are helpful."
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_system_message_accepts_string_content(phi3v_model_config, role):
+    """System and developer messages with plain string content should work."""
+    messages = [
+        {
+            "role": role,
+            "content": "You are helpful.",
+        },
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+    ]
+
+    # Should not raise
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        content_format="string",
+    )
+    assert conversation[0]["role"] == role
+    assert conversation[0]["content"] == "You are helpful."
