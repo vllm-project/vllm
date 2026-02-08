@@ -2,7 +2,9 @@ regex # Replace re for higher-performance regex matching
 cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+# NumPy 2.x needs all binary deps compiled against NumPy 2.
+numpy<2; python_version < "3.13"
+numpy>=2; python_version >= "3.13"
 requests >= 2.26.0
 tqdm
 blake3
@@ -32,7 +34,8 @@ pyzmq >= 25.0.0
 msgspec
 gguf >= 0.17.0
 mistral_common[image] >= 1.9.0
-opencv-python-headless >= 4.13.0    # required for video IO
+opencv-python-headless < 4.13.0; python_version < "3.13"  # required for video IO
+opencv-python-headless >= 4.13.0; python_version >= "3.13"  # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
