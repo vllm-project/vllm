@@ -649,6 +649,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             )
             # Activations not quantized for marlin.
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
@@ -851,7 +854,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -908,6 +911,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -950,10 +956,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self) -> bool:
-        return True
-
-    @property
-    def allow_inplace(self) -> bool:
         return True
 
     @property
@@ -1026,7 +1028,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1241,6 +1242,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
