@@ -974,7 +974,7 @@ def enable_batch_invariant_mode():
     )
 
     reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0.dev") else False
+        (False, False) if is_torch_equal_or_newer("2.10.0") else False
     )
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
         reduced_precision_val
