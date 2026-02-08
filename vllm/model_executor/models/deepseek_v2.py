@@ -24,6 +24,9 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import concurrent.futures
+import os
+import threading
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -1285,6 +1288,21 @@ class DeepseekV2ForCausalLM(
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, (os.cpu_count() or 1) // 4)
+        ) as executor:
+            ret, futures = self._load_weights_executor(weights, executor)
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+            return ret
+
+    def _load_weights_executor(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        executor: concurrent.futures.Executor,
+    ) -> tuple[str, set[concurrent.futures.Future]]:
+        futures: list[concurrent.futures.Future] = []
+
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
@@ -1324,6 +1342,7 @@ class DeepseekV2ForCausalLM(
         )
 
         params_dict = dict(self.named_parameters())
+        loaded_params_lock = threading.Lock()
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -1337,158 +1356,192 @@ class DeepseekV2ForCausalLM(
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
-                if is_fusion_moe_shared_experts_layer:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-
-                # QKV fusion is optional, fall back to normal
-                # weight loading if it's not enabled
-                # if go with fusion option, then update name
-                if (
-                    param_name == "fused_qkv_a_proj"
-                ) and name_mapped not in params_dict:
-                    continue
-                else:
-                    name = name_mapped
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+            if loaded_weight.device.type == "cpu":
+                future = executor.submit(
+                    self._load_weight,
+                    stacked_params_mapping,
+                    params_dict,
+                    expert_params_mapping,
+                    loaded_params_lock,
+                    loaded_params,
+                    name,
+                    loaded_weight,
+                    is_fusion_moe_shared_experts_layer,
+                )
+                futures.append(future)
             else:
-                is_expert_weight = False
+                self._load_weight(
+                    stacked_params_mapping,
+                    params_dict,
+                    expert_params_mapping,
+                    loaded_params_lock,
+                    loaded_params,
+                    name,
+                    loaded_weight,
+                    is_fusion_moe_shared_experts_layer,
+                )
 
-                # Special handling: when AITER fusion_shared_experts is enabled,
-                # checkpoints may provide a single widened shared_experts tensor
-                # without explicit expert indices
-                # (e.g. ...mlp.shared_experts.gate_proj.weight).
-                # For models with multiple shared experts, split that tensor
-                # evenly into per-shared-expert slices and load them into
-                # appended expert slots mlp.experts.{n_routed_experts + j}.*
-                # accordingly.
-                num_chunks = 1
+        return loaded_params, futures
+
+    def _load_weight(
+        self,
+        stacked_params_mapping,
+        params_dict,
+        expert_params_mapping,
+        loaded_params_lock,
+        loaded_params,
+        name,
+        loaded_weight,
+        is_fusion_moe_shared_experts_layer,
+    ):
+        for param_name, weight_name, shard_id in stacked_params_mapping:
+            # Skip non-stacked layers and experts (experts handled below).
+            if weight_name not in name:
+                continue
+            # We have mlp.experts[0].gate_proj in the checkpoint.
+            # Since we handle the experts below in expert_params_mapping,
+            # we need to skip here BEFORE we update the name, otherwise
+            # name will be updated to mlp.experts[0].gate_up_proj, which
+            # will then be updated below in expert_params_mapping
+            # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+            if ("mlp.experts." in name) and name not in params_dict:
+                continue
+            if is_fusion_moe_shared_experts_layer:
+                continue
+            name_mapped = name.replace(weight_name, param_name)
+
+            # QKV fusion is optional, fall back to normal
+            # weight loading if it's not enabled
+            # if go with fusion option, then update name
+            if (param_name == "fused_qkv_a_proj") and name_mapped not in params_dict:
+                continue
+            else:
+                name = name_mapped
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+
+            if is_pp_missing_parameter(name, self):
+                continue
+
+            param = params_dict[name]
+            weight_loader = param.weight_loader
+            weight_loader(param, loaded_weight, shard_id)
+            break
+        else:
+            is_expert_weight = False
+
+            # Special handling: when AITER fusion_shared_experts is enabled,
+            # checkpoints may provide a single widened shared_experts tensor
+            # without explicit expert indices
+            # (e.g. ...mlp.shared_experts.gate_proj.weight).
+            # For models with multiple shared experts, split that tensor
+            # evenly into per-shared-expert slices and load them into
+            # appended expert slots mlp.experts.{n_routed_experts + j}.*
+            # accordingly.
+            num_chunks = 1
+            if is_fusion_moe_shared_experts_layer:
+                num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
+                # Determine split axis based on op type
+                # gate/up: ColumnParallel → split along dim 0
+                # down: RowParallel → split along dim 1
+                split_dim = (
+                    1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
+                )
+                total = loaded_weight.shape[split_dim]
+                assert total % num_chunks == 0, (
+                    f"Shared expert weight dim {total} "
+                    f"not divisible by num_chunks {num_chunks}"
+                )
+                chunk_size = total // num_chunks
+
+            for j in range(num_chunks):
+                chunk_name = name
+                weight_to_load = loaded_weight
+
                 if is_fusion_moe_shared_experts_layer:
-                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
-                    # Determine split axis based on op type
-                    # gate/up: ColumnParallel → split along dim 0
-                    # down: RowParallel → split along dim 1
-                    split_dim = (
-                        1
-                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
-                        else 0
-                    )
-                    total = loaded_weight.shape[split_dim]
-                    assert total % num_chunks == 0, (
-                        f"Shared expert weight dim {total} "
-                        f"not divisible by num_chunks {num_chunks}"
-                    )
-                    chunk_size = total // num_chunks
-
-                for j in range(num_chunks):
-                    chunk_name = name
-                    weight_to_load = loaded_weight
-
-                    if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
-                        if loaded_weight.ndim == 1:
-                            weight_to_load = loaded_weight[chunk_slice]
-                        elif split_dim == 0:
-                            weight_to_load = loaded_weight[chunk_slice, :]
-                        else:
-                            weight_to_load = loaded_weight[:, chunk_slice]
-                        # Synthesize an expert-style name so expert mapping
-                        # can route it
-                        chunk_name = name.replace(
-                            "mlp.shared_experts",
-                            f"mlp.experts.{self.config.n_routed_experts + j}",
-                        )
-
-                    # Use expert_params_mapping to locate the destination
-                    # param and delegate to its expert-aware weight_loader
-                    # with expert_id.
-                    for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
-                        if weight_name not in chunk_name:
-                            continue
-
-                        # Anyway, this is an expert weight and should not be
-                        # attempted to load as other weights later
-                        is_expert_weight = True
-
-                        # Do not modify `name` since the loop may continue here
-                        # Instead, create a new variable
-                        name_mapped = chunk_name.replace(weight_name, param_name)
-
-                        if is_pp_missing_parameter(name_mapped, self):
-                            continue
-
-                        param = params_dict[name_mapped]
-                        # We should ask the weight loader to return success or
-                        # not here since otherwise we may skip experts with
-                        # other available replicas.
-                        weight_loader = typing.cast(
-                            Callable[..., bool], param.weight_loader
-                        )
-                        success = weight_loader(
-                            param,
-                            weight_to_load,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                        if success:
-                            if not is_fusion_moe_shared_experts_layer:
-                                name = name_mapped
-                            else:
-                                loaded_params.add(name_mapped)
-                            break
+                    chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                    if loaded_weight.ndim == 1:
+                        weight_to_load = loaded_weight[chunk_slice]
+                    elif split_dim == 0:
+                        weight_to_load = loaded_weight[chunk_slice, :]
                     else:
-                        if is_expert_weight:
-                            # We've checked that this is an expert weight
-                            # However it's not mapped locally to this rank
-                            # So we simply skip it
-                            continue
+                        weight_to_load = loaded_weight[:, chunk_slice]
+                    # Synthesize an expert-style name so expert mapping
+                    # can route it
+                    chunk_name = name.replace(
+                        "mlp.shared_experts",
+                        f"mlp.experts.{self.config.n_routed_experts + j}",
+                    )
 
-                        # Skip loading extra bias for GPTQ models.
-                        if name.endswith(".bias") and name not in params_dict:
-                            continue
+                # Use expert_params_mapping to locate the destination
+                # param and delegate to its expert-aware weight_loader
+                # with expert_id.
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in chunk_name:
+                        continue
 
-                        # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
-                            continue
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
 
-                        if is_pp_missing_parameter(name, self):
-                            continue
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = chunk_name.replace(weight_name, param_name)
 
-                        param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
-            if name is not None and not is_fusion_moe_shared_experts_layer:
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or
+                    # not here since otherwise we may skip experts with
+                    # other available replicas.
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        weight_to_load,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        if not is_fusion_moe_shared_experts_layer:
+                            name = name_mapped
+                        else:
+                            with loaded_params_lock:
+                                loaded_params.add(name_mapped)
+                        break
+                else:
+                    if is_expert_weight:
+                        # We've checked that this is an expert weight
+                        # However it's not mapped locally to this rank
+                        # So we simply skip it
+                        continue
+
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+        if not is_fusion_moe_shared_experts_layer:
+            with loaded_params_lock:
                 loaded_params.add(name)
-
-        return loaded_params
 
 
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):
