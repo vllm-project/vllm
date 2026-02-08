@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -102,6 +103,35 @@ def materialize_layer(layer: torch.nn.Module) -> None:
     for name, tensor in get_layer_tensors(layer).items():
         if name not in SKIP_TENSORS:
             setattr(layer, name, materialize_meta_tensor(tensor))
+
+
+def place_model_format_tensors_and_materialize(
+    layer: torch.nn.Module, model_format_tensors
+) -> None:
+    # TODO docblock
+    if layer.__class__.__name__ in SKIP_MODULES:
+        return
+
+    mf_params, mf_buffers = model_format_tensors
+    device_ctx = getattr(layer, "_layerwise_load_device", nullcontext())
+
+    for name, tensor in get_layer_tensors(layer).items():
+        if name in SKIP_TENSORS:
+            continue
+
+        # first, get the model format tensor
+        model_format_tensor = mf_params.get(name)
+        if model_format_tensor is None:
+            model_format_tensor = mf_buffers.get(name)
+        assert model_format_tensor is not None
+
+        # second, if the tensor is not yet materialized, materialize it
+        if model_format_tensor.device == torch.device("meta"):
+            with device_ctx:
+                model_format_tensor = materialize_meta_tensor(model_format_tensor)
+
+        # finally, copy the materialized tensor to layer
+        setattr(layer, name, model_format_tensor)
 
 
 class MetaCopyCounter(TorchDispatchMode):

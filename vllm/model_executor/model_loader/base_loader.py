@@ -9,6 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -58,20 +62,45 @@ class BaseModelLoader(ABC):
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
-            # Quantization does not happen in `load_weights` but after it
-            self.load_weights(model, model_config)
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda():
-                peak_memory = torch.cuda.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                    scope="local",
+            # Online quantization is needed when we have FP8 quantization
+            # but the checkpoint is not already serialized in FP8 format
+            quant_config = vllm_config.quant_config
+            is_online_quant = (
+                # TODO(future): add other online quant paths here
+                model_config.quantization == "fp8"
+                and quant_config is not None
+                and hasattr(quant_config, "is_checkpoint_fp8_serialized")
+                and not quant_config.is_checkpoint_fp8_serialized
+            )
+
+            if is_online_quant:
+                # set up layer loading
+                initialize_layerwise_reload(
+                    model, is_reload=False, target_device=load_device
                 )
+                # load weights, quantization via each layer's
+                # `process_weights_after_loading` will happen for each layer
+                # as soon as all of that layer's weights are loaded
+                self.load_weights(model, model_config)
+                # finalize layer reloading
+                finalize_layerwise_reload(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda():
+                    peak_memory = torch.cuda.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                        scope="local",
+                    )
+
+            else:
+                # Load weights to model format
+                self.load_weights(model, model_config)
+                # For layers with quantization, convert to kernel format
+                process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
 

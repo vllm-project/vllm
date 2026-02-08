@@ -17,6 +17,7 @@ from .meta import (
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
+    place_model_format_tensors_and_materialize,
     restore_layer_on_meta,
 )
 from .types import LayerReloadingInfo
@@ -66,9 +67,14 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module,
+    # TODO(before review): maybe this should be an enum. bool for quick testing.
+    is_reload: bool = True,
+    target_device: torch.device | None = None,
+):
     """
-    Set up layerwise weight loading with deferred processing.
+    Set up layerwise weight reloading with deferred processing.
 
     Must be called after `record_metadata_for_reloading`. This function:
     1. Saves current kernel tensors for later copying
@@ -81,6 +87,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
+
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
@@ -93,7 +100,15 @@ def initialize_layerwise_reload(model: torch.nn.Module):
             continue
 
         # Save current tensors for later copying
-        info.kernel_tensors = get_layer_params_buffers(layer)
+        if is_reload:
+            # reload path
+            assert target_device is None
+            info.kernel_tensors = get_layer_params_buffers(layer)
+        else:
+            # initial load path
+            assert target_device is not None
+            info.model_format_tensors = get_layer_params_buffers(layer)
+            layer._layerwise_load_device = target_device
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -185,12 +200,18 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
                 )
 
             else:
-                _place_kernel_tensors(layer, info)
+                if info.has_model_format_tensors:
+                    _place_model_format_tensors(layer, info)
+                elif info.has_kernel_tensors:
+                    _place_kernel_tensors(layer, info)
                 layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded, place kernel tensors back
         elif info.can_process() and info.load_numel <= 0:
-            _place_kernel_tensors(layer, info)
+            if info.has_model_format_tensors:
+                _place_model_format_tensors(layer, info)
+            elif info.has_kernel_tensors:
+                _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -213,8 +234,18 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     3. Runs quantization processing if applicable
     4. Copies processed values back to original tensor storage
     """
+    is_initial_load = info.has_model_format_tensors
+    if is_initial_load:
+        assert not info.has_kernel_tensors
+
     # Materialize layer tensors onto device
-    materialize_layer(layer)
+    if is_initial_load:
+        # initial load path. Note that we do not use `kernel_tensors`
+        # at all here.
+        place_model_format_tensors_and_materialize(layer, info.model_format_tensors)
+    else:
+        # reloading path
+        materialize_layer(layer)
 
     # Reset FP8 online quantization flag so process_weights_after_loading
     # will run again during reload
@@ -237,15 +268,17 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
 
-    # Copy processed values into original tensor storage (preserves cudagraph refs)
-    # this code is a no-op if not reloading (because kernel tensors is empty)
-    parameters, buffers = info.kernel_tensors
-    for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
-    for name, buffer in buffers.items():
-        buffer.data.copy_(getattr(layer, name))
+    if not is_initial_load:
+        # Reloading path
+        # Copy processed values into original tensor storage (preserves cudagraph refs)
+        # this code is a no-op if not reloading (because kernel tensors is empty)
+        parameters, buffers = info.kernel_tensors
+        for name, param in parameters.items():
+            param.data.copy_(getattr(layer, name))
+        for name, buffer in buffers.items():
+            buffer.data.copy_(getattr(layer, name))
 
-    _place_kernel_tensors(layer, info)
+        _place_kernel_tensors(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -265,10 +298,23 @@ def _get_weight_loader(tensor: torch.Tensor):
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Assign each parameter/buffer in `info.kernel_tensors` back onto `layer`"""
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 
     parameters, buffers = info.kernel_tensors
+    for name, param in parameters.items():
+        layer.register_parameter(name, param)
+    for name, buffer in buffers.items():
+        layer.register_buffer(name, buffer)
+
+
+def _place_model_format_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Assign each parameter/buffer in `info.model_format_tensors` back onto `layer`"""
+    for name in get_layer_tensors(layer):
+        delattr(layer, name)
+
+    parameters, buffers = info.model_format_tensors
     for name, param in parameters.items():
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
