@@ -89,8 +89,19 @@ class SchedulerConfig:
 
     Defaults to `max_num_batched_tokens`. This will be overridden by the
     maximum possible multimodal embedding count of the model if it is larger,
-    ensuring that a multimodal item will be eventually scheduled
-    regardless of its corresponding embedding count.
+    ensuring that a multimodal item will be eventually scheduled regardless of
+    its embedding count (an item is only scheduled if there is sufficient
+    encoder budget to process it).
+
+    If this is set to less than `max_num_batched_tokens`, text inputs from
+    lower-priority requests may be scheduled with a higher priority than
+    multimodal inputs in the current request if the encoder budget has been
+    exhausted but there is still decoder budget remaining.
+
+    There is generally no benefit of increasing this past `max_num_batched_tokens`
+    as the encoder is only scheduled to run on a multimodal item if the decoder
+    is also scheduled to run on the corresponding embeddings; we only allow this
+    to ensure that a multimodal item will be eventually scheduled (see above).
 
     Note that the number of encoder embeddings might be smaller than the
     number of input tokens used to represent the multimodal input; see
@@ -98,12 +109,18 @@ class SchedulerConfig:
     """
 
     encoder_cache_size: int | None = None
-    """Maximum number of encoder embeddings that can be stored in the encoder cache.
+    """Maximum number of encoder embeddings that can be stored in the encoder cache;
+    it must be no smaller than `max_num_batched_encoder_embeds`.
 
     Defaults to `max_num_batched_encoder_embeds`. This will be overridden by the
     maximum possible multimodal embedding count of the model if it is larger,
-    ensuring that a multimodal item will be eventually scheduled
-    regardless of its corresponding embedding count.
+    ensuring that a multimodal item will be eventually scheduled regardless of
+    its embedding count (an item is only scheduled if there is sufficient
+    cache budget to temporarily store its embeddings for decoder execution).
+
+    If this is set to greater than `max_num_batched_encoder_embeds`,
+    more encoder embeddings can be reused across requests,
+    but this will also lead to a corresponding increase in memory usage.
 
     Note that the number of encoder embeddings might be smaller than the
     number of input tokens used to represent the multimodal input; see

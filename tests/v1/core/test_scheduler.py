@@ -129,23 +129,11 @@ def test_schedule_multimodal_requests_one_batch():
 
 @pytest.mark.parametrize(
     ("encoder_budget_mult", "encoder_cache_mult"),
-    [
-        (0.5, 1.0),
-        (1.0, 0.5),
-        (1.0, 1.0),
-        (1.5, 2.0),
-        (2.0, 1.5),
-    ],
+    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.5, 2.0), (2.0, 2.0)],
 )
 @pytest.mark.parametrize(
     ("chunk_mult", "disable_chunked_mm_input"),
-    [
-        (0.5, False),
-        (1.0, True),
-        (1.0, False),
-        (2.0, True),
-        (2.0, False),
-    ],
+    [(0.5, False), (1.0, True), (1.0, False), (2.0, True), (2.0, False)],
 )
 def test_schedule_multimodal_requests_multi_batch(
     encoder_budget_mult, encoder_cache_mult, chunk_mult, disable_chunked_mm_input
@@ -177,7 +165,6 @@ def test_schedule_multimodal_requests_multi_batch(
         build_req_mm_positions(4 * MM_ITEM_TOK_MULT),
         build_req_mm_positions(8 * MM_ITEM_TOK_MULT),
     ]
-    print(f"{mm_positions=}, {NUM_TOTAL_TOKS=}")
 
     max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
 
@@ -198,13 +185,21 @@ def test_schedule_multimodal_requests_multi_batch(
         encoder_cache_size=encoder_cache_size,
         disable_chunked_mm_input=disable_chunked_mm_input,
     )
-
     assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
+
     requests = create_requests(
         num_requests=len(mm_positions),
         num_tokens=NUM_TOTAL_TOKS,
         mm_positions=mm_positions,
     )
+
+    mm_positions_by_req_id = {
+        request.request_id: [f.mm_position for f in request.mm_features]
+        for request in requests
+    }
+    for req_id, mm_positions in mm_positions_by_req_id.items():
+        print(f"{req_id=}: {mm_positions=}, {NUM_TOTAL_TOKS=}")
+
     for request in requests:
         scheduler.add_request(request)
 
@@ -229,14 +224,15 @@ def test_schedule_multimodal_requests_multi_batch(
         scheduler.update_from_output(output, model_runner_output)
 
         new_scheduled_tokens = output.num_scheduled_tokens
-        print(f"{total_scheduled_tokens=}, {new_scheduled_tokens=}")
+        new_scheduled_encoder_inputs = output.scheduled_encoder_inputs
+        print(
+            f"{total_scheduled_tokens=}, {new_scheduled_tokens=}, "
+            f"{new_scheduled_encoder_inputs=}"
+        )
 
         assert any(num_tokens > 0 for num_tokens in new_scheduled_tokens.values()), (
             "Detected hanging condition"
         )
-
-        new_scheduled_encoder_inputs = output.scheduled_encoder_inputs
-        print(f"{total_scheduled_encoder_inputs=}, {new_scheduled_encoder_inputs=}")
 
         for req_id, num_tokens in new_scheduled_tokens.items():
             total_scheduled_tokens[req_id] += num_tokens
@@ -246,11 +242,6 @@ def test_schedule_multimodal_requests_multi_batch(
     assert all(
         num_tokens == NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
     )
-
-    mm_positions_by_req_id = {
-        request.request_id: [f.mm_position for f in request.mm_features]
-        for request in requests
-    }
 
     assert all(
         len(enc_inputs) == len(mm_positions_by_req_id[req_id])
