@@ -5142,10 +5142,11 @@ class GPUModelRunner(
                         ]
 
                         logger.info(
-                            "Multimodal encoder will be profiled with %d %s items "
+                            "Multimodal encoder will be profiled with %d %s %s "
                             "of the maximum feature size (%d per item).",
                             max_mm_items_per_batch,
                             dummy_modality,
+                            "item" if max_mm_items_per_batch == 1 else "items",
                             mm_budget.mm_max_toks_per_item[dummy_modality],
                         )
 
