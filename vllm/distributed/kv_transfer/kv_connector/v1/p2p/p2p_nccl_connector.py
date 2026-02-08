@@ -86,7 +86,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.is_producer = self._kv_transfer_config.is_kv_producer
-        self.chunked_prefill: dict[str, tuple[list[int], list[int] | None]] = {}
+        self.chunked_prefill: dict[str, tuple[list[int], list[int] | None, str]] = {}
 
         self._rank = get_world_group().rank if role == KVConnectorRole.WORKER else 0
         self._local_rank = (
@@ -391,6 +391,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         meta = P2pNcclConnectorMetadata()
 
         for new_req in scheduler_output.scheduled_new_reqs:
+            assert new_req.external_req_id is not None
             if self.is_producer:
                 num_scheduled_tokens = (scheduler_output.num_scheduled_tokens)[
                     new_req.req_id
@@ -402,11 +403,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids[0],
                         new_req.prompt_token_ids,
+                        new_req.external_req_id,
                     )
                     continue
                 # the request's prompt is not chunked prefill
                 meta.add_request(
-                    request_id=new_req.req_id,
+                    request_id=new_req.external_req_id,
                     token_ids=new_req.prompt_token_ids or [],
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
@@ -414,7 +416,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 continue
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(
-                    request_id=new_req.req_id,
+                    request_id=new_req.external_req_id,
                     token_ids=new_req.prompt_token_ids or [],
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
@@ -436,14 +438,19 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if not resumed_from_preemption:
                     block_ids = self.chunked_prefill[req_id][0] + block_ids
                 prompt_token_ids = self.chunked_prefill[req_id][1]
+                kv_request_id = self.chunked_prefill[req_id][2]
                 assert prompt_token_ids is not None
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    self.chunked_prefill[req_id] = (block_ids, prompt_token_ids)
+                    self.chunked_prefill[req_id] = (
+                        block_ids,
+                        prompt_token_ids,
+                        kv_request_id,
+                    )
                     continue
                 # the request's prompt is all prefilled finally
                 meta.add_request(
-                    request_id=req_id,
+                    request_id=kv_request_id,
                     token_ids=prompt_token_ids,
                     block_ids=block_ids,
                     block_size=self._block_size,
@@ -465,8 +472,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 assert new_block_ids is not None
                 block_ids = new_block_ids[0]
 
+                assert request.external_req_id is not None
                 meta.add_request(
-                    request_id=req_id,
+                    request_id=request.external_req_id,
                     token_ids=token_ids,
                     block_ids=block_ids,
                     block_size=self._block_size,

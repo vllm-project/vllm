@@ -45,6 +45,8 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    external_req_id: str | None = None
+
     @classmethod
     def from_request(
         cls,
@@ -63,6 +65,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
+            external_req_id=request.external_req_id,
         )
 
     def __repr__(self) -> str:
