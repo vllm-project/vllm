@@ -236,7 +236,14 @@ async def test_chat_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
-def test_system_message_rejects_image():
+@pytest.mark.parametrize(
+    "image_content",
+    [
+        [{"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}],
+        [{"image_url": {"url": "https://example.com/image.jpg"}}],
+    ],
+)
+def test_system_message_rejects_image(image_content):
     """Test that system messages cannot contain image content."""
     with pytest.raises(VLLMValidationError) as exc_info:
         ChatCompletionRequest(
@@ -244,12 +251,7 @@ def test_system_message_rejects_image():
             messages=[
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "https://example.com/image.jpg"},
-                        }
-                    ],
+                    "content": image_content,
                 }
             ],
         )
@@ -306,7 +308,14 @@ def test_user_message_accepts_image():
     assert request.messages[0]["role"] == "user"
 
 
-def test_system_message_rejects_audio():
+@pytest.mark.parametrize(
+    "audio_content",
+    [
+        [{"type": "input_audio", "input_audio": {"data": "base64data", "format": "wav"}}],
+        [{"input_audio": {"data": "base64data", "format": "wav"}}],
+    ],
+)
+def test_system_message_rejects_audio(audio_content):
     """Test that system messages cannot contain audio content."""
     with pytest.raises(VLLMValidationError) as exc_info:
         ChatCompletionRequest(
@@ -314,12 +323,7 @@ def test_system_message_rejects_audio():
             messages=[
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": "base64data", "format": "wav"},
-                        }
-                    ],
+                    "content": audio_content,
                 }
             ],
         )
@@ -328,7 +332,14 @@ def test_system_message_rejects_audio():
     assert "input_audio" in str(exc_info.value)
 
 
-def test_system_message_rejects_video():
+@pytest.mark.parametrize(
+    "video_content",
+    [
+        [{"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}],
+        [{"video_url": {"url": "https://example.com/video.mp4"}}],
+    ],
+)
+def test_system_message_rejects_video(video_content):
     """Test that system messages cannot contain video content."""
     with pytest.raises(VLLMValidationError) as exc_info:
         ChatCompletionRequest(
@@ -336,12 +347,7 @@ def test_system_message_rejects_video():
             messages=[
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "video_url",
-                            "video_url": {"url": "https://example.com/video.mp4"},
-                        }
-                    ],
+                    "content": video_content,
                 }
             ],
         )
