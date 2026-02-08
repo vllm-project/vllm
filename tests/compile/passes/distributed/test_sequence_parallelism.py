@@ -9,7 +9,6 @@ from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer, multi_gpu_test
 from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
-from vllm.compilation.passes.fx_utils import find_auto_fn
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
@@ -84,13 +83,14 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         ]
 
     def ops_in_model(self):
-        if RMSNorm.enabled():
-            return [
-                torch.ops._C.rms_norm.default,
+        return (
+            [torch.ops.vllm_ir.rms_norm]
+            + [
                 torch.ops._C.fused_add_rms_norm.default,
             ]
-        else:
-            return []
+            if RMSNorm.enabled()
+            else []
+        )
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
@@ -319,4 +319,4 @@ def sequence_parallelism_pass_on_test_model(
             assert backend.op_count(op, before=False) == 4
 
         for op in model.ops_in_model():
-            find_auto_fn(backend.graph_post_pass.nodes, op)
+            assert backend.op_count(op, before=False) > 0
