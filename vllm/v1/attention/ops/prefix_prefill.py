@@ -682,7 +682,7 @@ def context_attention_fwd(
     if (
         k_cache.dtype == torch.uint8
         or v_cache.dtype == torch.uint8
-        and kv_cache_dtype == "auto"
+        and kv_cache_dtype in ("auto", "bfloat16", "float16")
     ):
         raise ValueError(
             "kv_cache_dtype='auto' unsupported for\

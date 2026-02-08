@@ -191,7 +191,7 @@ def use_rocm_custom_paged_attention(
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
-            and kv_cache_dtype == "auto"
+            and kv_cache_dtype in ("auto", "bfloat16", "float16")
             and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
             and sinks is None
         )
