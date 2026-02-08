@@ -10,7 +10,10 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -124,7 +127,9 @@ def fused_topk_bias(
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+    return topk_weights.to(torch.float32), topk_indices.to(
+        torch.int32 if indices_type is None else indices_type
+    )
 
 
 class FusedTopKBiasRouter(BaseRouter):
@@ -156,10 +161,10 @@ class FusedTopKBiasRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
+        return get_routing_method_type(
+            scoring_func=self.scoring_func,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
         )
 
     def _compute_routing(
@@ -176,6 +181,7 @@ class FusedTopKBiasRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
             scoring_func=self.scoring_func,
+            indices_type=indices_type,
         )
 
         if self.routed_scaling_factor != 1.0:

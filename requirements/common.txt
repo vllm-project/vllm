@@ -9,9 +9,9 @@ blake3
 py-cpuinfo
 transformers >= 4.56.0, < 5
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
-protobuf >= 6.30.0 # Required by LlamaTokenizer, gRPC.
+protobuf # Required by LlamaTokenizer, gRPC.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
-aiohttp
+aiohttp >= 3.13.3
 openai >= 1.99.1  # For Responses API with reasoning content
 pydantic >= 2.12.0
 prometheus_client >= 0.18.0
@@ -31,8 +31,8 @@ partial-json-parser # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.17.0
-mistral_common[image] >= 1.8.8
-opencv-python-headless >= 4.11.0    # required for video IO
+mistral_common[image] >= 1.9.0
+opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
@@ -51,5 +51,5 @@ openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.13, < 1.0.0
 mcp
-grpcio>=1.76.0
-grpcio-reflection>=1.76.0
+grpcio
+grpcio-reflection

@@ -210,7 +210,6 @@ def fused_marlin_moe(
     bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_type_id: int,
@@ -250,8 +249,6 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - w1_scale (torch.Tensor): Scale to be used for w1.
     - w2_scale (torch.Tensor): Scale to be used for w2.
-    - gating_output (torch.Tensor|None): The output of the gating
-        operation (before softmax).
     - g_idx1 (torch.Tensor|None): The first set of act_order indices.
     - g_idx2 (torch.Tensor|None): The second set of act_order indices.
     - sort_indices1 (torch.Tensor|None): The first act_order input
@@ -270,6 +267,7 @@ def fused_marlin_moe(
 
     if inplace:
         assert output is None, "Conflicting request"
+        assert not disable_inplace()
 
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
@@ -292,8 +290,6 @@ def fused_marlin_moe(
     topk = topk_ids.size(1)
 
     # Check constraints.
-    if gating_output is not None:
-        assert gating_output.size(0) == M, "Number of tokens mismatch"
     assert w1.size(1) * 16 == K, "Hidden size mismatch w1"
     assert w2.size(2) // (num_bits // 2) == K, "Hidden size mismatch w2"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -361,10 +357,7 @@ def fused_marlin_moe(
     ).view(-1, topk, K)
 
     if output is None:
-        if inplace and not disable_inplace():
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
+        output = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if moe_sum is None:
         return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
@@ -381,7 +374,6 @@ def batched_fused_marlin_moe(
     bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
     quant_type_id: int,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -599,7 +591,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     @property
     def quant_type_id(self) -> int:
@@ -718,7 +710,6 @@ class MarlinExperts(MarlinExpertsBase):
             bias2=self.w2_bias,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
-            gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             global_scale1=self.g1_alphas,
@@ -833,7 +824,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             bias2=self.w2_bias,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
-            gating_output=None,
             quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
