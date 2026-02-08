@@ -5142,10 +5142,11 @@ class GPUModelRunner(
                         ]
 
                         logger.info(
-                            "Encoder model will be profiled with %s %s items "
-                            "of the maximum feature size.",
+                            "Encoder model will be profiled with %d %s items "
+                            "of the maximum feature size (%d per item).",
                             max_mm_items_per_batch,
                             dummy_modality,
+                            mm_budget.mm_max_toks_per_item[dummy_modality],
                         )
 
                         # Create dummy batch of multimodal inputs.
