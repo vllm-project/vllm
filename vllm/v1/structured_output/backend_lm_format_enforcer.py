@@ -116,13 +116,8 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             raise ValueError(
                 f"Invalid request type for LM Format Enforcer backend({request_type!s})"
             )
-        max_rollback_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config is not None
-            else 0
-        )
 
-        if max_rollback_tokens > 0:
+        if self.max_num_spec_tokens > 0:
             raise ValueError(
                 "LM Format Enforcer backend does not support speculative tokens"
             )
