@@ -209,6 +209,9 @@ def test_schedule_multimodal_requests_multi_batch(
         scheduler.add_request(request)
 
     total_scheduled_tokens = {request.request_id: 0 for request in requests}
+    total_scheduled_encoder_inputs = {
+        request.request_id: list[int]() for request in requests
+    }
     while any(
         num_tokens < NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
     ):
@@ -232,11 +235,26 @@ def test_schedule_multimodal_requests_multi_batch(
             "Detected hanging condition"
         )
 
+        new_scheduled_encoder_inputs = output.scheduled_encoder_inputs
+        print(f"{total_scheduled_encoder_inputs=}, {new_scheduled_encoder_inputs=}")
+
         for req_id, num_tokens in new_scheduled_tokens.items():
             total_scheduled_tokens[req_id] += num_tokens
+        for req_id, enc_inputs in new_scheduled_encoder_inputs.items():
+            total_scheduled_encoder_inputs[req_id].extend(enc_inputs)
 
     assert all(
         num_tokens == NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
+    )
+
+    mm_positions_by_req_id = {
+        request.request_id: [f.mm_position for f in request.mm_features]
+        for request in requests
+    }
+
+    assert all(
+        len(enc_inputs) == len(mm_positions_by_req_id[req_id])
+        for req_id, enc_inputs in total_scheduled_encoder_inputs.items()
     )
 
 
