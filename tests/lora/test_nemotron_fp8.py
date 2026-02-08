@@ -12,14 +12,24 @@ MODEL_PATH = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
 
 
 def do_sample(
-    llm: vllm.LLM, lora_path: str, lora_id: int, prompts: list[str]
+    llm: vllm.LLM,
+    lora_path: str | None,
+    lora_id: int | None,
+    prompts: list[str],
 ) -> list[str]:
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
+
+    lora_request = None
+    if lora_path is not None and lora_id is not None:
+        # Create a LoRA request
+        lora_request = LoRARequest(str(lora_id), lora_id, lora_path)
+
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
+        lora_request=lora_request,
     )
+
     generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt
@@ -31,7 +41,6 @@ def do_sample(
 
 @pytest.mark.parametrize("tp_size", [2])
 def test_nemotron_fp8_lora(nemotron_lora_files, tp_size, monkeypatch):
-    """Test LoRA with Nemotron Nano FP8 MoE model."""
     if (
         torch.cuda.device_count() < tp_size
         and tp_size > 1
@@ -42,8 +51,11 @@ def test_nemotron_fp8_lora(nemotron_lora_files, tp_size, monkeypatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "0")
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
 
+    # The LoRA adapter should still be able to answer these questions
     prompts_and_answers = [
         ("What is the capital of France?", "Paris"),
+        ("100+100=?", "200"),
+        ("5*50=?", "250"),
     ]
 
     llm = vllm.LLM(
@@ -58,10 +70,15 @@ def test_nemotron_fp8_lora(nemotron_lora_files, tp_size, monkeypatch):
         trust_remote_code=True,
     )
 
-    output = do_sample(
-        llm, nemotron_lora_files, lora_id=1, prompts=[p[0] for p in prompts_and_answers]
-    )
+    for use_lora in [False, True]:
+        print(f"Testing with {use_lora=}")
+        lora_path = nemotron_lora_files if use_lora else None
+        lora_id = 1 if use_lora else None
 
-    # Check outputs are coherent
-    for i, (_, answer) in enumerate(prompts_and_answers):
-        assert answer in output[i], f"Expected '{answer}' in output: {output[i]}"
+        output = do_sample(
+            llm, lora_path, lora_id, prompts=[p[0] for p in prompts_and_answers]
+        )
+
+        # Check outputs
+        for i, (_, answer) in enumerate(prompts_and_answers):
+            assert answer in output[i], f"Expected '{answer}' in output: {output[i]}"
