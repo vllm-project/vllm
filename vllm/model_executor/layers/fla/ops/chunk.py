@@ -12,6 +12,8 @@ import warnings
 import torch
 from einops import rearrange
 
+from vllm.platforms import current_platform
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_o import chunk_fwd_o
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
@@ -74,7 +76,7 @@ def chunk_gated_delta_rule_fwd(
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
-    @torch.amp.custom_fwd(device_type="cuda")
+    @torch.amp.custom_fwd(device_type="xpu" if current_platform.is_xpu() else "cuda")
     def forward(
         ctx,
         q: torch.Tensor,
