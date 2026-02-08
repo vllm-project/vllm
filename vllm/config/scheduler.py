@@ -100,9 +100,10 @@ class SchedulerConfig:
 
     There is generally no benefit of increasing this past `max_num_batched_tokens`
     as the encoder is only scheduled to run on a multimodal item if the decoder
-    is also scheduled to run on the corresponding embeddings; we only allow this
+    is also scheduled to run on the corresponding embeddings, and thus
+    `max_num_batched_tokens` becomes the limiting factor; we only allow this
     to ensure that the largest multimodal item can still be scheduled (see above).
-
+ 
     Note that the number of encoder embeddings might be smaller than the
     number of input tokens used to represent the multimodal input; see
     [vllm.v1.core.encoder_cache_manager.EncoderCacheManager][] for more details.
