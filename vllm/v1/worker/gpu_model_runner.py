@@ -155,6 +155,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -450,6 +451,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | ExtractHiddenStatesProposer
             )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -473,6 +475,11 @@ class GPUModelRunner(
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
+            elif self.speculative_config.method == "extract_hidden_states":
+                self.drafter = ExtractHiddenStatesProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+                self.use_aux_hidden_state_outputs = True
             else:
                 raise ValueError(
                     "Unknown speculative decoding method: "
@@ -3114,8 +3121,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3703,15 +3710,23 @@ class GPUModelRunner(
                 <= self.effective_drafter_max_model_len
             )
             use_gpu_toks = (
-                spec_config.use_eagle() or spec_config.uses_draft_model()
+                spec_config.use_eagle()
+                or spec_config.uses_draft_model()
+                or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
+                    # The extract_hidden_states drafter may set self.kv_connector_output
+                    kv_connector_output = self.kv_connector_output
+                    self.kv_connector_output = None
                 elif self.valid_sampled_token_count_event is not None:
                     assert spec_decode_common_attn_metadata is not None
                     next_token_ids, valid_sampled_tokens_count = (
@@ -3987,6 +4002,40 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
             )
+        elif spec_config.uses_extract_hidden_states():
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor for "
+                "extract_hidden_states method."
+            )
+            if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+                raise ValueError(
+                    "aux_hidden_states are rquired when using `extract_hidden_states`"
+                )
+            target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+            draft_token_ids, kv_connector_output = self.drafter.propose(
+                sampled_token_ids=sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+                scheduler_output=scheduler_output,
+                slot_mappings=slot_mappings,
+            )
+            self.kv_connector_output = kv_connector_output
+
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_mask.gpu,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
