@@ -12,7 +12,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -133,6 +133,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.do_spec_decode = False
             self.num_speculative_steps = 0
             self.speculator = None
+        self.uniform_decode_query_len = 1 + self.num_speculative_steps
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -368,6 +369,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
+    def _get_cudagraph_runtime_mode(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> tuple[CUDAGraphMode, int | None]:
+        # Determine if this is a uniform decode batch
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        max_num_scheduled_tokens = max(scheduler_output.num_scheduled_tokens.values())
+        is_uniform_decode = (
+            max_num_scheduled_tokens == self.uniform_decode_query_len
+        ) and (
+            scheduler_output.total_num_scheduled_tokens
+            == max_num_scheduled_tokens * num_reqs
+        )
+
+        # Get local_cudagraph_size using the local token count
+        local_cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+            scheduler_output.total_num_scheduled_tokens,
+            uniform_decode=is_uniform_decode,
+        )
+
+        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
+        if local_cudagraph_size is None:
+            local_cudagraph_runtime_mode = CUDAGraphMode.NONE
+        elif is_uniform_decode:
+            local_cudagraph_runtime_mode = cudagraph_mode.decode_mode()
+        else:
+            local_cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
+
+        return local_cudagraph_runtime_mode, local_cudagraph_size
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         if not self.cudagraph_manager.needs_capture():
@@ -397,6 +428,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables=self.block_tables,
                 attn_metadata_builders=self.attn_metadata_builders,
                 kv_cache_config=self.kv_cache_config,
+                has_lora=self.lora_config is not None,
             )
             if self.do_spec_decode:
                 self.speculator.capture_model()
@@ -810,19 +842,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return empty_output
 
-        # Get the CUDA graph size. None means no CUDA graph is used.
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+        # Get local cudagraph mode and size.
+        local_cudagraph_mode, local_cudagraph_size = self._get_cudagraph_runtime_mode(
+            scheduler_output
+        )
+
+        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
+        (
+            num_tokens_after_padding,
+            num_tokens_across_dp,
+            synced_cudagraph_mode,
+        ) = get_cudagraph_and_dp_padding(
             scheduler_output.total_num_scheduled_tokens,
-            scheduler_output.num_scheduled_tokens.values(),
+            local_cudagraph_size,
+            local_cudagraph_mode.value,
+            self.parallel_config.data_parallel_size,
+            self.parallel_config.data_parallel_rank,
         )
-        use_cudagraph, num_tokens_after_padding, num_tokens_across_dp = (
-            get_cudagraph_and_dp_padding(
-                scheduler_output.total_num_scheduled_tokens,
-                cudagraph_size,
-                self.parallel_config.data_parallel_size,
-                self.parallel_config.data_parallel_rank,
-            )
-        )
+        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -872,27 +909,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
-        if use_cudagraph:
-            # Run CUDA graph.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
-            hidden_states = self.cudagraph_manager.run(
+            hidden_states = self.cudagraph_manager.run_fullgraph(
                 input_batch.num_tokens_after_padding
             )
         else:
-            # Run PyTorch model in eager mode.
+            # For piecewise and eager mode, just call model().
             positions = input_batch.positions
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
+
+            batch_descriptor = BatchDescriptor(
+                num_tokens=input_batch.num_tokens_after_padding,
+                num_reqs=None,
+                uniform=False,
+                has_lora=self.lora_config is not None,
+            )
+
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
-                # TODO(woosuk): Support piecewise CUDA graph.
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
                 slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
