@@ -22,6 +22,9 @@ ARGPARSE_DOC_DIR = ROOT_DIR / "docs/generated/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
 
+# make sure --request-id-prefix docs are consistent
+sys.modules["uuid"] = MagicMock(uuid4=lambda: MagicMock(hex="{uuid}"))
+
 
 def mock_if_no_torch(mock_module: str, mock: MagicMock):
     if not importlib.util.find_spec("torch"):
@@ -43,7 +46,6 @@ mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomO
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
-
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test.txt") as f:
@@ -85,7 +87,7 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
         except Exception:
-            logger.exception("Failed to import %s.%s: %s", module_name, attr)
+            logger.exception("Failed to import %s.%s", module_name, attr)
 
     raise ImportError(
         f"Failed to import {module_name}.{attr} after mocking {max_mocks} imports"

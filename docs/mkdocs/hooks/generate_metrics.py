@@ -147,3 +147,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         total_metrics,
         len(METRIC_SOURCE_FILES),
     )
+
+
+if __name__ == "__main__":
+    on_startup("build", False)
