@@ -193,6 +193,7 @@ class BenchmarkMetrics:
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
+    rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
 
 @dataclass
@@ -412,6 +413,7 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    input_audio_duration = 0.0
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -439,6 +441,7 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
+            input_audio_duration += outputs[i].input_audio_duration
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -583,6 +586,7 @@ def calculate_metrics(
         ],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
+        rtfx=input_audio_duration / dur_s,
     )
 
     return metrics, actual_output_lens
@@ -937,6 +941,12 @@ async def benchmark(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
             )
         )
+        if metrics.rtfx > 0.0:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "RTFx (Inverse Real-Time Factor):", metrics.rtfx
+                )
+            )
     print(
         "{:<40} {:<10.2f}".format(
             "Total token throughput (tok/s):", metrics.total_token_throughput
@@ -963,6 +973,7 @@ async def benchmark(
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
+            "rtfx": metrics.rtfx,
         }
     else:
         result = {
