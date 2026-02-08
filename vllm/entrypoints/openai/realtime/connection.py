@@ -146,6 +146,8 @@ class RealtimeConnection:
             # final signals that the audio is finished
             if commit_event.final:
                 self._is_input_finished = True
+                # Send sentinel to terminate audio_stream_generator
+                self.audio_queue.put_nowait(None)
             else:
                 await self.start_generation()
         else:
