@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm import _custom_ops as ops
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -778,6 +780,26 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
+
 
 class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """Sparse MLA attention implementation with only forward_mqa method.
@@ -822,6 +844,26 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """MQA-style decode forward pass."""
         raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
