@@ -40,7 +40,7 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import EagleModelTypes, SpeculativeConfig
+from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
 from .weight_transfer import WeightTransferConfig
@@ -622,11 +622,13 @@ class VllmConfig:
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
+                    and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model kind of speculative decoding."
+                        "with EAGLE/MTP/Draft Model/NGram GPU kind of "
+                        "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -649,6 +651,7 @@ class VllmConfig:
             if (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
+                and self.speculative_config.method not in get_args(NgramGPUTypes)
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
