@@ -1,0 +1,515 @@
+[2026-02-07T21:06:13.937-08:00] Buck UI: https://www.internalfb.com/buck2/eaf47e24-9784-4794-a1a1-b6a84e573ce1
+[2026-02-07T21:06:13.964-08:00] Network: Up: 0B  Down: 0B
+BUILD SUCCEEDED - starting your binary
+0207 21:06:18.041950  INFO main ThreadId(01) sidecar:526: Starting metrics collection thread...
+0207 21:06:18.042497  INFO main ThreadId(01) lib::metrics_thread:94: Using hostname entity for ODS: devgpu014.zas1.facebook.com
+0207 21:06:18.042557  INFO main ThreadId(01) lib::metrics_thread:130: Starting metrics collection thread with 60s interval, vLLM URL: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/metrics, ODS entity: devgpu014.zas1.facebook.com
+0207 21:06:18.042691  INFO main ThreadId(01) sidecar:536: Metrics collection thread started
+0207 21:06:18.042708  INFO main ThreadId(01) sidecar:544: Starting embedded vLLM router (direct library mode)...
+0207 21:06:18.042754  INFO main ThreadId(01) router:387: Prefill/decode disaggregation mode enabled
+0207 21:06:18.042770  INFO main ThreadId(01) router:388:   Prefill SMC tier: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:06:18.042789  INFO main ThreadId(01) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:06:18.138573  INFO tokio-runtime-worker ThreadId(220) lib::metrics_thread:677: Calculated 160 histogram percentile metrics
+ServiceRouter performance may be worse than expected, because this has been compiled in debug mode. Try using @//mode/opt for expected performance. Set SILENCE_SR_DEBUG_PERF_WARNING=1 to silence this warning.
+0207 21:06:20.521585  INFO                 main ThreadId(01) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:06:20.521764  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.521784  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.521800  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.521813  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.521930  INFO                 main ThreadId(01) router:414:   Decode: local vLLM at https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081
+0207 21:06:20.522008  INFO                 main ThreadId(01) router:286: Creating RouterManager (library mode, no HTTP server)
+0207 21:06:20.561638  INFO                 main ThreadId(01) vllm_router_rs::routers::factory:91: Creating VllmPDRouter with prefill_urls: [("https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081", None)], decode_urls: ["https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081"], discovery: None
+0207 21:06:20.561865  INFO                 main ThreadId(01) vllm_router_rs::routers::factory:176: Creating VllmPDRouter with static URLs - prefill: [("https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081", None), ("https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081", None)], decode: ["https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081"]
+0207 21:06:20.561951  INFO                 main ThreadId(01) vllm_router_rs::routers::http::vllm_pd_router:1047: VllmPDRouter::new called in direct URL mode with 4 prefill, 1 decode workers
+0207 21:06:20.561986  INFO                 main ThreadId(01) vllm_router_rs::routers::http::pd_router:496: DP-aware mode disabled, using original worker URLs
+0207 21:06:20.563232  INFO                 main ThreadId(01) vllm_router_rs::routers::http::router:234: Waiting for 5 unique hosts (representing 5 workers) to become healthy (timeout: 600s)
+0207 21:06:20.617496  INFO                 main ThreadId(01) vllm_router_rs::routers::http::router:305: All 5 unique hosts are healthy (representing 5 workers)
+0207 21:06:20.654994  INFO                 main ThreadId(01) vllm_router_rs::routers::http::vllm_pd_router:1059: VllmPDRouter created successfully with direct URLs
+0207 21:06:20.655029  INFO tokio-runtime-worker ThreadId(221) vllm_router_rs::routers::http::pd_router:603: Prefill drain coordinator started
+0207 21:06:20.655640  INFO                 main ThreadId(01) vllm_router_rs::routers::http::vllm_pd_router:1074: Initializing prefill and decode policies with workers.
+0207 21:06:20.692743  INFO                 main ThreadId(01) vllm_router_rs::routers::factory:190: VllmPDRouter instance created successfully
+0207 21:06:20.692828  INFO                 main ThreadId(01) router:331: DirectRouter: VllmPrefillDecode mode (disaggregated)
+0207 21:06:20.692853  INFO                 main ThreadId(01) router:332:   Prefill workers: 4
+0207 21:06:20.692878  INFO                 main ThreadId(01) router:334:     - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081
+0207 21:06:20.692897  INFO                 main ThreadId(01) router:334:     - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081
+0207 21:06:20.692915  INFO                 main ThreadId(01) router:334:     - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081
+0207 21:06:20.692932  INFO                 main ThreadId(01) router:334:     - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081
+0207 21:06:20.692950  INFO                 main ThreadId(01) router:336:   Decode workers: 1
+0207 21:06:20.692968  INFO                 main ThreadId(01) router:338:     - https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081
+0207 21:06:20.692986  INFO                 main ThreadId(01) router:343: RouterManager created successfully
+0207 21:06:20.693793  INFO                 main ThreadId(01) router:532: Router ready after 1 attempts
+0207 21:06:20.693843  INFO                 main ThreadId(01) router:737: Starting worker refresh task (interval: 60s)
+0207 21:06:20.693862  INFO                 main ThreadId(01) router:743: Running initial worker refresh...
+0207 21:06:20.693886  INFO                 main ThreadId(01) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:06:20.706303  INFO                 main ThreadId(01) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:06:20.706374  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.706401  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.706423  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.706448  INFO                 main ThreadId(01) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:06:20.707221  INFO                 main ThreadId(01) router:745: Initial worker refresh completed successfully
+0207 21:06:20.707799  INFO                 main ThreadId(01) sidecar:554: RouterManager created with 5 workers
+0207 21:06:20.707824  INFO                 main ThreadId(01) sidecar:563: Starting vLLM Sidecar service on port 12345
+0207 21:06:20.707842  INFO                 main ThreadId(01) sidecar:567: Using RouterClient for request routing (no HTTP overhead)
+I0207 21:06:20.884984 2087297 ServiceFrameworkLight.cpp:789] Status server running on service port 12345
+0207 21:06:20.886699  INFO                 main ThreadId(01) sidecar:602: vLLM Sidecar service started and listening on port 12345
+I0207 21:06:20.898725 2088585 BuildModule.cpp:13] Build Information
+  Built by: 
+  Built on:  (0)
+  Built at: 
+  Build path: 
+  Package Name: 
+  Package Version: 
+  Package Release: 
+  Build Revision: 
+  Build Revision Timestamp: 0
+  Build Upstream Revision: 
+  Build Upstream Revision Timestamp: 0
+  Build Platform: platform010
+  Build Rule: fbcode:vllm/fb/vllm-sidecar:sidecar (rust_binary, buck2, dev)
+  Build Library Versions: 
+I0207 21:06:20.899623 2088585 ServiceFrameworkLight.cpp:1214] Calling serve() on vllm_sidecar port 12345
+I0207 21:06:20.905025 2089241 ThriftServer.cpp:2058] Using randomly generated TLS ticket keys.
+I0207 21:06:20.917534 2089241 ThriftServer.cpp:988] Using resource pools on address/port 12345: thrift flag: true, enable gflag: false, disable gflag: false, runtime actions: 
+I0207 21:06:20.942254 2089241 ThriftServer.cpp:1538] Resource pools configured: 9
+0207 21:06:21.006088  INFO tokio-runtime-worker ThreadId(225) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 2.93s
+W0207 21:06:21.083195 2089241 api.cpp:825] config data_security_systems/certificate_service/prod/mrl_simple_predicates possesses a signature but this api instance has not been initialized with a ConfigSignatureVerifier object to verify it. Please initialize this api instance with an appropriate ConfigSignatureVerifier
+I0207 21:06:21.100957 2089241 SharedSSLContextManager.h:91] Initialized SSL context configs
+I0207 21:06:21.142477 2089241 ThriftServer.cpp:746] ThriftServer listening on address/port: [::]:12345
+I0207 21:06:21.152691 2089241 SharedSSLContextManager.h:134] Updated Fizz and SSL context configs
+0207 21:06:26.390789  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/responses through P/D pipeline request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.398385  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:281: Updated consistent hash ring with 4 workers and 640 virtual nodes request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.398801  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:d3b56585664036c4 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.398852  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:d3b56585664036c4' mapped to worker: https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.398887  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:d3b56585664036c4' -> worker='https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081' (index=0) request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400427  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:281: Updated consistent hash ring with 1 workers and 160 virtual nodes request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400745  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:d3b56585664036c4 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400779  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:d3b56585664036c4' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400807  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:d3b56585664036c4' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400850  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400878  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.400907  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/responses request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.401048  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_85d58822127c4e39bbcb8c65d06bb947 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:26.401239  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081/v1/responses with request_id: ___prefill_addr_[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_85d58822127c4e39bbcb8c65d06bb947 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.026400  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.026648  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:06:25 GMT", "server": "uvicorn", "content-length": "2866", "content-type": "application/json"} request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.026808  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 2866 bytes request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.026844  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"resp_993010ad10326749","created_at":1770527186,"incomplete_details":{"reason":"max_output_tokens"},"instructions":null,"metadata":null,"model":"default","object":"response","output":[{"id":"rs_8ed96759772ff47d","summary":[],"type":"reasoning","content":[{"text":" The user wants me to solve 8 comprehensive math problems as if I were a mathematics professor. I need to provide detailed, step-by-step solutions for each problem.\n\nLet me analyze each problem:\n\n**Problem 1**: Bayes' theorem problem about factory shifts and defect rates.\n- Morning: 40% production, 2% defect rate\n- Afternoon: 35% production, 3% defect rate  \n- Night: 25% production, 5% defect rate\n- Find P(Night | Defective)\n\n**Problem 2**: Find all positive integer solutions to $x^3 + y^3 + z^3 = x^2 y^2 z^2$.\nThis looks like a Diophantine equation. I need to find bounds and check small cases.\n\n**Problem 3**: Linear recurrence relation.\n- $a(1) = 1, a(2) = 3$\n- $a(n) = 2a(n-1) + a(n-2)$ for $n \\geq 3$\n- Find closed form using characteristic equation, prove by strong induction, calculate $a(10)$.\n\n**Problem 4**: Rational function analysis.\n- $f(x) = \\frac{x^3 - 6x^2 + 11x - 6}{x^2 - 4x + 3}$\n- Factor numerator and denominator: numerator is $(x-1)(x-2)(x-3)$, denominator is $(x-1)(x-3)$\n- So $f(x) = \\frac{(x-1)(x-2)(x-3)}{(x-1)(x-3)} = x-2$ for $x \\neq 1, 3$\n- Hole at $x=1$ and $x=3$? Wait, let me check... actually, both factors cancel, so holes at $x=1$ and $x=3$? No, wait:\n- Actually: $\\frac{(x-1)(x-2)(x-3)}{(x-1)(x-3)} = x-2$ when $x \\neq 1, 3$.\n- So there are holes at $(1, -1)$ and $(3, 1)$? Wait, if $x=1$, $f(1) = 1-2 = -1$, so hole at $(1, -1)$. If $x=3$, $f(3)","type":"reasoning_text"}],"encrypted_content":null,"status":null}],"parallel_tool_calls":true,"temperature":0.699999988079071,"tool_choice":"auto","tools":[{"container":{"type":"auto","file_ids":null,"memory_limit":null},"type":"code_interpreter"},{"server_label":"container","type":"mcp","allowed_tools":null,"authorization":null,"connector_id":null,"headers":null,"require_approval":null,"server_description":null,"server_url":""},{"type":"web_search_preview","search_context_size":null,"user_location":null}],"top_p":0.8999999761581421,"background":false,"max_output_tokens":512,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"reasoning":{"effort":"medium","generate_summary":null,"summary":null},"service_tier":"auto","status":"incomplete","text":null,"top_logprobs":null,"truncation":"disabled","usage":{"input_tokens":3473,"input_tokens_details":{"cached_tokens":1728,"input_tokens_per_turn":[],"cached_tokens_per_turn":[]},"output_tokens":512,"output_tokens_details":{"reasoning_tokens":0,"tool_output_tokens":0,"output_tokens_per_turn":[],"tool_output_tokens_per_turn":[]},"total_tokens":3985},"user":null,"input_messages":null,"output_messages":null} request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.027152  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:769: No kv_transfer_params found in prefill response, will proceed without them request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.027190  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:34.027300  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/responses with request_id: ___prefill_addr_[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_85d58822127c4e39bbcb8c65d06bb947 request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:41.751371  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:872: 📥 Decode response status: 200 OK request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:41.751728  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:873: 📥 Decode response headers: {"date": "Sun, 08 Feb 2026 05:06:33 GMT", "server": "uvicorn", "content-length": "3000", "content-type": "application/json"} request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:41.751786  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:937: No logprobs merging needed (streaming=false, needs_logprobs=false) request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:41.751910  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:954: 📥 Decode response body size: 3000 bytes request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:06:41.751945  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:959: 📥 Decode response body: {"id":"resp_b426eb83b5d27f57","created_at":1770527194,"incomplete_details":{"reason":"max_output_tokens"},"instructions":null,"metadata":null,"model":"default","object":"response","output":[{"id":"rs_abb2ac4109d78506","summary":[],"type":"reasoning","content":[{"text":" The user wants me to solve 8 comprehensive mathematics problems step by step. Let me analyze each problem:\n\n1. **Bayes Theorem Problem**: Calculate P(Night|Defective) given production percentages and defect rates.\n2. **Diophantine Equation**: Find all positive integer solutions to $x^3 + y^3 + z^3 = x^2 y^2 z^2$.\n3. **Recurrence Relation**: Solve $a(n) = 2a(n-1) + a(n-2)$ with $a(1)=1, a(2)=3$, find closed form, prove by induction, calculate $a(10)$.\n4. **Rational Function Analysis**: Analyze $f(x) = \\frac{x^3 - 6x^2 + 11x - 6}{x^2 - 4x + 3}$ for asymptotes, holes, intercepts, domain, range.\n5. **Differential Equation**: Tank filling with leak. Cylindrical tank, inflow 2 m³/min, outflow $0.5\\sqrt{h}$ m³/min. Find equilibrium, stability, time to reach 90% of equilibrium.\n6. **Graph Theory**: Prove existence of Hamiltonian path in tournament graph with 8 teams (actually, any tournament has a Hamiltonian path).\n7. **Integral Evaluation**: Evaluate $\\int_0^\\infty \\frac{\\sin(x)\\ln(x)}{x} dx$ using given $\\int_0^\\infty \\frac{\\sin(x)}{x} dx = \\frac{\\pi}{2}$.\n8. **Probability**: Binomial distribution with $n=100, p=0.7$. Find $P(X > 75)$ using exact binomial and normal approximation.\n\nLet me solve each one carefully.\n\n**Problem 1: Bayes Theorem**\n\nLet:\n- $M$ = morning shift, $P(M) = 0.40$\n- $A$ = afternoon shift, $P(A) = 0.35$\n- $N$ = night shift, $P(N) = 0.25$\n\nDefect rates:\n- $P(D|M) = 0.02$\n- $P(D|A) = 0.03$\n- $P(D|N) = 0.05$\n\nFind $P(N|D)$.\n\nBy Bayes' theorem:\n$$P(N|D) = \\frac{P(D|N)P(N","type":"reasoning_text"}],"encrypted_content":null,"status":null}],"parallel_tool_calls":true,"temperature":0.699999988079071,"tool_choice":"auto","tools":[{"container":{"type":"auto","file_ids":null,"memory_limit":null},"type":"code_interpreter"},{"server_label":"container","type":"mcp","allowed_tools":null,"authorization":null,"connector_id":null,"headers":null,"require_approval":null,"server_description":null,"server_url":""},{"type":"web_search_preview","search_context_size":null,"user_location":null}],"top_p":0.8999999761581421,"background":false,"max_output_tokens":512,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"reasoning":{"effort":"medium","generate_summary":null,"summary":null},"service_tier":"auto","status":"incomplete","text":null,"top_logprobs":null,"truncation":"disabled","usage":{"input_tokens":3473,"input_tokens_details":{"cached_tokens":2560,"input_tokens_per_turn":[],"cached_tokens_per_turn":[]},"output_tokens":512,"output_tokens_details":{"reasoning_tokens":0,"tool_output_tokens":0,"output_tokens_per_turn":[],"tool_output_tokens_per_turn":[]},"total_tokens":3985},"user":null,"input_messages":null,"output_messages":null} request_id: "0000000000000001" method: "OpenAIAPIService.createResponses"
+0207 21:07:18.101640  INFO tokio-runtime-worker ThreadId(225) lib::metrics_thread:677: Calculated 160 histogram percentile metrics
+0207 21:07:18.242686  INFO tokio-runtime-worker ThreadId(225) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.20s
+0207 21:07:20.709198  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:07:20.721691  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:07:20.721757  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:07:20.721776  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:07:20.721790  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:07:20.721803  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:08:18.099355  INFO tokio-runtime-worker ThreadId(225) lib::metrics_thread:677: Calculated 160 histogram percentile metrics
+0207 21:08:18.412179  INFO tokio-runtime-worker ThreadId(225) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.37s
+0207 21:08:20.708345  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:08:20.716685  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:08:20.716751  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:08:20.716769  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:08:20.716783  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:08:20.716796  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:09:14.550935  INFO tokio-runtime-worker ThreadId(224) request_info:handler: router:826: Sending chat completion request to /v1/chat/completions: {
+  "add_generation_prompt": true,
+  "continue_final_message": false,
+  "ignore_eos": false,
+  "include_reasoning": true,
+  "logprobs": false,
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?\n\nA: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6.\nQ: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?\n\nA: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5.\nQ: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?\n\nA: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39.\nQ: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?\n\nA: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8.\nQ: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?\n\nA: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9.\nQ: There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?\n\nA: There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29.\nQ: Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?\n\nA: Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33.\nQ: Olivia has $23. She bought five bagels for $3 each. How much money does she have left?\n\nA: Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8.\nQ: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\n\nA:",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "",
+  "no_stop_trim": false,
+  "return_hidden_states": false,
+  "separate_reasoning": true,
+  "skip_special_tokens": true,
+  "stream": false,
+  "stream_reasoning": true,
+  "temperature": 0.0
+} request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.551179  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/chat/completions through P/D pipeline request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552086  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552142  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552173  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081' (index=1) request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552364  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552394  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552419  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552454  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552480  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552504  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/chat/completions request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552589  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.552688  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.652334  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.652548  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:09:14 GMT", "server": "uvicorn", "content-length": "1161", "content-type": "application/json"} request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.652661  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 1161 bytes request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.652693  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44","object":"chat.completion","created":1770527354,"model":"default","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":" The"},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":720,"total_tokens":721,"completion_tokens":1,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"remote_block_ids":[88,89,90,91,92,93,94,95,96,97,127,193],"remote_engine_id":"00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp1","remote_request_id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44-9ce389a6","remote_host":"2803:6086:0878:2fca:e59e:72c3:0400:0000","remote_port":5603,"tp_size":1}} request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.652972  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:764: Extracted kv_transfer_params from prefill response: {
+  "do_remote_decode": false,
+  "do_remote_prefill": true,
+  "remote_block_ids": [
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    127,
+    193
+  ],
+  "remote_engine_id": "00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp1",
+  "remote_host": "2803:6086:0878:2fca:e59e:72c3:0400:0000",
+  "remote_port": 5603,
+  "remote_request_id": "chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44-9ce389a6",
+  "tp_size": 1
+} request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.653005  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:14.653096  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_3489704b169b453ab1dfa9539c342f44 request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:18.099419  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:677: Calculated 160 histogram percentile metrics
+0207 21:09:18.294569  INFO tokio-runtime-worker ThreadId(216) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.25s
+0207 21:09:20.709210  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:09:20.719476  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:09:20.719540  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:09:20.719558  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:09:20.719572  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:09:20.719585  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:09:22.127951  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:872: 📥 Decode response status: 200 OK request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:09:22.128180  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:873: 📥 Decode response headers: {"date": "Sun, 08 Feb 2026 05:09:13 GMT", "server": "uvicorn", "content-length": "2331", "content-type": "application/json"} request_id: "0020000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:10:18.102274  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:677: Calculated 164 histogram percentile metrics
+0207 21:10:18.198383  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.15s
+0207 21:10:20.708360  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:10:20.714810  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:10:20.714877  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:10:20.714895  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:10:20.714908  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:10:20.714922  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:11:18.100032  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:677: Calculated 164 histogram percentile metrics
+0207 21:11:18.185166  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.14s
+0207 21:11:20.708832  INFO tokio-runtime-worker ThreadId(225) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:11:20.717782  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:11:20.717928  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:11:20.717946  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:11:20.717960  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:11:20.717972  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:11:37.217863  INFO tokio-runtime-worker ThreadId(216) request_info:handler: router:826: Sending chat completion request to /v1/chat/completions: {
+  "add_generation_prompt": true,
+  "continue_final_message": false,
+  "ignore_eos": false,
+  "include_reasoning": true,
+  "logprobs": false,
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?\n\nA: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6.\nQ: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?\n\nA: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5.\nQ: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?\n\nA: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39.\nQ: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?\n\nA: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8.\nQ: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?\n\nA: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9.\nQ: There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?\n\nA: There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29.\nQ: Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?\n\nA: Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33.\nQ: Olivia has $23. She bought five bagels for $3 each. How much money does she have left?\n\nA: Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8.\nQ: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\n\nA:",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "",
+  "no_stop_trim": false,
+  "return_hidden_states": false,
+  "separate_reasoning": true,
+  "skip_special_tokens": true,
+  "stream": false,
+  "stream_reasoning": true,
+  "temperature": 0.0
+} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.217899  INFO tokio-runtime-worker ThreadId(225) request_info:handler: router:826: Sending chat completion request to /v1/chat/completions: {
+  "add_generation_prompt": true,
+  "continue_final_message": false,
+  "ignore_eos": false,
+  "include_reasoning": true,
+  "logprobs": false,
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?\n\nA: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6.\nQ: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?\n\nA: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5.\nQ: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?\n\nA: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39.\nQ: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?\n\nA: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8.\nQ: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?\n\nA: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9.\nQ: There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?\n\nA: There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29.\nQ: Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?\n\nA: Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33.\nQ: Olivia has $23. She bought five bagels for $3 each. How much money does she have left?\n\nA: Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8.\nQ: A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?\n\nA:",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "",
+  "no_stop_trim": false,
+  "return_hidden_states": false,
+  "separate_reasoning": true,
+  "skip_special_tokens": true,
+  "stream": false,
+  "stream_reasoning": true,
+  "temperature": 0.0
+} request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.218078  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/chat/completions through P/D pipeline request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.218117  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/chat/completions through P/D pipeline request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219005  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219083  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219077  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:202389e1fa091aa0 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219117  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081' (index=1) request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219138  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:202389e1fa091aa0' mapped to worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219172  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:202389e1fa091aa0' -> worker='https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081' (index=1) request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219291  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219334  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219342  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:202389e1fa091aa0 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219357  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219378  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:202389e1fa091aa0' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219391  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219406  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:202389e1fa091aa0' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219416  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219437  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219445  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/chat/completions request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219463  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219490  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/chat/completions request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219567  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219621  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219665  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.219711  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290180  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290391  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:11:37 GMT", "server": "uvicorn", "content-length": "1161", "content-type": "application/json"} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290512  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 1161 bytes request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290546  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421","object":"chat.completion","created":1770527497,"model":"default","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":" The"},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":720,"total_tokens":721,"completion_tokens":1,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"remote_block_ids":[88,89,90,91,92,93,94,95,96,97,127,194],"remote_engine_id":"00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp1","remote_request_id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421-8915ff09","remote_host":"2803:6086:0878:2fca:e59e:72c3:0400:0000","remote_port":5603,"tp_size":1}} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290779  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:764: Extracted kv_transfer_params from prefill response: {
+  "do_remote_decode": false,
+  "do_remote_prefill": true,
+  "remote_block_ids": [
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    127,
+    194
+  ],
+  "remote_engine_id": "00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp1",
+  "remote_host": "2803:6086:0878:2fca:e59e:72c3:0400:0000",
+  "remote_port": 5603,
+  "remote_request_id": "chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421-8915ff09",
+  "tp_size": 1
+} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290814  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.290889  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_071501ac6cdf4a4b8fc5ce2f13edd421 request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342192  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342395  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:11:36 GMT", "server": "uvicorn", "content-length": "1161", "content-type": "application/json"} request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342505  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 1161 bytes request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342538  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9","object":"chat.completion","created":1770527497,"model":"default","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":" The"},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":684,"total_tokens":685,"completion_tokens":1,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"remote_block_ids":[94,95,96,97,98,99,100,101,102,103,154],"remote_engine_id":"00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0","remote_request_id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9-8928c62d","remote_host":"2803:6086:0878:2fca:e59e:72c3:0400:0000","remote_port":5602,"tp_size":1}} request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342778  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:764: Extracted kv_transfer_params from prefill response: {
+  "do_remote_decode": false,
+  "do_remote_prefill": true,
+  "remote_block_ids": [
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    154
+  ],
+  "remote_engine_id": "00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0",
+  "remote_host": "2803:6086:0878:2fca:e59e:72c3:0400:0000",
+  "remote_port": 5602,
+  "remote_request_id": "chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9-8928c62d",
+  "tp_size": 1
+} request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342812  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.342887  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_9bd699ccaf884515ab43de36db181bf9 request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.401470  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:872: 📥 Decode response status: 400 Bad Request request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.401671  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:873: 📥 Decode response headers: {"date": "Sun, 08 Feb 2026 05:11:37 GMT", "server": "uvicorn", "content-length": "130", "content-type": "application/json"} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.402210 ERROR tokio-runtime-worker ThreadId(224) request_info:handler: common::thrift_predictor_service:173: HTTP request failed: Router error 400 Bad Request: {"error":{"code":400,"message":"Counters can only be incremented by non-negative amounts.","param":null,"type":"BadRequestError"},"prompt_logprobs":null} request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:37.402360 ERROR tokio-runtime-worker ThreadId(224) request_info:handler: llm_predictor_gpu_services:1007: method: "InferencePlatformSp_LlmPredictorGpu.predict", exception: ex2(ServiceException { message: "HTTP request failed: Router error 400 Bad Request: {\"error\":{\"code\":400,\"message\":\"Counters can only be incremented by non-negative amounts.\",\"param\":null,\"type\":\"BadRequestError\"},\"prompt_logprobs\":null}" }), error: "ServiceException { message: \"HTTP request failed: Router error 400 Bad Request: {\\\"error\\\":{\\\"code\\\":400,\\\"message\\\":\\\"Counters can only be incremented by non-negative amounts.\\\",\\\"param\\\":null,\\\"type\\\":\\\"BadRequestError\\\"},\\\"prompt_logprobs\\\":null}\" }" request_id: "0040000000000003" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.416394  INFO tokio-runtime-worker ThreadId(224) request_info:handler: router:826: Sending chat completion request to /v1/chat/completions: {
+  "add_generation_prompt": true,
+  "continue_final_message": false,
+  "ignore_eos": false,
+  "include_reasoning": true,
+  "logprobs": false,
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?\n\nA: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6.\nQ: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?\n\nA: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5.\nQ: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?\n\nA: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39.\nQ: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?\n\nA: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8.\nQ: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?\n\nA: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9.\nQ: There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?\n\nA: There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29.\nQ: Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?\n\nA: Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33.\nQ: Olivia has $23. She bought five bagels for $3 each. How much money does she have left?\n\nA: Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8.\nQ: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\n\nA:",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "",
+  "no_stop_trim": false,
+  "return_hidden_states": false,
+  "separate_reasoning": true,
+  "skip_special_tokens": true,
+  "stream": false,
+  "stream_reasoning": true,
+  "temperature": 0.0
+} request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.416604  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/chat/completions through P/D pipeline request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417528  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417586  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417616  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081' (index=1) request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417781  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417810  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417832  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417862  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417886  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417911  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/chat/completions request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.417989  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.418080  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.481879  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482117  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:11:37 GMT", "server": "uvicorn", "content-length": "1165", "content-type": "application/json"} request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482234  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 1165 bytes request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482266  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d","object":"chat.completion","created":1770527498,"model":"default","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":" The"},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":720,"total_tokens":721,"completion_tokens":1,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"remote_block_ids":[94,95,96,97,98,99,100,101,102,103,104,155],"remote_engine_id":"00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0","remote_request_id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d-a008b215","remote_host":"2803:6086:0878:2fca:e59e:72c3:0400:0000","remote_port":5602,"tp_size":1}} request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482491  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:764: Extracted kv_transfer_params from prefill response: {
+  "do_remote_decode": false,
+  "do_remote_prefill": true,
+  "remote_block_ids": [
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    155
+  ],
+  "remote_engine_id": "00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0",
+  "remote_host": "2803:6086:0878:2fca:e59e:72c3:0400:0000",
+  "remote_port": 5602,
+  "remote_request_id": "chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d-a008b215",
+  "tp_size": 1
+} request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482522  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.482592  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_f1525e66ff1a43718aaccdf77042920d request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.488643  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:872: 📥 Decode response status: 200 OK request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.488807  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:873: 📥 Decode response headers: {"date": "Sun, 08 Feb 2026 05:11:38 GMT", "server": "uvicorn", "content-length": "153", "content-type": "application/json"} request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.489331 ERROR tokio-runtime-worker ThreadId(224) request_info:handler: common::thrift_predictor_service:173: HTTP request failed: Failed to deserialize chat completion response (176 bytes): {"error":{"code":500,"message":"EngineCore encountered an issue. See stack trace (above) for the root cause.","param":null,"type":"InternalServerError"},"prompt_logprobs":null}: missing field `id` at line 1 column 176 request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:38.489468 ERROR tokio-runtime-worker ThreadId(224) request_info:handler: llm_predictor_gpu_services:1007: method: "InferencePlatformSp_LlmPredictorGpu.predict", exception: ex2(ServiceException { message: "HTTP request failed: Failed to deserialize chat completion response (176 bytes): {\"error\":{\"code\":500,\"message\":\"EngineCore encountered an issue. See stack trace (above) for the root cause.\",\"param\":null,\"type\":\"InternalServerError\"},\"prompt_logprobs\":null}: missing field `id` at line 1 column 176" }), error: "ServiceException { message: \"HTTP request failed: Failed to deserialize chat completion response (176 bytes): {\\\"error\\\":{\\\"code\\\":500,\\\"message\\\":\\\"EngineCore encountered an issue. See stack trace (above) for the root cause.\\\",\\\"param\\\":null,\\\"type\\\":\\\"InternalServerError\\\"},\\\"prompt_logprobs\\\":null}: missing field `id` at line 1 column 176\" }" request_id: "0050000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.494086  INFO tokio-runtime-worker ThreadId(224) request_info:handler: router:826: Sending chat completion request to /v1/chat/completions: {
+  "add_generation_prompt": true,
+  "continue_final_message": false,
+  "ignore_eos": false,
+  "include_reasoning": true,
+  "logprobs": false,
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?\n\nA: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6.\nQ: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?\n\nA: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5.\nQ: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?\n\nA: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39.\nQ: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?\n\nA: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8.\nQ: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?\n\nA: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9.\nQ: There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?\n\nA: There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29.\nQ: Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?\n\nA: Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33.\nQ: Olivia has $23. She bought five bagels for $3 each. How much money does she have left?\n\nA: Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8.\nQ: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\n\nA:",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "",
+  "no_stop_trim": false,
+  "return_hidden_states": false,
+  "separate_reasoning": true,
+  "skip_special_tokens": true,
+  "stream": false,
+  "stream_reasoning": true,
+  "temperature": 0.0
+} request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.494304  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1536: Transparent proxy: routing POST /v1/chat/completions through P/D pipeline request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495187  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495241  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495271  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081' (index=1) request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495440  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:593: CONSISTENT_HASH_DEBUG: Extracted hash key: request_hash:9554506712c316b0 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495469  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:598: CONSISTENT_HASH_DEBUG: Hash key 'request_hash:9554506712c316b0' mapped to worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495492  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::policies::consistent_hash:647: Consistent hash routing: key='request_hash:9554506712c316b0' -> worker='https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081' (index=0) request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495523  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:1596: Transparent proxy: prefill=https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, decode=https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495548  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:599: ENTERED process_vllm_two_stage_request method request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495572  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:600: Prefill worker: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081, Decode worker: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081, Path: /v1/chat/completions request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495652  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:614: Generated vLLM request ID: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.495739  INFO tokio-runtime-worker ThreadId(224) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:659: 🚀 vLLM Stage 1 - Prefill: https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.570535  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:713: 📥 Prefill response status: 200 OK request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.570766  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:714: 📥 Prefill response headers: {"date": "Sun, 08 Feb 2026 05:11:38 GMT", "server": "uvicorn", "content-length": "1165", "content-type": "application/json"} request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.570908  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:733: 📥 Prefill response body size: 1165 bytes request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.570958  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:738: 📥 Prefill response body: {"id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443","object":"chat.completion","created":1770527499,"model":"default","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":" The"},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":720,"total_tokens":721,"completion_tokens":1,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"remote_block_ids":[94,95,96,97,98,99,100,101,102,103,104,156],"remote_engine_id":"00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0","remote_request_id":"chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443-afdbc427","remote_host":"2803:6086:0878:2fca:e59e:72c3:0400:0000","remote_port":5602,"tp_size":1}} request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.571276  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:764: Extracted kv_transfer_params from prefill response: {
+  "do_remote_decode": false,
+  "do_remote_prefill": true,
+  "remote_block_ids": [
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    156
+  ],
+  "remote_engine_id": "00d7baa8-7c78-44b3-87b8-fd3b6953f3e2_dp0",
+  "remote_host": "2803:6086:0878:2fca:e59e:72c3:0400:0000",
+  "remote_port": 5602,
+  "remote_request_id": "chatcmpl-___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443-afdbc427",
+  "tp_size": 1
+} request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.571337  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:779: ✅ vLLM Stage 1 completed, starting Stage 2 - Decode request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.571445  INFO tokio-runtime-worker ThreadId(225) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:809: 🚀 vLLM Stage 2 - Decode: https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions with request_id: ___prefill_addr_[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081___decode_addr_[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081_353661d46ba048ad95e9879ef9039443 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.577936  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:872: 📥 Decode response status: 200 OK request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.578153  INFO tokio-runtime-worker ThreadId(216) request_info:handler: vllm_router_rs::routers::http::vllm_pd_router:873: 📥 Decode response headers: {"date": "Sun, 08 Feb 2026 05:11:39 GMT", "server": "uvicorn", "content-length": "153", "content-type": "application/json"} request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.578623 ERROR tokio-runtime-worker ThreadId(216) request_info:handler: common::thrift_predictor_service:173: HTTP request failed: Failed to deserialize chat completion response (176 bytes): {"error":{"code":500,"message":"EngineCore encountered an issue. See stack trace (above) for the root cause.","param":null,"type":"InternalServerError"},"prompt_logprobs":null}: missing field `id` at line 1 column 176 request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:39.578749 ERROR tokio-runtime-worker ThreadId(216) request_info:handler: llm_predictor_gpu_services:1007: method: "InferencePlatformSp_LlmPredictorGpu.predict", exception: ex2(ServiceException { message: "HTTP request failed: Failed to deserialize chat completion response (176 bytes): {\"error\":{\"code\":500,\"message\":\"EngineCore encountered an issue. See stack trace (above) for the root cause.\",\"param\":null,\"type\":\"InternalServerError\"},\"prompt_logprobs\":null}: missing field `id` at line 1 column 176" }), error: "ServiceException { message: \"HTTP request failed: Failed to deserialize chat completion response (176 bytes): {\\\"error\\\":{\\\"code\\\":500,\\\"message\\\":\\\"EngineCore encountered an issue. See stack trace (above) for the root cause.\\\",\\\"param\\\":null,\\\"type\\\":\\\"InternalServerError\\\"},\\\"prompt_logprobs\\\":null}: missing field `id` at line 1 column 176\" }" request_id: "0040000000000005" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:45.545423 ERROR tokio-runtime-worker ThreadId(216) request_info:handler: common::thrift_predictor_service:173: HTTP request failed: Router error 500 Internal Server Error: Transparent proxy request failed: Network error: Decode request failed to https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions: error sending request for url (https://[2803:6086:908:97e5:9f1:7c4:400:0]:8081/v1/chat/completions) request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:11:45.545709 ERROR tokio-runtime-worker ThreadId(216) request_info:handler: llm_predictor_gpu_services:1007: method: "InferencePlatformSp_LlmPredictorGpu.predict", exception: ex2(ServiceException { message: "HTTP request failed: Router error 500 Internal Server Error: Transparent proxy request failed: Network error: Decode request failed to https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions: error sending request for url (https://[2803:6086:908:97e5:9f1:7c4:400:0]:8081/v1/chat/completions)" }), error: "ServiceException { message: \"HTTP request failed: Router error 500 Internal Server Error: Transparent proxy request failed: Network error: Decode request failed to https://[2803:6086:0908:97e5:09f1:07c4:0400:0000]:8081/v1/chat/completions: error sending request for url (https://[2803:6086:908:97e5:9f1:7c4:400:0]:8081/v1/chat/completions)\" }" request_id: "0040000000000001" method: "InferencePlatformSp_LlmPredictorGpu.predict"
+0207 21:12:18.047825  WARN tokio-runtime-worker ThreadId(216) lib::metrics_thread:241: Failed to collect service metrics: Failed to fetch metrics
+0207 21:12:18.048020  INFO tokio-runtime-worker ThreadId(216) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.00s
+0207 21:12:20.708293  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:12:20.715475  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:12:20.715537  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:12:20.715554  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:12:20.715567  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:12:20.715580  INFO tokio-runtime-worker ThreadId(216) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
+0207 21:13:18.047423  WARN tokio-runtime-worker ThreadId(224) lib::metrics_thread:241: Failed to collect service metrics: Failed to fetch metrics
+0207 21:13:18.047643  INFO tokio-runtime-worker ThreadId(224) lib::metrics_thread:246: Periodic task to report metrics to ODS finished in 0.00s
+0207 21:13:20.709227  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:65: Querying SMC tier for workers: smc.rift_congc_kimi_prefill_c3b210t
+0207 21:13:20.717017  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:108: Discovered 4 enabled workers from SMC tier smc.rift_congc_kimi_prefill_c3b210t
+0207 21:13:20.717105  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2af7:d49f:72c3:0400:0000]:8081 (port 8081)
+0207 21:13:20.717130  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2bf6:d07f:72c3:0400:0000]:8081 (port 8081)
+0207 21:13:20.717150  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2c68:a4a1:72c3:0400:0000]:8081 (port 8081)
+0207 21:13:20.717175  INFO tokio-runtime-worker ThreadId(224) router::smc_worker_discovery:114:   - https://[2803:6086:0878:2fca:e59e:72c3:0400:0000]:8081 (port 8081)
