@@ -14,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
+    apply_fi_trtllm_fp8_per_tensor_moe,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -85,9 +88,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.utils.flashinfer import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

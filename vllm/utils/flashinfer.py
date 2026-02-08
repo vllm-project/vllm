@@ -758,12 +758,6 @@ def register_scales_for_trtllm_fp8_per_tensor_moe(
     layer.output2_scales_scalar = g2_alphas
 
 
-# Import from the new unified location
-from vllm.model_executor.layers.fused_moe.flashinfer_utils import (  # noqa: F401
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
-
-
 def make_fp8_moe_alpha_scales_for_fi(
     w13_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
@@ -996,7 +990,6 @@ __all__ = [
     "swap_w13_to_w31",
     "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",
     "register_scales_for_trtllm_fp8_per_tensor_moe",
-    "apply_fi_trtllm_fp8_per_tensor_moe",
     "make_fp8_moe_alpha_scales_for_fi",
     "get_flashinfer_moe_backend",
     "is_flashinfer_supporting_global_sf",
