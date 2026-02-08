@@ -15,6 +15,21 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 
+def configure_reduced_precision_reduction():
+    """Disable reduced precision reduction for bf16/fp16 matmul operations
+    if explicitly requested via environment variable.
+    This ensures numerical consistency across PyTorch versions without
+    enabling full batch invariant mode.
+    See: https://github.com/pytorch/pytorch/pull/173002
+    """
+    if os.getenv("VLLM_DISABLE_REDUCED_PRECISION_REDUCTION", "0") == "1":
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
+
+configure_reduced_precision_reduction()
+
+
 def _matmul_launch_metadata(
     grid: Callable[..., Any], kernel: Any, args: dict[str, Any]
 ) -> dict[str, Any]:
