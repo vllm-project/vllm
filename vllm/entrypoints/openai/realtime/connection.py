@@ -13,7 +13,11 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorResponse,
+    ErrorType,
+    UsageInfo,
+)
 from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
@@ -87,7 +91,7 @@ class RealtimeConnection:
 
         return self.serving.create_error_response(
             message=f"The model `{model}` does not exist.",
-            err_type="NotFoundError",
+            err_type=ErrorType.NOT_FOUND,
             status_code=HTTPStatus.NOT_FOUND,
             param="model",
         )
