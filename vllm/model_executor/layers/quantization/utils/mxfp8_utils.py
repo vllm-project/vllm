@@ -11,8 +11,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
-class Mxfp8Backend(Enum):
-    TORCH = "torch"
+class Mxfp8LinearBackend(Enum):
+    EMULATION = "emulation"
 
 
 # MXFP8 constants
@@ -102,8 +102,8 @@ direct_register_custom_op(
 
 
 class Mxfp8LinearOp:
-    def __init__(self, backend: Mxfp8Backend):
-        if backend not in Mxfp8Backend:
+    def __init__(self, backend: Mxfp8LinearBackend):
+        if backend not in Mxfp8LinearBackend:
             raise ValueError(f"Unsupported backend: {backend}")
 
         self.backend = backend

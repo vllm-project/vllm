@@ -67,7 +67,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    Mxfp8Backend,
+    Mxfp8LinearBackend,
     Mxfp8LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
@@ -1688,7 +1688,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend: Mxfp8Backend = Mxfp8Backend.TORCH
+        backend: Mxfp8LinearBackend = Mxfp8LinearBackend.EMULATION
         self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
         logger.info_once("Using %s backend for MXFP8 GEMM", backend.value)
 
