@@ -1871,7 +1871,6 @@ class Scheduler(SchedulerInterface):
         num_invalid_spec_tokens: dict[str, int] | None,
         request_id: str,
     ) -> SpecDecodingStats | None:
-<<<<<<< HEAD
         # Save this so its accessible by scheduler and can
         # be sent to engine for Dynamic SD.
         if self.spec_decoding_stats_all is not None:
@@ -1880,10 +1879,7 @@ class Scheduler(SchedulerInterface):
                 num_accepted_tokens=num_accepted_tokens,
             )
 
-        if not self.log_stats:
-=======
         if not self.log_stats or not num_draft_tokens:
->>>>>>> ab10d798555ee3611f82e71cbe573086fb92a4ed
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
