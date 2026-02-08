@@ -343,6 +343,38 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the FRONT of the free list.
+
+        This is used to prioritize fresh blocks (without cached hashes) over
+        cached blocks, so that cached blocks are preserved longer.
+
+        Args:
+            blocks: The blocks to prepend.
+        """
+        if len(blocks) == 0:
+            return
+
+        first_block = self.fake_free_list_head.next_free_block
+        assert first_block is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        # Connect the fake head to the first block of <blocks>
+        self.fake_free_list_head.next_free_block = blocks[0]
+        blocks[0].prev_free_block = self.fake_free_list_head
+
+        # Add inter-connections between consecutive blocks
+        for i in range(len(blocks) - 1):
+            blocks[i].next_free_block = blocks[i + 1]
+            blocks[i + 1].prev_free_block = blocks[i]
+
+        # Connect the last block of <blocks> to the original first block
+        blocks[-1].next_free_block = first_block
+        first_block.prev_free_block = blocks[-1]
+
+        self.num_free_blocks += len(blocks)
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 
