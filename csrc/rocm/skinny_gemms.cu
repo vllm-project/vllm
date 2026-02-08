@@ -1953,9 +1953,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
                                           1);  // row_shl1
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
-                                          1);  // row_shl1
+                                          1);  // row_shl2
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
-                                          1);  // row_shl1
+                                          1);  // row_shl3
         accm0 += __shfl_down(accm0, 20);
         accm0 += __shfl_down(accm0, 40);
         sum[n][y][0] = accm0;
@@ -2101,9 +2101,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
                                           1);  // row_shl1
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
-                                          1);  // row_shl1
+                                          1);  // row_shl2
         accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
-                                          1);  // row_shl1
+                                          1);  // row_shl3
         accm0 += __shfl_down(accm0, 20);
         accm0 += __shfl_down(accm0, 40);
         sum[n][y][0] = accm0;
