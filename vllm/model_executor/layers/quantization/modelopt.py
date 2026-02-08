@@ -394,19 +394,13 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
             if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", "")).upper()
-                # Skip MXFP8 - let ModelOptMxFp8Config handle it
-                if "MXFP8" in quant_algo.upper():
-                    return None
-                if "FP8" in quant_algo.upper():
+                quant_algo = str(quant_config.get("quant_algo", ""))
+                if quant_algo.upper() == "FP8":
                     return "modelopt"
         else:
             # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
-            # Skip MXFP8 - let ModelOptMxFp8Config handle it
-            if "MXFP8" in quant_algo.upper():
-                return None
-            if "FP8" in quant_algo.upper():
+            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
+            if quant_algo.upper() == "FP8":
                 return "modelopt"
 
         return None
