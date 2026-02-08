@@ -104,7 +104,7 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-def chunk_gated_delta_rule(
+def fi_chunk_gated_delta_rule(
     q,
     k,
     v,
@@ -116,50 +116,45 @@ def chunk_gated_delta_rule(
     head_first=False,
     use_qk_l2norm_in_kernel=True,
 ):
-    if current_platform.is_cuda() and current_platform.is_device_capability(90):
-        logger.info_once(
-            "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
-        )
-        from flashinfer.gdn_prefill import (
-            chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
-        )
+    from flashinfer.gdn_prefill import (
+        chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
+    )
 
-        if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
 
-        # use flashinfer implementation
-        q = rearrange(q, "1 l h d -> l h d").contiguous()
-        k = rearrange(k, "1 l h d -> l h d").contiguous()
-        v = rearrange(v, "1 l h d -> l h d").contiguous()
-        g = rearrange(g, "1 b h -> b h").contiguous()
-        beta = rearrange(beta, "1 b h -> b h").contiguous()
-        fi_state = initial_state.to(torch.float32)
-        fi_g = g.to(torch.float32)
-        fi_beta = beta.to(torch.float32)
-        return chunk_gated_delta_rule_fi(
-            q=q,
-            k=k,
-            v=v,
-            g=torch.exp(fi_g),
-            beta=fi_beta,
-            initial_state=fi_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-        )
-
-    return fla_chunk_gated_delta_rule(
+    # use flashinfer implementation
+    q = rearrange(q, "1 l h d -> l h d").contiguous()
+    k = rearrange(k, "1 l h d -> l h d").contiguous()
+    v = rearrange(v, "1 l h d -> l h d").contiguous()
+    g = rearrange(g, "1 b h -> b h").contiguous()
+    beta = rearrange(beta, "1 b h -> b h").contiguous()
+    fi_state = initial_state.to(torch.float32)
+    fi_g = g.to(torch.float32)
+    fi_beta = beta.to(torch.float32)
+    return chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
-        g=g,
-        beta=beta,
-        initial_state=initial_state,
+        g=torch.exp(fi_g),
+        beta=fi_beta,
+        initial_state=fi_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        head_first=head_first,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+
+
+class ChunkGatedDeltaRule(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        if current_platform.is_cuda() and current_platform.is_device_capability(90):
+            logger.info_once(
+                "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
+            )
+            self.forward = fi_chunk_gated_delta_rule
+        else:
+            self.forward = fla_chunk_gated_delta_rule
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -422,6 +417,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -708,7 +705,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = chunk_gated_delta_rule(
+            ) = self.chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
