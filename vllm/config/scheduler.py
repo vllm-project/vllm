@@ -118,8 +118,7 @@ class SchedulerConfig:
     its embedding count (an item is only scheduled if there is sufficient
     cache budget to temporarily store its embeddings for decoder execution).
 
-    If this is set to greater than `max_num_batched_encoder_embeds`,
-    more encoder embeddings can be reused across requests,
+    Increasing this enables more encoder embeddings to be reused across requests,
     but this will also lead to a corresponding increase in memory usage.
 
     Note that the number of encoder embeddings might be smaller than the
