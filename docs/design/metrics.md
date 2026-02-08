@@ -21,22 +21,22 @@ The mental model is that server-level metrics help explain the values of request
 
 ### v1 Metrics
 
-In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix, for example:
+In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm_` prefix, for example:
 
-- `vllm:num_requests_running` (Gauge) - Number of requests currently running.
-- `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
-- `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
-- `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
-- `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
-- `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
-- `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
-- `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
-- `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
-- `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
-- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency.
-- `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
-- `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
-- `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
+- `vllm_num_requests_running` (Gauge) - Number of requests currently running.
+- `vllm_kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
+- `vllm_prefix_cache_queries` (Counter) - Number of prefix cache queries.
+- `vllm_prefix_cache_hits` (Counter) - Number of prefix cache hits.
+- `vllm_prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
+- `vllm_generation_tokens_total` (Counter) - Total number of generated tokens.
+- `vllm_request_success_total` (Counter) - Number of finished requests (by finish reason).
+- `vllm_request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
+- `vllm_request_generation_tokens` (Histogram) - Histogram of generation token counts.
+- `vllm_time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
+- `vllm_inter_token_latency_seconds` (Histogram) - Inter-token latency.
+- `vllm_e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
+- `vllm_request_prefill_time_seconds` (Histogram) - Request prefill time.
+- `vllm_request_decode_time_seconds` (Histogram) - Request decode time.
 
 These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
@@ -46,20 +46,20 @@ vLLM also provides [a reference example](../../examples/online_serving/prometheu
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
-- `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
-- `vllm:prompt_tokens` - Prompt tokens.
-- `vllm:generation_tokens` - Generation tokens.
-- `vllm:inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
-- `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
-- `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
-- `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
-- `vllm:request_prompt_tokens` - Request prompt length.
-- `vllm:request_generation_tokens` - Request generation length.
-- `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
-- `vllm:request_queue_time_seconds` - Queue time.
-- `vllm:request_prefill_time_seconds` - Requests prefill time.
-- `vllm:request_decode_time_seconds` - Requests decode time.
-- `vllm:request_max_num_generation_tokens` - Max generation tokens in a sequence group.
+- `vllm_e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
+- `vllm_prompt_tokens` - Prompt tokens.
+- `vllm_generation_tokens` - Generation tokens.
+- `vllm_inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
+- `vllm_time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
+- `vllm_num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
+- `vllm_kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
+- `vllm_request_prompt_tokens` - Request prompt length.
+- `vllm_request_generation_tokens` - Request generation length.
+- `vllm_request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
+- `vllm_request_queue_time_seconds` - Queue time.
+- `vllm_request_prefill_time_seconds` - Requests prefill time.
+- `vllm_request_decode_time_seconds` - Requests decode time.
+- `vllm_request_max_num_generation_tokens` - Max generation tokens in a sequence group.
 
 See [the PR which added this Dashboard](https://github.com/vllm-project/vllm/pull/2316) for interesting and useful background on the choices made here.
 
@@ -266,9 +266,9 @@ chosen we record:
 
 Those map directly to the Prometheus metrics:
 
-- `vllm:kv_block_lifetime_seconds` – how long each sampled block exists.
-- `vllm:kv_block_idle_before_evict_seconds` – idle tail after the final access.
-- `vllm:kv_block_reuse_gap_seconds` – time between consecutive touches.
+- `vllm_kv_block_lifetime_seconds` – how long each sampled block exists.
+- `vllm_kv_block_idle_before_evict_seconds` – idle tail after the final access.
+- `vllm_kv_block_reuse_gap_seconds` – time between consecutive touches.
 
 The engine core only ships raw eviction events via `SchedulerStats`; the
 frontend drains them, turns them into Prometheus observations, and also
@@ -319,31 +319,31 @@ Example output:
 
 ```bash
 $ curl http://0.0.0.0:8000/metrics
-# HELP vllm:num_requests_running Number of requests in model execution batches.
-# TYPE vllm:num_requests_running gauge
-vllm:num_requests_running{model_name="meta-llama/Llama-3.1-8B-Instruct"} 8.0
+# HELP vllm_num_requests_running Number of requests in model execution batches.
+# TYPE vllm_num_requests_running gauge
+vllm_num_requests_running{model_name="meta-llama/Llama-3.1-8B-Instruct"} 8.0
 ...
-# HELP vllm:generation_tokens_total Number of generation tokens processed.
-# TYPE vllm:generation_tokens_total counter
-vllm:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 27453.0
+# HELP vllm_generation_tokens_total Number of generation tokens processed.
+# TYPE vllm_generation_tokens_total counter
+vllm_generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 27453.0
 ...
-# HELP vllm:request_success_total Count of successfully processed requests.
-# TYPE vllm:request_success_total counter
-vllm:request_success_total{finished_reason="stop",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
-vllm:request_success_total{finished_reason="length",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0
-vllm:request_success_total{finished_reason="abort",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
+# HELP vllm_request_success_total Count of successfully processed requests.
+# TYPE vllm_request_success_total counter
+vllm_request_success_total{finished_reason="stop",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
+vllm_request_success_total{finished_reason="length",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0
+vllm_request_success_total{finished_reason="abort",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
 ...
-# HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
-# TYPE vllm:time_to_first_token_seconds histogram
-vllm:time_to_first_token_seconds_bucket{le="0.001",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.005",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.01",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.02",model_name="meta-llama/Llama-3.1-8B-Instruct"} 13.0
-vllm:time_to_first_token_seconds_bucket{le="0.04",model_name="meta-llama/Llama-3.1-8B-Instruct"} 97.0
-vllm:time_to_first_token_seconds_bucket{le="0.06",model_name="meta-llama/Llama-3.1-8B-Instruct"} 123.0
-vllm:time_to_first_token_seconds_bucket{le="0.08",model_name="meta-llama/Llama-3.1-8B-Instruct"} 138.0
-vllm:time_to_first_token_seconds_bucket{le="0.1",model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
-vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
+# HELP vllm_time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE vllm_time_to_first_token_seconds histogram
+vllm_time_to_first_token_seconds_bucket{le="0.001",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
+vllm_time_to_first_token_seconds_bucket{le="0.005",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
+vllm_time_to_first_token_seconds_bucket{le="0.01",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
+vllm_time_to_first_token_seconds_bucket{le="0.02",model_name="meta-llama/Llama-3.1-8B-Instruct"} 13.0
+vllm_time_to_first_token_seconds_bucket{le="0.04",model_name="meta-llama/Llama-3.1-8B-Instruct"} 97.0
+vllm_time_to_first_token_seconds_bucket{le="0.06",model_name="meta-llama/Llama-3.1-8B-Instruct"} 123.0
+vllm_time_to_first_token_seconds_bucket{le="0.08",model_name="meta-llama/Llama-3.1-8B-Instruct"} 138.0
+vllm_time_to_first_token_seconds_bucket{le="0.1",model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
+vllm_time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
 ```
 
 !!! note
@@ -361,12 +361,12 @@ used for information about an instance that does not change - so it
 only needs to be observed at startup - and allows comparing across
 instances in Prometheus.
 
-We use this concept for the `vllm:cache_config_info` metric:
+We use this concept for the `vllm_cache_config_info` metric:
 
 ```text
-# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
-# TYPE vllm:cache_config_info gauge
-vllm:cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
+# HELP vllm_cache_config_info Information of the LLMEngine CacheConfig
+# TYPE vllm_cache_config_info gauge
+vllm_cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
 ```
 
 However, `prometheus_client` has
@@ -377,7 +377,7 @@ simply use a `Gauge` metric set to 1 and
 
 ### LoRA Metrics
 
-The `vllm:lora_requests_info` `Gauge` is somewhat similar, except the
+The `vllm_lora_requests_info` `Gauge` is somewhat similar, except the
 value is the current wall-clock time, and is updated every iteration.
 
 The label names used are:
@@ -439,7 +439,7 @@ metric has been deprecated, and may be quite inconvenienced when it is
 suddenly (from their perspective) when it is removed, even if there is
 an equivalent metric for them to use.
 
-As an example, see how `vllm:avg_prompt_throughput_toks_per_s` was
+As an example, see how `vllm_avg_prompt_throughput_toks_per_s` was
 [deprecated](https://github.com/vllm-project/vllm/pull/2764) (with a comment in the code),
 [removed](https://github.com/vllm-project/vllm/pull/12383), and then [noticed by a user](https://github.com/vllm-project/vllm/issues/13218).
 
@@ -459,14 +459,14 @@ In general:
 See the [deprecation policy](../contributing/deprecation_policy.md) for
 the project-wide deprecation policy.
 
-### Unimplemented - `vllm:tokens_total`
+### Unimplemented - `vllm_tokens_total`
 
 Added by <https://github.com/vllm-project/vllm/pull/4464>, but apparently never implemented. This can just be
 removed.
 
 ### Duplicated - Queue Time
 
-The `vllm:time_in_queue_requests` Histogram metric was added by
+The `vllm_time_in_queue_requests` Histogram metric was added by
 <https://github.com/vllm-project/vllm/pull/9659> and its calculation is:
 
 ```python
@@ -474,7 +474,7 @@ The `vllm:time_in_queue_requests` Histogram metric was added by
     self.metrics.time_in_queue = now - self.metrics.arrival_time
 ```
 
-Two weeks later, <https://github.com/vllm-project/vllm/pull/4464> added `vllm:request_queue_time_seconds` leaving
+Two weeks later, <https://github.com/vllm-project/vllm/pull/4464> added `vllm_request_queue_time_seconds` leaving
 us with:
 
 ```python
@@ -504,8 +504,8 @@ See above - we now expose 'queries' and 'hits' counters rather than a
 Two legacy metrics relate to a "swapped" preemption mode that is no
 longer relevant in v1:
 
-- `vllm:num_requests_swapped`
-- `vllm:cpu_cache_usage_perc`
+- `vllm_num_requests_swapped`
+- `vllm_cpu_cache_usage_perc`
 
 In this mode, when a request is preempted (e.g. to make room in KV
 cache to complete other requests), we swap kv cache blocks out to CPU
@@ -543,15 +543,15 @@ request multiple completions from the same prompt.
 As part of adding parallel sampling support in <https://github.com/vllm-project/vllm/pull/10980>, we should
 also add these metrics.
 
-- `vllm:request_params_n` (Histogram)
+- `vllm_request_params_n` (Histogram)
 
   Observes the value of the 'n' parameter of every finished request.
 
-- `vllm:request_max_num_generation_tokens` (Histogram)
+- `vllm_request_max_num_generation_tokens` (Histogram)
 
   Observes the maximum output length of all sequences in every finished
   sequence group. In the absence of parallel sampling, this is
-  equivalent to `vllm:request_generation_tokens`.
+  equivalent to `vllm_request_generation_tokens`.
 
 ### Speculative Decoding
 
@@ -559,11 +559,11 @@ Some legacy metrics are specific to "speculative decoding". This is where
 we generate candidate tokens using a faster, approximate method or
 model and then validate those tokens with the larger model.
 
-- `vllm:spec_decode_draft_acceptance_rate` (Gauge)
-- `vllm:spec_decode_efficiency` (Gauge)
-- `vllm:spec_decode_num_accepted_tokens` (Counter)
-- `vllm:spec_decode_num_draft_tokens` (Counter)
-- `vllm:spec_decode_num_emitted_tokens` (Counter)
+- `vllm_spec_decode_draft_acceptance_rate` (Gauge)
+- `vllm_spec_decode_efficiency` (Gauge)
+- `vllm_spec_decode_num_accepted_tokens` (Counter)
+- `vllm_spec_decode_num_draft_tokens` (Counter)
+- `vllm_spec_decode_num_emitted_tokens` (Counter)
 
 There is a PR under review (<https://github.com/vllm-project/vllm/pull/12193>) to add "prompt lookup (ngram)"
 speculative decoding to v1. Other techniques will follow. We should
@@ -670,9 +670,9 @@ of tracing to be quite separate from metrics.
 
 The current implementation exposes the following two metrics:
 
-- `vllm:model_forward_time_milliseconds` (Histogram) - The time spent
+- `vllm_model_forward_time_milliseconds` (Histogram) - The time spent
   in the model forward pass when this request was in the batch.
-- `vllm:model_execute_time_milliseconds` (Histogram) - The time spent
+- `vllm_model_execute_time_milliseconds` (Histogram) - The time spent
   in the model execute function. This will include model forward,
   block/sync across workers, cpu-gpu sync time and sampling time.
 

@@ -51,7 +51,7 @@ spec:
             datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
             labelName: model_name
             matchers:
-              - vllm:request_success_total{namespace="$NS",service="$SVC"}
+              - vllm_request_success_total{namespace="$NS",service="$SVC"}
 
   panels:
 
@@ -68,7 +68,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum(vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum(vllm_num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_waiting_now:
@@ -83,7 +83,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum(vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum(vllm_num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_kv_usage_now:
@@ -98,7 +98,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: avg(vllm_kv_cache_usage_perc{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_running_ts:
@@ -117,7 +117,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (service) (vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum by (service) (vllm_num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_waiting_ts:
@@ -136,7 +136,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (service) (vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum by (service) (vllm_num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_targets_up:
@@ -168,7 +168,7 @@ spec:
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
                   # multiply by 100 to present percentage; omit format.unit to avoid schema conflicts
-                  query: (avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg(vllm_kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     core_kv_usage_pct_ts:
@@ -187,7 +187,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: (avg by (service) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg by (service) (vllm_kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     # --- Per-Pod breakdowns (works on Simulator & Real) ---
@@ -207,7 +207,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (pod) (vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum by (pod) (vllm_num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     per_pod_waiting_ts:
@@ -226,7 +226,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (pod) (vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: sum by (pod) (vllm_num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     per_pod_kv_pct_ts:
@@ -246,7 +246,7 @@ spec:
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
                   # if your exporter labels kv metric with pod (the sim does), this works; otherwise it will just return empty
-                  query: (avg by (pod) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg by (pod) (vllm_kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     # --- Real vLLM only (zeros on simulator) ---
@@ -266,7 +266,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (model_name) (rate(vllm:request_success_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  query: sum by (model_name) (rate(vllm_request_success_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
                   minStep: "15s"
 
     real_p50:
@@ -281,7 +281,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: histogram_quantile(0.50, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  query: histogram_quantile(0.50, sum by (le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
                   minStep: "15s"
 
     real_p90:
@@ -296,7 +296,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: histogram_quantile(0.90, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  query: histogram_quantile(0.90, sum by (le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
                   minStep: "15s"
 
     real_p99:
@@ -311,7 +311,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: histogram_quantile(0.99, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  query: histogram_quantile(0.99, sum by (le, model_name) (rate(vllm_e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
                   minStep: "15s"
 
     real_input_tokens_ts:
@@ -330,7 +330,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (model_name) (rate(vllm:prompt_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  query: sum by (model_name) (rate(vllm_prompt_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
                   minStep: "15s"
 
     real_output_tokens_ts:
@@ -349,7 +349,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: sum by (model_name) (rate(vllm:generation_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  query: sum by (model_name) (rate(vllm_generation_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
                   minStep: "15s"
 
   layouts:

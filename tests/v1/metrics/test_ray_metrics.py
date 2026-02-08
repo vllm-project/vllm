@@ -86,7 +86,7 @@ def test_sanitized_opentelemetry_name():
     )
 
     # Test mixed valid and invalid characters
-    complex_name = "vllm:engine_stats/time.latency_ms-99p"
+    complex_name = "vllm_engine_stats/time.latency_ms-99p"
     expected = "vllm_engine_stats_time_latency_ms_99p"
     assert (
         RayPrometheusMetric._get_sanitized_opentelemetry_name(complex_name) == expected

@@ -122,20 +122,20 @@ class SpecDecodingProm:
 
     The acceptance rate can be calculated using a PromQL query:
 
-      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_draft_tokens_total[$interval])
+      rate(vllm_spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm_spec_decode_num_draft_tokens_total[$interval])
 
     The mean acceptance length (conventionally including bonus tokens)
     can be calculated using:
 
       1 + (
-      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts[$interval]))
+      rate(vllm_spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm_spec_decode_num_drafts[$interval]))
 
     A per-position acceptance rate vector can be computed using
 
-      vllm:spec_decode_num_accepted_tokens_per_pos[$interval] /
-      vllm:spec_decode_num_drafts[$interval]
+      vllm_spec_decode_num_accepted_tokens_per_pos[$interval] /
+      vllm_spec_decode_num_drafts[$interval]
     """
 
     _counter_cls = prometheus_client.Counter
@@ -151,7 +151,7 @@ class SpecDecodingProm:
             return
 
         counter_drafts = self._counter_cls(
-            name="vllm:spec_decode_num_drafts",
+            name="vllm_spec_decode_num_drafts",
             documentation="Number of spec decoding drafts.",
             labelnames=labelnames,
         )
@@ -160,7 +160,7 @@ class SpecDecodingProm:
         )
 
         counter_draft_tokens = self._counter_cls(
-            name="vllm:spec_decode_num_draft_tokens",
+            name="vllm_spec_decode_num_draft_tokens",
             documentation="Number of draft tokens.",
             labelnames=labelnames,
         )
@@ -169,7 +169,7 @@ class SpecDecodingProm:
         )
 
         counter_accepted_tokens = self._counter_cls(
-            name="vllm:spec_decode_num_accepted_tokens",
+            name="vllm_spec_decode_num_accepted_tokens",
             documentation="Number of accepted tokens.",
             labelnames=labelnames,
         )
@@ -185,7 +185,7 @@ class SpecDecodingProm:
         )
         pos_labelnames = labelnames + ["position"]
         base_counter = self._counter_cls(
-            name="vllm:spec_decode_num_accepted_tokens_per_pos",
+            name="vllm_spec_decode_num_accepted_tokens_per_pos",
             documentation="Accepted tokens per draft position.",
             labelnames=pos_labelnames,
         )

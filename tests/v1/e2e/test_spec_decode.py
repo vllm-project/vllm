@@ -208,9 +208,9 @@ def test_suffix_decoding_acceptance(
         # Collect draft and acceptance stats.
         metrics = spec_llm.get_metrics()
         for metric in metrics:
-            if metric.name == "vllm:spec_decode_num_draft_tokens":
+            if metric.name == "vllm_spec_decode_num_draft_tokens":
                 num_draft.append(metric.value)
-            if metric.name == "vllm:spec_decode_num_accepted_tokens":
+            if metric.name == "vllm_spec_decode_num_accepted_tokens":
                 num_accept.append(metric.value)
 
     # Calculate the acceptance rates for the first and last runs.
@@ -835,17 +835,17 @@ def some_high_acceptance_metrics() -> dict:
 
 def compute_acceptance_rate(metrics: list[Metric]) -> float:
     name2metric = {metric.name: metric for metric in metrics}
-    n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
+    n_draft_toks = name2metric["vllm_spec_decode_num_draft_tokens"].value  # type: ignore
     if n_draft_toks == 0:
         return float("nan")
-    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    n_accepted_toks = name2metric["vllm_spec_decode_num_accepted_tokens"].value  # type: ignore
     return n_accepted_toks / n_draft_toks
 
 
 def compute_acceptance_len(metrics: list[Metric]) -> float:
     name2metric = {metric.name: metric for metric in metrics}
-    n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
-    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    n_drafts = name2metric["vllm_spec_decode_num_drafts"].value  # type: ignore
+    n_accepted_toks = name2metric["vllm_spec_decode_num_accepted_tokens"].value  # type: ignore
     if n_drafts == 0:
         return 1
     return 1 + (n_accepted_toks / n_drafts)
