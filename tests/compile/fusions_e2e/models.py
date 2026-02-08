@@ -108,3 +108,12 @@ qwen3_a3b_fp8 = ModelFusionInfo(
         async_tp=n_layers * 2,
     ),
 )
+
+gpt_oss_20b = ModelFusionInfo(
+    model_name="openai/gpt-oss-20b",
+    matches=lambda n_layers: Matches(
+        ar_rms_fusion=n_layers * 2 + 1,
+        sequence_parallel=n_layers * 2 + 1,
+        async_tp=n_layers * 2,
+    ),
+)
