@@ -161,7 +161,7 @@ def evaluate_gsm8k(
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stop=["Question", "Assistant:", "<|separator|>"],
+                stop=["Question", "Assistant:", "<|separator|>", "\n\n"],
                 url=base_url,
                 seed=seed,
             )
