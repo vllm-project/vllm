@@ -91,12 +91,12 @@ class SchedulerConfig:
     maximum possible multimodal embedding count of the model if it is larger,
     ensuring that a multimodal item will be eventually scheduled regardless of
     its embedding count (an item is only scheduled if there is sufficient
-    encoder budget to process it).
+    compute budget to process it).
 
     If this is set to less than `max_num_batched_tokens`, text inputs from
     lower-priority requests may be scheduled with a higher priority than
-    multimodal inputs in the current request if the encoder budget has been
-    exhausted but there is still decoder budget remaining.
+    multimodal inputs in the current request if the compute budget for the encoder
+    has been exhausted but there is still remaining budget for the decoder.
 
     There is generally no benefit of increasing this past `max_num_batched_tokens`
     as the encoder is only scheduled to run on a multimodal item if the decoder
