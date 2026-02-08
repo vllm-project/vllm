@@ -152,9 +152,35 @@ class ChunkGatedDeltaRule(nn.Module):
             logger.info_once(
                 "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
             )
-            self.forward = fi_chunk_gated_delta_rule
+            self.func = fi_chunk_gated_delta_rule
         else:
-            self.forward = fla_chunk_gated_delta_rule
+            self.func = fla_chunk_gated_delta_rule
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.LongTensor | None = None,
+        head_first: bool = False,
+        use_qk_l2norm_in_kernel: bool = True,
+    ):
+        return self.func(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            head_first=head_first,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
