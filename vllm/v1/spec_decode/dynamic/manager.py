@@ -162,6 +162,9 @@ class DynamicSpeculativeDecodingManager:
             smaller_bs_stat = self.batch_stats[smaller_bs]
             larger_bs_stat = self.batch_stats[larger_bs]
 
+            if larger_bs == smaller_bs:
+                return self.batch_stats[smaller_bs]
+
             ratio = (batch_size - smaller_bs) / (larger_bs - smaller_bs)
 
             # REMOVE
