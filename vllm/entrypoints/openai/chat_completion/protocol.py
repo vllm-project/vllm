@@ -45,6 +45,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.utils import random_uuid
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -483,6 +484,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+
+        # Apply tool token suppression if configured
+        logit_bias = self.logit_bias.copy() if self.logit_bias else {}
+        if (
+            self.tool_choice == "none"
+            and envs.VLLM_BIAS_TOOL_WHEN_NONE
+            and envs.VLLM_TOOL_TOKENS_TO_SUPPRESS
+        ):
+            for token_id in envs.VLLM_TOOL_TOKENS_TO_SUPPRESS:
+                if str(token_id) not in logit_bias:
+                    logit_bias[str(token_id)] = -100.0
+
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -511,7 +524,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
             structured_outputs=self.structured_outputs,
-            logit_bias=self.logit_bias,
+            logit_bias=logit_bias,
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
