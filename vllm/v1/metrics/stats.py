@@ -275,8 +275,10 @@ class PromptTokenStats:
 
         self.computed += prompt_len - num_cached_tokens
         self.external_kv_transfer += num_external_computed_tokens
-        self.local_cache_hit += (
-            num_cached_tokens + recomputed - num_external_computed_tokens
+        # Clamp to non-negative: in P/D disagg, external tokens can exceed
+        # local cached tokens, making this calculation negative.
+        self.local_cache_hit += max(
+            0, num_cached_tokens + recomputed - num_external_computed_tokens
         )
         self.cached_tokens += num_cached_tokens
         self.recomputed_tokens += recomputed
