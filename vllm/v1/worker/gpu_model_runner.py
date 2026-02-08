@@ -5155,6 +5155,20 @@ class GPUModelRunner(
                     for i, output in enumerate(dummy_encoder_outputs):
                         self.encoder_cache[f"tmp_{i}"] = output
 
+                    # Fill up the encoder cache to its maximum capacity
+                    num_embeds_in_cache = sum(
+                        len(embeds) for embeds in self.encoder_cache.values()
+                    )
+                    num_embeds_to_pad = (
+                        mm_budget.encoder_cache_size - num_embeds_in_cache
+                    )
+                    if num_embeds_to_pad:
+                        self.encoder_cache["tmp_pad"] = torch.empty(
+                            (num_embeds_to_pad, self.inputs_embeds_size),
+                            dtype=self.dtype,
+                            device=self.device,
+                        )
+
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
