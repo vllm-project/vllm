@@ -132,8 +132,10 @@ ENV UV_LINK_MODE=copy
 # Verify GCC version
 RUN gcc --version
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Set CUDA compatibility library path
+RUN ln -snf "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat" /usr/local/cuda-compat
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+ENV VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-compat"
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -560,8 +562,10 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Set CUDA compatibility library path
+RUN ln -snf "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat" /usr/local/cuda-compat
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+ENV VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-compat"
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW

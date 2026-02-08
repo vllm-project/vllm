@@ -1,6 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 import os
+
+
+# The CUDA compatibility library path must be set before importing
+# torch, because torch loads CUDA shared libraries at import time and the
+# dynamic linker only consults LD_LIBRARY_PATH when a library is first
+# loaded. Setting it afterwards has no effect.
+def _maybe_set_cuda_compatibility_path():
+    enable_cuda_compatibility = os.environ.get(
+        "VLLM_ENABLE_CUDA_COMPATIBILITY", "0"
+    ).strip().lower() in ("1", "true")
+    if not enable_cuda_compatibility:
+        return
+    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", None)
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        return
+    existing_ld_library = os.environ.get("LD_LIBRARY_PATH", None)
+    if not existing_ld_library:
+        ld_library_paths = []
+    else:
+        ld_library_paths = existing_ld_library.split(os.pathsep)
+    norm_cuda_compat_path = os.path.normpath(cuda_compat_path)
+    if (
+        ld_library_paths
+        and ld_library_paths[0]
+        and os.path.normpath(ld_library_paths[0]) == norm_cuda_compat_path
+    ):
+        return
+    new_ld_library_paths = [norm_cuda_compat_path] + [
+        ld_library_path
+        for ld_library_path in ld_library_paths
+        if not ld_library_path
+        or os.path.normpath(ld_library_path) != norm_cuda_compat_path
+    ]
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_ld_library_paths)
+
+
+_maybe_set_cuda_compatibility_path()
 
 import torch
 
