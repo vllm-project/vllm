@@ -234,6 +234,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_TOKENS_TO_SUPPRESS: list[int] = []
     VLLM_BIAS_TOOL_WHEN_NONE: bool = False
     VLLM_INSERT_TOOL_PROHIBIT: str = ""
+    VLLM_REASONING_OFF_BY_DEFAULT: bool = False
 
 
 def get_default_cache_root():
@@ -1555,6 +1556,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Message to insert into conversation when tool_choice is "none" to prohibit tool use
     "VLLM_INSERT_TOOL_PROHIBIT": lambda: os.getenv("VLLM_INSERT_TOOL_PROHIBIT", ""),
+    # If set, reasoning is disabled by default for models that support it.
+    # Users can still enable reasoning per-request by setting enable_thinking=True
+    # in chat_template_kwargs.
+    "VLLM_REASONING_OFF_BY_DEFAULT": lambda: bool(
+        int(os.getenv("VLLM_REASONING_OFF_BY_DEFAULT", "0"))
+    ),
 }
 
 

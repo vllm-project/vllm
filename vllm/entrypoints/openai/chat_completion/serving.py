@@ -359,6 +359,10 @@ class OpenAIServingChat(OpenAIServing):
                     request.chat_template_kwargs,
                     self.default_chat_template_kwargs,
                 )
+                # Apply reasoning off by default if configured
+                if envs.VLLM_REASONING_OFF_BY_DEFAULT:
+                    if chat_template_kwargs.get("enable_thinking") is None:
+                        chat_template_kwargs["enable_thinking"] = False
                 reasoning_parser = self.reasoning_parser_cls(
                     tokenizer,
                     chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
