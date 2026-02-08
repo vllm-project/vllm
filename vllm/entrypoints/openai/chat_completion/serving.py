@@ -87,6 +87,7 @@ from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -286,6 +287,24 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
 
+            # Apply tool prohibition message insertion if configured
+            messages = request.messages
+            if (
+                request.tool_choice == "none"
+                and envs.VLLM_INSERT_TOOL_PROHIBIT
+                and messages
+            ):
+                tool_prohibit_msg = envs.VLLM_INSERT_TOOL_PROHIBIT
+                # Create a copy of messages to avoid modifying the original request
+                messages = list(messages)
+                # Append a new user message with the prohibition text
+                from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+                new_msg = ChatCompletionMessageParam(
+                    role="user", content=tool_prohibit_msg
+                )
+                messages.append(new_msg)
+
             if not self.use_harmony:
                 # Common case.
                 error_check_ret = self._validate_chat_template(
@@ -298,7 +317,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
-                    request.messages,
+                    messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
                     default_template_kwargs=self.default_chat_template_kwargs,

@@ -233,6 +233,7 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_TOOL_TOKENS_TO_SUPPRESS: list[int] = []
     VLLM_BIAS_TOOL_WHEN_NONE: bool = False
+    VLLM_INSERT_TOOL_PROHIBIT: str = ""
 
 
 def get_default_cache_root():
@@ -1552,6 +1553,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BIAS_TOOL_WHEN_NONE": lambda: bool(
         int(os.getenv("VLLM_BIAS_TOOL_WHEN_NONE", "0"))
     ),
+    # Message to insert into conversation when tool_choice is "none" to prohibit tool use
+    "VLLM_INSERT_TOOL_PROHIBIT": lambda: os.getenv("VLLM_INSERT_TOOL_PROHIBIT", ""),
 }
 
 
