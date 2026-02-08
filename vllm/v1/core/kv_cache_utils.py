@@ -1320,6 +1320,7 @@ def _report_kv_cache_config(
 def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
+    group_size: int,
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -1343,7 +1344,6 @@ def _max_memory_usage_bytes_from_groups(
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
@@ -1357,6 +1357,7 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    group_size: int,
 ) -> int:
     """
     Binary search for the maximum model length that fits in available memory.
@@ -1367,7 +1368,7 @@ def _estimate_max_model_len_from_groups(
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups, group_size)
             <= available_memory
         )
 
@@ -1391,7 +1392,8 @@ def _estimate_max_model_len_from_groups(
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: list[int],
+    available_memory: int,
+    group_size: int,
 ) -> None:
     """
     When max_model_len is set to -1, this function estimates the largest
@@ -1403,8 +1405,9 @@ def _auto_fit_max_model_len(
         vllm_config: The global VllmConfig (will be modified in-place)
         kv_cache_groups: The global KV cache groups (from get_kv_cache_groups).
             This correctly accounts for padding in hybrid models.
-        available_memory: Memory available for KV cache in bytes for each
-            worker.
+        available_memory: Available memory in bytes for KV cache, adjusted
+            for the worst-case worker in pipeline parallel scenarios.
+        group_size: Number of layer groups for the worst-case worker.
     """
     original_max = vllm_config.model_config.max_model_len
 
@@ -1418,10 +1421,8 @@ def _auto_fit_max_model_len(
         )
         return
 
-    # Use minimum available memory across all workers
-    min_available_memory = min(available_memory)
     auto_fit_max = _estimate_max_model_len_from_groups(
-        vllm_config, kv_cache_groups, min_available_memory
+        vllm_config, kv_cache_groups, available_memory, group_size
     )
 
     if auto_fit_max <= 0:
@@ -1446,7 +1447,7 @@ def _auto_fit_max_model_len(
             "available GPU memory (%s GiB available for KV cache)",
             original_max,
             auto_fit_max,
-            format_gib(min_available_memory),
+            format_gib(available_memory),
             scope="local",
         )
 
@@ -1504,23 +1505,39 @@ def get_kv_cache_configs(
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
 
+    # Find the bottleneck worker for KV cache allocation in pipeline parallel.
+    # The bottleneck is determined by minimum memory-per-layer ratio, not
+    # just minimum available memory, because different workers may handle
+    # different numbers of layers.
+    mem_per_layer = [
+        mem / len(spec) for mem, spec in zip(available_memory, kv_cache_specs)
+    ]
+    bottleneck_idx = mem_per_layer.index(min(mem_per_layer))
+    bottleneck_group_size = len(kv_cache_specs[bottleneck_idx])
+
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
     # We use the global groups here to correctly account for padding.
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(vllm_config, global_kv_cache_groups, available_memory)
+        _auto_fit_max_model_len(
+            vllm_config,
+            global_kv_cache_groups,
+            available_memory[bottleneck_idx],
+            bottleneck_group_size,
+        )
 
-    # Check if the available memory is enough (using min across all workers).
+    # Check if the available memory is enough (using bottleneck worker based on
+    # memory per layer ratio for pipeline parallel scenarios).
     # We use the global groups to correctly account for padding.
     if global_kv_cache_groups:
         _check_enough_kv_cache_memory(
-            min(available_memory),
+            available_memory[bottleneck_idx],
             lambda: _max_memory_usage_bytes_from_groups(
-                vllm_config, global_kv_cache_groups
+                vllm_config, global_kv_cache_groups, bottleneck_group_size
             ),
             vllm_config.model_config.max_model_len,
             lambda am: _estimate_max_model_len_from_groups(
-                vllm_config, global_kv_cache_groups, am
+                vllm_config, global_kv_cache_groups, am, bottleneck_group_size
             ),
         )
 
