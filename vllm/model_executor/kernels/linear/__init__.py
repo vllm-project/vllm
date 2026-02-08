@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-This module re-exports linear kernel implementations to provide a stable import interface
-during an ongoing reorganization. Upcoming PRs will remove the scaled_mm and mixed_precision
-subdirectories and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.) rather
-than by precision type. By centralizing exports here, we minimize the need to update imports
-across other modules when the internal structure changes. If you are adding a new kernel
-selector or kernel implementation, add it to this __init__.py to maintain import stability.
+This module re-exports linear kernel implementations to provide a
+stable import interface during an ongoing reorganization. Upcoming
+PRs will remove the scaled_mm and mixed_precision subdirectories
+and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
+rather than by precision type. By centralizing exports here, we
+minimize the need to update imports across other modules when the
+internal structure changes. If you are adding a new kernel selector
+or kernel implementation, add it to this __init__.py to maintain
+import stability.
 """
 
 import os
@@ -17,6 +20,37 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mixed_precision import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
+    AllSparkLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.conch import (
+    ConchLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
+    CPUWNA16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.cutlass import (
+    CutlassW4A8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
+    Dynamic4bitLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
+    ExllamaLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.machete import (
+    MacheteLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
+    XPUwNa16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -48,37 +82,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision import (
-    MPLinearKernel,
-    MPLinearLayerConfig,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
-    AllSparkLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.conch import (
-    ConchLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
-    CPUWNA16LinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.cutlass import (
-    CutlassW4A8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
-    Dynamic4bitLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
-    ExllamaLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.machete import (
-    MacheteLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
-    MarlinLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
-    XPUwNa16LinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
