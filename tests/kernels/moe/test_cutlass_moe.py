@@ -304,7 +304,6 @@ def test_cutlass_moe_8_bit_no_graph(
     ep_size: int | None = None,
 ):
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
 
@@ -359,7 +358,6 @@ def test_cutlass_moe_8_bit_cuda_graph(
     workspace_init,
 ):
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
 

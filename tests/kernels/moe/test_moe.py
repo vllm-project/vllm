@@ -286,7 +286,6 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_fused_moe(
     m: int,
     n: int,
@@ -296,13 +295,10 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data
@@ -400,7 +396,6 @@ def test_fused_moe(
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_naive_block_assignment_moe(
     m: int,
     n: int,
@@ -409,13 +404,10 @@ def test_naive_block_assignment_moe(
     topk: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data

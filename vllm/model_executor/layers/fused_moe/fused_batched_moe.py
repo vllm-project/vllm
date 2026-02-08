@@ -711,9 +711,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "This method should not be called."
         )
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -955,9 +952,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
