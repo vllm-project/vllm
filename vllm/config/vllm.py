@@ -1357,6 +1357,36 @@ class VllmConfig:
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
 
+        # Add the compile ranges for sequence parallelism
+        if compilation_config.pass_config.enable_sp:
+            pass_config = compilation_config.pass_config
+
+            # Calculate min_token_num if not explicitly provided
+            # User override works regardless of hidden_size
+            if pass_config.sp_min_token_num is None:
+                from vllm.compilation.passes.fusion.sequence_parallelism import (
+                    get_sequence_parallelism_threshold,
+                )
+
+                tp_size = self.parallel_config.tensor_parallel_size
+                hidden_size = self.model_config.get_hidden_size()
+                element_size = self.model_config.dtype.itemsize
+                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                    hidden_size, tp_size, element_size
+                )
+
+            min_token_num = pass_config.sp_min_token_num
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if min_token_num is not None and (
+                max_num_batched_tokens is not None
+                and min_token_num < max_num_batched_tokens
+                and min_token_num > 1
+            ):
+                # Add split point at min_token_num - 1 to ensure SP applies
+                # starting from min_token_num
+                # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
+                computed_compile_ranges_split_points.append(min_token_num - 1)
+
         if compilation_config.compile_ranges_split_points is not None:
             for x in compilation_config.compile_ranges_split_points:
                 assert isinstance(x, int)
