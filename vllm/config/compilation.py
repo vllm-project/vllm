@@ -629,6 +629,13 @@ class CompilationConfig:
     static_all_moe_layers: list[str] = field(default_factory=list, init=False)
     """The names of all the MOE layers in the model
     """
+    static_all_kv_cache_update_layers: list[str] = field(
+        default_factory=list, init=False
+    )
+    """The names of all attention layers that call unified_kv_cache_update.
+    These are layers where forward_includes_kv_cache_update is False
+    and kv_sharing_target_layer_name is None.
+    """
 
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
