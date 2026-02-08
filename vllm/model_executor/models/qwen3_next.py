@@ -7,7 +7,6 @@ from itertools import islice
 
 import torch
 from einops import rearrange
-from flashinfer.gdn_prefill import chunk_gated_delta_rule as chunk_gated_delta_rule_fi
 from torch import nn
 from transformers.activations import ACT2FN
 
@@ -117,13 +116,14 @@ def chunk_gated_delta_rule(
     head_first=False,
     use_qk_l2norm_in_kernel=True,
 ):
-    if (
-        current_platform.is_cuda()
-        and current_platform.get_device_capability().major == 9
-    ):
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
         logger.info_once(
             "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
         )
+        from flashinfer.gdn_prefill import (
+            chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
+        )
+
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
