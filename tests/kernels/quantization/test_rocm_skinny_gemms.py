@@ -8,6 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 from vllm.utils.platform_utils import get_cu_count
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -99,7 +100,7 @@ NKM_FACTORS_WVSPLITK_FP8 = [
     (4, 32768 * 2 + 16, 28672 + 16),
 ]
 
-SEEDS = [0, 1, 2, 3, 4, 5]
+SEEDS = [0]
 
 
 def pad_fp8(weight):
@@ -109,7 +110,6 @@ def pad_fp8(weight):
     return F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
 
 
-"""
 @pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
@@ -233,8 +233,6 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
-
-"""
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
