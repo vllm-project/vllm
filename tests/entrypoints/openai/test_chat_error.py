@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -233,3 +234,105 @@ async def test_chat_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_system_message_rejects_image():
+    """Test that system messages cannot contain image content."""
+    with pytest.raises(VLLMValidationError) as exc_info:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                    ],
+                }
+            ],
+        )
+
+    assert "System messages can only contain text content" in str(exc_info.value)
+    assert "image_url" in str(exc_info.value)
+
+
+def test_system_message_accepts_text():
+    """Test that system messages can contain text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_system_message_accepts_text_array():
+    """Test that system messages can contain an array with text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_user_message_accepts_image():
+    """Test that user messages can still contain image content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+                ],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "user"
+
+
+def test_system_message_rejects_audio():
+    """Test that system messages cannot contain audio content."""
+    with pytest.raises(VLLMValidationError) as exc_info:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "input_audio", "input_audio": {"data": "base64data", "format": "wav"}}
+                    ],
+                }
+            ],
+        )
+
+    assert "System messages can only contain text content" in str(exc_info.value)
+    assert "input_audio" in str(exc_info.value)
+
+
+def test_system_message_rejects_video():
+    """Test that system messages cannot contain video content."""
+    with pytest.raises(VLLMValidationError) as exc_info:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}
+                    ],
+                }
+            ],
+        )
+
+    assert "System messages can only contain text content" in str(exc_info.value)
+    assert "video_url" in str(exc_info.value)

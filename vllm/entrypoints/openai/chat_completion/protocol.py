@@ -674,3 +674,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "Parameter 'cache_salt' must be a non-empty string if provided."
             )
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_system_message_content_type(cls, data):
+        """Validate that system messages only contain text content.
+
+        According to OpenAI API spec, system messages can only be of type 'text'.
+        See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
+        """
+        messages = data.get("messages", [])
+        for msg in messages:
+            # Check if this is a system message
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                content = msg.get("content")
+
+                # If content is a list (multimodal format)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            part_type = part.get("type")
+                            # Reject any content type that is not text
+                            if part_type and part_type != "text":
+                                raise VLLMValidationError(
+                                    f"System messages can only contain text content. "
+                                    f"Found content type: '{part_type}'.",
+                                    parameter="messages",
+                                )
+
+        return data
