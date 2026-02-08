@@ -245,7 +245,10 @@ def test_system_message_rejects_image():
                 {
                     "role": "system",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.jpg"},
+                        }
                     ],
                 }
             ],
@@ -292,7 +295,10 @@ def test_user_message_accepts_image():
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What's in this image?"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.jpg"},
+                    },
                 ],
             },
         ],
@@ -309,7 +315,10 @@ def test_system_message_rejects_audio():
                 {
                     "role": "system",
                     "content": [
-                        {"type": "input_audio", "input_audio": {"data": "base64data", "format": "wav"}}
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": "base64data", "format": "wav"},
+                        }
                     ],
                 }
             ],
@@ -328,7 +337,10 @@ def test_system_message_rejects_video():
                 {
                     "role": "system",
                     "content": [
-                        {"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "https://example.com/video.mp4"},
+                        }
                     ],
                 }
             ],
