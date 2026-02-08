@@ -16,6 +16,8 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import triton
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -98,6 +100,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
+        self._sm_count = get_cu_count()
+
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
@@ -134,8 +138,27 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
-        # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        if vllm_is_batch_invariant():
+            num_kv_splits = 1
+        else:
+            max_seq_len = attn_metadata.max_seq_len
+            work_size = max_seq_len * B
+
+            # Minimum work per split
+            # hardware dependent
+            min_work_per_split = 256
+
+            ideal_splits = max(1, work_size // min_work_per_split)
+
+            # use power of 2 to avoid excessive kernel instantiations
+            ideal_splits = triton.next_power_of_2(ideal_splits)
+
+            # Calculate SM-based maximum splits with occupancy multiplier
+            # 2-4x allows multiple blocks per SM for latency hiding
+            # hardware dependent
+            occupancy_multiplier = 2
+            max_splits = self._sm_count * occupancy_multiplier
+            num_kv_splits = min(ideal_splits, max_splits)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
