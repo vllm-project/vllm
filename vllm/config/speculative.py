@@ -4,7 +4,7 @@
 import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator, BaseModel
 from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
@@ -53,7 +53,6 @@ SpeculativeMethod = Literal[
 ]
 
 
-# @dataclass
 class DynamicSpeculativeConfig(BaseModel):
     # """A mapping from batch size to optimal number of drafts to use for that
     # batch size. This is used to dynamically adjust the number of drafts used
