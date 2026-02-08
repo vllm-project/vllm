@@ -144,7 +144,6 @@ def _synchronize_dp_ranks(
     # DP padding is needed when cudagraph is enabled (synced across ranks).
     # Use the synced runtime cudagraph mode rather than the compilation config
     # so we can avoid padding when cudagraph is not enabled for this step
-    # (e.g., prefills in a P/D setup).
     should_dp_pad = synced_cudagraph_mode != 0
 
     # Check conditions for microbatching
