@@ -288,7 +288,7 @@ async def init_app_state(
             DeprecationWarning,
             stacklevel=2,
         )
-        supported_tasks = await engine_client.get_supported_tasks()
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
