@@ -19,6 +19,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
+from vllm.config.parallel import EPLBCommunicationConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -149,6 +150,101 @@ def get_ep_ranks_with_experts_batch(
     return ranks_to_send_map, ranks_to_recv_map
 
 
+def _get_communication_round(rank1: int, rank2: int, group_size: int) -> int:
+    """
+    Determine which communication round a pair of ranks belongs to.
+
+    Uses hierarchical grouping: ranks are divided into groups of size
+    `group_size`.
+    - Round 0: Same group (intra-group)
+    - Round i (i>0): Communication between groups with XOR = i
+
+    Returns the round index based on the XOR of group IDs.
+    """
+    group1 = rank1 // group_size
+    group2 = rank2 // group_size
+    return group1 ^ group2
+
+
+def _execute_batch(ops: list[P2POp], cuda_stream: torch.cuda.Stream | None) -> None:
+    """Execute a batch of P2P operations and wait for completion."""
+    if cuda_stream is not None:
+        with torch.cuda.stream(cuda_stream):
+            reqs = batch_isend_irecv(ops)
+            for req in reqs:
+                req.wait()
+    else:
+        reqs = batch_isend_irecv(ops)
+        for req in reqs:
+            req.wait()
+
+
+def _execute_p2p_ops_round(
+    send_ops: list[P2POp],
+    recv_ops: list[P2POp],
+    *,
+    batch_size: int | None,
+    ep_rank: int,
+    rank_to_global: dict[int, int],
+    cuda_stream: torch.cuda.Stream | None,
+) -> None:
+    """
+    Execute P2P operations for a communication round.
+
+    When batch_size is set, uses rank ordering to avoid deadlocks:
+    - Phase 1: lower rank sends (batches if needed), higher rank receives
+    - Phase 2: lower rank receives (batches if needed), higher rank sends
+    Otherwise, merges sends and recvs and executes them together.
+    """
+    if not send_ops and not recv_ops:
+        return
+    if batch_size is None:
+        _execute_batch(send_ops + recv_ops, cuda_stream)
+        return
+
+    # When batch_size is set, each rank communicates with only one peer per round.
+    # We need special handling to avoid deadlocks.
+    # Validate that all operations are for the same peer.
+    peer_ranks = set()
+    for op in send_ops:
+        peer_ranks.add(op.peer)
+    for op in recv_ops:
+        peer_ranks.add(op.peer)
+
+    assert len(peer_ranks) == 1, (
+        f"Rank {ep_rank}: All send and recv operations in a round "
+        f"must be for the same peer. Found {len(peer_ranks)} "
+        f"different peers: {peer_ranks}"
+    )
+
+    # Find the peer rank - should be the same for all ops in this round.
+    my_global_rank = rank_to_global[ep_rank]
+    peer_rank = peer_ranks.pop()
+
+    # Determine if we should send first based on having smaller rank.
+    send_first = my_global_rank < peer_rank
+
+    # Phase 1: Lower rank sends, higher rank receives.
+    if send_first:
+        # We are the lower rank - send first.
+        for i in range(0, len(send_ops), batch_size):
+            _execute_batch(send_ops[i : i + batch_size], cuda_stream)
+    else:
+        # We are the higher rank - receive first.
+        for i in range(0, len(recv_ops), batch_size):
+            _execute_batch(recv_ops[i : i + batch_size], cuda_stream)
+
+    # Phase 2: Lower rank receives, higher rank sends.
+    if send_first:
+        # We are the lower rank - receive second.
+        for i in range(0, len(recv_ops), batch_size):
+            _execute_batch(recv_ops[i : i + batch_size], cuda_stream)
+    else:
+        # We are the higher rank - send second.
+        for i in range(0, len(send_ops), batch_size):
+            _execute_batch(send_ops[i : i + batch_size], cuda_stream)
+
+
 def move_to_buffer(
     num_local_experts: int,
     old_indices: np.ndarray,
@@ -157,6 +253,7 @@ def move_to_buffer(
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
 ) -> MoveToBufferResult:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -171,6 +268,7 @@ def move_to_buffer(
         expert_weights_buffers: Intermediate buffers (one per tensor).
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         ep_group: Distributed process group for expert parallel comms.
+        communication_config: Communication configuration for P2P operations.
 
     Returns:
         is_unchanged (np.ndarray): (num_local_experts,), True where an expert row
@@ -248,11 +346,31 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
-    p2p_ops: list[P2POp] = []
-
     # Pre-compute global ranks mapping
     ep_size = ep_group.size()
     rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
+
+    # Use the already-validated configuration from EPLBConfig
+    # (validation and adjustment is done in EPLBConfig.get_communication_config)
+    num_groups = communication_config.num_groups
+    batch_size = communication_config.batch_size
+
+    # Calculate group size and number of communication rounds
+    group_size = ep_size // num_groups
+    # Number of rounds must accommodate the maximum possible XOR value
+    # If world size is not evenly divisible by num_groups, some ranks will
+    # map to higher group IDs, so we need to allocate enough rounds
+    max_group_id = (ep_size - 1) // group_size
+    # Maximum XOR value is the next power of 2 above max_group_id, minus 1
+    # E.g., max_group_id=4 → max_xor=7 (binary: 100 → 111)
+    num_rounds = 1 << max_group_id.bit_length()
+
+    # Create separate lists for sends and recvs for each round
+    # Round i: Communication between groups where (group1 XOR group2) == i
+    # Round 0: Same group (intra-group)
+    # Round 1+: Different groups with specific XOR values
+    send_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
+    recv_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
 
     # 2. Post sends
     if send_count > 0:
@@ -285,7 +403,7 @@ def move_to_buffer(
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
                 dst_global = rank_to_global[dst]
-                p2p_ops += [
+                send_ops = [
                     P2POp(
                         torch.distributed.isend,
                         w[src],
@@ -293,6 +411,9 @@ def move_to_buffer(
                     )
                     for w in expert_weights
                 ]
+                # Determine which round based on sender and receiver ranks
+                round_idx = _get_communication_round(ep_rank, dst, group_size)
+                send_ops_per_round[round_idx] += send_ops
 
     # 3. Post recvs
     if recv_count > 0:
@@ -322,7 +443,7 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             src_global = rank_to_global[src]
-            p2p_ops += [
+            recv_ops = [
                 P2POp(
                     torch.distributed.irecv,
                     b[dst],
@@ -330,17 +451,28 @@ def move_to_buffer(
                 )
                 for b in expert_weights_buffers
             ]
+            # Determine which round based on sender and receiver ranks
+            round_idx = _get_communication_round(ep_rank, src, group_size)
+            recv_ops_per_round[round_idx] += recv_ops
 
-    # 4. Execute the P2P operations. The real communication happens here.
-    if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
-            reqs = batch_isend_irecv(p2p_ops)
-            for req in reqs:
-                req.wait()
-    elif p2p_ops:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            req.wait()
+    # 4. Execute the P2P operations in multiple rounds
+    # Each round handles communication between groups where
+    # (group1 XOR group2) == round_idx
+    # Round 0: Intra-group (same group)
+    # Round i (i>0): Inter-group with XOR = i
+    for round_idx in range(num_rounds):
+        _execute_p2p_ops_round(
+            send_ops_per_round[round_idx],
+            recv_ops_per_round[round_idx],
+            batch_size=batch_size,
+            ep_rank=ep_rank,
+            rank_to_global=rank_to_global,
+            cuda_stream=cuda_stream,
+        )
+        # Barrier to ensure all ranks complete this round before proceeding
+        # This prevents ranks from getting out of sync across rounds
+        torch.distributed.barrier(group=ep_group)
+
     # wait for the communication to finish
     return (
         is_unchanged,
@@ -439,6 +571,7 @@ async def transfer_layer(
     expert_weights: Sequence[Sequence[torch.Tensor]],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
     is_profile: bool = False,
     layer: int = 0,
     cuda_stream: torch.cuda.Stream | None = None,
@@ -504,6 +637,7 @@ async def transfer_layer(
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,
+        communication_config=communication_config,
     )
     return is_unchanged, is_received_locally, recv_metadata
 
@@ -513,6 +647,7 @@ def rearrange_expert_weights_inplace(
     new_global_expert_indices: torch.Tensor,
     expert_weights: Sequence[Sequence[torch.Tensor]],
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
@@ -534,6 +669,7 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        communication_config: Communication configuration for P2P operations.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -597,6 +733,7 @@ def rearrange_expert_weights_inplace(
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
             ep_group=ep_group,
+            communication_config=communication_config,
         )
 
         move_from_buffer(
