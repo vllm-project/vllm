@@ -116,7 +116,7 @@ class SchedulerConfig:
     maximum possible multimodal embedding count of the model if it is larger,
     ensuring that a multimodal item will be eventually scheduled regardless of
     its embedding count (an item is only scheduled if there is sufficient
-    cache budget to temporarily store its embeddings for decoder execution).
+    cache budget to at least temporarily store its embeddings for decoder execution).
 
     Increasing this enables more encoder embeddings to be reused across requests,
     but this will also lead to a corresponding increase in memory usage.
