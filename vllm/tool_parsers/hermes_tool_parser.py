@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Sequence
+from json import JSONDecoder
 
 import partial_json_parser
 import regex as re
@@ -26,6 +27,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.tool_parsers.utils import consume_space, partial_json_loads
 
 logger = init_logger(__name__)
 
@@ -278,36 +280,65 @@ class Hermes2ProToolParser(ToolParser):
                 and cur_tool_end_count >= prev_tool_end_count
             ):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
-                    logger.debug("attempting to close tool call, but no tool call")
-                    return None
+                    tool_call_portion = current_text.split(self.tool_call_start_token)[
+                        -1
+                    ].split(self.tool_call_end_token)[0]
 
-                if self.prev_tool_call_arr[self.current_tool_id].get("arguments"):
+                    if tool_call_portion:
+                        try:
+                            current_tool_call = partial_json_parser.loads(
+                                tool_call_portion, flags
+                            )
+                            logger.debug("Parsed tool call %s", current_tool_call)
+                            self.prev_tool_call_arr.append(current_tool_call)
+                            self.streamed_args_for_tool.append("")
+                        except (
+                            partial_json_parser.core.exceptions.MalformedJSON,
+                            json.decoder.JSONDecodeError,
+                        ):
+                            pass
+                    else:
+                        logger.debug("attempting to close tool call, but no tool call")
+                        return None
+
+                if current_args := self.prev_tool_call_arr[self.current_tool_id].get(
+                    "arguments"
+                ):
                     if '"}' not in delta_text:
                         return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
+                    if not self.streamed_args_for_tool[self.current_tool_id]:
+                        diff = json.dumps(current_args)
+                        self.streamed_args_for_tool[self.current_tool_id] = diff
+                    else:
+                        end_loc = delta_text.rindex('"}')
+                        diff = delta_text[: end_loc + 2]
+
+                        total_arg_text = (
+                            self.streamed_args_for_tool[self.current_tool_id] + diff
+                        )
+                        brace_diff = total_arg_text.count("}") - total_arg_text.count(
+                            "{"
+                        )
+                        if brace_diff > 0:
+                            end_loc = total_arg_text.rindex("}")
+                            n = 1
+                            while n < brace_diff:
+                                end_loc = total_arg_text.rindex("}", 0, end_loc)
+                                n += 1
+                            dist_from_end = len(total_arg_text) - end_loc
+                            total_arg_text = total_arg_text[:-dist_from_end]
+                            diff = diff[:-dist_from_end]
+
+                        self.streamed_args_for_tool[self.current_tool_id] = (
+                            total_arg_text
+                        )
+                        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                            total_arg_text
+                        )
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s",
                         diff,
-                    )
-                    total_arg_text = (
-                        self.streamed_args_for_tool[self.current_tool_id] + diff
-                    )
-                    brace_diff = total_arg_text.count("}") - total_arg_text.count("{")
-                    if brace_diff > 0:
-                        end_loc = total_arg_text.rindex("}")
-                        n = 1
-                        while n < brace_diff:
-                            end_loc = total_arg_text.rindex("}", 0, end_loc)
-                            n += 1
-                        dist_from_end = len(total_arg_text) - end_loc
-                        total_arg_text = total_arg_text[:-dist_from_end]
-                        diff = diff[:-dist_from_end]
-
-                    self.streamed_args_for_tool[self.current_tool_id] = total_arg_text
-                    self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
-                        total_arg_text
                     )
                     return DeltaMessage(
                         tool_calls=[
@@ -327,12 +358,13 @@ class Hermes2ProToolParser(ToolParser):
                 delta = DeltaMessage(tool_calls=[], content=text)
                 return delta
 
+            current_tool_call = None
             try:
-                current_tool_call = (
-                    partial_json_parser.loads(tool_call_portion or "{}", flags)
-                    if tool_call_portion
-                    else None
-                )
+                if tool_call_portion:
+                    start_idx = consume_space(0, tool_call_portion)
+                    current_tool_call, end_idx = partial_json_loads(
+                        tool_call_portion[start_idx:], flags
+                    )
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug("not enough tokens to parse into JSON yet")
@@ -447,6 +479,9 @@ class Hermes2ProToolParser(ToolParser):
 
                 # use that to find the actual delta
                 arguments_delta = cur_arguments_json[:args_delta_start_loc]
+                _, end_idx = partial_json_loads(cur_arguments_json, flags)
+                if (rstrip := len(cur_arguments_json) - end_idx) > 0:
+                    arguments_delta = arguments_delta[:-rstrip]
                 logger.debug("First tokens in arguments received: %s", arguments_delta)
 
                 delta = DeltaMessage(
@@ -463,24 +498,22 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                # judge whether the tool_call_portion is a complete JSON
                 try:
-                    json.loads(tool_call_portion)
-                    is_complete_json = True
+                    # if we can get a complete argument json this means
+                    # that the delta is closing the arguments, in which
+                    # case we trim it down to stream just the part that
+                    # corresponds to the arguments.
+                    start_idx = consume_space(0, tool_call_portion)
+                    dec = JSONDecoder()
+                    _, end_idx = dec.raw_decode(tool_call_portion[start_idx:])
+                    stripped_tc_portion = tool_call_portion[start_idx:end_idx]
+
+                    while delta_text:
+                        if stripped_tc_portion.find(delta_text) != -1:
+                            break
+                        delta_text = delta_text[:-1]
                 except Exception:
-                    is_complete_json = False
-
-                # if the delta_text ends with a '}' and tool_call_portion is a
-                #   complete JSON, then the last '}' does not belong to the
-                #   arguments, so we should trim it off
-                if (
-                    isinstance(delta_text, str)
-                    and len(delta_text.rstrip()) >= 1
-                    and delta_text.rstrip()[-1] == "}"
-                    and is_complete_json
-                ):
-                    delta_text = delta_text.rstrip()[:-1]
-
+                    pass
                 logger.debug("got diff %s", delta_text)
 
                 delta = DeltaMessage(
