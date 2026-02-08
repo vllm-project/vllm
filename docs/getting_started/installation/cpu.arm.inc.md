@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM offers basic model inferencing and serving on Arm CPU platform, with support NEON, data types FP32, FP16 and BF16.
+vLLM offers basic model inferencing and serving on Arm CPU platform, with support for NEON, data types FP32, FP16 and BF16.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -136,13 +136,29 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image.
+To pull the latest image:
 
-Stable vLLM Docker images are being pre-built for Arm from version 0.12.0. Available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
+```bash
+docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest
+```
+
+To pull an image with a specific vLLM version:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${VLLM_VERSION}
+```
+
+All available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
+
+You can run these images via:
+
+```bash
+docker run \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:<tag> <args...>
 ```
 
 You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.

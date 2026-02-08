@@ -11,6 +11,7 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -36,15 +37,18 @@ from vllm.config.utils import (
     config,
     get_attr_docs,
     is_init_field,
+    replace,
     update_config,
 )
 from vllm.config.vllm import (
     VllmConfig,
     get_cached_compilation_config,
     get_current_vllm_config,
+    get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.weight_transfer import WeightTransferConfig
 
 # __all__ should only contain classes and functions.
 # Types and globals should be imported from their respective modules.
@@ -62,6 +66,8 @@ __all__ = [
     "DeviceConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
+    # From vllm.config.kernel
+    "KernelConfig",
     # From vllm.config.kv_events
     "KVEventsConfig",
     # From vllm.config.kv_transfer
@@ -100,11 +106,14 @@ __all__ = [
     "config",
     "get_attr_docs",
     "is_init_field",
+    "replace",
     "update_config",
     # From vllm.config.vllm
     "VllmConfig",
     "get_cached_compilation_config",
     "get_current_vllm_config",
+    "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
+    "WeightTransferConfig",
 ]

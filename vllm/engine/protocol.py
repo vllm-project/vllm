@@ -3,19 +3,27 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
+
+if TYPE_CHECKING:
+    from vllm.v1.engine import PauseMode
 
 
 class EngineClient(ABC):
@@ -25,6 +33,10 @@ class EngineClient(ABC):
     model_config: ModelConfig
     input_processor: InputProcessor
     io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> BaseRenderer: ...
 
     @property
     @abstractmethod
@@ -45,7 +57,11 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -62,13 +78,12 @@ class EngineClient(ABC):
     @abstractmethod
     def encode(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
@@ -82,11 +97,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def get_tokenizer(self) -> TokenizerLike:
-        """Get the tokenizer"""
         ...
 
     @abstractmethod
@@ -113,6 +123,11 @@ class EngineClient(ABC):
     @abstractmethod
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""
+        ...
+
+    @abstractmethod
+    async def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache"""
         ...
 
     @abstractmethod
@@ -146,16 +161,22 @@ class EngineClient(ABC):
     async def pause_generation(
         self,
         *,
+        mode: "PauseMode" = "abort",
         wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
 
         Args:
-            wait_for_inflight_requests: When ``True`` waits for in-flight requests
-                to finish before pausing. When ``False`` (default), aborts in-flight
-                requests immediately.
-            clear_cache: Whether to clear KV and prefix caches after draining.
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately
+                  and return partial results with "abort" reason (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
+            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
+            clear_cache: DEPRECATED. Whether to clear KV and prefix caches
+                after draining.
         """
         ...
 
@@ -187,4 +208,14 @@ class EngineClient(ABC):
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
+        raise NotImplementedError
+
+    async def init_weight_transfer_engine(
+        self, init_request: WeightTransferInitRequest
+    ) -> None:
+        """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """Batched weight update for RL training."""
         raise NotImplementedError

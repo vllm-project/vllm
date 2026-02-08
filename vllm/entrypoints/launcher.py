@@ -36,6 +36,7 @@ async def serve_http(
     h11_max_header_count.
     """
     logger.info("Available routes are:")
+    # post endpoints
     for route in app.routes:
         methods = getattr(route, "methods", None)
         path = getattr(route, "path", None)
@@ -44,6 +45,17 @@ async def serve_http(
             continue
 
         logger.info("Route: %s, Methods: %s", path, ", ".join(methods))
+
+    # other endpoints
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        methods = getattr(route, "methods", None)
+        path = getattr(route, "path", None)
+
+        if endpoint is None or path is None or methods is not None:
+            continue
+
+        logger.info("Route: %s, Endpoint: %s", path, endpoint.__name__)
 
     # Extract header limit options if present
     h11_max_incomplete_event_size = uvicorn_kwargs.pop(

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
@@ -19,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -107,6 +107,22 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+
+        Args:
+            kv_caches: dictionary of layer names, kv cache
+        """
+        if hasattr(self._lmcache_engine, "register_kv_caches"):
+            self._lmcache_engine.register_kv_caches(kv_caches)
+        else:
+            logger.warning(
+                "LMCache engine does not support register_kv_caches, "
+                "please check and use the latest version"
+            )
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -218,6 +234,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 lora_id=e.lora_id,
                 block_size=e.block_size,
                 medium=e.medium,
+                lora_name=getattr(e, "lora_name", None),
             )
             for e in events
         ]

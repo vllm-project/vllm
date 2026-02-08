@@ -4,10 +4,10 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 import torch.nn as nn
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -21,9 +21,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
@@ -65,8 +68,9 @@ class LLMEngine:
 
         self.log_stats = log_stats
 
-        executor_backend = self.vllm_config.parallel_config.distributed_executor_backend
         parallel_config = vllm_config.parallel_config
+        executor_backend = parallel_config.distributed_executor_backend
+
         self.external_launcher_dp = (
             parallel_config.data_parallel_size > 1
             and executor_backend == "external_launcher"
@@ -83,12 +87,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
-
-        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -102,8 +101,8 @@ class LLMEngine:
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
+            init_tracer("vllm.llm_engine", endpoint)
+            self.output_processor.tracing_enabled = True
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -135,14 +134,6 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
-
-    @property
-    @deprecated(
-        "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.14."
-    )
-    def processor(self):
-        return self.input_processor
 
     @classmethod
     def from_vllm_config(
@@ -211,18 +202,22 @@ class LLMEngine:
         return outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.engine_core.get_supported_tasks()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = self.engine_core.get_supported_tasks()
 
-    def abort_request(self, request_ids: list[str]) -> None:
+        return self._supported_tasks
+
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
+        request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
     def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | DictPrompt | TokPrompt,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -238,6 +233,12 @@ class LLMEngine:
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -249,11 +250,11 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                supported_tasks=self.get_supported_tasks(),
             )
-            if isinstance(prompt, str):
-                prompt_text = prompt
-            elif isinstance(prompt, Mapping):
-                prompt_text = cast(str | None, prompt.get("prompt"))
+            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+        self.input_processor.assign_request_id(request)
 
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
@@ -268,7 +269,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, params)
+        parent_req = ParentRequest(request)
         for idx in range(n):
             request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
@@ -335,6 +336,14 @@ class LLMEngine:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        """
+        self.engine_core.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
@@ -359,12 +368,11 @@ class LLMEngine:
         return self.input_processor.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        if self.tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
+        return self.input_processor.get_tokenizer()
 
-        return self.tokenizer
+    @property
+    def renderer(self) -> BaseRenderer:
+        return self.input_processor.renderer
 
     def do_log_stats(self) -> None:
         """Log stats if logging is enabled."""

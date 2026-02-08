@@ -9,3 +9,5 @@ wheel
 jinja2>=3.1.6
 regex
 build
+protobuf
+grpcio-tools==1.78.0 # Required for grpc entrypoints

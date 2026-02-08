@@ -131,7 +131,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
@@ -172,13 +172,13 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 ### What are supported models on CPU?
 
-For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](../../models/hardware_supported_models/cpu.md)
 
 ### How to find benchmark configuration examples for supported CPU models?
 
-For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](https://github.com/vllm-project/vllm/blob/main/.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
-For details on how these optimized configurations are determined, see: [performance-benchmark-details](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks#performance-benchmark-details).
-To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
 Below is an example command to benchmark all CPU-supported models using optimized configurations.
 
