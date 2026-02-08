@@ -16,6 +16,7 @@ import psutil
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
@@ -132,6 +133,9 @@ def _maybe_force_spawn():
     elif xpu_is_initialized():
         reasons.append("XPU is initialized")
 
+    if in_wsl():
+        reasons.append("WSL is detected and NVML is not compatible with fork")
+
     if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
@@ -175,7 +179,12 @@ def set_process_title(
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
-    if envs.NO_COLOR:
+    is_tty = hasattr(file, "isatty") and file.isatty()
+    if (
+        envs.NO_COLOR
+        or envs.VLLM_LOGGING_COLOR == "0"
+        or (envs.VLLM_LOGGING_COLOR != "1" and not is_tty)
+    ):
         prefix = f"({worker_name} pid={pid}) "
     else:
         prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
@@ -267,3 +276,30 @@ def set_ulimit(target_soft_limit: int = 65535):
                 current_soft,
                 e,
             )
+
+
+def find_loaded_library(lib_name: str) -> str | None:
+    """
+    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process, which includes the
+    shared libraries loaded by the process. We can use this file to find the path of the
+    loaded library.
+    """  # noqa
+    found_line = None
+    with open("/proc/self/maps") as f:
+        for line in f:
+            if lib_name in line:
+                found_line = line
+                break
+    if found_line is None:
+        # the library is not loaded in the current process
+        return None
+    # if lib_name is libcudart, we need to match a line with:
+    # address /path/to/libcudart-hash.so.11.0
+    start = found_line.index("/")
+    path = found_line[start:].strip()
+    filename = path.split("/")[-1]
+    assert filename.rpartition(".so")[0].startswith(lib_name), (
+        f"Unexpected filename: {filename} for library {lib_name}"
+    )
+    return path

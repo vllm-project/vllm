@@ -8,6 +8,7 @@ from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float16]
 IS_NEOX = [True, False]
@@ -56,6 +57,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
+    default_vllm_config,
     device: str,
     dtype: torch.dtype,
     is_neox: bool,
@@ -64,7 +66,7 @@ def test_fused_qk_norm_rope_matches_reference(
     rotary_ratio: float,
 ):
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     num_heads, num_kv_heads, head_dim = 16, 4, 128
     num_tokens = 4
 

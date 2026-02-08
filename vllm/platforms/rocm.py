@@ -3,21 +3,20 @@
 
 import os
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 
@@ -49,7 +48,6 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = ()
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
@@ -89,27 +87,67 @@ def with_amdsmi_context(fn):
     return wrapper
 
 
+@with_amdsmi_context
+def _query_gcn_arch_from_amdsmi() -> str:
+    """Query GCN arch from amdsmi. Raises if not available."""
+    handles = amdsmi_get_processor_handles()
+    if handles:
+        asic_info = amdsmi_get_gpu_asic_info(handles[0])
+        # Use target_graphics_version which contains the gfx name
+        # e.g., 'gfx942' for MI300X/MI325X
+        target_gfx = asic_info.get("target_graphics_version", "")
+        if target_gfx:
+            return target_gfx
+    raise RuntimeError("amdsmi did not return valid GCN arch")
+
+
+@cache
+def _get_gcn_arch_via_amdsmi() -> str:
+    """
+    Get the GCN architecture name using amdsmi instead of torch.cuda.
+    This avoids initializing CUDA, which is important for Ray workers
+    that need to set CUDA_VISIBLE_DEVICES after importing vLLM.
+    """
+    try:
+        return _query_gcn_arch_from_amdsmi()
+    except Exception as e:
+        logger.debug("Failed to get GCN arch via amdsmi: %s", e)
+        logger.warning_once(
+            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
+            "This will initialize CUDA and may cause "
+            "issues if CUDA_VISIBLE_DEVICES is not set yet."
+        )
+    # Ultimate fallback: use torch.cuda (will initialize CUDA)
+    return torch.cuda.get_device_properties("cuda").gcnArchName
+
+
 @cache
 def on_gfx1x() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
 def on_mi3xx() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
 
 
 @cache
 def on_gfx9() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
 @cache
+def on_gfx942() -> bool:
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
+    return any(arch in GPU_ARCH for arch in ["gfx942"])
+
+
+@cache
 def on_gfx950() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx950"])
 
 
@@ -125,7 +163,7 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gcn_arch_via_amdsmi()
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
@@ -159,6 +197,28 @@ def use_rocm_custom_paged_attention(
         )
 
 
+@cache
+def flash_attn_triton_available() -> bool:
+    if not on_gfx1x():
+        return False
+    try:
+        from importlib.util import find_spec
+
+        if find_spec("flash_attn") is None:
+            return False
+        if find_spec("flash_attn.flash_attn_triton_amd") is None:
+            return False
+        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
+            logger.info_once(
+                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
+                "Flash Attention Triton backend on RDNA."
+            )
+            return False
+        return True
+    except ImportError:
+        return False
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -168,10 +228,17 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+    ]
 
     supported_quantization: list[str] = [
         "awq",
+        "awq_marlin",  # will be overwritten with awq
         "gptq",
+        "gptq_marlin",  # will be overwritten with gptq
         "fp8",
         "compressed-tensors",
         "fbgemm_fp8",
@@ -185,6 +252,17 @@ class RocmPlatform(Platform):
     # bitsandbytes not supported on gfx9 (warp size 64 limitation)
     if not on_gfx9():
         supported_quantization += ["bitsandbytes"]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import ROCm-specific kernels."""
+        super().import_kernels()
+
+        import contextlib
+
+        # Import ROCm-specific extension
+        with contextlib.suppress(ImportError):
+            import vllm._rocm_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -275,7 +353,13 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.attention_config.use_prefill_decode_attention
+            ):
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
@@ -288,14 +372,6 @@ class RocmPlatform(Platform):
             ):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-
-            # Priority 5: If model is Encoder-only self-attention type
-            if (
-                attn_selector_config.attn_type is not None
-                and attn_selector_config.attn_type == AttentionType.ENCODER_ONLY
-            ):
-                logger.info("Using FlexAttention backend.")
-                return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend.")
@@ -319,7 +395,7 @@ class RocmPlatform(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
@@ -333,7 +409,7 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_enabled():
+        if rocm_aiter_ops.is_enabled() and on_gfx9():
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
@@ -343,6 +419,17 @@ class RocmPlatform(Platform):
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using Flash Attention backend for ViT model.")
+            return AttentionBackendEnum.FLASH_ATTN
+
+        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
+        if (
+            on_gfx1x()
+            and flash_attn_triton_available()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
+            logger.info_once(
+                "Using Flash Attention (Triton backend) for ViT model on RDNA."
+            )
             return AttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
@@ -476,6 +563,9 @@ class RocmPlatform(Platform):
         ):
             compilation_config.custom_ops.append("+grouped_topk")
 
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
@@ -510,7 +600,8 @@ class RocmPlatform(Platform):
         cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(device)[0]
+        free_mem, total_mem = torch.cuda.mem_get_info(device)
+        return total_mem - free_mem
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

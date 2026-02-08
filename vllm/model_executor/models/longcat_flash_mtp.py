@@ -24,7 +24,6 @@ from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -124,7 +123,7 @@ class LongCatMultiTokenPredictor(nn.Module):
         )
 
 
-class LongCatFlashMTP(nn.Module, SupportsPP):
+class LongCatFlashMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         # LongCat MTP without MoE layers
@@ -151,7 +150,7 @@ class LongCatFlashMTP(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
