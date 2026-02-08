@@ -859,6 +859,19 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _is_blackwell() -> bool:
+    """Check if running on Blackwell GPU (SM 120 / compute capability 12.x)."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            major, _ = torch.cuda.get_device_capability()
+            return major == 12
+    except Exception:
+        pass
+    return False
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
@@ -871,6 +884,12 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
+    # Blackwell shared memory constraint: head_size=256 with float32
+    # needs ~117KB at TILE_SIZE=32, exceeding the 101KB hardware limit.
+    # Reduce to TILE_SIZE=16 (~66KB) which fits within budget.
+    if _is_blackwell() and head_size == 256 and element_size == 4:
+        return 16
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
