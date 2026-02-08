@@ -5,7 +5,10 @@ import json
 import os
 import re
 
-from vllm.v1.spec_decode.dynamic.profiling_client import EAGLE_FMT, NGRAM_FMT
+
+# Format strings for speculative config naming in benchmark result files.
+NGRAM_FMT = "min-{min}-max-{max}-k-{k}"
+EAGLE_FMT = "k-{k}"
 
 
 def reverse_fmt(fmt_str):
