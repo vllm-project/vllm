@@ -14,10 +14,12 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFP4ScaledMMLinearKernel,
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
+    FlashInferFP4ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
@@ -29,6 +31,8 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP4ScaledMMLinearKernel,
+    FP4ScaledMMLinearLayerConfig,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
@@ -71,6 +75,13 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+    ],
+}
+
+_POSSIBLE_FP4_KERNELS: dict[PlatformEnum, list[type[FP4ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferFP4ScaledMMLinearKernel,
+        CutlassFP4ScaledMMLinearKernel,
     ],
 }
 
@@ -161,6 +172,66 @@ def choose_scaled_mm_linear_kernel(
         "Failed to find a kernel that can implement the "
         "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reason_list)
     )
+
+
+def init_fp4_linear_kernel(
+    group_size: int | None,
+    is_checkpoint_fp4_serialized: bool,
+    out_dtype: torch.dtype | None,
+    force_kernel: type[FP4ScaledMMLinearKernel] | None = None,
+    backend: str | None = None,
+    module_name: str | None = None,
+) -> FP4ScaledMMLinearKernel:
+    """
+    Initialize an FP4 linear kernel.
+
+    Args:
+        group_size: Block size for weight scales (e.g., 128)
+        is_checkpoint_fp4_serialized: Whether weights are pre-quantized
+        out_dtype: Output dtype for the matmul
+        force_kernel: Optional kernel to force use of
+        backend: Backend variant for FlashInfer (cutlass/trtllm/cudnn)
+        module_name: Name of the module for logging
+
+    Returns:
+        Initialized FP4ScaledMMLinearKernel instance
+    """
+    scaled_mm_linear_kernel_config = FP4ScaledMMLinearLayerConfig(
+        group_size=group_size,
+        is_checkpoint_fp4_serialized=is_checkpoint_fp4_serialized,
+        out_dtype=out_dtype,
+    )
+
+    kernel_type = choose_scaled_mm_linear_kernel(
+        scaled_mm_linear_kernel_config, _POSSIBLE_FP4_KERNELS, force_kernel=force_kernel
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
+
+    # FlashInfer kernels need the backend parameter
+    param_names = [
+        "weight",
+        "weight_scale",
+        "weight_scale_2",
+        "input_scale_inv",
+        "alpha",
+    ]
+
+    if kernel_type == FlashInferFP4ScaledMMLinearKernel:
+        # FlashInfer requires backend parameter
+        return FlashInferFP4ScaledMMLinearKernel(
+            scaled_mm_linear_kernel_config,
+            param_names,
+            backend=backend or "cutlass",
+        )
+
+    return kernel_type(scaled_mm_linear_kernel_config, param_names)
 
 
 def init_fp8_linear_kernel(
