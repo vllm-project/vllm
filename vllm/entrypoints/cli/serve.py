@@ -260,6 +260,7 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            tensor_queues=addresses.tensor_queues,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the

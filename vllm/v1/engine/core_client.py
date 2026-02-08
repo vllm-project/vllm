@@ -60,6 +60,33 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 EngineIdentity = bytes
 
 
+@contextlib.contextmanager
+def encoder_request_context(
+    encoder: MsgpackEncoder,
+    engine: EngineIdentity,
+    request_type: EngineCoreRequestType,
+    request: Any,
+):
+    """Context manager for setting encoder state during request encoding.
+
+    Sets the target engine and request context (for ADD requests) on entry,
+    and clears the request context on exit.
+    """
+    # Set target engine index for tensor routing
+    engine_index = int.from_bytes(engine, "little")
+    encoder.set_target_engine(engine_index)
+
+    # Set request context if this is an ADD request with a request_id
+    if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+        encoder.set_request_context(request.request_id)
+
+    try:
+        yield encoder
+    finally:
+        # Clear request context after encoding
+        encoder.set_request_context(None)
+
+
 class EngineCoreClient(ABC):
     """
     EngineCoreClient: subclasses handle different methods for pushing
@@ -371,6 +398,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
+    tensor_queues: list[Any] | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -461,9 +489,6 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
-        # Serialization setup.
-        self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -480,11 +505,14 @@ class MPClient(EngineCoreClient):
             self.engines_running = False
 
             self.stats_update_address: str | None = None
+            tensor_queues: list[Any] | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                # Tensor queues passed via client_addresses for multi-API-server case
+                tensor_queues = client_addresses.get("tensor_queues")  # type: ignore[assignment]
             else:
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class, log_stats) as (
@@ -498,10 +526,27 @@ class MPClient(EngineCoreClient):
                 (input_address,) = addresses.inputs
                 (output_address,) = addresses.outputs
                 self.stats_update_address = addresses.frontend_stats_publish_address
+                tensor_queues = addresses.tensor_queues
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            # Serialization setup with tensor queues for multimodal tensor IPC.
+            # Get IPC config from multimodal_config, falling back to default
+            multimodal_tensor_ipc = "direct_rpc"  # Default
+            if vllm_config.model_config.multimodal_config is not None:
+                multimodal_tensor_ipc = (
+                    vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
+                )
+
+            self.encoder = MsgpackEncoder(
+                tensor_queues=tensor_queues,
+                multimodal_tensor_ipc=multimodal_tensor_ipc,
+            )
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
+            # Store tensor queues for routing
+            self.resources.tensor_queues = tensor_queues
 
             # Create input and output sockets.
             self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -733,8 +778,12 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
         self.free_pending_messages()
+
         # (Identity, RequestType, SerializedRequest)
-        msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+        with encoder_request_context(
+            self.encoder, self.core_engine, request_type, request
+        ):
+            msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
 
         if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
@@ -919,7 +968,9 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
-        message = (request_type.value, *self.encoder.encode(request))
+        with encoder_request_context(self.encoder, engine, request_type, request):
+            message = (request_type.value, *self.encoder.encode(request))
+
         return self._send_input_message(message, engine, request)
 
     def _send_input_message(

@@ -145,6 +145,11 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    multimodal_tensor_ipc: Literal["direct_rpc", "torch_shm"] = "direct_rpc"
+    """IPC (inter-process communication) method for multimodal tensors.
+    - "direct_rpc": Use msgspec serialization via RPC
+    - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    Defaults to "direct_rpc". """
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
