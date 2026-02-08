@@ -14,6 +14,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearLayerConfig,
@@ -90,4 +93,34 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
         return triton_scaled_mm(
             x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
+        )
+
+
+class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not current_platform.is_cuda_alike():
+            return False, "only cuda like devices are supported."
+        return True, None
+
+    @classmethod
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
+        return [cls]
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
+            A,
+            B,
+            As,
+            Bs,
+            list(self.weight_group_shape),
+            out_dtype,
         )
