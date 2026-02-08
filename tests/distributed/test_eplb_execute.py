@@ -9,6 +9,7 @@ import torch
 import torch.distributed
 
 from vllm.distributed.eplb.rebalance_execute import (
+    create_eplb_communicator,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -242,6 +243,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
@@ -292,6 +294,13 @@ def _test_async_transfer_layer_without_mtp_worker(
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
     cuda_stream = torch.cuda.Stream(device=device)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+    communicator.set_stream(cuda_stream)
+
     for layer_idx in range(num_layers):
         is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
@@ -300,6 +309,7 @@ def _test_async_transfer_layer_without_mtp_worker(
                 expert_weights=expert_weights,
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
+                communicator=communicator,
                 layer=layer_idx,
                 cuda_stream=cuda_stream,
             )
@@ -332,7 +342,12 @@ def _test_async_transfer_layer_without_mtp_worker(
 
 
 def _test_rearrange_expert_weights_with_redundancy(
-    env, world_size, num_layers, num_local_experts, num_logical_experts
+    env,
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator: str,
 ) -> None:
     # Initialize model parallel (using tensor parallel as an entrypoint
     # to expert parallel)
@@ -377,12 +392,19 @@ def _test_rearrange_expert_weights_with_redundancy(
         num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
     )
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute weight rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        communicator,
         is_profile=False,
     )
 
@@ -427,8 +449,13 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
 def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
@@ -440,10 +467,13 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator,
     )
 
 
-def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
+def _test_rearrange_expert_weights_no_change(
+    env, world_size, eplb_communicator: str
+) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
@@ -479,12 +509,19 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute rearrangement (should be no change)
     rearrange_expert_weights_inplace(
         indices,
         indices,  # Same indices
         expert_weights,
         ep_group,
+        communicator,
         is_profile=False,
     )
 
@@ -505,11 +542,13 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
@@ -522,11 +561,13 @@ def test_async_transfer_layer_without_mtp(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator,
     )
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_no_change(world_size):
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+def test_rearrange_expert_weights_no_change(world_size, eplb_communicator):
     """
     Test that when the indices do not change, the weights should remain
     unchanged.
@@ -534,10 +575,16 @@ def test_rearrange_expert_weights_no_change(world_size):
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_no_change, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_no_change,
+        world_size,
+        eplb_communicator,
+    )
 
 
-def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
+def _test_rearrange_expert_weights_profile_mode(
+    env, world_size, eplb_communicator: str
+) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
@@ -580,12 +627,19 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute profile mode rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        communicator,
         is_profile=True,  # Profile mode
     )
 
@@ -600,9 +654,14 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_profile_mode(world_size):
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+def test_rearrange_expert_weights_profile_mode(world_size, eplb_communicator):
     """Test profile mode (should not copy actual weights)"""
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_profile_mode,
+        world_size,
+        eplb_communicator,
+    )
