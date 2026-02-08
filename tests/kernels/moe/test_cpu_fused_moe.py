@@ -6,8 +6,9 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
-from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -22,11 +23,6 @@ ACT = ["silu", "swigluoai"]
 USE_BIAS = [True, False]
 ISA = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
 DTYPE = [torch.bfloat16]
-
-_CPU_MOE_ACT = {
-    "silu": SiluAndMul(),
-    "swigluoai": SwigluOAIAndMul(),
-}
 
 
 def ref_fused_moe(
@@ -72,12 +68,7 @@ def ref_fused_moe(
             tokens_for_this_expert, curr_w13, curr_w13_bias
         )
         # Note: to simulate the kernel implementation
-        gate_up = (
-            _CPU_MOE_ACT[activation]
-            .forward_native(gate_up)
-            .to(dtype=input.dtype)
-            .float()
-        )
+        gate_up = _CPU_MOE_ACT_FN[activation](gate_up).to(dtype=input.dtype).float()
         expert_out = torch.nn.functional.linear(gate_up, curr_w2, curr_w2_bias)
 
         outputs.append(expert_out)
@@ -105,6 +96,7 @@ def ref_fused_moe(
 @pytest.mark.parametrize("act", ACT)
 @pytest.mark.parametrize("isa", ISA)
 def test_cpu_fused_moe(
+    default_vllm_config,
     batch_size: int,
     expert_num: int,
     hidden_size: int,
@@ -114,7 +106,7 @@ def test_cpu_fused_moe(
     act: str,
     isa: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     topk_num = max(expert_num // 2, 1)
     up_dim = 2 * intermediate_size

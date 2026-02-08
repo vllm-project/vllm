@@ -6,11 +6,11 @@ from typing import Any
 
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -1003,9 +1003,14 @@ def vllm_is_batch_invariant() -> bool:
 def override_envs_for_invariance(
     attention_backend: AttentionBackendEnum | None,
 ):
-    supported_backends = [
+    decode_invariant_backends = [
         AttentionBackendEnum.FLASH_ATTN,  # best supported backend
-        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.TRITON_ATTN,
+    ]
+    supported_backends = decode_invariant_backends + [
+        # FlashInfer temporarily disabled due to invariant CTA sizes.
+        # See FlashInfer issue #2424
+        # AttentionBackendEnum.FLASHINFER,
         AttentionBackendEnum.FLASH_ATTN_MLA,
         AttentionBackendEnum.TRITON_MLA,
         # Not yet supported MLA backends
@@ -1023,9 +1028,9 @@ def override_envs_for_invariance(
             "one of the supported backends before enabling batch_invariant."
         )
         raise RuntimeError(error)
-    if attention_backend != supported_backends[0]:
+    if attention_backend not in decode_invariant_backends:
         warning = (
-            "You are using a decode-invariant form of batch invariance. "
+            "You are using a non-decode-invariant form of batch invariance. "
             "This will not be invariant between prefill and decode."
         )
         logger.warning_once(warning, scope="local")
