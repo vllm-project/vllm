@@ -289,6 +289,13 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
+        # infer method from user args
+        if self.method is None:
+            if self.model in ("ngram", "[ngram]"):
+                self.method = "ngram"
+            else:
+                self.method = "draft_model"
+
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
@@ -317,13 +324,6 @@ class SpeculativeConfig:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
-
-        # Automatically configure the method for ngram when "model" is used
-        # instead of "method"
-        if self.method is None and (
-            self.model is not None and self.model in ("ngram", "[ngram]")
-        ):
-            self.method = "ngram"
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
