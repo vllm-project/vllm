@@ -5122,8 +5122,8 @@ class GPUModelRunner(
                 mm_budget = self.mm_budget
                 assert mm_budget is not None
 
-                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                    if not mm_budget.mm_max_toks_per_item:
+                if mm_budget.get_encoder_budget() > 0:
+                    if not mm_budget.mm_max_items_per_batch:
                         # All modality limits are 0 — embedding-only mode.
                         # Budget is non-zero for embedding storage, but
                         # there's no encoder to profile.
@@ -5142,10 +5142,8 @@ class GPUModelRunner(
                         ]
 
                         logger.info(
-                            "Encoder cache will be initialized with a "
-                            "budget of %s tokens, and profiled with "
-                            "%s %s items of the maximum feature size.",
-                            encoder_budget,
+                            "Encoder model will be profiled with %s %s items "
+                            "of the maximum feature size.",
                             max_mm_items_per_batch,
                             dummy_modality,
                         )
