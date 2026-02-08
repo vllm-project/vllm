@@ -92,53 +92,6 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
-                        int64_t num_heads_k, int64_t num_heads_v,
-                        int64_t head_dim, double eps, torch::Tensor& q_weight,
-                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
-                        bool is_neox, torch::Tensor& position_ids);
-
-void apply_repetition_penalties_(torch::Tensor& logits,
-                                 const torch::Tensor& prompt_mask,
-                                 const torch::Tensor& output_mask,
-                                 const torch::Tensor& repetition_penalties);
-
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& rowStarts,
-                           const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1,
-                           int64_t topK);
-
-void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
-                          const torch::Tensor& seqLens, torch::Tensor& indices,
-                          int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t topK);
-
-void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                               torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
-
-void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                         torch::Tensor& input,
-                                         torch::Tensor& residual,
-                                         torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
-
-void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
-                                      torch::Tensor const& input,
-                                      torch::Tensor const& weight,
-                                      torch::Tensor& scales,
-                                      double const epsilon,
-                                      std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
-
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed);
-
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
@@ -161,8 +114,6 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
-void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
-
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -184,8 +135,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
-
 #ifndef USE_ROCM
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
@@ -197,7 +146,6 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,

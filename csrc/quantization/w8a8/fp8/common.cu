@@ -1,4 +1,4 @@
-#include "common.cuh"
+#include "stable/quantization/w8a8/fp8/common.cuh"
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "quantization/vectorization_utils.cuh"

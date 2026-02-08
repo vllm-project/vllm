@@ -8,7 +8,7 @@
 
 #include <torch/all.h>
 
-#include "quantization/vectorization.cuh"
+#include "stable/quantization/vectorization.cuh"
 #include "quantization/vectorization_utils.cuh"
 #include "dispatch_utils.h"
 

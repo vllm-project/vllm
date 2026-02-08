@@ -30,10 +30,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
-           &get_cuda_view_from_cpu_tensor);
-
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -101,10 +97,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // Activation ops
-  // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
-
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
@@ -115,121 +107,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor input, Tensor input_global_scale) -> ()");
   ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
 #endif
-
-  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
-  ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
-
-  // Activation function used in GeGLU with `none` approximation.
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
-
-  // Activation function used in GeGLU with `tanh` approximation.
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
-
-  // FATReLU implementation.
-  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
-  ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
-
-  ops.def(
-      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
-      "limit=7.0) "
-      "-> ()");
-  ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
-
-  // GELU implementation used in GPT-2.
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kCUDA, &gelu_new);
-
-  // Approximate GELU implementation.
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kCUDA, &gelu_fast);
-
-  // Quick GELU implementation.
-  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
-
-  // Layernorm
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm", torch::kCUDA, &rms_norm);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
-
-  // Function for fused QK Norm and RoPE
-  ops.def(
-      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
-      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids) -> ()");
-  ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
-
-  // Apply repetition penalties to logits in-place
-  ops.def(
-      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
-      "Tensor output_mask, Tensor repetition_penalties) -> ()");
-  ops.impl("apply_repetition_penalties_", torch::kCUDA,
-           &apply_repetition_penalties_);
-
-  // Optimized top-k per row operation
-  ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, int numRows, int stride0, "
-      "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
-
-  ops.def(
-      "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, "
-      "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
-
-  // Layernorm-quant
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
-      "Tensor scale, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
-           &rms_norm_static_fp8_quant);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! residual, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
-           &fused_add_rms_norm_static_fp8_quant);
-
-  // Fused Layernorm + Quant kernels
-  ops.def(
-      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual) -> ()");
-  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
-           &rms_norm_dynamic_per_token_quant);
-
-  // Fused Layernorm + Block quant kernels
-  ops.def(
-      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed) -> ()");
-  ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
-
-  // Rotary embedding
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def(
-      "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
-  ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
   // Quantization ops
 #ifndef USE_ROCM
@@ -291,9 +168,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   ScalarType? group_scales_type"
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
-
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
 
   // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
   ops.def(
