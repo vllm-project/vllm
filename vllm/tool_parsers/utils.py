@@ -17,6 +17,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaToolCall,
+    ToolCall,
+)
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -227,3 +232,105 @@ def get_json_schema_from_tools(
         return _get_json_schema_from_tools(tools)
     # tool_choice: "auto"
     return None
+
+
+def compute_tool_delta(
+    previously_sent_args: str, new_call: ToolCall, index: int, withheld_suffix: str
+) -> DeltaToolCall | None:
+    new_call_args = new_call.function.arguments
+    if withheld_suffix:
+        assert new_call_args.endswith(withheld_suffix)
+        new_call_args = new_call_args[: -len(withheld_suffix)]
+    if not previously_sent_args:
+        return DeltaToolCall(
+            id=new_call.id,
+            type="function",
+            index=index,
+            function=DeltaFunctionCall(
+                name=new_call.function.name,
+                arguments=new_call_args,
+            ),
+        )
+
+    arg_diff = new_call_args[len(previously_sent_args) :]
+    return (
+        DeltaToolCall(
+            id=None, index=index, function=DeltaFunctionCall(arguments=arg_diff)
+        )
+        if arg_diff
+        else None
+    )
+
+
+class _UnexpectedAstError(Exception):
+    pass
+
+
+def make_valid_python(text: str) -> tuple[str, str] | None:
+    bracket_stack = []
+    for index, char in enumerate(text):
+        if char in {"[", "(", "{"}:
+            bracket_stack.append(char)
+        elif char == "]":
+            if not bracket_stack or bracket_stack.pop() != "[":
+                raise _UnexpectedAstError("Mismatched square brackets")
+        elif char == ")":
+            if not bracket_stack or bracket_stack.pop() != "(":
+                raise _UnexpectedAstError("Mismatched parentheses")
+        elif char == "}":
+            if not bracket_stack or bracket_stack.pop() != "{":
+                raise _UnexpectedAstError("Mismatched curly braces")
+        elif char in {"'", '"'}:
+            if bracket_stack and bracket_stack[-1] == char:
+                if index > 0 and text[index - 1] == "\\":
+                    # Treat an escaped quote as a regular character
+                    pass
+                else:
+                    bracket_stack.pop()
+            elif bracket_stack and bracket_stack[-1] in {"'", '"'}:
+                # Double quote within a single quote string or vice versa.
+                pass
+            else:
+                bracket_stack.append(char)
+
+    text = text.rstrip()
+    if text.endswith("=") or text.endswith(":"):
+        # Since we have no type information for this property/parameter value,
+        # we can't fill in a valid value.
+        return None
+    if bracket_stack and bracket_stack[-1] == "{":
+        trailing_dict_text = text[: text.rfind("{")]
+        num_keys = trailing_dict_text.count(":")
+        num_values = trailing_dict_text.count(",")
+        if num_keys <= num_values:
+            return None  # Incomplete property name within parameter value
+    if bracket_stack and bracket_stack[-1] == "(":
+        trailing_params_text = text[: text.rfind("(")]
+        num_full_param_names = trailing_params_text.count("=")
+        num_full_param_values = trailing_params_text.count(",")
+        if num_full_param_names <= num_full_param_values:
+            return None  # Incomplete parameter name
+    if text.endswith(","):
+        text = text[:-1]
+    if (
+        bracket_stack
+        and bracket_stack[-1] == "["
+        and not text.endswith("[")
+        and not text.endswith(")")
+    ):
+        return None  # Incomplete function name
+
+    added_text = ""
+    for char in reversed(bracket_stack):
+        if char == "[":
+            added_text += "]"
+        elif char == "(":
+            added_text += ")"
+        elif char == "{":
+            added_text += "}"
+        elif char == "'":
+            added_text += "'"
+        elif char == '"':
+            added_text += '"'
+
+    return text + added_text, added_text

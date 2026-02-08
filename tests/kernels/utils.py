@@ -1085,3 +1085,42 @@ def baseline_scaled_mm(
         output = output + bias
 
     return output
+
+
+def rtne_fp4(x: torch.Tensor):
+    device = x.device
+    grid = torch.tensor(
+        [
+            -6.0,
+            -4.0,
+            -3.0,
+            -2.0,
+            -1.5,
+            -1.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+        ],
+        dtype=x.dtype,
+        device=x.device,
+    )
+    grid_int = torch.tensor(
+        [-1, -2, -3, -4, -5, -6, -7, -8, 0, 1, 2, 3, 4, 5, 6, 7],
+        dtype=torch.uint8,
+        device=device,
+    )
+    inds = torch.bucketize(x, grid)
+    lo, hi = (inds - 1).clamp(min=0, max=15), inds.clamp(min=0, max=15)
+    g_lo, g_hi = grid[lo], grid[hi]
+    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (grid_int[hi] % 2 == 0)
+    y = torch.where(pick_hi, g_hi, g_lo)
+    y_int = torch.where(pick_hi, grid_int[hi], grid_int[lo])
+    y_int_packed = (y_int[..., 1::2] & 0xF) << 4 | y_int[..., ::2] & 0xF
+    return y, y_int_packed
