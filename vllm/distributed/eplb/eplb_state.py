@@ -527,6 +527,26 @@ class EplbState:
         )
         self.model_states[model_config.compute_hash()] = model_state
 
+    def reinitialize_model_states(self, num_replicas: int):
+        for eplb_model_state in self.model_states.values():
+            model = eplb_model_state.model
+            model.num_physical_experts = num_replicas
+
+            eplb_model_state.expert_load_window = torch.zeros(
+                (
+                    self.expert_load_window_size,
+                    model.num_moe_layers,
+                    num_replicas,
+                ),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            eplb_model_state.expert_load_pass = torch.zeros(
+                (model.num_moe_layers, num_replicas),
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     def step(
         self,
         is_dummy: bool = False,
@@ -786,6 +806,7 @@ class EplbState:
             num_replicas = (
                 num_replicas // ep_group.size() * num_gpus
             )  # handle num replicas change
+            self.reinitialize_model_states(num_replicas)
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()

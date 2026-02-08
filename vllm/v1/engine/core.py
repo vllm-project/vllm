@@ -1424,7 +1424,6 @@ class DPEngineCoreProc(EngineCoreProc):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         stateless_destroy_torch_distributed_process_group(self.dp_group)
-        self.shutdown()
 
         parallel_config = self.vllm_config.parallel_config
         old_dp_size = parallel_config.data_parallel_size
@@ -1442,7 +1441,10 @@ class DPEngineCoreProc(EngineCoreProc):
         parallel_config.data_parallel_master_port = (
             reconfig_request.new_data_parallel_master_port
         )
-        if reconfig_request.new_data_parallel_rank != -2:
+        if (
+            reconfig_request.new_data_parallel_rank
+            != ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        ):
             self.dp_rank = parallel_config.data_parallel_rank
             self.dp_group = parallel_config.stateless_init_dp_group()
         reconfig_request.new_data_parallel_master_port = (
