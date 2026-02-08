@@ -2,7 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, MutableSequence
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Iterable,
+    Mapping,
+    MutableSequence,
+    Sequence,
+)
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
@@ -826,7 +833,7 @@ class MixtureOfExperts(Protocol):
     Check if the model is a mixture of experts (MoE) model.
     """
 
-    expert_weights: MutableSequence[Iterable[Tensor]]
+    expert_weights: MutableSequence[Sequence[Tensor]]
     """
     Expert weights saved in this rank.
 
@@ -980,6 +987,40 @@ def supports_cross_encoding(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
+
+
+@runtime_checkable
+class SupportsLateInteraction(Protocol):
+    """The interface required for all models that support late interaction.
+
+    Late interaction models (like ColBERT) encode queries and documents
+    separately into per-token embeddings, then compute similarity via
+    MaxSim (max over document tokens, sum over query tokens).
+    """
+
+    supports_late_interaction: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_late_interaction(
+    model: type[object],
+) -> TypeIs[type[SupportsLateInteraction]]: ...
+
+
+@overload
+def supports_late_interaction(model: object) -> TypeIs[SupportsLateInteraction]: ...
+
+
+def _supports_late_interaction(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
+    return getattr(model, "supports_late_interaction", False)
+
+
+def supports_late_interaction(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
+    return is_pooling_model(model) and _supports_late_interaction(model)
 
 
 class SupportsQuant:

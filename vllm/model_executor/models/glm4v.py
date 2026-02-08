@@ -139,7 +139,7 @@ class EVA2CLIPAttention(nn.Module):
             self.num_heads_per_rank,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
