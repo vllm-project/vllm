@@ -475,6 +475,17 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr, new_attr)
+
+    # For Qwen3 models, ensure sliding_window is None when use_sliding_window is False
+    # This prevents context length being limited to sliding_window value
+    if (
+        hasattr(config, "use_sliding_window")
+        and not config.use_sliding_window
+        and hasattr(config, "sliding_window")
+    ):
+        config.sliding_window = None
+        logger.debug("Set sliding_window=None for model with use_sliding_window=False")
+
     return config
 
 
