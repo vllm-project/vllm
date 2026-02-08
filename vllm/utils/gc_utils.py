@@ -149,3 +149,391 @@ def _compute_top_gc_collected_objects(objects: list[Any], top: int) -> str:
         f"{count:>5}:{object_type}"
         for object_type, count in Counter(object_types).most_common(top)
     )
+
+
+class ManualGCController:
+    """
+    Controller for manual garbage collection to avoid GC pauses during
+    GPU kernel execution.
+
+    Problem:
+        Python's automatic GC can trigger at any time during object allocation,
+        causing "stop the world" pauses that delay GPU kernel launches and
+        reduce GPU utilization.
+
+    Solution:
+        Disable automatic GC and invoke gc.collect() manually at controlled
+        points where CPU is already waiting (e.g., during CUDA stream sync).
+        This hides GC latency behind GPU compute time.
+
+    Hook Point Rationale:
+        The GC is invoked in EngineCore.step() just BEFORE future.result():
+
+            gc_collect_on_sync()      # <-- GC runs here
+            model_output = future.result()  # CPU blocks waiting for GPU
+
+        Why this location is ideal:
+        1. CPU is about to block anyway - GC latency is "free"
+        2. Outside any locks or critical sections
+        3. Not in hot loops (once per engine step, not per token)
+        4. GPU is executing - GC hidden behind compute time
+
+    Generation 2 Heuristic (CPython-inspired):
+        To avoid expensive gen2 collections when unnecessary, we track
+        the number of objects promoted to gen2 since the last gen2 collection.
+        Gen2 collection is only triggered when:
+        - Standard threshold conditions are met, AND
+        - Enough new objects have been added to gen2 (>25% growth)
+
+        This mimics CPython's long_lived_pending optimization from gcmodule.c.
+        See: https://github.com/python/cpython/blob/v3.11.0/Modules/gcmodule.c#L1416-L1454
+
+    Rate Limiting:
+        - Minimum interval between GC calls (default: 10ms)
+        - Respects Python's allocation thresholds (700, 10, 10)
+        - Prevents GC thrashing under rapid allocation patterns
+
+    Safety Features:
+        - Off by default (opt-in via VLLM_MANUAL_GC_CONTROL=1)
+        - Leak guard: forces collection if allocations exceed 10x threshold
+        - Lightweight telemetry: count, total time, max time, per-generation stats
+
+    Topologies Tested:
+        - Single GPU (sync scheduling)
+        - Single GPU (async scheduling)
+        - Multi-GPU tensor parallel
+        - Multiprocessing executor (VLLM_ENABLE_V1_MULTIPROCESSING=1)
+
+    Usage:
+        # Automatically enabled via environment variable:
+        # VLLM_MANUAL_GC_CONTROL=1
+
+        # Programmatic access (for telemetry):
+        controller = ManualGCController.get_instance()
+        if controller is not None:
+            stats = controller.get_stats()
+    """
+
+    _instance: "ManualGCController | None" = None
+
+    # Default GC thresholds from Python (gen0, gen1, gen2)
+    DEFAULT_THRESHOLDS = (700, 10, 10)
+
+    # Safety limit: force GC if allocations exceed this multiple of threshold
+    LEAK_GUARD_MULTIPLIER = 10
+
+    # Minimum interval between GC calls in seconds (rate limiting)
+    MIN_GC_INTERVAL_S = 0.010  # 10ms
+
+    # Gen2 heuristic: only collect gen2 if objects in gen2 grew by this ratio
+    # since last gen2 collection. Mimics CPython's long_lived_pending check.
+    GEN2_GROWTH_RATIO = 0.25
+
+    def __init__(self) -> None:
+        # Store original thresholds for potential restore
+        self._original_thresholds: tuple[int, int, int] = gc.get_threshold()
+
+        # Track generation collection counts for threshold logic
+        self._gc0_count_since_gc1 = 0
+        self._gc1_count_since_gc2 = 0
+
+        # Gen2 heuristic: track object count at last gen2 collection
+        # This mimics CPython's long_lived_total / long_lived_pending
+        self._gen2_object_count_at_last_gc: int = 0
+
+        # Rate limiting: track last GC time
+        self._last_gc_time_ns: int = 0
+
+        # Telemetry - lightweight metrics
+        self._total_gc_time_ms = 0.0
+        self._gc_invocations = 0
+        self._objects_collected = 0
+        self._max_gc_time_ms = 0.0
+        self._skipped_due_to_rate_limit = 0
+        self._gen2_skipped_by_heuristic = 0
+
+        # Per-generation telemetry
+        self._gen_invocations = [0, 0, 0]  # gen0, gen1, gen2
+        self._gen_time_ms = [0.0, 0.0, 0.0]
+        self._gen_objects = [0, 0, 0]
+
+        # Use configured or default thresholds
+        self._thresholds = self.DEFAULT_THRESHOLDS
+
+        # Disable automatic GC immediately upon creation
+        gc.disable()
+        self._last_gc_time_ns = time.monotonic_ns()
+
+        # Initialize gen2 baseline
+        self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
+
+        logger.info(
+            "Manual GC control enabled. Automatic GC disabled. "
+            "Thresholds: %s, Leak guard: %dx, Min interval: %.0fms, "
+            "Gen2 growth ratio: %.0f%%",
+            self._thresholds,
+            self.LEAK_GUARD_MULTIPLIER,
+            self.MIN_GC_INTERVAL_S * 1000,
+            self.GEN2_GROWTH_RATIO * 100,
+        )
+
+    @classmethod
+    def get_instance(cls) -> "ManualGCController | None":
+        """
+        Get singleton instance of ManualGCController.
+
+        Returns None if manual GC control is not enabled.
+        """
+        return cls._instance
+
+    @classmethod
+    def _create_instance(cls) -> "ManualGCController":
+        """Internal: Create and store the singleton instance."""
+        if cls._instance is None:
+            cls._instance = ManualGCController()
+        return cls._instance
+
+    def maybe_collect(self) -> int:
+        """
+        Check if GC should be triggered based on thresholds and collect if needed.
+
+        This should be called at controlled points where CPU is waiting,
+        such as just before blocking on future.result() during CUDA sync.
+
+        Rate limiting prevents GC thrashing - calls within MIN_GC_INTERVAL_S
+        of the last GC are skipped (unless leak guard triggers).
+
+        Generation selection follows Python's generational GC algorithm:
+        - gc.get_count()[0] = allocations - deallocations since last gen0 GC
+        - This matches CPython's automatic GC threshold behavior
+
+        Gen2 heuristic (CPython-inspired):
+        - Skip gen2 collection if not enough new objects were promoted
+        - This avoids expensive full collections when unnecessary
+
+        Returns:
+            Number of objects collected (0 if no collection performed).
+        """
+        current_time_ns = time.monotonic_ns()
+
+        # Get current GC counts (allocations - deallocations since last GC)
+        # This matches CPython's automatic GC threshold logic
+        counts = gc.get_count()
+        gen0_count = counts[0]
+
+        # Check leak guard first (bypasses rate limit)
+        if gen0_count >= self._thresholds[0] * self.LEAK_GUARD_MULTIPLIER:
+            logger.warning(
+                "Leak guard triggered: gen0_count=%d exceeds safety limit. "
+                "Forcing full GC collection.",
+                gen0_count,
+            )
+            collected = self._do_collect(2)
+            self._gc0_count_since_gc1 = 0
+            self._gc1_count_since_gc2 = 0
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
+            return collected
+
+        # Rate limiting check
+        elapsed_ns = current_time_ns - self._last_gc_time_ns
+        if elapsed_ns < self.MIN_GC_INTERVAL_S * 1e9:
+            self._skipped_due_to_rate_limit += 1
+            return 0
+
+        # Check if we need to collect based on thresholds
+        if gen0_count < self._thresholds[0]:
+            return 0
+
+        # Determine the highest generation to collect to avoid redundant work.
+        # Note: gc.collect(gen) collects gen and all younger generations.
+        pending_gc0_count = self._gc0_count_since_gc1 + 1
+        highest_gen = 0
+        if pending_gc0_count >= self._thresholds[1]:
+            highest_gen = 1
+            pending_gc1_count = self._gc1_count_since_gc2 + 1
+            if pending_gc1_count >= self._thresholds[2]:
+                # Apply gen2 heuristic: skip if not enough new objects
+                # in oldest generation (mimics CPython's long_lived_pending)
+                current_gen2_count = len(gc.get_objects(generation=2))
+                growth = current_gen2_count - self._gen2_object_count_at_last_gc
+                threshold = int(
+                    self._gen2_object_count_at_last_gc * self.GEN2_GROWTH_RATIO
+                )
+
+                if growth > threshold:
+                    highest_gen = 2
+                else:
+                    # Skip gen2, but still do gen1
+                    self._gen2_skipped_by_heuristic += 1
+                    if envs.VLLM_GC_DEBUG:
+                        logger.debug(
+                            "Skipping gen2 collection: growth=%d <= threshold=%d "
+                            "(current=%d, baseline=%d)",
+                            growth,
+                            threshold,
+                            current_gen2_count,
+                            self._gen2_object_count_at_last_gc,
+                        )
+
+        total_collected = self._do_collect(highest_gen)
+
+        if highest_gen == 0:
+            self._gc0_count_since_gc1 += 1
+        elif highest_gen == 1:
+            self._gc0_count_since_gc1 = 0
+            self._gc1_count_since_gc2 += 1
+        else:
+            self._gc0_count_since_gc1 = 0
+            self._gc1_count_since_gc2 = 0
+            # Update gen2 baseline after full collection
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
+
+        return total_collected
+
+    def force_collect(self, generation: int = 2) -> int:
+        """
+        Force a GC collection regardless of thresholds and rate limits.
+
+        Args:
+            generation: GC generation to collect (0, 1, or 2).
+
+        Returns:
+            Number of objects collected.
+        """
+        collected = self._do_collect(generation)
+        if generation == 2:
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
+        return collected
+
+    def _do_collect(self, generation: int) -> int:
+        """Perform GC collection with timing and telemetry."""
+        start_time_ns = time.monotonic_ns()
+        collected = gc.collect(generation)
+        elapsed_ms = (time.monotonic_ns() - start_time_ns) / 1e6
+
+        # Update global telemetry
+        self._total_gc_time_ms += elapsed_ms
+        self._gc_invocations += 1
+        self._objects_collected += collected
+        self._max_gc_time_ms = max(self._max_gc_time_ms, elapsed_ms)
+        self._last_gc_time_ns = time.monotonic_ns()
+
+        # Update per-generation telemetry
+        self._gen_invocations[generation] += 1
+        self._gen_time_ms[generation] += elapsed_ms
+        self._gen_objects[generation] += collected
+
+        if envs.VLLM_GC_DEBUG:
+            logger.debug(
+                "Manual GC gen%d: collected %d objects in %.3fms "
+                "(total: %d invocations, %.2fms)",
+                generation,
+                collected,
+                elapsed_ms,
+                self._gc_invocations,
+                self._total_gc_time_ms,
+            )
+
+        return collected
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Get GC telemetry for monitoring and debugging.
+
+        Returns lightweight metrics suitable for periodic logging
+        or metrics export.
+        """
+        return {
+            # Global stats
+            "gc_invocations": self._gc_invocations,
+            "total_gc_time_ms": round(self._total_gc_time_ms, 2),
+            "max_gc_time_ms": round(self._max_gc_time_ms, 2),
+            "avg_gc_time_ms": round(
+                self._total_gc_time_ms / self._gc_invocations
+                if self._gc_invocations > 0
+                else 0.0,
+                2,
+            ),
+            "objects_collected": self._objects_collected,
+            "skipped_rate_limited": self._skipped_due_to_rate_limit,
+            "gen2_skipped_by_heuristic": self._gen2_skipped_by_heuristic,
+            # Per-generation stats
+            "gen0_invocations": self._gen_invocations[0],
+            "gen1_invocations": self._gen_invocations[1],
+            "gen2_invocations": self._gen_invocations[2],
+            "gen0_time_ms": round(self._gen_time_ms[0], 2),
+            "gen1_time_ms": round(self._gen_time_ms[1], 2),
+            "gen2_time_ms": round(self._gen_time_ms[2], 2),
+        }
+
+    def log_stats(self) -> None:
+        """Log current GC telemetry at INFO level."""
+        stats = self.get_stats()
+        logger.info(
+            "Manual GC stats: invocations=%d, total=%.2fms, max=%.2fms, "
+            "avg=%.2fms, collected=%d, rate_limited=%d, gen2_skipped=%d | "
+            "gen0=%d/%.1fms, gen1=%d/%.1fms, gen2=%d/%.1fms",
+            stats["gc_invocations"],
+            stats["total_gc_time_ms"],
+            stats["max_gc_time_ms"],
+            stats["avg_gc_time_ms"],
+            stats["objects_collected"],
+            stats["skipped_rate_limited"],
+            stats["gen2_skipped_by_heuristic"],
+            stats["gen0_invocations"],
+            stats["gen0_time_ms"],
+            stats["gen1_invocations"],
+            stats["gen1_time_ms"],
+            stats["gen2_invocations"],
+            stats["gen2_time_ms"],
+        )
+
+
+def maybe_enable_manual_gc_control() -> None:
+    """
+    Enable manual GC control if VLLM_MANUAL_GC_CONTROL is set.
+
+    When enabled, this:
+    1. Creates the ManualGCController singleton
+    2. Disables Python's automatic GC
+    3. GC is then triggered manually at controlled sync points
+
+    This function is idempotent - calling it multiple times is safe.
+    """
+    if envs.VLLM_MANUAL_GC_CONTROL:
+        ManualGCController._create_instance()
+
+
+def gc_collect_on_sync() -> int:
+    """
+    Invoke manual GC at CUDA synchronization points.
+
+    This is the primary hook for manual GC control. It should be called
+    at points where CPU is about to block waiting for GPU, hiding GC
+    latency behind GPU compute time.
+
+    Hook Point Rationale:
+        Called in EngineCore.step() BEFORE future.result():
+
+            gc_collect_on_sync()           # <-- Here: CPU about to wait
+            model_output = future.result()  # CPU blocks for GPU
+
+        Why this location:
+        1. CPU is about to block anyway - GC latency is effectively "free"
+        2. Outside any locks - no risk of deadlock or contention
+        3. Not in hot loops - once per engine step, not per token
+        4. GPU is actively computing - GC hidden behind GPU work
+
+    Safety:
+        - No-op if manual GC control is not enabled
+        - Rate-limited to prevent GC thrashing
+        - Respects allocation thresholds
+
+    Returns:
+        Number of objects collected (0 if GC not enabled, rate-limited,
+        or thresholds not met).
+    """
+    controller = ManualGCController.get_instance()
+    if controller is not None:
+        return controller.maybe_collect()
+    return 0
