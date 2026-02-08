@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
 
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 
