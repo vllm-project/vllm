@@ -21,6 +21,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
@@ -134,6 +135,11 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def _platform_aware_cudagraph(desired: CUDAGraphMode) -> CUDAGraphMode:
+    """Return desired cudagraph mode if platform supports static graph, else NONE."""
+    return desired if current_platform.support_static_graph_mode() else CUDAGraphMode.NONE
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -163,7 +169,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
         },
-        "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+        "cudagraph_mode": _platform_aware_cudagraph(CUDAGraphMode.PIECEWISE),
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
@@ -181,7 +187,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
         },
-        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "cudagraph_mode": _platform_aware_cudagraph(CUDAGraphMode.FULL_AND_PIECEWISE),
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
@@ -199,7 +205,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
         },
-        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "cudagraph_mode": _platform_aware_cudagraph(CUDAGraphMode.FULL_AND_PIECEWISE),
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
@@ -440,8 +446,6 @@ class VllmConfig:
         model_config: ModelConfig, load_config: LoadConfig
     ) -> QuantizationConfig | None:
         """Get the quantization config."""
-        from vllm.platforms import current_platform
-
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
@@ -707,8 +711,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
-
-        from vllm.platforms import current_platform
 
         if (
             self.model_config is not None
