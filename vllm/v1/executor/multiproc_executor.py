@@ -572,7 +572,8 @@ class WorkerProc:
 
         # Set process title and log prefix
         self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel,
+            enable_log_prefix=vllm_config.observability_config.enable_log_prefix,
         )
 
         # Load model
@@ -871,7 +872,10 @@ class WorkerProc:
                 self.handle_output(output)
 
     @staticmethod
-    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+    def setup_proc_title_and_log_prefix(
+        enable_ep: bool,
+        enable_log_prefix: bool = True,
+    ) -> None:
         dp_size = get_dp_group().world_size
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
@@ -897,7 +901,7 @@ class WorkerProc:
             ep_rank = get_ep_group().rank_in_group
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
-        decorate_logs(process_name)
+        decorate_logs(process_name, enable_prefix=enable_log_prefix)
 
 
 def set_multiprocessing_worker_envs():
