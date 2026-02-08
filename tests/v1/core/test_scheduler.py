@@ -186,8 +186,8 @@ def test_schedule_multimodal_requests_multi_batch(
     encoder_cache_size = int(encoder_cache_mult * MAX_MM_ITEM_TOKS)
 
     print(
-        f"{max_num_batched_tokens=}, {max_num_batched_encoder_embeds=}, "
-        f"{encoder_cache_size=}"
+        f"{max_num_batched_tokens=}, {disable_chunked_mm_input=}, "
+        f"{max_num_batched_encoder_embeds=}, {encoder_cache_size=}"
     )
 
     scheduler = create_scheduler(
