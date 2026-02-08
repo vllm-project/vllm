@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     VLLM_MODEL_REDIRECT_PATH: str | None = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
+    VLLM_USE_HELION_BACKEND: bool = False
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
@@ -514,6 +515,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
             os.path.join(get_default_config_root(), "vllm"),
         )
     ),
+    # Enable experimental Helion backend
+    "VLLM_USE_HELION_BACKEND": lambda: bool(int(os.getenv("VLLM_USE_HELION_BACKEND", "0"))),
     # ================== Runtime Env Vars ==================
     # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
