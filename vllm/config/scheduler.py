@@ -94,9 +94,9 @@ class SchedulerConfig:
     compute budget to process it).
 
     If this is set to less than `max_num_batched_tokens`, text inputs from
-    lower-priority requests may be scheduled with a higher priority than
-    multimodal inputs in the current request if the compute budget for the encoder
-    has been exhausted but there is still compute budget remaining for the decoder.
+    lower-priority requests may be scheduled before multimodal inputs in the current
+    request if the compute budget for the encoder has been exhausted but there is
+    still compute budget remaining for the decoder.
 
     There is generally no benefit of increasing this past `max_num_batched_tokens`
     as the encoder is only scheduled to run on a multimodal item if the decoder
