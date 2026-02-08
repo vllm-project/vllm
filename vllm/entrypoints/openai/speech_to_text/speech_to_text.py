@@ -471,15 +471,26 @@ class OpenAISpeechToText(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            list_result_generator = [
-                self.engine_client.generate(
+            list_result_generator = []
+            for i, prompt in enumerate(prompts):
+                request_id_item = f"{request_id}_{i}"
+                engine_request, tokenization_kwargs = await self._process_inputs(
+                    request_id_item,
                     prompt,
                     sampling_params,
-                    f"{request_id}_{i}",
                     lora_request=lora_request,
+                    trace_headers=None,
+                    priority=0,
                 )
-                for i, prompt in enumerate(prompts)
-            ]
+                list_result_generator.append(
+                    self.engine_client.generate(
+                        engine_request,
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
+                    )
+                )
         except ValueError as e:
             return self.create_error_response(e)
 
