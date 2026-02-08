@@ -18,19 +18,22 @@
 #include <cuda_runtime.h>
 #include <type_traits>
 
-#include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#include "torch_utils.h"
 #include "type_convert.cuh"
 
-#define CHECK_TYPE(x, st)                                              \
-  TORCH_CHECK(x.scalar_type() == st, #x " dtype is ", x.scalar_type(), \
-              ", while ", st, " is expected")
-#define CHECK_TH_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_TYPE(x, st)                                                  \
+  STD_TORCH_CHECK(x.scalar_type() == st, #x " dtype is ", x.scalar_type(), \
+                  ", while ", st, " is expected")
+#define CHECK_TH_CUDA(x) \
+  STD_TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) \
-  TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+  STD_TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) \
   CHECK_TH_CUDA(x);    \
   CHECK_CONTIGUOUS(x)
@@ -356,25 +359,27 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
       });
       break;
     default:
-      TORCH_CHECK(false,
-                  "Unsupported head dimension for fusedQKNormRope: ", head_dim);
+      STD_TORCH_CHECK(
+          false, "Unsupported head dimension for fusedQKNormRope: ", head_dim);
   }
 }
 }  // namespace tensorrt_llm::kernels
 
 void fused_qk_norm_rope(
-    torch::Tensor& qkv,       // Combined QKV tensor [num_tokens,
-                              // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
-    int64_t num_heads_q,      // Number of query heads
-    int64_t num_heads_k,      // Number of key heads
-    int64_t num_heads_v,      // Number of value heads
-    int64_t head_dim,         // Dimension per head
-    double eps,               // Epsilon for RMS normalization
-    torch::Tensor& q_weight,  // RMSNorm weights for query [head_dim]
-    torch::Tensor& k_weight,  // RMSNorm weights for key [head_dim]
-    torch::Tensor& cos_sin_cache,  // Cos/sin cache [max_position, head_dim]
-    bool is_neox,                  // Whether RoPE is applied in Neox style
-    torch::Tensor& position_ids    // Position IDs for RoPE [num_tokens]
+    torch::stable::Tensor&
+        qkv,              // Combined QKV tensor [num_tokens,
+                          // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
+    int64_t num_heads_q,  // Number of query heads
+    int64_t num_heads_k,  // Number of key heads
+    int64_t num_heads_v,  // Number of value heads
+    int64_t head_dim,     // Dimension per head
+    double eps,           // Epsilon for RMS normalization
+    torch::stable::Tensor& q_weight,  // RMSNorm weights for query [head_dim]
+    torch::stable::Tensor& k_weight,  // RMSNorm weights for key [head_dim]
+    torch::stable::Tensor&
+        cos_sin_cache,  // Cos/sin cache [max_position, head_dim]
+    bool is_neox,       // Whether RoPE is applied in Neox style
+    torch::stable::Tensor& position_ids  // Position IDs for RoPE [num_tokens]
 ) {
   // Input validation
   CHECK_INPUT(qkv);
@@ -382,55 +387,61 @@ void fused_qk_norm_rope(
   CHECK_INPUT(q_weight);
   CHECK_INPUT(k_weight);
   CHECK_INPUT(cos_sin_cache);
-  CHECK_TYPE(position_ids, torch::kInt64);
+  CHECK_TYPE(position_ids, torch::headeronly::ScalarType::Long);
 
-  TORCH_CHECK(qkv.dim() == 2,
-              "QKV tensor must be 2D: [num_tokens, "
-              "(num_heads_q+num_heads_k+num_heads_v)*head_dim]");
-  TORCH_CHECK(position_ids.dim() == 1, "Position IDs must be 1D: [num_tokens]");
-  TORCH_CHECK(q_weight.dim() == 1, "Query weights must be 1D: [head_dim]");
-  TORCH_CHECK(k_weight.dim() == 1, "Key weights must be 1D: [head_dim]");
-  TORCH_CHECK(cos_sin_cache.dim() == 2,
-              "Cos/sin cache must be 2D: [max_position, head_dim]");
-  TORCH_CHECK(q_weight.size(0) == head_dim,
-              "Query weights size must match head dimension");
-  TORCH_CHECK(k_weight.size(0) == head_dim,
-              "Key weights size must match head dimension");
+  STD_TORCH_CHECK(qkv.dim() == 2,
+                  "QKV tensor must be 2D: [num_tokens, "
+                  "(num_heads_q+num_heads_k+num_heads_v)*head_dim]");
+  STD_TORCH_CHECK(position_ids.dim() == 1,
+                  "Position IDs must be 1D: [num_tokens]");
+  STD_TORCH_CHECK(q_weight.dim() == 1, "Query weights must be 1D: [head_dim]");
+  STD_TORCH_CHECK(k_weight.dim() == 1, "Key weights must be 1D: [head_dim]");
+  STD_TORCH_CHECK(cos_sin_cache.dim() == 2,
+                  "Cos/sin cache must be 2D: [max_position, head_dim]");
+  STD_TORCH_CHECK(q_weight.size(0) == head_dim,
+                  "Query weights size must match head dimension");
+  STD_TORCH_CHECK(k_weight.size(0) == head_dim,
+                  "Key weights size must match head dimension");
 
-  TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
-  TORCH_CHECK(cos_sin_cache.size(1) <= head_dim,
-              "rotary_dim must be less than or equal to head_dim");
+  STD_TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
+  STD_TORCH_CHECK(cos_sin_cache.size(1) <= head_dim,
+                  "rotary_dim must be less than or equal to head_dim");
 
-  TORCH_CHECK(qkv.scalar_type() == q_weight.scalar_type() &&
-                  qkv.scalar_type() == k_weight.scalar_type(),
-              "qkv, q_weight and k_weight must have the same dtype");
+  STD_TORCH_CHECK(qkv.scalar_type() == q_weight.scalar_type() &&
+                      qkv.scalar_type() == k_weight.scalar_type(),
+                  "qkv, q_weight and k_weight must have the same dtype");
 
   int64_t num_tokens = qkv.size(0);
-  TORCH_CHECK(position_ids.size(0) == num_tokens,
-              "Number of tokens in position_ids must match QKV");
+  STD_TORCH_CHECK(position_ids.size(0) == num_tokens,
+                  "Number of tokens in position_ids must match QKV");
 
   int64_t total_heads = num_heads_q + num_heads_k + num_heads_v;
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       qkv.size(1) == total_heads * head_dim,
       "QKV tensor size must match total number of heads and head dimension");
 
-  auto stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      qkv.get_device_index());
+  auto stream = get_current_cuda_stream(qkv.get_device_index());
 
-  VLLM_DISPATCH_HALF_TYPES(qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
-    using qkv_scalar_t = scalar_t;
-    VLLM_DISPATCH_FLOATING_TYPES(
-        cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
-          using cache_scalar_t = scalar_t;
-          tensorrt_llm::kernels::launchFusedQKNormRope<qkv_scalar_t,
-                                                       cache_scalar_t>(
-              qkv.data_ptr(), static_cast<int>(num_tokens),
-              static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
-              static_cast<int>(num_heads_v), static_cast<int>(head_dim),
-              static_cast<int>(cos_sin_cache.size(1)), static_cast<float>(eps),
-              q_weight.data_ptr(), k_weight.data_ptr(),
-              cos_sin_cache.data_ptr(), !is_neox,
-              reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
-              stream);
-        });
-  });
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
+        using qkv_scalar_t = scalar_t;
+        VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+            cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
+              using cache_scalar_t = scalar_t;
+              tensorrt_llm::kernels::launchFusedQKNormRope<qkv_scalar_t,
+                                                           cache_scalar_t>(
+                  qkv.mutable_data_ptr(), static_cast<int>(num_tokens),
+                  static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
+                  static_cast<int>(num_heads_v), static_cast<int>(head_dim),
+                  static_cast<int>(cos_sin_cache.size(1)),
+                  static_cast<float>(eps), q_weight.const_data_ptr(),
+                  k_weight.const_data_ptr(), cos_sin_cache.const_data_ptr(),
+                  !is_neox,
+                  reinterpret_cast<int64_t const*>(
+                      position_ids.const_data_ptr()),
+                  stream);
+            });
+      });
 }

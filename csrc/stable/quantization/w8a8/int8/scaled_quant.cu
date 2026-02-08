@@ -1,12 +1,15 @@
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cmath>
 
-#include "dispatch_utils.h"
+#include "stable/dispatch_utils.h"
 #include "quantization/vectorization_utils.cuh"
 #include "cub_helpers.h"
+#include "stable/torch_utils.h"
+
+#include <optional>
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
@@ -263,66 +266,73 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
 
 }  // namespace vllm
 
-void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
-                              torch::Tensor const& input,  // [..., hidden_size]
-                              torch::Tensor const& scale,
-                              std::optional<torch::Tensor> const& azp) {
-  TORCH_CHECK(input.is_contiguous());
-  TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(scale.numel() == 1);
-  TORCH_CHECK(!azp || azp->numel() == 1);
+void static_scaled_int8_quant(
+    torch::stable::Tensor& out,          // [..., hidden_size]
+    torch::stable::Tensor const& input,  // [..., hidden_size]
+    torch::stable::Tensor const& scale,
+    std::optional<torch::stable::Tensor> const& azp) {
+  STD_TORCH_CHECK(input.is_contiguous());
+  STD_TORCH_CHECK(out.is_contiguous());
+  STD_TORCH_CHECK(scale.numel() == 1);
+  STD_TORCH_CHECK(!azp || azp->numel() == 1);
 
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 256));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
         if (!azp) {
           vllm::static_scaled_int8_quant_kernel<scalar_t, float>
-              <<<grid, block, 0, stream>>>(
-                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-                  scale.data_ptr<float>(), hidden_size);
+              <<<grid, block, 0, stream>>>(input.const_data_ptr<scalar_t>(),
+                                           out.mutable_data_ptr<int8_t>(),
+                                           scale.const_data_ptr<float>(),
+                                           hidden_size);
         } else {
           vllm::static_scaled_int8_azp_quant_kernel<scalar_t, float, int32_t>
               <<<grid, block, 0, stream>>>(
-                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-                  scale.data_ptr<float>(), azp->data_ptr<int32_t>(),
-                  hidden_size);
+                  input.const_data_ptr<scalar_t>(),
+                  out.mutable_data_ptr<int8_t>(), scale.const_data_ptr<float>(),
+                  azp->const_data_ptr<int32_t>(), hidden_size);
         }
       });
 }
 
 void dynamic_scaled_int8_quant(
-    torch::Tensor& out,          // [..., hidden_size]
-    torch::Tensor const& input,  // [..., hidden_size]
-    torch::Tensor& scales, std::optional<torch::Tensor> const& azp) {
-  TORCH_CHECK(input.is_contiguous());
-  TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(scales.is_contiguous());
-  TORCH_CHECK(!azp || azp->is_contiguous());
+    torch::stable::Tensor& out,          // [..., hidden_size]
+    torch::stable::Tensor const& input,  // [..., hidden_size]
+    torch::stable::Tensor& scales,
+    std::optional<torch::stable::Tensor> const& azp) {
+  STD_TORCH_CHECK(input.is_contiguous());
+  STD_TORCH_CHECK(out.is_contiguous());
+  STD_TORCH_CHECK(scales.is_contiguous());
+  STD_TORCH_CHECK(!azp || azp->is_contiguous());
 
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 256));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
         if (!azp) {
           vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float>
-              <<<grid, block, 0, stream>>>(
-                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-                  scales.data_ptr<float>(), hidden_size);
+              <<<grid, block, 0, stream>>>(input.const_data_ptr<scalar_t>(),
+                                           out.mutable_data_ptr<int8_t>(),
+                                           scales.mutable_data_ptr<float>(),
+                                           hidden_size);
         } else {
           vllm::dynamic_scaled_int8_azp_quant_kernel<scalar_t, float, int32_t>
-              <<<grid, block, 0, stream>>>(
-                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-                  scales.data_ptr<float>(), azp->data_ptr<int32_t>(),
-                  hidden_size);
+              <<<grid, block, 0, stream>>>(input.const_data_ptr<scalar_t>(),
+                                           out.mutable_data_ptr<int8_t>(),
+                                           scales.mutable_data_ptr<float>(),
+                                           azp->mutable_data_ptr<int32_t>(),
+                                           hidden_size);
         }
       });
 }

@@ -1,16 +1,18 @@
-#include <ATen/cuda/CUDAContext.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/core/ScalarType.h>
 
-#include "quantization/w8a8/per_token_group_quant_8bit.h"
+#include "stable/dispatch_utils.h"
+#include "stable/torch_utils.h"
 
 #include <cmath>
 
 #include <cuda_fp8.h>
 
-#include <torch/all.h>
-
-#include "quantization/vectorization.cuh"
+#include "stable/quantization/vectorization.cuh"
 #include "quantization/vectorization_utils.cuh"
-#include "dispatch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
   unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
@@ -154,20 +156,22 @@ inline int GetGroupsPerBlock(int64_t num_groups) {
   return 1;
 }
 
-void per_token_group_quant_8bit(const torch::Tensor& input,
-                                torch::Tensor& output_q,
-                                torch::Tensor& output_s, int64_t group_size,
-                                double eps, double min_8bit, double max_8bit,
-                                bool scale_ue8m0) {
-  TORCH_CHECK(input.is_contiguous());
-  TORCH_CHECK(output_q.is_contiguous());
+void per_token_group_quant_8bit(const torch::stable::Tensor& input,
+                                torch::stable::Tensor& output_q,
+                                torch::stable::Tensor& output_s,
+                                int64_t group_size, double eps, double min_8bit,
+                                double max_8bit, bool scale_ue8m0) {
+  STD_TORCH_CHECK(input.is_contiguous());
+  STD_TORCH_CHECK(output_q.is_contiguous());
 
   const int num_groups = input.numel() / group_size;
 
-  TORCH_CHECK(input.numel() % group_size == 0);
-  TORCH_CHECK(output_s.dim() == 2);
+  STD_TORCH_CHECK(input.numel() % group_size == 0);
+  STD_TORCH_CHECK(output_s.dim() == 2);
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   constexpr int THREADS_PER_GROUP = 16;
 
@@ -181,52 +185,56 @@ void per_token_group_quant_8bit(const torch::Tensor& input,
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
 
-#define LAUNCH_KERNEL(T, DST_DTYPE)                                        \
-  do {                                                                     \
-    dim3 grid(num_blocks);                                                 \
-    dim3 block(num_threads);                                               \
-    size_t smem_bytes =                                                    \
-        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);    \
-    if (is_column_major) {                                                 \
-      if (scale_ue8m0) {                                                   \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>        \
-            <<<grid, block, smem_bytes, stream>>>(                         \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
-                static_cast<float*>(output_s.data_ptr()), group_size,      \
-                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
-                (float)max_8bit, scale_num_rows, scale_stride);            \
-      } else {                                                             \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, false>       \
-            <<<grid, block, smem_bytes, stream>>>(                         \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
-                static_cast<float*>(output_s.data_ptr()), group_size,      \
-                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
-                (float)max_8bit, scale_num_rows, scale_stride);            \
-      }                                                                    \
-    } else {                                                               \
-      if (scale_ue8m0) {                                                   \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, true>       \
-            <<<grid, block, smem_bytes, stream>>>(                         \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
-                static_cast<float*>(output_s.data_ptr()), group_size,      \
-                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
-                (float)max_8bit);                                          \
-      } else {                                                             \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, false>      \
-            <<<grid, block, smem_bytes, stream>>>(                         \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
-                static_cast<float*>(output_s.data_ptr()), group_size,      \
-                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
-                (float)max_8bit);                                          \
-      }                                                                    \
-    }                                                                      \
+#define LAUNCH_KERNEL(T, DST_DTYPE)                                           \
+  do {                                                                        \
+    dim3 grid(num_blocks);                                                    \
+    dim3 block(num_threads);                                                  \
+    size_t smem_bytes =                                                       \
+        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);       \
+    if (is_column_major) {                                                    \
+      if (scale_ue8m0) {                                                      \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>           \
+            <<<grid, block, smem_bytes, stream>>>(                            \
+                static_cast<const T*>(input.const_data_ptr()),                \
+                output_q.mutable_data_ptr(),                                  \
+                static_cast<float*>(output_s.mutable_data_ptr()), group_size, \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit,    \
+                (float)max_8bit, scale_num_rows, scale_stride);               \
+      } else {                                                                \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, false>          \
+            <<<grid, block, smem_bytes, stream>>>(                            \
+                static_cast<const T*>(input.const_data_ptr()),                \
+                output_q.mutable_data_ptr(),                                  \
+                static_cast<float*>(output_s.mutable_data_ptr()), group_size, \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit,    \
+                (float)max_8bit, scale_num_rows, scale_stride);               \
+      }                                                                       \
+    } else {                                                                  \
+      if (scale_ue8m0) {                                                      \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, true>          \
+            <<<grid, block, smem_bytes, stream>>>(                            \
+                static_cast<const T*>(input.const_data_ptr()),                \
+                output_q.mutable_data_ptr(),                                  \
+                static_cast<float*>(output_s.mutable_data_ptr()), group_size, \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit,    \
+                (float)max_8bit);                                             \
+      } else {                                                                \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, false>         \
+            <<<grid, block, smem_bytes, stream>>>(                            \
+                static_cast<const T*>(input.const_data_ptr()),                \
+                output_q.mutable_data_ptr(),                                  \
+                static_cast<float*>(output_s.mutable_data_ptr()), group_size, \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit,    \
+                (float)max_8bit);                                             \
+      }                                                                       \
+    }                                                                         \
   } while (0)
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == at::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == at::ScalarType::Char) {
+        } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
         }
       }));
@@ -294,41 +302,44 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
                               threads_per_group, y_s, min_8bit, max_8bit);
 }
 
-void per_token_group_quant_8bit_packed(const torch::Tensor& input,
-                                       torch::Tensor& output_q,
-                                       torch::Tensor& output_s_packed,
+void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
+                                       torch::stable::Tensor& output_q,
+                                       torch::stable::Tensor& output_s_packed,
                                        int64_t group_size, double eps,
                                        double min_8bit, double max_8bit) {
-  TORCH_CHECK(input.is_contiguous());
-  TORCH_CHECK(output_q.is_contiguous());
+  STD_TORCH_CHECK(input.is_contiguous());
+  STD_TORCH_CHECK(output_q.is_contiguous());
 
   const int64_t k = input.size(-1);
-  TORCH_CHECK(k % group_size == 0, "Last dimension (", k,
-              ") must be divisible by group_size (", group_size, ").");
+  STD_TORCH_CHECK(k % group_size == 0, "Last dimension (", k,
+                  ") must be divisible by group_size (", group_size, ").");
 
   const int64_t mn = input.numel() / k;
   const int64_t groups_per_row = k / group_size;
   const int64_t num_groups = mn * groups_per_row;
 
-  TORCH_CHECK(output_s_packed.dim() == 2,
-              "output_s_packed must be 2D, got dim=", output_s_packed.dim(),
-              ".");
+  STD_TORCH_CHECK(output_s_packed.dim() == 2,
+                  "output_s_packed must be 2D, got dim=", output_s_packed.dim(),
+                  ".");
 
   const int64_t k_num_packed_sfk = (groups_per_row + 3) / 4;
   const int64_t tma_aligned_mn = ((mn + 3) / 4) * 4;
 
-  TORCH_CHECK(output_s_packed.scalar_type() == at::ScalarType::Int,
-              "output_s_packed must have dtype int32 for UE8M0-packed scales.");
+  STD_TORCH_CHECK(
+      output_s_packed.scalar_type() == torch::headeronly::ScalarType::Int,
+      "output_s_packed must have dtype int32 for UE8M0-packed scales.");
   // DeepGEMM expects SFA scales in MN-major form with shape
   // [mn, ceil_div(K, 128 * 4)] and TMA-aligned stride on the last
   // dimension.
-  TORCH_CHECK(output_s_packed.size(0) == mn &&
-                  output_s_packed.size(1) == k_num_packed_sfk,
-              "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
-              "], but got [", output_s_packed.size(0), ", ",
-              output_s_packed.size(1), "].");
+  STD_TORCH_CHECK(output_s_packed.size(0) == mn &&
+                      output_s_packed.size(1) == k_num_packed_sfk,
+                  "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
+                  "], but got [", output_s_packed.size(0), ", ",
+                  output_s_packed.size(1), "].");
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   constexpr int THREADS_PER_GROUP = 16;
 
@@ -340,33 +351,35 @@ void per_token_group_quant_8bit_packed(const torch::Tensor& input,
 
   // zero-initialize packed scales, since we use atomicOr to accumulate
   // exponents from different groups.
-  output_s_packed.zero_();
+  torch::stable::zero_(output_s_packed);
 
-#define LAUNCH_PACKED_KERNEL(T, DST_DTYPE)                                \
-  do {                                                                    \
-    dim3 grid(num_blocks);                                                \
-    dim3 block(num_threads);                                              \
-    size_t smem_bytes =                                                   \
-        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);   \
-    per_token_group_quant_8bit_packed_kernel<T, DST_DTYPE>                \
-        <<<grid, block, smem_bytes, stream>>>(                            \
-            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(), \
-            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),  \
-            static_cast<int>(group_size), static_cast<int>(num_groups),   \
-            groups_per_block, static_cast<int>(groups_per_row),           \
-            static_cast<int>(mn), static_cast<int>(tma_aligned_mn),       \
-            static_cast<float>(eps), static_cast<float>(min_8bit),        \
-            static_cast<float>(max_8bit));                                \
+#define LAUNCH_PACKED_KERNEL(T, DST_DTYPE)                              \
+  do {                                                                  \
+    dim3 grid(num_blocks);                                              \
+    dim3 block(num_threads);                                            \
+    size_t smem_bytes =                                                 \
+        static_cast<size_t>(groups_per_block) * group_size * sizeof(T); \
+    per_token_group_quant_8bit_packed_kernel<T, DST_DTYPE>              \
+        <<<grid, block, smem_bytes, stream>>>(                          \
+            static_cast<const T*>(input.const_data_ptr()),              \
+            output_q.mutable_data_ptr(),                                \
+            reinterpret_cast<unsigned int*>(                            \
+                output_s_packed.mutable_data_ptr()),                    \
+            static_cast<int>(group_size), static_cast<int>(num_groups), \
+            groups_per_block, static_cast<int>(groups_per_row),         \
+            static_cast<int>(mn), static_cast<int>(tma_aligned_mn),     \
+            static_cast<float>(eps), static_cast<float>(min_8bit),      \
+            static_cast<float>(max_8bit));                              \
   } while (0)
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit_packed", ([&] {
-        if (dst_type == at::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == at::ScalarType::Char) {
+        } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_PACKED_KERNEL(scalar_t, int8_t);
         } else {
-          TORCH_CHECK(
+          STD_TORCH_CHECK(
               false,
               "per_token_group_quant_8bit_packed only supports FP8/INT8 "
               "outputs.");
@@ -376,8 +389,9 @@ void per_token_group_quant_8bit_packed(const torch::Tensor& input,
 #undef LAUNCH_PACKED_KERNEL
 }
 
-void per_token_group_quant_fp8(const torch::Tensor& input,
-                               torch::Tensor& output_q, torch::Tensor& output_s,
+void per_token_group_quant_fp8(const torch::stable::Tensor& input,
+                               torch::stable::Tensor& output_q,
+                               torch::stable::Tensor& output_s,
                                int64_t group_size, double eps, double fp8_min,
                                double fp8_max, bool scale_ue8m0) {
   per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
