@@ -38,6 +38,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MLPSpeculatorConfig": "vllm.transformers_utils.configs.mlp_speculator",
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
+    "KimiAudioConfig": "vllm.transformers_utils.configs.kimi_audio",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "KimiK25Config": "vllm.transformers_utils.configs.kimi_k25",
