@@ -5156,6 +5156,7 @@ class GPUModelRunner(
                         self.encoder_cache[f"tmp_{i}"] = output
 
                     # Fill up the encoder cache to its maximum capacity
+                    # since it may contain more than one batch worth of embeds
                     num_embeds_in_cache = sum(
                         len(embeds) for embeds in self.encoder_cache.values()
                     )
