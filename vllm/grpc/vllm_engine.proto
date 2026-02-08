@@ -143,7 +143,12 @@ message GenerateComplete {
 
 message EmbedRequest {
   string request_id = 1;
-  TokenizedInput tokenized = 2;
+
+  // Prompt input
+  oneof input {
+    TokenizedInput tokenized = 2;
+    string text = 3;
+  }
 }
 
 message EmbedResponse {

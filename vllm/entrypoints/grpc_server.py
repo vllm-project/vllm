@@ -34,6 +34,7 @@ from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -49,7 +50,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
     Handles 6 RPCs:
     - Generate: Streaming text generation
-    - Embed: Embeddings (TODO)
+    - Embed: Embeddings
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
@@ -131,8 +132,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         Handle embedding requests.
 
-        TODO: Implement in Phase 4
-
         Args:
             request: The EmbedRequest protobuf
             context: gRPC context
@@ -140,10 +139,45 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             EmbedResponse protobuf
         """
-        logger.warning("Embed RPC not yet implemented")
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented"
-        )
+        request_id = request.request_id
+        logger.debug("Embed request %s received.", request_id)
+
+        try:
+            # Extract input (tokenized or text)
+            if request.WhichOneof("input") == "tokenized":
+                prompt: TokensPrompt = {
+                    "prompt_token_ids": list(request.tokenized.input_ids)
+                }
+                if request.tokenized.original_text:
+                    prompt["prompt"] = request.tokenized.original_text
+            else:
+                prompt: TextPrompt = {"prompt": request.text}
+
+            pooling_params = PoolingParams(task="embed")
+
+            # Call AsyncLLM.encode() and collect the final result
+            final_output = None
+            async for output in self.async_llm.encode(
+                prompt=prompt,
+                pooling_params=pooling_params,
+                request_id=request_id,
+            ):
+                final_output = output
+
+            # Extract embedding from PoolingRequestOutput
+            embedding_list = final_output.outputs.data.tolist()
+
+            return vllm_engine_pb2.EmbedResponse(
+                embedding=embedding_list,
+                prompt_tokens=len(final_output.prompt_token_ids),
+                embedding_dim=len(embedding_list),
+            )
+
+        except ValueError as e:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            logger.exception("Error in Embed for request %s", request_id)
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def HealthCheck(
         self,
