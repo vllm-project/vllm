@@ -77,7 +77,6 @@ from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
     aux_stream,
-    current_stream,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backend import AttentionMetadata
@@ -312,7 +311,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
         )
+
         self.aux_stream = aux_stream()
+        self.event_main = torch.cuda.Event()
+        self.event_aux = torch.cuda.Event()
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -458,16 +460,15 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        use_in_proj_stream, hidden_states_clone = self._setup_in_proj_stream(
-            hidden_states
-        )
-        use_in_proj_stream = False
-        if use_in_proj_stream:
-            assert self.aux_stream is not None
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            with torch.cuda.stream(self.aux_stream):
-                projected_states_ba, _ = self.in_proj_ba(hidden_states_clone)
-            current_stream().wait_stream(self.aux_stream)
+        if self.aux_stream is not None:
+            projected_states_qkvz, projected_states_ba = (
+                torch.ops.vllm.gdn_in_proj_dual_stream(
+                    hidden_states,
+                    self.prefix,
+                    self.projection_size_qkvz // self.tp_size,
+                    self.projection_size_ba // self.tp_size,
+                )
+            )
         else:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -509,33 +510,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
-
-    def _setup_in_proj_stream(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[bool, torch.Tensor | None]:
-        use_in_proj_stream = (
-            current_platform.is_cuda()
-            and not torch.compiler.is_compiling()
-            and self.aux_stream is not None
-        )
-
-        hidden_states_clone: torch.Tensor | None = None
-        if use_in_proj_stream:
-            assert self.aux_stream is not None
-
-            # Clone BEFORE switching streams to avoid race conditions where
-            # other ops may mutate hidden_states on the default stream.
-            hidden_states_clone = hidden_states.clone()
-
-            # Record that the clone will be used by aux_stream to avoid
-            # premature deallocation.
-            hidden_states_clone.record_stream(self.aux_stream)
-
-            # Ensure aux_stream waits for the default stream before launch.
-            self.aux_stream.wait_stream(current_stream())
-
-        return use_in_proj_stream, hidden_states_clone
 
     def _forward_core(
         self,
@@ -1457,3 +1431,75 @@ def fused_gdn_gating(
         num_warps=1,
     )
     return g, beta_output
+
+
+def _gdn_in_proj_dual_stream_impl(
+    hidden_states: torch.Tensor,
+    layer_name: str,
+    projection_size_qkvz: int,
+    projection_size_ba: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Implementation of dual-stream input projection for GatedDeltaNet.
+    Runs in_proj_qkvz on main stream and in_proj_ba on auxiliary stream.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers.get(layer_name)
+
+    if self is None:
+        raise RuntimeError(
+            f"Cannot find GatedDeltaNet layer with name: {layer_name}. "
+            f"Available layers: {list(forward_context.no_compile_layers.keys())}"
+        )
+
+    # Record an event on the default stream so the aux stream knows
+    # when hidden_states is ready to be read.
+    self.event_main.record()
+
+    # Run the larger projection on the default stream
+    projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+
+    # Run the smaller projection on the auxiliary stream
+    with torch.cuda.stream(self.aux_stream):
+        self.event_main.wait()  # wait for hidden_states to be ready
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        self.event_aux.record()  # signal completion of ba projection
+
+    # Default stream waits only for the ba projection to finish
+    self.event_aux.wait()
+
+    return projected_states_qkvz, projected_states_ba
+
+
+def _gdn_in_proj_dual_stream_fake(
+    hidden_states: torch.Tensor,
+    layer_name: str | None,
+    projection_size_qkvz: int,
+    projection_size_ba: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fake implementation for shape inference during torch.compile.
+    Returns empty tensors with the expected output shapes.
+    """
+    num_tokens = hidden_states.size(0)
+    return (
+        torch.empty(
+            (num_tokens, projection_size_qkvz),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, projection_size_ba),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+    )
+
+
+# Register the custom op
+direct_register_custom_op(
+    op_name="gdn_in_proj_dual_stream",
+    op_func=_gdn_in_proj_dual_stream_impl,
+    mutates_args=[],  # We don't mutate the input tensors
+    fake_impl=_gdn_in_proj_dual_stream_fake,
+)
