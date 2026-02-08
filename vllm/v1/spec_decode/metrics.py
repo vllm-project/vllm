@@ -27,12 +27,14 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
+    num_draft_tokens_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
         return cls(
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
+            num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
@@ -42,6 +44,11 @@ class SpecDecodingStats:
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
+        for i in range(num_draft_tokens):
+            self.num_draft_tokens_per_pos[i] += 1
+
+        # REMOVE
+        # print(f"self.num_drafts: {self.num_drafts}, num_draft_tokens: {num_draft_tokens}, num_accepted_tokens: {num_accepted_tokens}")
 
 
 class SpecDecodingLogging:
