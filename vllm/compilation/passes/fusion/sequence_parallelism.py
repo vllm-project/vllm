@@ -10,6 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -23,7 +24,7 @@ from vllm.platforms import current_platform
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
 
 logger = init_logger(__name__)
 
@@ -66,35 +67,38 @@ class _SequenceParallelPatternHelper:
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
 
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=self.dtype, device=self.device, **kwargs)
+
+    def empty_f32(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
+
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
-        arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
-
-        return [input, arg3_1]
+        # input, weight
+        return [self.empty([1, 8, 4]), self.empty([4])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
 
             return rmsnorm, all_reduce
 
         def replacement(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             all_gather = self._all_gather(rmsnorm)
             return all_gather, reduce_scatter
 
@@ -169,14 +173,11 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         device: str | None,
     ) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
-        weight = torch.empty([4], device=self.device, dtype=self.dtype)
-        scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [input, weight, scale]
+        # input, weight, scale
+        return [self.empty([1, 8, 4]), self.empty([4]), self.empty_f32([1, 1])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -185,7 +186,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rms = self.rmsnorm_matcher(all_reduce, weight)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -195,7 +196,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
-            rms = self.rmsnorm_matcher(reduce_scatter, weight)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
 
