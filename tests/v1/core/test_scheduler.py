@@ -144,21 +144,34 @@ def test_schedule_multimodal_requests_one_batch():
 def test_schedule_multimodal_requests_multi_batch(
     encoder_budget_mult, encoder_cache_mult, chunk_mult
 ):
-    NUM_MM_ITEMS = 10
+    MM_ITEM_TOK_MULT = 4
     MAX_MM_ITEM_TOKS = 576
     NUM_TEXT_TOKS = 100
+    NUM_TOTAL_TOKS = NUM_TEXT_TOKS + MM_ITEM_TOK_MULT * MAX_MM_ITEM_TOKS
 
-    mm_positions = []
-    start_idx = NUM_TEXT_TOKS
-    for i in range(NUM_MM_ITEMS):
-        mm_position = PlaceholderRange(
-            offset=start_idx,
-            length=int(MAX_MM_ITEM_TOKS * (i / NUM_MM_ITEMS)),
-        )
-        mm_positions.append(mm_position)
+    def build_req_mm_positions(n_mm_items: int):
+        req_mm_positions = []
+        start_idx = NUM_TEXT_TOKS
 
-        start_idx += mm_position.length
-    total_len = start_idx
+        for _ in range(n_mm_items):
+            mm_position = PlaceholderRange(
+                offset=start_idx,
+                length=MM_ITEM_TOK_MULT * MAX_MM_ITEM_TOKS // n_mm_items,
+            )
+
+            req_mm_positions.append(mm_position)
+            start_idx += mm_position.length
+
+        assert start_idx == NUM_TOTAL_TOKS
+        return req_mm_positions
+
+    mm_positions = [
+        build_req_mm_positions(1 * MM_ITEM_TOK_MULT),
+        build_req_mm_positions(4 * MM_ITEM_TOK_MULT),
+        build_req_mm_positions(2 * MM_ITEM_TOK_MULT),
+        build_req_mm_positions(8 * MM_ITEM_TOK_MULT),
+    ]
+    print(f"{mm_positions=}, {NUM_TOTAL_TOKS=}")
 
     max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
 
@@ -173,7 +186,7 @@ def test_schedule_multimodal_requests_multi_batch(
 
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
-        max_model_len=total_len,
+        max_model_len=NUM_TOTAL_TOKS,
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_batched_encoder_embeds=max_num_batched_encoder_embeds,
         encoder_cache_size=encoder_cache_size,
@@ -181,15 +194,17 @@ def test_schedule_multimodal_requests_multi_batch(
 
     assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
     requests = create_requests(
-        num_requests=1,
-        num_tokens=total_len,
-        mm_positions=[mm_positions],
+        num_requests=len(mm_positions),
+        num_tokens=NUM_TOTAL_TOKS,
+        mm_positions=mm_positions,
     )
     for request in requests:
         scheduler.add_request(request)
 
-    total_scheduled_tokens = 0
-    while total_scheduled_tokens < total_len:
+    total_scheduled_tokens = {request.request_id: 0 for request in requests}
+    while any(
+        num_tokens < NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
+    ):
         output = scheduler.schedule()
 
         req_to_index = {request.request_id: i for i, request in enumerate(requests)}
@@ -203,13 +218,19 @@ def test_schedule_multimodal_requests_multi_batch(
         )
         scheduler.update_from_output(output, model_runner_output)
 
-        new_scheduled_tokens = sum(output.num_scheduled_tokens.values())
-        print(f"{total_scheduled_tokens=}, {new_scheduled_tokens=}, {total_len=}")
-        assert new_scheduled_tokens > 0, "Detected hanging condition"
+        new_scheduled_tokens = output.num_scheduled_tokens
+        print(f"{total_scheduled_tokens=}, {new_scheduled_tokens=}")
 
-        total_scheduled_tokens += new_scheduled_tokens
+        assert any(num_tokens > 0 for num_tokens in new_scheduled_tokens.values()), (
+            "Detected hanging condition"
+        )
 
-    assert total_scheduled_tokens == total_len
+        for req_id, num_tokens in new_scheduled_tokens.items():
+            total_scheduled_tokens[req_id] += num_tokens
+
+    assert all(
+        num_tokens == NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
+    )
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
