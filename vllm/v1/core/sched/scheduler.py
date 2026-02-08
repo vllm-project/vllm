@@ -192,7 +192,7 @@ class Scheduler(SchedulerInterface):
                 "multimodal interface with at most one modality."
             )
 
-        self.max_num_encoder_input_tokens = (
+        self.encoder_compute_budget = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
@@ -204,10 +204,8 @@ class Scheduler(SchedulerInterface):
         # For encoder-decoder models, allocate the maximum number of tokens for Cross
         # Attn blocks, as for Whisper its input is always padded to the maximum length.
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
-        self._num_encoder_max_input_tokens = (
-            mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
-            if mm_budget and mm_budget.mm_max_toks_per_item
-            else 0
+        self.max_encoder_len = (
+            max(mm_budget.mm_max_toks_per_item.values(), default=0) if mm_budget else 0
         )
 
         speculative_config = vllm_config.speculative_config
@@ -340,7 +338,7 @@ class Scheduler(SchedulerInterface):
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
-        encoder_compute_budget = self.max_num_encoder_input_tokens
+        encoder_compute_budget = self.encoder_compute_budget
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -705,7 +703,7 @@ class Scheduler(SchedulerInterface):
                 )
 
                 num_encoder_tokens = (
-                    self._num_encoder_max_input_tokens
+                    self.max_encoder_len
                     if self.is_encoder_decoder and request.has_encoder_inputs
                     else 0
                 )
