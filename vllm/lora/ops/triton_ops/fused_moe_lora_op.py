@@ -779,7 +779,6 @@ def _fused_moe_lora_shrink_fake(
 def _fused_moe_lora_expand_fake(
     output: torch.Tensor,
     a_intermediate_cache1: torch.Tensor,
-    b_intermediate_cache1: torch.Tensor,
     lora_b_stacked: list[torch.Tensor],
     topk_weights: torch.Tensor,
     sorted_token_ids: torch.Tensor | None,
