@@ -744,7 +744,7 @@ steps:
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_mxfp8.py
 
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
@@ -1128,6 +1128,16 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
+
+- label: Blackwell Quantized Linear Test
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  source_file_dependencies:
+  - tests/quantization/test_mxfp8.py
+  - vllm/model_executor/layers/quantization/mxfp8.py
+  commands:
+    - pytest -s -v tests/quantization/test_mxfp8.py
 
 - label: Blackwell LM Eval Small Models
   timeout_in_minutes: 120
