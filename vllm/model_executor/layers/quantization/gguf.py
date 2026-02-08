@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -246,16 +247,18 @@ def _fused_moe_gguf(
     qweight_type2: int,
     activation: str,
 ) -> torch.Tensor:
+    activation_enum = MoEActivation.from_str(activation)
+
     def act(x: torch.Tensor):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        if activation == "silu":
+        if activation_enum == MoEActivation.SILU:
             torch.ops._C.silu_and_mul(out, x)
-        elif activation == "gelu":
+        elif activation_enum == MoEActivation.GELU:
             torch.ops._C.gelu_and_mul(out, x)
         else:
-            raise ValueError(f"Unsupported activation: {activation}")
+            raise ValueError(f"Unsupported activation: {activation_enum}")
         return out
 
     # lazy import to avoid triggering triton import in CPU backend
@@ -636,7 +639,9 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
+        assert layer.activation == MoEActivation.SILU, (
+            f"Only SiLU activation is supported, got {layer.activation}."
+        )
         if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
@@ -651,7 +656,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             topk_ids,
             layer.w13_qweight_type.weight_type,
             layer.w2_qweight_type.weight_type,
-            layer.activation,
+            layer.activation.value,
         )
 
 

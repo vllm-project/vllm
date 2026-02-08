@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -371,7 +372,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 expert_map=layer.expert_map,
             )
         elif self.use_marlin:
-            assert layer.activation == "silu", (
+            assert layer.activation == MoEActivation.SILU, (
                 f"{layer.activation} not supported for Marlin MoE."
             )
             return fused_marlin_moe(

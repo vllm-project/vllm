@@ -16,6 +16,7 @@ from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
@@ -324,7 +325,7 @@ def deepep_deepgemm_moe_impl(
             w2=w2,
             topk_weights=test_tensors.topk_weights,
             topk_ids=test_tensors.topk,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,

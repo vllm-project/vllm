@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -927,7 +928,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
-        assert layer.activation == "silu", (
+        assert layer.activation == MoEActivation.SILU, (
             f"Expected 'silu' activation but got {layer.activation}"
         )
         assert not layer.renormalize
@@ -955,7 +956,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            assert layer.activation in ("silu", "relu2_no_mul"), (
+            assert layer.activation in (
+                MoEActivation.SILU,
+                MoEActivation.RELU2_NO_MUL,
+            ), (
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
                 f"but got {layer.activation}"
             )
