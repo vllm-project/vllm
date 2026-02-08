@@ -205,8 +205,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            non_spec_sequence_masks = (query_lens > 0) & ~spec_sequence_masks
 
-            non_spec_query_lens = query_lens[~spec_sequence_masks]
+            non_spec_query_lens = query_lens[non_spec_sequence_masks]
             num_decodes = (non_spec_query_lens == 1).sum().item()
             num_prefills = non_spec_query_lens.size(0) - num_decodes
             num_decode_tokens = num_decodes
@@ -246,7 +247,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     spec_sequence_masks, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
-                    ~spec_sequence_masks, 0
+                    non_spec_sequence_masks, 0
                 ]
 
                 spec_query_start_loc = torch.zeros(
@@ -263,7 +264,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
                 torch.cumsum(
-                    query_lens[~spec_sequence_masks],
+                    query_lens[non_spec_sequence_masks],
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
@@ -271,8 +272,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     query_lens_cpu.size(0) - num_spec_decodes + 1,
                     dtype=torch.int32,
                 )
+                non_spec_sequence_masks_cpu = (
+                    query_lens_cpu > 0
+                ) & ~spec_sequence_masks_cpu
                 torch.cumsum(
-                    query_lens_cpu[~spec_sequence_masks_cpu],
+                    query_lens_cpu[non_spec_sequence_masks_cpu],
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
@@ -283,7 +287,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
-                has_initial_state = has_initial_state[~spec_sequence_masks]
+                has_initial_state = has_initial_state[non_spec_sequence_masks]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
@@ -295,8 +299,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             has_initial_state = None
 
         # Prepare tensors for cudagraph
-        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
-        batch_size = m.num_actual_tokens
+        batch_size = query_start_loc_cpu.size(0) - 1
 
         if (
             self.use_full_cuda_graph
@@ -305,13 +308,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
-            self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+            self.spec_state_indices_tensor[:batch_size].copy_(
                 spec_state_indices_tensor, non_blocking=True
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
 
-            self.spec_sequence_masks[:num_spec_decodes].copy_(
+            self.spec_sequence_masks[:batch_size].copy_(
                 spec_sequence_masks, non_blocking=True
             )
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
@@ -330,7 +333,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
 
-            self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
+            self.spec_query_start_loc[: batch_size + 1].copy_(
                 spec_query_start_loc, non_blocking=True
             )
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
