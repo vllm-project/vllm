@@ -1615,14 +1615,12 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
-        eager_valid_modes = None if use_cudagraphs else {CUDAGraphMode.NONE}
         dispatch_cudagraph = (
-            lambda num_tokens,
-            valid_modes=eager_valid_modes,
-            invalid_modes=None: self.cudagraph_dispatcher.dispatch(
+            lambda num_tokens, valid_modes=None: self.cudagraph_dispatcher.dispatch(
                 num_tokens,
-                valid_modes=valid_modes,
-                invalid_modes=invalid_modes,
+                valid_modes=(
+                    {CUDAGraphMode.NONE} if not use_cudagraphs else valid_modes
+                ),
             )
         )
 
@@ -1649,14 +1647,15 @@ class SpecDecodeBaseProposer:
             if num_tokens_across_dp is not None:
                 dp_rank = self.dp_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # Re-dispatch with DP padding so we have the correct batch size.
-                # valid_modes is restricted to the synced mode (min across DP
-                # ranks) so all ranks agree on the runtime cudagraph mode.
+                # Re-dispatch with DP padding so we have the correct
+                # batch_descriptor
                 cudagraph_mode, batch_desc = dispatch_cudagraph(
                     num_tokens_padded,
                     valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
-                num_tokens_padded = batch_desc.num_tokens
+                # Assert to make sure the agreed upon token count is correct
+                # otherwise num_tokens_across_dp will no-longer be valid
+                assert batch_desc.num_tokens == num_tokens_padded
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
