@@ -278,9 +278,6 @@ class QuarkOCP_MX(QuarkScheme):
             )
         else:
             if self.dynamic_mxfp4_quant:
-                layer.weight = torch.nn.Parameter(
-                    layer.weight.data, requires_grad=False
-                )
                 w_q, w_s = dynamic_mxfp4_quant(layer.weight)
                 layer.weight_scale = torch.nn.Parameter(
                     w_s.T.contiguous(), requires_grad=False

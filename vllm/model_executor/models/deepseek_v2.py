@@ -57,7 +57,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig, QuarkConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -1184,7 +1184,6 @@ class DeepseekV2ForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
         # Dynamic Quantize proj weights if using QuarkConfig
         if isinstance(quant_config, QuarkConfig):
