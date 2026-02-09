@@ -141,14 +141,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if vllm_is_batch_invariant():
             num_kv_splits = 1
         else:
-            max_seq_len = attn_metadata.max_seq_len
-            work_size = max_seq_len * B
-
             # Minimum work per split
             # hardware dependent
-            min_work_per_split = 256
+            min_work_per_split = 512
 
-            ideal_splits = max(1, work_size // min_work_per_split)
+            ideal_splits = max(1, attn_metadata.max_seq_len // min_work_per_split)
 
             # use power of 2 to avoid excessive kernel instantiations
             ideal_splits = triton.next_power_of_2(ideal_splits)
