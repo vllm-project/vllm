@@ -245,12 +245,10 @@ def test_bimodal_dataset_custom_ratio(
     assert len(requests) == num_requests
 
     short_count = sum(
-        1 for r in requests
-        if r.prompt_len <= 150 and r.expected_output_len <= 20
+        1 for r in requests if r.prompt_len <= 150 and r.expected_output_len <= 20
     )
     long_count = sum(
-        1 for r in requests
-        if r.prompt_len >= 400 and r.expected_output_len == 64
+        1 for r in requests if r.prompt_len >= 400 and r.expected_output_len == 64
     )
     # 50/50 split with +/- 5% tolerance.
     assert short_count >= num_requests * 0.40, (

@@ -720,11 +720,17 @@ class BimodalDataset(RandomDataset):
         batchsize: int = 1,
         short_ratio: float = DEFAULT_SHORT_RATIO,
         short_input_range: tuple[int, int] = (
-            DEFAULT_SHORT_INPUT_MIN, DEFAULT_SHORT_INPUT_MAX),
+            DEFAULT_SHORT_INPUT_MIN,
+            DEFAULT_SHORT_INPUT_MAX,
+        ),
         short_output_range: tuple[int, int] = (
-            DEFAULT_SHORT_OUTPUT_MIN, DEFAULT_SHORT_OUTPUT_MAX),
+            DEFAULT_SHORT_OUTPUT_MIN,
+            DEFAULT_SHORT_OUTPUT_MAX,
+        ),
         long_input_range: tuple[int, int] = (
-            DEFAULT_LONG_INPUT_MIN, DEFAULT_LONG_INPUT_MAX),
+            DEFAULT_LONG_INPUT_MIN,
+            DEFAULT_LONG_INPUT_MAX,
+        ),
         long_output_len: int = DEFAULT_LONG_OUTPUT_LEN,
         max_model_len: int | None = None,
         **kwargs,
@@ -732,8 +738,7 @@ class BimodalDataset(RandomDataset):
         # --- Validate bimodal parameters ---
         if not 0.0 <= short_ratio <= 1.0:
             raise ValueError(
-                f"--bimodal-short-ratio must be in [0.0, 1.0], "
-                f"got {short_ratio}."
+                f"--bimodal-short-ratio must be in [0.0, 1.0], got {short_ratio}."
             )
         if short_input_range[0] > short_input_range[1]:
             raise ValueError(
@@ -793,10 +798,8 @@ class BimodalDataset(RandomDataset):
             no_oversample=no_oversample,
             prefix_len=prefix_len,
             range_ratio=range_ratio,
-            input_len=(input_len if input_len is not None
-                       else long_input_range[1]),
-            output_len=(output_len if output_len is not None
-                        else long_output_len),
+            input_len=(input_len if input_len is not None else long_input_range[1]),
+            output_len=(output_len if output_len is not None else long_output_len),
             batchsize=batchsize,
             **kwargs,
         )
@@ -840,11 +843,16 @@ class BimodalDataset(RandomDataset):
             "BimodalDataset: %d short (%d%% target), %d long (%d%% target); "
             "short input [%d, %d] output [%d, %d], "
             "long input [%d, %d] output %d",
-            short_count, int(self._short_ratio * 100),
-            long_count, int((1 - self._short_ratio) * 100),
-            self._short_input_range[0], self._short_input_range[1],
-            self._short_output_range[0], self._short_output_range[1],
-            self._long_input_range[0], self._long_input_range[1],
+            short_count,
+            int(self._short_ratio * 100),
+            long_count,
+            int((1 - self._short_ratio) * 100),
+            self._short_input_range[0],
+            self._short_input_range[1],
+            self._short_output_range[0],
+            self._short_output_range[1],
+            self._long_input_range[0],
+            self._long_input_range[1],
             self._long_output_len,
         )
 
@@ -1806,15 +1814,13 @@ def add_bimodal_dataset_args(
         "--bimodal-long-input-min",
         type=int,
         default=BimodalDataset.DEFAULT_LONG_INPUT_MIN,
-        help="Min input tokens for long (RAG-style) requests. "
-        "Default: %(default)s.",
+        help="Min input tokens for long (RAG-style) requests. Default: %(default)s.",
     )
     parser_or_group.add_argument(
         "--bimodal-long-input-max",
         type=int,
         default=BimodalDataset.DEFAULT_LONG_INPUT_MAX,
-        help="Max input tokens for long (RAG-style) requests. "
-        "Default: %(default)s.",
+        help="Max input tokens for long (RAG-style) requests. Default: %(default)s.",
     )
     parser_or_group.add_argument(
         "--bimodal-long-output-len",
@@ -2895,9 +2901,11 @@ class MMVUDataset(HuggingFaceDataset):
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
-        "yale-nlp/MMVU": lambda x: x["question"]
-        + " "
-        + (" ".join(f"{k}.{v}" for k, v in x["choices"].items())),
+        "yale-nlp/MMVU": lambda x: (
+            x["question"]
+            + " "
+            + (" ".join(f"{k}.{v}" for k, v in x["choices"].items()))
+        ),
     }
 
     def sample(

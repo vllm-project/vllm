@@ -363,9 +363,7 @@ def get_requests(args, tokenizer):
         )
         random_input_len = getattr(args, "random_input_len", None)
         sample_kwargs["input_len"] = (
-            random_input_len
-            if random_input_len is not None
-            else args.input_len
+            random_input_len if random_input_len is not None else args.input_len
         )
         random_output_len = getattr(args, "random_output_len", None)
         sample_kwargs["output_len"] = (
