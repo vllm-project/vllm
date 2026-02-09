@@ -511,6 +511,13 @@ class EngineArgs:
     logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
     speculative_config: dict[str, Any] | None = None
+    
+    # Capture for speculative decoding distillation
+    capture_enabled: bool = False
+    capture_dir: str | None = None
+    capture_percentile: float = 8.0
+    capture_top_k: int = 128
+    capture_window_size: int = 1000
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1198,6 +1205,42 @@ class EngineArgs:
         vllm_group.add_argument(
             "--speculative-config", **vllm_kwargs["speculative_config"]
         )
+        
+        # Logits logging arguments for speculative decoding
+        vllm_group.add_argument(
+            "--logits-logging-enabled",
+            action="store_true",
+            default=False,
+            help="Enable logits logging for speculative decoding diagnostics "
+                 "and knowledge distillation. When enabled, logs target model "
+                 "probabilities for worst-performing drafts.")
+        vllm_group.add_argument(
+            "--logits-logging-dir",
+            type=str,
+            default=None,
+            help="Directory where logits Parquet files will be written. "
+                 "Defaults to './logits_logs' if not specified.")
+        vllm_group.add_argument(
+            "--logits-logging-percentile",
+            type=float,
+            default=10.0,
+            help="Percentile threshold for logging worst acceptance rates (0-100). "
+                 "For example, 10.0 means log the worst 10%% of drafts. "
+                 "Lower values log fewer, harder cases.")
+        vllm_group.add_argument(
+            "--logits-logging-top-k",
+            type=int,
+            default=50,
+            help="Number of top probabilities to capture per token position. "
+                 "Higher values provide more information for distillation but "
+                 "use more storage.")
+        vllm_group.add_argument(
+            "--logits-logging-window-size",
+            type=int,
+            default=1000,
+            help="Number of recent acceptance rates to track for percentile "
+                 "calculation.")
+        
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
@@ -1369,7 +1412,12 @@ class EngineArgs:
         dictionary from the engine.
         """
         if self.speculative_config is None:
-            return None
+            # Check if any capture flags are set
+            if self.capture_enabled:
+                # Create a minimal speculative config just for capture
+                self.speculative_config = {}
+            else:
+                return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1380,6 +1428,20 @@ class EngineArgs:
                 "target_parallel_config": target_parallel_config,
             }
         )
+        
+        # Merge capture CLI arguments into speculative_config
+        # CLI arguments take precedence over JSON config
+        if self.capture_enabled:
+            self.speculative_config["capture_enabled"] = True
+        if self.capture_dir is not None:
+            self.speculative_config["capture_dir"] = self.capture_dir
+        if self.capture_percentile != 8.0:  # Non-default value
+            self.speculative_config["capture_percentile"] = self.capture_percentile
+        if self.capture_top_k != 128:  # Non-default value
+            self.speculative_config["capture_top_k"] = self.capture_top_k
+        if self.capture_window_size != 1000:  # Non-default value
+            self.speculative_config["capture_window_size"] = self.capture_window_size
+        
         return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(

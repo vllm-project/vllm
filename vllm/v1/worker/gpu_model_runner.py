@@ -479,6 +479,10 @@ class GPUModelRunner(
                     f"{self.speculative_config.method}"
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
+            from vllm.v1.spec_decode.capture import LogitsLogger
+            self.logits_logger = LogitsLogger(self.speculative_config)
+        else:
+            self.logits_logger = None
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -3664,6 +3668,9 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        if self.logits_logger is not None and spec_decode_metadata is not None:
+            self.logits_logger.log_spec_decode_step(
+                logits, spec_decode_metadata, sampler_output.sampled_token_ids, self.model_config.model, sample_hidden_states, aux_hidden_states)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

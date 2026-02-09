@@ -116,6 +116,24 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    
+    # Capture configuration for knowledge distillation
+    capture_enabled: bool = False
+    """Enable capture for speculative decoding diagnostics and 
+    knowledge distillation. When enabled, captures target model probabilities
+    for worst-performing drafts."""
+    capture_dir: str | None = None
+    """Directory where capture Safetensors files will be written. 
+    Defaults to './capture_data' if not specified."""
+    capture_percentile: float = 8.0
+    """Percentile threshold for capturing worst acceptance rates (0-100).
+    For example, 8.0 means capture the worst 8% of drafts. Lower values
+    capture fewer, harder cases."""
+    capture_top_k: int = 128
+    """Number of top probabilities to capture per token position.
+    Higher values provide more information for distillation but use more storage."""
+    capture_window_size: int = 1000
+    """Number of recent acceptance rates to track for percentile calculation."""
 
     # Alternative drafting strategies
     speculative_token_tree: str | None = None
