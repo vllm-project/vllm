@@ -1,8 +1,10 @@
 #pragma once
 
-#include <torch/all.h>
+#include <torch/headeronly/util/Half.h>
+#include <torch/headeronly/util/BFloat16.h>
 
 #ifndef USE_ROCM
+  #include <cuda.h>  // For CUDA_VERSION
   #include <cuda_bf16.h>
   #include <cuda_fp16.h>
 #else
