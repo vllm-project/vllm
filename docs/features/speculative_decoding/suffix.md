@@ -15,13 +15,11 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 ```python
 from vllm import LLM, SamplingParams
 
-prompts = [
-    "The future of AI is",
-]
+prompts = ["The future of AI is"]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-    model="facebook/opt-6.7b",
+    model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
     speculative_config={
         "method": "suffix",

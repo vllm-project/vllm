@@ -9,10 +9,10 @@ prompts = ["The future of AI is"]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-    model="facebook/opt-6.7b",
+    model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
     speculative_config={
-        "model": "facebook/opt-125m",
+        "model": "Qwen/Qwen3-0.6B",
         "num_speculative_tokens": 5,
         "method": "draft_model",
     },
@@ -28,13 +28,14 @@ for output in outputs:
 To perform the equivalent launch in online mode, use the following server-side code:
 
 ```bash
-vllm serve facebook/opt-6.7b \
+vllm serve Qwen/Qwen3-4B-Thinking-2507 \
     --host 0.0.0.0 \
     --port 8000 \
     --seed 42 \
     -tp 1 \
+    --max_model_len 2048 \
     --gpu_memory_utilization 0.8 \
-    --speculative_config '{"model": "facebook/opt-125m", "num_speculative_tokens": 5, "method": "draft_model"}'
+    --speculative_config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
 The code used to request as completions as a client remains unchanged:

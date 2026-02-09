@@ -10,7 +10,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 
 - [EAGLE](eagle.md)
 - [Draft Model](draft_model.md)
-- [MLP](mlp.md)
+- [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 

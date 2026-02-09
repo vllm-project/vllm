@@ -489,6 +489,13 @@ class SpeculativeConfig:
                         )
 
                 if self.speculative_token_tree is None:
+                    if self.num_speculative_tokens is None:
+                        raise ValueError(
+                            "A speculative model was provided, but neither "
+                            "`speculative_token_tree` nor `num_speculative_tokens` "
+                            "was provided"
+                        )
+
                     # Generate chain of tokens.
                     self.speculative_token_tree = str(
                         [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
