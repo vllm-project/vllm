@@ -74,7 +74,7 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("backend", ["cutlass", "trtllm"])
+@pytest.mark.parametrize("backend", ["cutlass", "cudnn", "trtllm"])
 @pytest.mark.parametrize("autotune", [False, True])
 @torch.inference_mode()
 def test_flashinfer_nvfp4_gemm(
@@ -107,10 +107,14 @@ def test_flashinfer_nvfp4_gemm(
     # from checkpoints are in linear scales.
     # So instead of needing to swizzle for cutlass as in modelopt.py,
     # we need to unswizzle for trtllm here.
-    a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a_dtype, a_global_scale, backend)
+    a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
+        a_dtype, a_global_scale, is_sf_swizzled_layout=True, backend=backend
+    )
     is_sf_128x4_layout = not (backend == "trtllm" and m <= 32)
 
-    b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
+    b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(
+        b_dtype, b_global_scale, is_sf_swizzled_layout=True
+    )
 
     # get_ref_results unswizzles the scales internally.
     expected_out = get_ref_results(

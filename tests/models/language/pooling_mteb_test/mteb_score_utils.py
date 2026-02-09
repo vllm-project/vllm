@@ -79,9 +79,9 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         outputs = self.llm.score(
             queries,
             corpus,
-            truncate_prompt_tokens=-1,
             use_tqdm=False,
             chat_template=self.chat_template,
+            tokenization_kwargs={"truncate_prompt_tokens": -1},
         )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
@@ -117,8 +117,8 @@ class ScoreClientMtebEncoder(MtebCrossEncoderMixin):
             self.url,
             json={
                 "model": self.model_name,
-                "text_1": query,
-                "text_2": corpus,
+                "queries": query,
+                "documents": corpus,
                 "truncate_prompt_tokens": -1,
             },
         ).json()

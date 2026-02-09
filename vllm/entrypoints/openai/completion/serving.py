@@ -32,13 +32,12 @@ from vllm.entrypoints.openai.engine.serving import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
@@ -72,30 +71,20 @@ class OpenAIServingCompletion(OpenAIServing):
         self.logits_processors = self.model_config.logits_processors
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.enable_force_include_usage = enable_force_include_usage
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default completion sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
 
-    async def create_completion(
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
+
+    async def render_completion_request(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
-    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
-        """Completion API similar to OpenAI's API.
+    ) -> list[TokPrompt] | ErrorResponse:
+        """
+        render completion request by validating and preprocessing inputs.
 
-        See https://platform.openai.com/docs/api-reference/completions/create
-        for the API specification. This API mimics the OpenAI Completion API.
-
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
+        Returns:
+            A list of engine_prompts on success,
+            or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -119,6 +108,38 @@ class OpenAIServingCompletion(OpenAIServing):
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
+        try:
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.prompt,
+                prompt_embeds=request.prompt_embeds,
+            )
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(e)
+
+        return engine_prompts
+
+    async def create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        """Completion API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/completions/create
+        for the API specification. This API mimics the OpenAI Completion API.
+
+        NOTE: Currently we do not support the following feature:
+            - suffix (the language models we currently support do not support
+            suffix)
+        """
+        result = await self.render_completion_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_prompts = result
+
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
@@ -128,29 +149,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
-
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
-            engine_prompts = await renderer.render_prompt_and_embeds(
-                prompt_or_prompts=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-                config=self._build_render_config(request),
-            )
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
@@ -160,26 +160,13 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, prompt_token_ids, prompt_embeds = (
-                    self._get_prompt_components(engine_prompt)
-                )
-
-                input_length = None
-                if prompt_token_ids is not None:
-                    input_length = len(prompt_token_ids)
-                elif prompt_embeds is not None:
-                    input_length = len(prompt_embeds)
-                else:
-                    raise NotImplementedError
-
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    input_length=input_length,
-                    default_sampling_params=self.default_sampling_params,
+                    self.max_model_len,
+                    request.max_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -213,10 +200,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
-                # Mypy inconsistently requires this second cast in different
-                # environments. It shouldn't be necessary (redundant from above)
-                # but pre-commit in CI fails without it.
-                engine_prompt = cast(EmbedsPrompt | TokensPrompt, engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
                         prompt=engine_prompt,
@@ -226,11 +209,15 @@ class OpenAIServingCompletion(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    engine_request, tokenization_kwargs = await self._process_inputs(
+                    tok_params = request.build_tok_params(self.model_config)
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
+                    engine_request = self.input_processor.process_inputs(
                         request_id_item,
                         engine_prompt,
                         sampling_params,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,
@@ -261,6 +248,8 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = request.stream and not request.use_beam_search
 
         # Streaming response
+        tokenizer = self.renderer.tokenizer
+
         if stream:
             return self.completion_stream_generator(
                 request,
@@ -288,11 +277,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     engine_prompt = engine_prompts[i]
-                    final_res.prompt = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    final_res.prompt = self._extract_prompt_text(engine_prompt)
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -328,7 +313,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[TokensPrompt | EmbedsPrompt],
+        engine_prompts: list[TokPrompt],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -362,11 +347,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
                 if prompt_text is None:
                     engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    prompt_text = self._extract_prompt_text(engine_prompt)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -716,27 +697,4 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
-        )
-
-    def _build_render_config(
-        self,
-        request: CompletionRequest,
-        max_input_length: int | None = None,
-    ) -> RenderConfig:
-        # Validate max_tokens before using it
-        if request.max_tokens is not None and request.max_tokens > self.max_model_len:
-            raise VLLMValidationError(
-                f"'max_tokens' ({request.max_tokens}) cannot be greater than "
-                f"the model's maximum context length ({self.max_model_len}).",
-                parameter="max_tokens",
-                value=request.max_tokens,
-            )
-
-        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
-        return RenderConfig(
-            max_length=max_input_tokens_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-            cache_salt=request.cache_salt,
-            needs_detokenization=bool(request.echo and not request.return_token_ids),
         )
