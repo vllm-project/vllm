@@ -1357,34 +1357,8 @@ class Scheduler(SchedulerInterface):
                             and new_token_ids[-len(content_ids) :] == content_ids
                         ):
                             new_token_ids = new_token_ids[: -len(content_ids)]
-
-            # Fallback: if reasoning end tokens are missing but structured
-            # output is requested, detect the first grammar-valid token
-            # sequence in the delta and drop any leading garbage such as
-            # markdown fences.
-            if (
-                new_token_ids
-                and request.use_structured_output
-                and self.structured_output_manager.reasoner is not None
-                and not self.structured_output_manager.enable_in_reasoning
-            ):
-                structured_req = request.structured_output_request
-                if (
-                    structured_req is not None
-                    and not structured_req.reasoning_ended
-                    and structured_req.grammar is not None
-                ):
-                    delta_ids = list(new_token_ids)
-                    grammar = structured_req.grammar
-                    for start_idx in range(len(delta_ids)):
-                        valid_tokens = grammar.validate_tokens(delta_ids[start_idx:])
-                        if valid_tokens:
+                            # Mark reasoning as ended since we've accepted the reasoning end token
                             structured_req.reasoning_ended = True
-                            structured_req.reasoning_ended_by_fallback = True
-                            new_token_ids = delta_ids[
-                                start_idx : start_idx + len(valid_tokens)
-                            ]
-                            break
 
             # Check for stop and update request status.
             if new_token_ids:
