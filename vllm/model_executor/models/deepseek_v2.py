@@ -836,7 +836,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                is_neox_style=True,
+                is_neox_style=not getattr(config, "indexer_rope_interleave", True),
             )
             self.indexer = Indexer(
                 vllm_config,
@@ -1485,7 +1485,7 @@ class DeepseekV2ForCausalLM(
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
+            if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
         return loaded_params
@@ -1496,6 +1496,10 @@ class DeepseekForCausalLM(DeepseekV2ForCausalLM):
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
+    pass
+
+
+class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
 
 
