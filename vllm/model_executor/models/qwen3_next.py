@@ -152,7 +152,7 @@ class ChunkGatedDeltaRule(CustomOp):
         super().__init__()
         if current_platform.is_cuda() and current_platform.is_device_capability(90):
             logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
+                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
             )
             self._forward_method = self.forward_cuda
         else:
