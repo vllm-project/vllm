@@ -10,6 +10,7 @@ from typing import Any
 
 import requests
 import torch
+from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -246,8 +247,6 @@ class IPCWeightTransferEngine(
         dtype_names = []
         shapes = []
         ipc_handles = []
-
-        from torch.multiprocessing.reductions import reduce_tensor
 
         for name, tensor in iterator:
             names.append(name)

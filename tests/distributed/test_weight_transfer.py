@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 import ray
 import torch
+from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -379,8 +380,6 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_valid_update_info(self):
         """Test creating valid IPCWeightTransferUpdateInfo."""
-        from torch.multiprocessing.reductions import reduce_tensor
-
         if torch.cuda.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
@@ -403,8 +402,6 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_dtype_names_raises(self):
         """Test that mismatched dtype_names length raises ValueError."""
-        from torch.multiprocessing.reductions import reduce_tensor
-
         if torch.cuda.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
@@ -423,8 +420,6 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_shapes_raises(self):
         """Test that mismatched shapes length raises ValueError."""
-        from torch.multiprocessing.reductions import reduce_tensor
-
         if torch.cuda.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
@@ -443,8 +438,6 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_ipc_handles_raises(self):
         """Test that mismatched ipc_handles length raises ValueError."""
-        from torch.multiprocessing.reductions import reduce_tensor
-
         if torch.cuda.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
@@ -480,8 +473,6 @@ class TestIPCEngineParsing:
 
     def test_parse_update_info_valid(self):
         """Test parsing valid update info dict."""
-        from torch.multiprocessing.reductions import reduce_tensor
-
         if torch.cuda.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
@@ -528,7 +519,6 @@ class TrainerActor:
 
     def __init__(self, tensor_shape: list[int], tensor_dtype: str):
         import torch
-        from torch.multiprocessing.reductions import reduce_tensor
 
         # Create tensor on GPU and keep it alive
         dtype = getattr(torch, tensor_dtype)
@@ -680,8 +670,6 @@ def test_ipc_weight_transfer_between_processes():
 
 def test_ipc_receive_weights_missing_gpu_uuid_raises():
     """Test that receive_weights raises if GPU UUID not found in IPC handles."""
-    from torch.multiprocessing.reductions import reduce_tensor
-
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
