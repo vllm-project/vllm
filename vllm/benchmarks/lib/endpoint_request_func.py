@@ -791,8 +791,8 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "infinity-embeddings": async_request_infinity_embeddings,
     "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
     # (Infinity embedding server does not support vlm2vec)
-    "vllm-rerank": async_request_vllm_rerank,
     "vllm-pooling": async_request_vllm_pooling,
+    "vllm-rerank": async_request_vllm_rerank,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
