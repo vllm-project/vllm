@@ -663,9 +663,11 @@ class Qwen3_5ForCausalLMBase(
         cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3.5 Series currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3.5 currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -763,9 +765,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
-
-        # Qwen3.5 series disable deepstack path
-        config.vision_config.deepstack_visual_indexes = []
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
