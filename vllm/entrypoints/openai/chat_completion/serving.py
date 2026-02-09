@@ -388,7 +388,9 @@ class OpenAIServingChat(OpenAIServing):
 
                 max_tokens = get_max_tokens(
                     self.max_model_len,
-                    request,
+                    request.max_completion_tokens
+                    if request.max_completion_tokens is not None
+                    else request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
                 )
