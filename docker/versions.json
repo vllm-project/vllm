@@ -50,7 +50,7 @@
       "default": "cuda"
     },
     "DEEPGEMM_GIT_REF": {
-      "default": "594953acce41793ae00a1233eb516044d604bcb6"
+      "default": "477618cd51baffca09c4b0b87e97c03fe827ef03"
     },
     "PPLX_COMMIT_HASH": {
       "default": "12cecfd"
@@ -68,7 +68,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.5.3"
+      "default": "0.6.3"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
