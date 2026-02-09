@@ -158,8 +158,7 @@ async def build_async_engine_client_from_engine_args(
 
 def build_app(
     args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...] | None = None,
-    vllm_config: VllmConfig | None = None,
+    supported_tasks: tuple["SupportedTask", ...] | None = None
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -170,14 +169,6 @@ def build_app(
             stacklevel=2,
         )
         supported_tasks = _FALLBACK_SUPPORTED_TASKS
-
-    if vllm_config is None:
-        warnings.warn(
-            "The 'vllm_config' parameter was not provided to "
-            "build_app and will be required in a future version. ",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
     if args.disable_fastapi_docs:
         app = FastAPI(
@@ -224,12 +215,11 @@ def build_app(
 
         attach_rlhf_router(app)
 
-        if vllm_config is None or vllm_config.model_config.is_moe:
-            from vllm.entrypoints.serve.elastic_ep.api_router import (
-                attach_router as elastic_ep_attach_router,
-            )
+        from vllm.entrypoints.serve.elastic_ep.api_router import (
+            attach_router as elastic_ep_attach_router,
+        )
 
-            elastic_ep_attach_router(app)
+        elastic_ep_attach_router(app)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
@@ -504,10 +494,9 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         supported_tasks = await engine_client.get_supported_tasks()
-        vllm_config = engine_client.vllm_config
         logger.info("Supported tasks: %s", supported_tasks)
 
-        app = build_app(args, supported_tasks, vllm_config)
+        app = build_app(args, supported_tasks)
         await init_app_state(engine_client, app.state, args, supported_tasks)
 
         logger.info(
