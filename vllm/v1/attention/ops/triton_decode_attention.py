@@ -276,6 +276,7 @@ def _fwd_grouped_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    IS_MLA: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -369,13 +370,19 @@ def _fwd_grouped_kernel_stage1(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
 
-            offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
-            v = tl.load(
-                V_Buffer + offs_buf_v,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
-                other=0.0,
-                cache_modifier=".cg",
-            )
+            if not IS_MLA:
+                offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+                v = tl.load(
+                    V_Buffer + offs_buf_v,
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+                    other=0.0,
+                    cache_modifier=".cg",
+                )
+            else:
+                # MLA uses a single c_kv.
+                # loading the same c_kv to interpret it as v is not necessary.
+                # transpose the existing c_kv (aka k) for the dot product.
+                v = tl.trans(k)
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -424,7 +431,10 @@ def _decode_grouped_att_m_fwd(
     sm_scale,
     page_size,
     logit_cap,
+    is_mla=False,
 ):
+    # with is_mla there is only a single c_kv in smem.
+    # could increase BLOCK or num_stages.
     BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
@@ -495,6 +505,7 @@ def _decode_grouped_att_m_fwd(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        IS_MLA=is_mla,
         **extra_kargs,
     )
 
@@ -648,6 +659,7 @@ def decode_attention_fwd_grouped(
     sm_scale,
     page_size,
     logit_cap=0.0,
+    is_mla=False,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -660,6 +672,7 @@ def decode_attention_fwd_grouped(
         sm_scale,
         page_size,
         logit_cap,
+        is_mla=is_mla,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -679,6 +692,7 @@ def decode_attention_fwd(
     sm_scale,
     page_size=1,
     logit_cap=0.0,
+    is_mla=False,
 ):
     assert num_kv_splits == attn_logits.shape[2]
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
@@ -714,4 +728,5 @@ def decode_attention_fwd(
             sm_scale,
             page_size,
             logit_cap,
+            is_mla=is_mla,
         )

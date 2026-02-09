@@ -192,6 +192,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_kv_splits,
             self.scale,
             PAGE_SIZE,
+            is_mla=True,
         )
 
         return o, lse
