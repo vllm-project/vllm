@@ -278,8 +278,9 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
-def test_deepseek_hybrid_topk() -> None:
+def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
     torch.set_default_device("cuda:0")
 
     top_k = 2048
@@ -302,7 +303,7 @@ def test_deepseek_hybrid_topk() -> None:
     )
 
     logits_short = create_random_logits(
-        row_starts_short, row_ends_short, torch.float32, 42, "random"
+        row_starts_short, row_ends_short, torch.float32, 42, clean_logits, "random"
     )
 
     indices_vllm = torch.empty(
@@ -336,7 +337,7 @@ def test_deepseek_hybrid_topk() -> None:
     row_ends_long = seq_lens_long[row_indices_long] - next_n + next_n_offset_long + 1
 
     logits_long = create_random_logits(
-        row_starts_long, row_ends_long, torch.float32, 43, "random"
+        row_starts_long, row_ends_long, torch.float32, 43, clean_logits, "random"
     )
 
     indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device="cuda")
@@ -355,13 +356,14 @@ def test_deepseek_hybrid_topk() -> None:
         None,
     )
 
-    torch_indices_short = logits_short.topk(min(top_k, max(row_ends_short)), dim=-1)[1]
-    mask_lo_short = torch_indices_short >= 0
-    mask_hi_short = (
-        torch_indices_short - (row_ends_short - row_starts_short)[:, None]
-    ) < 0
-    mask_short = mask_lo_short & mask_hi_short
-    torch_indices_short = torch_indices_short.masked_fill(~mask_short, -1)
+    torch_indices_short = torch.empty(
+        (num_rows_short, top_k), dtype=torch.int32, device="cuda"
+    )
+    for i in range(num_rows_short):
+        row_end = int(row_ends_short[i])
+        k_i = min(top_k, row_end)
+        idx = logits_short[i, :row_end].topk(k_i, dim=-1)[1]
+        torch_indices_short[i, :k_i] = idx
 
     assert compare_top_k_results(
         logits_short,
@@ -372,11 +374,14 @@ def test_deepseek_hybrid_topk() -> None:
         top_k,
     ), "top_k_per_row_decode kernel (short sequences) doesn't match torch.topk"
 
-    torch_indices_long = logits_long.topk(min(top_k, max(row_ends_long)), dim=-1)[1]
-    mask_lo_long = torch_indices_long >= 0
-    mask_hi_long = (torch_indices_long - (row_ends_long - row_starts_long)[:, None]) < 0
-    mask_long = mask_lo_long & mask_hi_long
-    torch_indices_long = torch_indices_long.masked_fill(~mask_long, -1)
+    torch_indices_long = torch.empty(
+        (num_rows_long, top_k), dtype=torch.int32, device="cuda"
+    )
+    for i in range(num_rows_long):
+        row_end = int(row_ends_long[i])
+        k_i = min(top_k, row_end)
+        idx = logits_long[i, :row_end].topk(k_i, dim=-1)[1]
+        torch_indices_long[i, :k_i] = idx
 
     assert compare_top_k_results(
         logits_long, indices, torch_indices_long, row_starts_long, row_ends_long, top_k
