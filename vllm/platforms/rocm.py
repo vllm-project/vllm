@@ -269,6 +269,7 @@ class RocmPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
