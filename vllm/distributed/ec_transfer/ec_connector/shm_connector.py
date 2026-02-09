@@ -148,7 +148,6 @@ class SHMConnector(ECConnectorBase):
             self.thread_executor = ThreadPoolExecutor(max_workers=self.max_workers)
             self.thread_executor.submit(self.producer_run)
 
-        # 4. RPC 初始化
         global _LOCAL_CONNECTOR
         _LOCAL_CONNECTOR = self
         logger.info("SHMConnector %s initialized successfully.", self.rpc_name)
@@ -198,7 +197,7 @@ class SHMConnector(ECConnectorBase):
                             all_received = False
 
                     if all_received:
-                        self._generate_filename_debug(feat_key)
+                        self._generate_foldername_debug(feat_key)
                         logger.info(
                             "Broadcast Success: %s received by all %d workers.",
                             feat_key,
@@ -357,13 +356,12 @@ class SHMConnector(ECConnectorBase):
 
     def _found_match_for_mm_data(self, mm_hash) -> bool:
         """Check if the cache is hit for the request."""
-        # filename = self._generate_filename_debug(mm_hash)
         if not self.is_producer:
             foldername = os.path.join(self._storage_path, mm_hash)
             return os.path.exists(foldername)
         else:
-            filename = self._generate_filename_debug(mm_hash)
-            return os.path.exists(filename)
+            foldername = self._generate_foldername_debug(mm_hash)
+            return os.path.exists(foldername)
 
     def _generate_foldername_debug(
         self,
@@ -378,16 +376,6 @@ class SHMConnector(ECConnectorBase):
         foldername = os.path.join(self._storage_path, mm_hash)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
-        return foldername
-
-    def _generate_filename_debug(self, mm_hash: str) -> str:
-        """
-        Return the full path of the safetensors file for this mm_hash.
-        Ensures the parent directory exists because
-        `_generate_foldername_debug` is called with its default
-        (`create_folder=True`).
-        """
-        foldername = self._generate_foldername_debug(mm_hash)  # <- folder auto-created
         return foldername
 
     def get_finished(
