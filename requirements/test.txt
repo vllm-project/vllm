@@ -153,6 +153,10 @@ coverage==7.10.6
     # via pytest-cov
 cramjam==2.9.0
     # via fastparquet
+cuda-bindings==12.9.4
+    # via torch
+cuda-pathfinder==1.3.3
+    # via cuda-bindings
 cupy-cuda12x==13.6.0
     # via ray
 cycler==0.12.1
@@ -300,8 +304,12 @@ graphql-relay==3.2.0
     # via graphene
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.76.0
-    # via ray
+grpcio==1.78.0
+    # via
+    #   grpcio-tools
+    #   ray
+grpcio-tools==1.78.0
+    # via -r requirements/test.in
 gunicorn==23.0.0
     # via mlflow
 h11==0.14.0
@@ -624,7 +632,7 @@ nvidia-nvjitlink-cu12==12.9.86
     #   nvidia-cusolver-cu12
     #   nvidia-cusparse-cu12
     #   torch
-nvidia-nvshmem-cu12==3.3.20
+nvidia-nvshmem-cu12==3.4.5
     # via torch
 nvidia-nvtx-cu12==12.9.79
     # via torch
@@ -772,6 +780,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
+    #   grpcio-tools
     #   mlflow-skinny
     #   opentelemetry-proto
     #   proto-plus
@@ -1037,6 +1046,7 @@ sentence-transformers==5.2.0
     #   mteb
 setuptools==77.0.3
     # via
+    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   torch
@@ -1149,7 +1159,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.9.1+cu129
+torch==2.10.0+cu129
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -1177,7 +1187,7 @@ torch==2.9.1+cu129
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.9.1+cu129
+torchaudio==2.10.0+cu129
     # via
     #   -r requirements/test.in
     #   encodec
@@ -1190,7 +1200,7 @@ torchmetrics==1.7.4
     #   pytorch-lightning
     #   terratorch
     #   torchgeo
-torchvision==0.24.1+cu129
+torchvision==0.25.0+cu129
     # via
     #   -r requirements/test.in
     #   lightly
@@ -1219,7 +1229,7 @@ tqdm==4.66.6
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@711f27972f1bdffc3b0f27b21a57416bc43a2a5b
+transformers @ git+https://github.com/huggingface/transformers.git@fc9137225880a9d03f130634c20f9dbe36a7b8bf
     # via
     #   -r requirements/test.in
     #   genai-perf
@@ -1228,7 +1238,7 @@ transformers @ git+https://github.com/huggingface/transformers.git@711f27972f1bd
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
-triton==3.5.1
+triton==3.6.0
     # via torch
 tritonclient==2.64.0
     # via -r requirements/test.in
