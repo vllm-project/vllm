@@ -328,7 +328,6 @@ class FusedMoE(CustomOp):
         is_sequence_parallel=False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        shared_experts: torch.nn.Module | None = None,
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
@@ -705,8 +704,8 @@ class FusedMoE(CustomOp):
         return self._shared_experts if self.use_overlapped else None
 
     # TODO(bnell): is this needed?
-    #@property
-    #def layer_id(self):
+    # @property
+    # def layer_id(self):
     #    # Delayed import to avoid circular dependency
     #    from vllm.model_executor.models.utils import extract_layer_index
 
