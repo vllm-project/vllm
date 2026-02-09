@@ -708,9 +708,7 @@ async def test_pause_resume_basic():
         # Test all modes with no requests in flight
         for mode in ("abort", "wait", "keep"):
             await engine.pause_generation(mode=mode)
-            # "keep" only freezes the scheduler; it does not set _paused
-            if mode != "keep":
-                assert await engine.is_paused()
+            assert await engine.is_paused()
             await engine.resume_generation()
             assert not await engine.is_paused()
 

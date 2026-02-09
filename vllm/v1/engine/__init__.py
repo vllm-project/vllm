@@ -24,6 +24,22 @@ from vllm.v1.serial_utils import UtilityResult
 # - "keep": Freeze requests in queue; they resume on resume_generation().
 PauseMode = Literal["abort", "wait", "keep"]
 
+
+class PauseState(enum.IntEnum):
+    """Engine scheduler pause state. All non-UNPAUSED states queue new adds.
+
+    - UNPAUSED: Normal operation; step runs, adds go to scheduler.
+    - PAUSE_ABORT: Paused (no step); new adds queued until resume.
+    - PAUSE_KEEP: Paused (no step); new adds queued until resume.
+    - PAUSE_WAIT: Draining in-flight (step runs); new adds queued until resume.
+    """
+
+    UNPAUSED = 0
+    PAUSE_ABORT = 1
+    PAUSE_KEEP = 2
+    PAUSE_WAIT = 3
+
+
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
 FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")

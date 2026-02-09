@@ -1001,8 +1001,13 @@ class AsyncMPClient(MPClient):
         await self.broadcast_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        """Return whether the scheduler is currently paused (first engine)."""
-        return await self.call_utility_async("is_scheduler_paused")
+        """Return whether the scheduler is paused on all engines; warn if
+        inconsistent.
+        """
+        results = await self.broadcast_utility_async("is_scheduler_paused")
+        if len(set(results)) > 1:
+            logger.warning("inconsistent pause state across engines: %s", results)
+        return all(results)
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
@@ -1215,22 +1220,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
-
-    async def pause_scheduler_async(
-        self,
-        mode: PauseMode = "abort",
-        clear_cache: bool = True,
-    ) -> None:
-        """Pause the scheduler, keeping requests frozen in queue."""
-        raise NotImplementedError(
-            "pause_scheduler_async is not yet supported for data parallel"
-        )
-
-    async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause."""
-        raise NotImplementedError(
-            "resume_scheduler_async is not yet supported for data parallel"
-        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

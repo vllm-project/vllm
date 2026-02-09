@@ -279,6 +279,23 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
+def deferred_echo(self, value: Any, num_wait_loops: int = 2) -> Any:
+    """Utility that completes after num_wait_loops resolver invocations (tests
+    DeferredUtilityResult).
+    """
+    from vllm.v1.engine import DEFERRED_NOT_READY, DeferredUtilityResult
+
+    counter = [0]
+
+    def resolve() -> Any:
+        counter[0] += 1
+        if counter[0] <= num_wait_loops:
+            return DEFERRED_NOT_READY
+        return value
+
+    return DeferredUtilityResult(resolve)
+
+
 # --- Fixtures for subprocess patching ---
 # These create sitecustomize.py files that patch EngineCore in spawned
 # subprocesses. This is necessary because ROCm requires 'spawn' multiprocessing
@@ -375,6 +392,27 @@ def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
                 "from vllm.v1.engine.core import EngineCore",
                 inspect.getsource(echo_dc_nested),
                 "EngineCore.echo_dc_nested = echo_dc_nested",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_deferred_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have deferred_echo method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from typing import Any",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(deferred_echo),
+                "EngineCore.deferred_echo = deferred_echo",
             ]
         )
     )
@@ -783,6 +821,48 @@ async def test_engine_core_client_util_method_nested_structures(
                 for val in item.values():
                     assert val is None
 
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_deferred_utility_async(
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_deferred_echo_patch,
+):
+    """Test that a utility returning DeferredUtilityResult completes after the
+    resolver returns a value (engine runs resolver each loop until ready).
+    """
+    with monkeypatch.context() as m:
+        m.setattr(EngineCore, "deferred_echo", deferred_echo, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            core_client: AsyncMPClient = client
+
+            # Completes after resolver returns (num_wait_loops=2 → 3 resolver calls)
+            result = await core_client.call_utility_async(
+                "deferred_echo", "deferred_result", 2
+            )
+            assert result == "deferred_result"
+
+            # None is a valid result once resolver is ready
+            result = await core_client.call_utility_async("deferred_echo", None, 0)
+            assert result is None
         finally:
             client.shutdown()
 

@@ -51,6 +51,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
+    PauseState,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -213,9 +214,9 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # Pause state - when True, add_request queues requests until resume.
-        self._scheduler_paused = False
-        # Requests received while paused (keep mode); flushed on resume_scheduler().
+        # Pause state; all non-UNPAUSED states queue new adds in _paused_adds_queue.
+        self._scheduler_pause_state = PauseState.UNPAUSED
+        # Requests received while paused; flushed on resume_scheduler().
         self._paused_adds_queue: list[tuple[Request, int]] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
@@ -296,7 +297,7 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
-        if self._scheduler_paused:
+        if self._scheduler_pause_state != PauseState.UNPAUSED:
             self._paused_adds_queue.append((request, request_wave))
             return
         # Validate the request_id type.
@@ -330,36 +331,43 @@ class EngineCore:
         """Abort requests from the scheduler.
 
         When running in a process with an output_queue (e.g. EngineCoreProc),
-        also emits abort outputs so the client receives them.
+        also emits abort outputs so each client receives the abort for its
+        request(s). Outputs are routed by client_index so the waiting client
+        gets the finish.
 
         Returns:
             List of request IDs that were actually aborted (were in the
             scheduler).
         """
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
+        # Get client_index for each request before finish_requests removes them.
+        client_indices = self.scheduler.get_request_client_indices(request_ids)
         aborted_ids = self.scheduler.finish_requests(
             request_ids, RequestStatus.FINISHED_ABORTED
         )
         output_queue = getattr(self, "output_queue", None)
         if aborted_ids and output_queue is not None:
-            output_queue.put_nowait(
-                (
-                    -1,
-                    EngineCoreOutputs(
-                        finished_requests=set(aborted_ids),
-                        outputs=[
-                            EngineCoreOutput(
-                                request_id=rid,
-                                new_token_ids=[],
-                                finish_reason=FinishReason.ABORT,
-                            )
-                            for rid in aborted_ids
-                        ],
+            # Group aborted request IDs by client_index and send one output per client.
+            by_client: dict[int, list[str]] = {}
+            for rid in aborted_ids:
+                client_idx = client_indices.get(rid, 0)
+                by_client.setdefault(client_idx, []).append(rid)
+            for client_index, rids in by_client.items():
+                output_queue.put_nowait(
+                    (
+                        client_index,
+                        EngineCoreOutputs(
+                            finished_requests=set(rids),
+                            outputs=[
+                                EngineCoreOutput(
+                                    request_id=rid,
+                                    new_token_ids=[],
+                                    finish_reason=FinishReason.ABORT,
+                                )
+                                for rid in rids
+                            ],
+                        ),
                     ),
                 )
-            )
         return aborted_ids
 
     def pause_scheduler(
@@ -369,31 +377,45 @@ class EngineCore:
     ) -> None | DeferredUtilityResult:
         """Pause generation; behavior depends on mode.
 
-        _scheduler_paused is always set True so new adds are queued until resume.
+        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
+        PAUSE_WAIT allows step() so in-flight requests can drain.
 
-        - ``abort``: Abort all requests in the scheduler now, optionally clear
-          caches, return immediately.
-        - ``wait``: Let in-flight requests finish; when scheduler has no
-          unfinished requests, optionally clear caches and return (deferred).
-        - ``keep``: Return immediately; in-flight requests stay queued until
-          resume_scheduler (no drain, no cache clear from this call).
+        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), clear caches,
+          then return.
+        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
+          set PAUSE_KEEP, clear caches, return (deferred).
+        - ``keep``: Set PAUSE_KEEP, return immediately.
         """
-        self._scheduler_paused = True
         if mode == "abort":
+            self._scheduler_pause_state = PauseState.PAUSE_ABORT
             request_ids = self.scheduler.get_all_request_ids()
+            output_queue = getattr(self, "output_queue", None)
+            size_before = output_queue.qsize() if output_queue is not None else 0
             if request_ids:
                 self.abort_requests(request_ids)
             if clear_cache:
                 self.reset_prefix_cache()
                 self.reset_mm_cache()
                 self.reset_encoder_cache()
-            return None
+
+            def _resolve_when_abort_sent() -> Any:
+                if output_queue is None or output_queue.qsize() <= size_before:
+                    return None
+                return DEFERRED_NOT_READY
+
+            return DeferredUtilityResult(_resolve_when_abort_sent)
         if mode == "keep":
+            self._scheduler_pause_state = PauseState.PAUSE_KEEP
             return None
+
+        # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
+        self._scheduler_pause_state = PauseState.PAUSE_WAIT
 
         def _resolve_when_drained() -> Any:
             if self.scheduler.has_unfinished_requests():
                 return DEFERRED_NOT_READY
+            self._scheduler_pause_state = PauseState.PAUSE_KEEP
             if clear_cache:
                 self.reset_prefix_cache()
                 self.reset_mm_cache()
@@ -404,14 +426,14 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
-        self._scheduler_paused = False
+        self._scheduler_pause_state = PauseState.UNPAUSED
         for request, request_wave in self._paused_adds_queue:
             self.add_request(request, request_wave)
         self._paused_adds_queue.clear()
 
     def is_scheduler_paused(self) -> bool:
-        """Return whether the scheduler is currently paused (adds are queued)."""
-        return self._scheduler_paused
+        """Return whether the scheduler is in any pause state."""
+        return self._scheduler_pause_state != PauseState.UNPAUSED
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -466,8 +488,11 @@ class EngineCore:
         was executed.
         """
 
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
+        # If paused (abort/keep), don't schedule any work. PAUSE_WAIT allows step.
+        if self._scheduler_pause_state in (
+            PauseState.PAUSE_ABORT,
+            PauseState.PAUSE_KEEP,
+        ):
             return {}, False
 
         # Check for any requests remaining in the scheduler - unfinished,
@@ -520,8 +545,11 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
+        # If paused (abort/keep), don't schedule any work. PAUSE_WAIT allows step.
+        if self._scheduler_pause_state in (
+            PauseState.PAUSE_ABORT,
+            PauseState.PAUSE_KEEP,
+        ):
             return {}, False
 
         batch_queue = self.batch_queue
@@ -1110,7 +1138,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
-            and not self._scheduler_paused
+            and self._scheduler_pause_state == PauseState.UNPAUSED
             and not self._pending_utility_resolvers
         ):
             if self.input_queue.empty():

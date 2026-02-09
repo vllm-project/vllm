@@ -1645,6 +1645,16 @@ class Scheduler(SchedulerInterface):
         """Return all request IDs currently in the scheduler (running or waiting)."""
         return list(self.requests.keys())
 
+    def get_request_client_indices(self, request_ids: Iterable[str]) -> dict[str, int]:
+        """Return request_id -> client_index for requests that exist and are not
+        finished.
+        """
+        return {
+            rid: self.requests[rid].client_index
+            for rid in request_ids
+            if rid in self.requests and not self.requests[rid].is_finished()
+        }
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:

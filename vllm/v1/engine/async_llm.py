@@ -708,17 +708,12 @@ class AsyncLLM(EngineClient):
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
-        """Abort request(s) on the engine only.
-
-        Pass internal=True and internal request IDs (the ones the engine knows).
-        The engine aborts whichever of those it has and reports back via normal
-        output; requests not yet on the engine are left in queue. No client-side
-        resolution or cleanup; OutputProcessor is unchanged.
-        """
+        """Abort RequestId in OutputProcessor and EngineCore."""
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        await self.engine_core.abort_requests_async(request_ids)
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))

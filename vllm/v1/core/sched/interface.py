@@ -176,6 +176,14 @@ class SchedulerInterface(ABC):
         """Return all request IDs currently in the scheduler (running or waiting)."""
         raise NotImplementedError
 
+    def get_request_client_indices(
+        self, request_ids: "Iterable[str]"
+    ) -> "dict[str, int]":
+        """Return request_id -> client_index for requests that exist and are not
+        finished. Used to route abort outputs to the correct client(s).
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
