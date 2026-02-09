@@ -25,6 +25,8 @@ from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
+use_legacy_triton_kernels = False
+
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
@@ -42,8 +44,15 @@ if has_triton_kernels():
         )
         from triton_kernels.topk import topk
 
-        if not current_platform.is_rocm():
-            from triton_kernels.tensor import SparseMatrix, make_ragged_tensor_metadata
+        if current_platform.is_rocm():
+            try:
+                from triton_kernels.tensor import (
+                    SparseMatrix,
+                    make_ragged_tensor_metadata,
+                )
+            except ImportError:
+                logger.warning_once("Using legacy triton_kernels on ROCm")
+                use_legacy_triton_kernels = True
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -103,7 +112,7 @@ def legacy_routing_from_bitmatrix(
     Replacement for the removed triton_kernels.routing.routing_from_bitmatrix.
     Creates routing data from a bitmatrix representation.
     """
-    if current_platform.is_rocm():
+    if use_legacy_triton_kernels:
         from triton_kernels.routing import routing_from_bitmatrix
 
         return routing_from_bitmatrix(
@@ -138,7 +147,7 @@ def legacy_routing(
     Replacement for the removed triton_kernels.routing.routing function.
     Computes routing data from gating logits.
     """
-    if current_platform.is_rocm():
+    if use_legacy_triton_kernels:
         from triton_kernels.routing import routing
 
         return routing(logits, n_expts_act, sm_first=sm_first)
@@ -253,7 +262,7 @@ def triton_kernel_fused_experts(
             ),
             (swiglu_alpha, swiglu_limit),
         )
-        if not current_platform.is_rocm()
+        if not use_legacy_triton_kernels
         else FusedActivation(
             FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
             (swiglu_alpha, swiglu_limit),
@@ -323,7 +332,7 @@ def make_routing_data(
         Bitmatrix(
             bitmatrix, dtype=BIT, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max
         )
-        if not current_platform.is_rocm()
+        if not use_legacy_triton_kernels
         else Bitmatrix(
             bitmatrix,
             shape=bitmatrix_shape,
