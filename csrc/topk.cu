@@ -1,5 +1,7 @@
 // Portions of this file are adapted from SGLang PR:
 // https://github.com/sgl-project/sglang/pull/11194
+// and
+// https://github.com/sgl-project/sglang/pull/17747
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
@@ -22,7 +24,10 @@ constexpr int kThreadsPerBlock = 1024;  // Threads per block
 #if defined(USE_ROCM)
 constexpr size_t kSmem = 48 * 1024;  // ROCm default: 48KB
 #else
-constexpr size_t kSmem = 128 * 1024;  // CUDA: 128KB
+// Reduced from 128KB to 32KB to improve occupancy.
+// Each radix pass needs at most ~TopK candidates in the threshold bin,
+// so 4K entries per round (2 rounds = 8K entries = 32KB) is sufficient.
+constexpr size_t kSmem = 8 * 1024 * sizeof(uint32_t);  // 32KB (bytes)
 #endif
 
 struct FastTopKParams {
