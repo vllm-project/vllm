@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
 )
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -443,6 +444,7 @@ def download_gguf(
     return local_files[0]
 
 
+@instrument(span_name="Download weights - HF")
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,
@@ -799,8 +801,8 @@ def runai_safetensors_weights_iterator(
         yield from tensor_iter
 
 
-def _init_loader(
-    pg: torch.distributed.ProcessGroup,
+def _init_fastsafetensors_loader(
+    pg: "torch.distributed.ProcessGroup",
     device: torch.device,
     f_list: list[str],
     *,
@@ -823,13 +825,16 @@ def fastsafetensors_weights_iterator(
     else:
         pg = SingleGroup()
 
-    device = torch.device(f"cuda:{pg.rank()}")
+    device = torch.device(f"cuda:{current_platform.current_device()}")
     weight_files_sub_lists = [
         hf_weights_files[i : i + pg.size()]
         for i in range(0, len(hf_weights_files), pg.size())
     ]
 
-    nogds = False
+    # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
+    # initializes the GDS DMA subsystem for all visible GPUs, creating
+    # unwanted CUDA contexts on every device.
+    nogds = pg.size() > 1
 
     for f_list in tqdm(
         weight_files_sub_lists,
@@ -837,7 +842,7 @@ def fastsafetensors_weights_iterator(
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
     ):
-        loader = _init_loader(pg, device, f_list, nogds=nogds)
+        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
         try:
             try:
                 fb = loader.copy_files_to_device()
@@ -851,7 +856,7 @@ def fastsafetensors_weights_iterator(
                     "GDS not enabled, setting `nogds=True`.\n"
                     "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
                 )
-                loader = _init_loader(pg, device, f_list, nogds=nogds)
+                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
                 fb = loader.copy_files_to_device()
 
             try:
