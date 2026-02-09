@@ -239,8 +239,8 @@ class CudagraphDispatcher:
 
         Args:
             num_tokens: Number of tokens in the batch.
-            uniform_decode: Whether the batch is uniform decode (i.e. uniform
-                and query length is uniform_decode_query_len).
+            uniform_decode: Whether the batch is uniform decode (i.e. uniform and query
+                length is uniform_decode_query_len).
             has_lora: Whether LoRA is active.
             num_active_loras: Number of distinct active LoRA adapters.
             valid_modes: Set of cudagraph modes that are allowed. None means
