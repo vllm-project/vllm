@@ -26,12 +26,13 @@ PauseMode = Literal["abort", "wait", "keep"]
 
 
 class PauseState(enum.IntEnum):
-    """Engine scheduler pause state. All non-UNPAUSED states queue new adds.
+    """Engine scheduler pause state. All states besides UNPAUSED add
+    new requests to a queue that is flushed on resume.
 
     - UNPAUSED: Normal operation; step runs, adds go to scheduler.
-    - PAUSE_ABORT: Paused (no step); new adds queued until resume.
-    - PAUSE_KEEP: Paused (no step); new adds queued until resume.
-    - PAUSE_WAIT: Draining in-flight (step runs); new adds queued until resume.
+    - PAUSE_ABORT: Paused (no step)
+    - PAUSE_KEEP: Paused (no step)
+    - PAUSE_WAIT: Draining in-flight (step runs)
     """
 
     UNPAUSED = 0
@@ -186,9 +187,10 @@ class DeferredUtilityResult:
     """Return this from a utility handler to send the result later.
 
     Use when the utility cannot complete immediately (e.g. waiting for
-    requests to drain). The engine will call ``resolver`` every loop
-    until it returns a value other than :const:`DEFERRED_NOT_READY`,
-    then send that value via the output queue and remove the resolver.
+    requests to drain). The engine will call ``resolver`` at every step
+    in the busy loop until it returns a value other than
+    :const:`DEFERRED_NOT_READY`, then send that value via the output
+    queue and remove the resolver.
 
     Example::
 

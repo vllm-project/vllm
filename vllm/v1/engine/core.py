@@ -217,7 +217,8 @@ class EngineCore:
         # Pause state; all non-UNPAUSED states queue new adds in _paused_adds_queue.
         self._scheduler_pause_state = PauseState.UNPAUSED
         # Requests received while paused; flushed on resume_scheduler().
-        self._paused_adds_queue: list[tuple[Request, int]] = []
+        # Contains tuples of (request, request_wave)
+        self._paused_adds_queue: deque[tuple[Request, int]] = deque()
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -346,10 +347,10 @@ class EngineCore:
         )
         output_queue = getattr(self, "output_queue", None)
         if aborted_ids and output_queue is not None:
-            # Group aborted request IDs by client_index and send one output per client.
+            # Map client_index to list of request_ids that belong to that client.
             by_client: dict[int, list[str]] = {}
             for rid in aborted_ids:
-                client_idx = client_indices.get(rid, 0)
+                client_idx = client_indices[rid]
                 by_client.setdefault(client_idx, []).append(rid)
             for client_index, rids in by_client.items():
                 output_queue.put_nowait(
@@ -391,7 +392,6 @@ class EngineCore:
             self._scheduler_pause_state = PauseState.PAUSE_ABORT
             request_ids = self.scheduler.get_all_request_ids()
             output_queue = getattr(self, "output_queue", None)
-            size_before = output_queue.qsize() if output_queue is not None else 0
             if request_ids:
                 self.abort_requests(request_ids)
             if clear_cache:
@@ -400,7 +400,7 @@ class EngineCore:
                 self.reset_encoder_cache()
 
             def _resolve_when_abort_sent() -> Any:
-                if output_queue is None or output_queue.qsize() <= size_before:
+                if output_queue is None or output_queue.empty():
                     return None
                 return DEFERRED_NOT_READY
 
@@ -427,9 +427,8 @@ class EngineCore:
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
         self._scheduler_pause_state = PauseState.UNPAUSED
-        for request, request_wave in self._paused_adds_queue:
-            self.add_request(request, request_wave)
-        self._paused_adds_queue.clear()
+        while self._paused_adds_queue:
+            self.add_request(*self._paused_adds_queue.popleft())
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -1182,11 +1181,11 @@ class EngineCoreProc(EngineCore):
 
     def _process_pending_utility_resolvers(self) -> None:
         """Run deferred utility resolvers; send and remove any that complete."""
-        pending = getattr(self, "_pending_utility_resolvers", None)
-        if not pending:
+        current_resolvers = getattr(self, "_pending_utility_resolvers", None)
+        if not current_resolvers:
             return
-        still_pending: list[tuple[int, int, Callable[[], Any]]] = []
-        for client_idx, call_id, resolver in pending:
+        unfinished_resolvers: list[tuple[int, int, Callable[[], Any]]] = []
+        for client_idx, call_id, resolver in current_resolvers:
             try:
                 value = resolver()
             except BaseException as e:
@@ -1200,13 +1199,13 @@ class EngineCoreProc(EngineCore):
                 )
                 continue
             if value is DEFERRED_NOT_READY:
-                still_pending.append((client_idx, call_id, resolver))
-                continue
-            output = UtilityOutput(call_id, result=UtilityResult(value))
-            self.output_queue.put_nowait(
-                (client_idx, EngineCoreOutputs(utility_output=output))
-            )
-        self._pending_utility_resolvers[:] = still_pending
+                unfinished_resolvers.append((client_idx, call_id, resolver))
+            else:
+                output = UtilityOutput(call_id, result=UtilityResult(value))
+                self.output_queue.put_nowait(
+                    (client_idx, EngineCoreOutputs(utility_output=output))
+                )
+        self._pending_utility_resolvers = unfinished_resolvers
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
