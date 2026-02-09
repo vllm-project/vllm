@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1100,7 +1100,7 @@ class Scheduler(SchedulerInterface):
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
-            num_encoder_embeds = mm_feature.mm_position.get_num_embeds
+            num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
 
             # The encoder output is needed if the two ranges overlap:
