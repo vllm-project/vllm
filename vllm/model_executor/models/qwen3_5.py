@@ -247,10 +247,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             )
         )
 
-        set_weight_attrs(
-            self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(
-            self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         self.norm = RMSNormGated(
             self.head_v_dim,
@@ -472,8 +470,7 @@ class Qwen3_5Model(Qwen3NextModel):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -522,8 +519,7 @@ class Qwen3_5Model(Qwen3NextModel):
             ("experts.w2_weight", "experts.down_proj", 0, "w2"),
         ]
         num_experts = (
-            self.config.num_experts if hasattr(
-                self.config, "num_experts") else 0
+            self.config.num_experts if hasattr(self.config, "num_experts") else 0
         )
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -781,8 +777,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(
-                    prefix, "language_model")
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
         self.make_empty_intermediate_tensors = (
@@ -988,8 +983,7 @@ class Qwen3_5MoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(
-                    prefix, "language_model")
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
         self.make_empty_intermediate_tensors = (

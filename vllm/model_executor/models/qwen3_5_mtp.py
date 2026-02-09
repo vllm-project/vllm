@@ -205,8 +205,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             ("experts.w2_weight", "experts.down_proj", 0, "w2"),
         ]
         num_experts = (
-            self.config.num_experts if hasattr(
-                self.config, "num_experts") else 0
+            self.config.num_experts if hasattr(self.config, "num_experts") else 0
         )
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -322,6 +321,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
 
 @support_torch_compile(
     dynamic_arg_dims={
