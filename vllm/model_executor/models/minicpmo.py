@@ -75,10 +75,13 @@ from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
 
-if os.getenv("USE_FLAGOS") == "1":
+try:
     import flag_gems
+except ImportError:
+    flag_gems = None
 
-    FlagGemsConfig = [
+if flag_gems and os.getenv("USE_FLAGOS") == "1":
+    FLAG_GEMS_CONFIG = [
         "sort", "sort_stable", "layer_norm", "clamp_", "cos", "embedding",
         "exp", "exponential_", "full", "gather", "gelu", "index", "le", "lt",
         "lt_scalar", "masked_fill_", "max", "ones", "pow_scalar", "prod_dim",
@@ -86,8 +89,7 @@ if os.getenv("USE_FLAGOS") == "1":
         "sub", "true_divide", "true_divide_", "uniform_", "where_scalar_self",
         "where_self_out", "zeros", "zeros_like"
     ]
-
-    flag_gems.only_enable(record=False, include=FlagGemsConfig)
+    flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
