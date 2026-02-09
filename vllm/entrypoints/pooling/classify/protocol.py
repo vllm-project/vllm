@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import Field
 
@@ -48,12 +48,6 @@ class ClassificationCompletionRequest(
 class ClassificationChatRequest(
     PoolingBasicRequestMixin, ChatRequestMixin, ClassifyRequestMixin
 ):
-    # --8<-- [start:chat-classification-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
