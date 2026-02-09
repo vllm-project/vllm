@@ -95,9 +95,7 @@ def extract_world_size_and_kv_rank(
 
 
 def create_scheduler_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
+    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPSchedulerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -115,9 +113,7 @@ def create_scheduler_adapter(
 
 
 def create_worker_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
+    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPWorkerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -412,15 +408,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
-
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
-                server_url, zmq_context, vllm_config,
+                server_url, zmq_context, vllm_config
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
-                server_url, zmq_context, vllm_config,
+                server_url, zmq_context, vllm_config
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -540,7 +535,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
-        
+
         request_ids = []
         ops = []
         for meta in metadata.requests:
@@ -886,7 +881,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size,
+                request_tracker, blocks_per_chunk, self.vllm_block_size
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -912,7 +907,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size,
+                request_tracker, blocks_per_chunk, self.vllm_block_size
             )
 
             if r_meta is not None:
