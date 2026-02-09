@@ -33,9 +33,11 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import PoolingTask, SupportedTask
+from vllm.renderers.inputs import TokPrompt
+from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -48,7 +50,6 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        supported_tasks: tuple[SupportedTask, ...],
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -62,7 +63,6 @@ class OpenAIServingPooling(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
-        self.supported_tasks = supported_tasks
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
@@ -94,6 +94,7 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
+            engine_prompts: Sequence[PromptType | TokPrompt]
             if is_io_processor_request:
                 if self.io_processor is None:
                     raise ValueError(
@@ -105,14 +106,10 @@ class OpenAIServingPooling(OpenAIServing):
 
                 validated_prompt = self.io_processor.parse_request(request)
 
-                engine_prompts = await self.io_processor.pre_process_async(
+                raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                if not isinstance(engine_prompts, Sequence) or isinstance(
-                    engine_prompts, (str, bytes, bytearray)
-                ):
-                    engine_prompts = [engine_prompts]
-
+                engine_prompts = prompt_to_seq(raw_prompts)
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(
                     request_chat_template=request.chat_template,
@@ -152,32 +149,6 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()
 
-            pooling_task: PoolingTask
-            if request.task is None:
-                if "token_embed" in self.supported_tasks:
-                    pooling_task = "token_embed"
-                elif "token_classify" in self.supported_tasks:
-                    pooling_task = "token_classify"
-                elif "plugin" in self.supported_tasks:
-                    pooling_task = "plugin"
-                else:
-                    return self.create_error_response(
-                        f"pooling_task must be one of {self.supported_tasks}."
-                    )
-            else:
-                pooling_task = request.task
-
-            if pooling_task not in self.supported_tasks:
-                return self.create_error_response(
-                    f"Task {pooling_task} is not supported, it"
-                    f" must be one of {self.supported_tasks}."
-                )
-
-            try:
-                pooling_params.verify(pooling_task, self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
@@ -212,8 +183,7 @@ class OpenAIServingPooling(OpenAIServing):
 
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -251,8 +221,7 @@ class OpenAIServingPooling(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         return response
 

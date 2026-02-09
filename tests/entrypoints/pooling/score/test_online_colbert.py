@@ -138,17 +138,17 @@ def test_colbert_token_embed(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_colbert_embed_not_supported(server: RemoteOpenAIServer, model_name: str):
     """Test that ColBERT model does not support 'embed' task."""
+    task = "embed"
     text = "What is the capital of France?"
 
-    pooling_response = requests.post(
+    response = requests.post(
         server.url_for("pooling"),
         json={
             "model": model_name,
             "input": text,
-            "task": "embed",
+            "task": task,
         },
     )
 
-    # Should return error
-    assert pooling_response.status_code == 400
-    assert "Task embed is not supported" in pooling_response.text
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")

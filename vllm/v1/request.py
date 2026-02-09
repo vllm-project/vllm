@@ -74,6 +74,7 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        reasoning_ended: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -86,6 +87,8 @@ class Request:
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
         )
+        if self.structured_output_request is not None:
+            self.structured_output_request.reasoning_ended = reasoning_ended
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -195,6 +198,7 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            reasoning_ended=request.reasoning_ended,
         )
 
     def append_output_token_ids(
@@ -256,7 +260,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        return self.mm_features[input_id].mm_position.get_num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
         self,
