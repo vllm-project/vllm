@@ -53,6 +53,23 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+# Triton MoE kernels cause illegal memory access (IMA) when the number
+# of tokens exceeds ~65K.  See https://github.com/vllm-project/vllm/issues/5938
+MAX_SAFE_MOE_TOKENS = 65536
+
+
+def _check_moe_token_limit(num_tokens: int) -> None:
+    """Raise if num_tokens exceeds the safe limit for Triton MoE kernels."""
+    if num_tokens > MAX_SAFE_MOE_TOKENS:
+        raise ValueError(
+            f"Number of tokens ({num_tokens}) exceeds the maximum safe "
+            f"limit ({MAX_SAFE_MOE_TOKENS}) for Triton MoE kernels. "
+            f"This can cause an illegal memory access (IMA) error. "
+            f"Please enable chunked prefill "
+            f"(--enable-chunked-prefill) or reduce "
+            f"--max-num-batched-tokens to at most {MAX_SAFE_MOE_TOKENS}."
+        )
+
 
 @triton.jit
 def write_zeros_to_output(
@@ -1649,22 +1666,7 @@ def fused_experts_impl(
         global_num_experts = E
     top_k_num = topk_ids.size(1)
 
-    # Triton MoE kernels cause illegal memory access (IMA) when the number
-    # of tokens exceeds ~65K.  Previously we chunked the computation here
-    # (see https://github.com/vllm-project/vllm/issues/5938), but chunked
-    # prefill now guarantees that the scheduler never sends more tokens
-    # than this limit in a single forward pass.  If you hit this error,
-    # enable chunked prefill or reduce --max-num-batched-tokens.
-    MAX_SAFE_MOE_TOKENS = 65536
-    if num_tokens > MAX_SAFE_MOE_TOKENS:
-        raise ValueError(
-            f"Number of tokens ({num_tokens}) exceeds the maximum safe "
-            f"limit ({MAX_SAFE_MOE_TOKENS}) for Triton MoE kernels. "
-            f"This can cause an illegal memory access (IMA) error. "
-            f"Please enable chunked prefill "
-            f"(--enable-chunked-prefill) or reduce "
-            f"--max-num-batched-tokens to at most {MAX_SAFE_MOE_TOKENS}."
-        )
+    _check_moe_token_limit(num_tokens)
 
     M = num_tokens
 
@@ -1994,6 +1996,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states, w1, w2, topk_ids
         )
 
+        _check_moe_token_limit(num_tokens)
+
         if global_num_experts == -1:
             global_num_experts = E
 
@@ -2179,6 +2183,8 @@ class TritonWNA16Experts(TritonExperts):
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
+
+        _check_moe_token_limit(num_tokens)
 
         if global_num_experts == -1:
             global_num_experts = E
