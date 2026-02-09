@@ -119,9 +119,6 @@ class Worker(WorkerBase):
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner", scope="global")
-
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -239,6 +236,9 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+
+            if self.use_v2_model_runner:
+                logger.info_once("Using V2 Model Runner", scope="local")
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
