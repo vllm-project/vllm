@@ -230,6 +230,7 @@ class Platform:
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
         return ""

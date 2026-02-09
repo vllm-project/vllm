@@ -336,6 +336,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             block_size,
             use_mla=True,
             use_sparse=use_sparse,
+            num_heads=self.num_heads,
         )
 
         if (
