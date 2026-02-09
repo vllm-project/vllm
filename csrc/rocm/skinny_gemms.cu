@@ -11,7 +11,7 @@
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/w8a8/fp8/common.cuh"
+#include "stable/quantization/w8a8/fp8/common.cuh"
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that

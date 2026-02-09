@@ -4,8 +4,8 @@
  */
 
 // Include both AMD and NVIDIA fp8 types to avoid circular import
-#include <c10/util/Float8_e4m3fnuz.h>
-#include <c10/util/Float8_e4m3fn.h>
+#include <torch/headeronly/util/Float8_e4m3fnuz.h>
+#include <torch/headeronly/util/Float8_e4m3fn.h>
 
 namespace vllm {
 
