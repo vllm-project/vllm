@@ -71,6 +71,9 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # ZMQ socket for the engine registry, used for elastic EP events. This is
+    # the same socket as `handshake_address`, which the engine uses at startup.
+    engine_registry_address: str | None = None
 
 
 @dataclass
@@ -868,6 +871,7 @@ class EngineRegistry:
         proc_manager: CoreEngineProcManager | None,
         coord_process: Process | None,
     ):
+        self.handshake_address = handshake_address
         self.addresses = addresses
         self.core_engines = core_engines
         self.parallel_config = parallel_config
@@ -1005,8 +1009,11 @@ class EngineRegistry:
                     finished[coord_process.name] = coord_process.exitcode
                 if not finished:
                     # This can happen if scale down removed the process whose
-                    # sentinel we were waiting on, so we should just continue
-                    # waiting for other events.
+                    # sentinel we were waiting on, so we should unregister the
+                    # sentinels for finished processes and just continue waiting
+                    # for other events.
+                    for event in events:
+                        poller.unregister(event[0])
                     continue
                 raise RuntimeError(
                     "Engine core initialization failed. "
@@ -1017,7 +1024,21 @@ class EngineRegistry:
             # Receive messages from the input socket. These include:
             # - HELLO/READY: engine process handshake and readiness signals
             # - Registration messages from engine process managers
+            # - Scaling messages from the engine core client to notify engine
+            #   process managers of elastic scaling events
             eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+
+            # If this message is from the engine client, it must be a scaling
+            # message to notify engine process managers of elastic scaling
+            # events.
+            if check_engine_core_client_identity(eng_identity):
+                msg = msgspec.msgpack.decode(ready_msg_bytes)
+                logger.debug("Received scaling message from engine client: %s", msg)
+                self.notify_elastic_ep_event(
+                    msg["cur_data_parallel_size"],
+                    msg["new_data_parallel_size"],
+                )
+                continue
 
             # Check if this is a registration message from an engine process
             # manager, which has a different format for the identity.
@@ -1165,7 +1186,6 @@ def launch_core_engines(
         CoreEngineProcManager | CoreEngineActorManager | None,
         DPCoordinator | None,
         EngineZmqAddresses,
-        EngineRegistry | None,
     ]
 ]:
     """Launch engine and DP coordinator processes as needed."""
@@ -1236,7 +1256,7 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses, None
+        yield engine_actor_manager, coordinator, addresses
         return
 
     if offline_mode:
@@ -1270,6 +1290,7 @@ def launch_core_engines(
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port
     )
+    addresses.engine_registry_address = handshake_address
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
@@ -1309,7 +1330,7 @@ def launch_core_engines(
         coordinator.proc if coordinator else None,
     )
 
-    yield local_engine_manager, coordinator, addresses, registry_thread
+    yield local_engine_manager, coordinator, addresses
 
     # Now wait for engines to start.
     registry_thread.wait_for_engine_startup()
@@ -1318,12 +1339,15 @@ def launch_core_engines(
 def create_engine_proc_mgr_identity(start_index: int) -> bytes:
     """Construct engine proc manager identity.
 
-    The engine proc manager identity combines a unique start_index (upper
-    bits) with a constant lower half (0xFFFF) to distinguish it from
-    engine identities. Format: lower 16 bits are 0xFFFF, upper 16 bits
-    store the start_index. Examples: start_index=1 -> 0x0001FFFF,
+    The engine proc manager identity combines a unique start_index (upper 15
+    bits) with a constant lower half (0xFFFF) to distinguish it from engine
+    identities. Highest bit must be 0. Format: lower 16 bits are 0xFFFF, upper
+    15 bits store the start_index. Examples: start_index=1 -> 0x0001FFFF,
     start_index=2 -> 0x0002FFFF
     """
+    assert 0 <= start_index < (1 << 15), (
+        f"dp start index ({start_index}) must be in [0, 32767]"
+    )
     return (((1 << 16) - 1) | (start_index << 16)).to_bytes(4, "little")
 
 
@@ -1331,5 +1355,25 @@ def check_engine_proc_mgr_identity(identity: bytes) -> bool:
     """Check if the given identity belongs to an engine proc manager."""
     if identity is None or len(identity) != 4:
         return False
-    # Check if lower 16 bits are 0xFFFF
-    return identity[0] == 0xFF and identity[1] == 0xFF
+    # Lower 16 bits should be 0xFFFF
+    return identity[0] == 0xFF and identity[1] == 0xFF and (identity[3] & 0x80) == 0
+
+
+def create_engine_core_client_identity(client_index: int) -> bytes:
+    """Construct engine core client identity.
+
+    The identity format sets the highest bit to 1, uses the lower 16 bits
+    as a marker (0xFFFF), and stores client_index in the upper 15 bits.
+    """
+    assert 0 <= client_index < (1 << 15), (
+        f"engine core client index ({client_index}) must be in [0, 32767]"
+    )
+    return ((1 << 31) | ((1 << 16) - 1) | (client_index << 16)).to_bytes(4, "little")
+
+
+def check_engine_core_client_identity(identity: bytes) -> bool:
+    """Check if the given identity belongs to an engine core client."""
+    if identity is None or len(identity) != 4:
+        return False
+    # Highest bit should be 1 and lower 16 bits should be 0xFFFF
+    return identity[0] == 0xFF and identity[1] == 0xFF and (identity[3] & 0x80) != 0

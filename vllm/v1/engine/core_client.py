@@ -45,7 +45,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    EngineRegistry,
+    create_engine_core_client_identity,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -479,23 +479,24 @@ class MPClient(EngineCoreClient):
             self.engines_running = False
 
             self.stats_update_address: str | None = None
-            self.engine_registry: EngineRegistry | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                self.engine_registry_address = client_addresses.get(
+                    "engine_registry_address"
+                )
             else:
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class, log_stats) as (
                     engine_manager,
                     coordinator,
                     addresses,
-                    engine_registry,
                 ):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
-                    self.engine_registry = engine_registry
+                    self.engine_registry_address = addresses.engine_registry_address
 
                 (input_address,) = addresses.inputs
                 (output_address,) = addresses.outputs
@@ -1437,21 +1438,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         await asyncio.gather(*reconfig_futures)
 
-        assert self.resources.engine_manager is not None, (
-            "Engine manager should not be None when scaling down elastic EP"
-        )
         if self.vllm_config.parallel_config.data_parallel_backend == "ray":
+            assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
             self.resources.engine_manager.scale_down_elastic_ep(
                 cur_data_parallel_size, new_data_parallel_size
             )
         else:
-            assert self.engine_registry is not None, (
-                "Engine registry should not be None when scaling down elastic EP"
-            )
-            self.engine_registry.notify_elastic_ep_event(
-                cur_data_parallel_size,
-                new_data_parallel_size,
-            )
+            self.notify_elastic_ep_event(cur_data_parallel_size, new_data_parallel_size)
 
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
@@ -1464,3 +1457,25 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
         )
+
+    def notify_elastic_ep_event(self, cur_dp_size, new_dp_size):
+        assert self.engine_registry_address is not None, (
+            "Engine registry address should not be None when scaling down "
+            "elastic EP with non-ray DP backend"
+        )
+        with make_zmq_socket(
+            zmq.Context(),
+            self.engine_registry_address,
+            zmq.DEALER,
+            bind=False,
+            identity=create_engine_core_client_identity(self.client_index),
+            linger=5000,
+        ) as socket:
+            socket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "cur_data_parallel_size": cur_dp_size,
+                        "new_data_parallel_size": new_dp_size,
+                    }
+                )
+            )
