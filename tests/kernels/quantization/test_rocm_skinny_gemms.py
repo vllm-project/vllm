@@ -177,7 +177,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     ref_out = torch.matmul(A, B.t())
     out = ops.LLMM1(B, A, rows_per_block)
 
-    torch.testing.assert_close(out, ref_out, rtol=0.01)
+    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=0.01)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
@@ -194,7 +194,7 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
 
-    torch.testing.assert_close(out, ref_out, rtol=0.01)
+    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=0.01)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
@@ -213,7 +213,7 @@ def test_rocm_wvsplitk_bias1D_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    torch.testing.assert_close(out, ref_out, rtol=0.01)
+    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=0.01)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
@@ -232,7 +232,7 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    torch.testing.assert_close(out, ref_out, rtol=0.01)
+    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=0.01)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
