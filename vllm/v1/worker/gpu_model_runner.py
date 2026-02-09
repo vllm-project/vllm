@@ -2856,7 +2856,6 @@ class GPUModelRunner(
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
-        print(f"jcz _preprocess positions:{positions.shape} {positions}", flush=True)
         if is_first_rank:
             intermediate_tensors = None
         else:
@@ -4925,8 +4924,6 @@ class GPUModelRunner(
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
-            
-            print(f"jcz _dummy_run 1 positions:{positions.shape} {positions}", flush=True)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -4992,7 +4989,6 @@ class GPUModelRunner(
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
                     self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)
                 logger.info(f'jcz send dp_metadata_list in prepare input')
-                print(f"jcz _dummy_run 2 positions:{positions.shape} {positions}", flush=True)
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

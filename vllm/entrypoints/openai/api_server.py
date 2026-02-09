@@ -425,7 +425,6 @@ def setup_server(args):
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
-        logger.info(f"jcz create_server_socket sock_addr:{sock_addr}")
         sock = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
@@ -455,7 +454,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     decorate_logs("APIServer")
 
     listen_address, sock = setup_server(args)
-    logger.info(f"jcz run_server listen_address:{listen_address}")
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 

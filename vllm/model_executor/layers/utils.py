@@ -116,10 +116,6 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
-    print(f"jcz default_unquantized_gemm begin", flush=True)
-    print(f"jcz default_unquantized_gemm shape x:{x.shape} weight:{weight.shape} ", flush=True)
-    print(f"jcz default_unquantized_gemm dtype x:{x.dtype} weight:{weight.dtype}", flush=True)
-    print(f"jcz default_unquantized_gemm device x:{x.device} weight:{weight.device}", flush=True)
     return torch.nn.functional.linear(x, weight, bias)
 
 

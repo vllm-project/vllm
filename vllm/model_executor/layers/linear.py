@@ -601,18 +601,12 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        print(f"jcz ColumnParallelLinear input_:{input_.shape} type:{self.quant_method}", flush=True)
         output_parallel = self.quant_method.apply(self, input_, bias)
-        print(f"jcz ColumnParallelLinear output_parallel:{output_parallel.shape}", flush=True)
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
-            print(f"jcz ColumnParallelLinear all_gather", flush=True)
             output = tensor_model_parallel_all_gather(output_parallel)
-            print(f"jcz ColumnParallelLinear output:{output.shape}", flush=True)
         else:
             output = output_parallel
-            print(f"jcz ColumnParallelLinear output:{output.shape}", flush=True)
-        print(f"jcz ColumnParallelLinear end", flush=True)
         if not self.return_bias:
             return output
         output_bias = self.bias if self.skip_bias_add else None

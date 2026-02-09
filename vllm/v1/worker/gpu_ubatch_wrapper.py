@@ -326,12 +326,8 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-<<<<<<< HEAD
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                     afd_metadata=afd_metadata,
-=======
-                    afd_metadata=afd_metadata_clone,
->>>>>>> efbc0d799 (forward use ubatch multithread)
                 )
             )
 

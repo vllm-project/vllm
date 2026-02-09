@@ -219,13 +219,9 @@ class DeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        print(f"jcz DeepseekV2MLP 1 x:{x.shape}", flush=True)
         gate_up, _ = self.gate_up_proj(x)
-        print(f"jcz DeepseekV2MLP 2 gate_up:{gate_up.shape}", flush=True)
         x = self.act_fn(gate_up)
-        print(f"jcz DeepseekV2MLP 3 x:{x.shape}", flush=True)
         x, _ = self.down_proj(x)
-        print(f"jcz DeepseekV2MLP 4 x:{x.shape}", flush=True)
         return x
 
 
@@ -334,7 +330,6 @@ class DeepseekV2MoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        print(f"jcz DeepseekV2MoE begin hidden_states:{hidden_states.shape}", flush=True)
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -1016,11 +1011,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         }
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
-        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
-            print(f"jcz DeepseekV2DecoderLayer begin forward positions:{positions.shape} {positions} layer_idx:{self.layer_idx}", flush=True)
         hidden_states = self.self_attn(**attn_kwargs)
-        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
-            print(f"jcz DeepseekV2DecoderLayer end forward positions:{positions.shape} {positions} layer_idx:{self.layer_idx}", flush=True)
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1085,9 +1076,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def compute_ffn_output(self, hidden_states):
         assert self.afd_role == "ffn"
-        print(f"jcz deepseekv2 compute_ffn_output begin {type(self.mlp)}", flush=True)
         hidden_states = self.mlp(hidden_states)
-        print(f"jcz deepseekv2 compute_ffn_output end {type(self.mlp)}", flush=True)
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
             # Scaling the DeepseekV2MLP output, it is the input of
@@ -1159,8 +1148,6 @@ class DeepseekV2Model(nn.Module):
         afd_metadata: AFDMetadata,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
-            print(f"jcz forward_with_afd positions:{positions.shape} {positions}", flush=True)
         for layer_idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             afd_connector = afd_metadata.afd_connector
 
@@ -1265,8 +1252,6 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
-            print(f"jcz DeepseekV2Model forward positions:{positions.shape} {positions}", flush=True)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1462,8 +1447,6 @@ class DeepseekV2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
-            print(f"jcz DeepseekV2ForCausalLM forward positions:{positions.shape} {positions}", flush=True)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

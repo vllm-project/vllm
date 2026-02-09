@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
 from typing import Any, Literal
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -42,7 +42,7 @@ class AFDConfig:
     afd_server_rank: int = 0
     """Rank of this AFD server."""
 
-    afd_extra_config: dict[str, Any] = field(default_factory=dict)
+    afd_extra_config: dict[str, Any] = Field(default_factory=dict)
     """Extra configuration for specific AFD connectors."""
 
     def compute_hash(self) -> str:
