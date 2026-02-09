@@ -20,6 +20,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+    LMCacheKVEvents,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -117,13 +120,46 @@ class MultiConnectorKVEvents(KVConnectorKVEvents):
     def __init__(self, data: dict[str, KVConnectorKVEvents] | None = None):
         self._data = data or {}
 
+    def _create_kv_events_for_connector(
+        self, connector_name: str
+    ) -> KVConnectorKVEvents | None:
+        """
+        Factory method to create appropriate KVConnectorKVEvents instance.
+
+        Args:
+            connector_name: Name of the connector requiring event tracking
+
+        Returns:
+            KVConnectorKVEvents instance appropriate for the connector type or
+            None if none available
+        """
+        if connector_name == "LMCacheConnectorV1":
+            return LMCacheKVEvents(num_workers=1)
+        else:
+            return None
+
     def add_events(self, events: list[KVCacheEvent]) -> None:
         for event in events:
             assert isinstance(event, ConnectorKVCacheEvents)
 
             connector_name = event.connector_name
             if connector_name not in self._data:
-                continue
+                if new_connector_events := self._create_kv_events_for_connector(
+                    connector_name
+                ):
+                    self._data[connector_name] = new_connector_events
+                    self._data[connector_name].add_events(event.events)
+                    # Continue to avoid incrementing workers as already set it in
+                    # _create_kv_events_for_connector
+                    continue
+                else:
+                    logger.error(
+                        "Unable to process events for connector "
+                        "[%s] because it does not have an "
+                        "events class to handle the events.",
+                        connector_name,
+                    )
+                    continue
 
             self._data[connector_name].add_events(event.events)
             self._data[connector_name].increment_workers(1)
