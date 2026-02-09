@@ -18,7 +18,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
@@ -786,7 +786,7 @@ class InputProcessor:
             decoder_mm_positions = prompt_inputs["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds
+                    embed_length = mm_position.get_num_embeds()
                     if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "

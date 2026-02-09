@@ -40,6 +40,7 @@ from vllm.config import (
     DeviceConfig,
     ECTransferConfig,
     EPLBConfig,
+    KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -453,6 +454,7 @@ class EngineArgs:
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
@@ -536,6 +538,10 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
+    enable_flashinfer_autotune: bool = get_field(
+        KernelConfig, "enable_flashinfer_autotune"
+    )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -597,6 +603,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.kernel_config, dict):
+            self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
@@ -971,6 +979,9 @@ class EngineArgs:
             description=MultiModalConfig.__doc__,
         )
         multimodal_group.add_argument(
+            "--language-model-only", **multimodal_kwargs["language_model_only"]
+        )
+        multimodal_group.add_argument(
             "--limit-mm-per-prompt", **multimodal_kwargs["limit_per_prompt"]
         )
         multimodal_group.add_argument(
@@ -1165,6 +1176,17 @@ class EngineArgs:
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
 
+        # Kernel arguments
+        kernel_kwargs = get_kwargs(KernelConfig)
+        kernel_group = parser.add_argument_group(
+            title="KernelConfig",
+            description=KernelConfig.__doc__,
+        )
+        kernel_group.add_argument(
+            "--enable-flashinfer-autotune",
+            **kernel_kwargs["enable_flashinfer_autotune"],
+        )
+
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
@@ -1191,6 +1213,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
@@ -1282,6 +1305,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
+            language_model_only=self.language_model_only,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
@@ -1729,6 +1753,17 @@ class EngineArgs:
             else:
                 attention_config.backend = self.attention_backend
 
+        # Kernel config overrides
+        kernel_config = copy.deepcopy(self.kernel_config)
+        if self.enable_flashinfer_autotune is not None:
+            if kernel_config.enable_flashinfer_autotune is not None:
+                raise ValueError(
+                    "enable_flashinfer_autotune and "
+                    "kernel_config.enable_flashinfer_autotune "
+                    "are mutually exclusive"
+                )
+            kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1779,6 +1814,7 @@ class EngineArgs:
             device_config=device_config,
             load_config=load_config,
             attention_config=attention_config,
+            kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,
