@@ -628,7 +628,6 @@ class precompiled_wheel_utils:
                 commit=commit, variant=variant
             )
             if wheels is None or repo_url is None:
-                print(f"Using latest available nightly wheel with variant {variant}")
                 commit = "nightly"
                 wheels, repo_url = precompiled_wheel_utils.resolve_wheel_metadata(
                     commit=commit, variant=variant
