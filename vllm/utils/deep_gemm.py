@@ -91,14 +91,16 @@ def is_deep_gemm_e8m0_used() -> bool:
     _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
-        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
+        logger.info_once(
+            "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found", scope="local"
+        )
         return False
 
     if envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.", scope="local")
         return True
 
-    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.", scope="local")
     return False
 
 
@@ -242,7 +244,7 @@ def fp8_mqa_logits(
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
-    clean_logits: bool = False,
+    clean_logits: bool,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits for a single sequence without KV paging.
 
@@ -257,6 +259,7 @@ def fp8_mqa_logits(
             shape [M], dtype int32.
         cu_seqlen_ke: End indices (exclusive) for valid K per query position,
             shape [M], dtype int32.
+        clean_logits: Whether to clean the unfilled logits into `-inf`.
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
@@ -298,7 +301,7 @@ def fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
-    clean_logits: bool = False,
+    clean_logits: bool,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -316,7 +319,7 @@ def fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
-        clean_logits: Whether to clean the logits after computation.
+        clean_logits: Whether to clean the unfilled logits into `-inf`.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype

@@ -7,7 +7,6 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -15,17 +14,22 @@ import torch
 import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, StreamingInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.inputs import DictPrompt, TokPrompt
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -34,13 +38,12 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.utils import get_prompt_text
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -51,18 +54,6 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class StreamingInput:
-    """Input data for a streaming generation request.
-
-    This is used with generate() to support multi-turn streaming sessions
-    where inputs are provided via an async generator.
-    """
-
-    prompt: PromptType
-    sampling_params: SamplingParams | None = None
 
 
 class InputStreamError(Exception):
@@ -120,6 +111,10 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
+        tracing_endpoint = self.observability_config.otlp_traces_endpoint
+        if tracing_endpoint is not None:
+            init_tracer("vllm.llm_engine", tracing_endpoint)
+
         self.log_requests = log_requests
 
         custom_stat_loggers = list(stat_loggers or [])
@@ -146,10 +141,8 @@ class AsyncLLM(EngineClient):
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
-        endpoint = self.observability_config.otlp_traces_endpoint
-        if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
+        if tracing_endpoint is not None:
+            self.output_processor.tracing_enabled = True
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -177,6 +170,7 @@ class AsyncLLM(EngineClient):
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._paused = False
+        self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -283,12 +277,20 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = await self.engine_core.get_supported_tasks_async()
+
+        return self._supported_tasks
 
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -316,13 +318,20 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-        _validate_truncation_size(
-            self.model_config.max_model_len,
-            params.truncate_prompt_tokens,
-            tokenization_kwargs,
-        )
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.16. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
+            )
 
         if isinstance(prompt, AsyncGenerator):
             # Streaming input case.
@@ -356,14 +365,15 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                supported_tasks=await self.get_supported_tasks(),
             )
-            prompt_text = get_prompt_text(prompt)
+            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         self.input_processor.assign_request_id(request)
 
@@ -467,6 +477,7 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
+                    # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
@@ -479,7 +490,9 @@ class AsyncLLM(EngineClient):
                         raise ValueError(
                             "prompt_embeds not supported for streaming inputs"
                         )
-                    prompt_text = get_prompt_text(input_chunk.prompt)
+                    prompt_text, _, _ = extract_prompt_components(
+                        self.model_config, input_chunk.prompt
+                    )
                     await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
@@ -523,7 +536,11 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -618,7 +635,7 @@ class AsyncLLM(EngineClient):
                 except Exception as e2:
                     s = (
                         f"{e.__class__.__name__}: "
-                        + "error during printing an exception of class"
+                        "error during printing an exception of class"
                         + e2.__class__.__name__
                     )
                 logger.info("Request %s failed due to %s.", request_id, s)
@@ -712,7 +729,8 @@ class AsyncLLM(EngineClient):
     async def pause_generation(
         self,
         *,
-        wait_for_inflight_requests: bool = False,
+        mode: PauseMode = "abort",
+        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """
@@ -721,37 +739,64 @@ class AsyncLLM(EngineClient):
         New generation/encoding requests are blocked until resume.
 
         Args:
-            wait_for_inflight_requests: When ``True`` waits for in-flight
-                requests to finish before pausing. When ``False`` (default),
-                immediately aborts any in-flight requests.
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately
+                  (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
+            wait_for_inflight_requests: DEPRECATED: use mode argument.
+                Whether to wait for in-flight requests to complete before pausing.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
                 Default is ``True`` (clear caches).
+
         """
+        if wait_for_inflight_requests:
+            warnings.warn(
+                "The `wait_for_inflight_requests` parameter in "
+                "`AsyncLLM.pause_generation()` is deprecated. "
+                "Please use `mode` argument instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            mode = "wait"
 
-        async with self._pause_cond:
-            if self._paused:
-                return
-            self._paused = True
+        if mode == "keep":
+            # Freeze requests in the scheduler - they will resume on
+            # resume_generation().
+            await self.engine_core.pause_scheduler_async()
+        else:
+            if self._client_count > 1:
+                raise NotImplementedError(
+                    "pause_generation is not supported with --api-server-count > 1"
+                    " when mode is not 'keep'"
+                )
+            async with self._pause_cond:
+                if not self._paused:
+                    self._paused = True
 
-        if not wait_for_inflight_requests:
-            request_ids = list(self.output_processor.request_states.keys())
-            if request_ids:
-                await self.abort(request_ids, internal=True)
-
-        # Wait for running requests to drain before clearing cache.
-        if self.output_processor.has_unfinished_requests():
-            await self.output_processor.wait_for_requests_to_drain()
+                    if mode == "abort":
+                        request_ids = list(self.output_processor.request_states.keys())
+                        if request_ids:
+                            await self.abort(request_ids, internal=True)
+                    elif mode == "wait":
+                        if self.output_processor.has_unfinished_requests():
+                            await self.output_processor.wait_for_requests_to_drain()
+                    else:
+                        raise ValueError(f"Invalid mode: {mode}")
 
         # Clear cache
         if clear_cache:
             await self.reset_prefix_cache()
             await self.reset_mm_cache()
+            await self.reset_encoder_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
 
         async with self._pause_cond:
+            await self.engine_core.resume_scheduler_async()
             self._paused = False
             self._pause_cond.notify_all()  # Wake up all waiting requests
 
@@ -763,13 +808,12 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -784,22 +828,10 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         q: RequestOutputCollector | None = None
         try:
-            if truncate_prompt_tokens is not None:
-                warnings.warn(
-                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
-                    "is deprecated and will be removed in v0.15. "
-                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -863,7 +895,7 @@ class AsyncLLM(EngineClient):
         return self.input_processor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_processor.renderer
 
     async def is_tracing_enabled(self) -> bool:
@@ -900,6 +932,9 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
+
+    async def reset_encoder_cache(self) -> None:
+        await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
@@ -1021,3 +1056,44 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
+
+    async def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest
+    ) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+        from vllm.distributed.weight_transfer.base import (
+            WeightTransferInitRequest,
+        )
+
+        if isinstance(request, WeightTransferInitRequest):
+            init_info_dict = request.init_info
+        else:
+            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+
+        await self.collective_rpc(
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+        )
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """
+        Batched weight update for RL training.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+
+        if isinstance(request, WeightTransferUpdateRequest):
+            update_info_dict = request.update_info
+        else:
+            raise TypeError(
+                f"Expected WeightTransferUpdateRequest, got {type(request)}"
+            )
+
+        await self.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )

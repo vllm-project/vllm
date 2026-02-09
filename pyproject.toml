@@ -6,10 +6,10 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.9.1",
+    "torch == 2.10.0",
     "wheel",
     "jinja2",
-    "grpcio-tools>=1.76.0",
+    "grpcio-tools==1.78.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -72,6 +72,8 @@ select = [
     "UP",
     # flake8-bugbear
     "B",
+    # flake8-implicit-str-concat
+    "ISC",
     # flake8-simplify
     "SIM",
     # isort
@@ -99,13 +101,6 @@ docstring-code-format = true
 plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
-follow_imports = "silent"
-
-[[tool.mypy.overrides]]
-module = "vllm.compilation.*"
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-warn_return_any = true
 follow_imports = "silent"
 
 [tool.pytest.ini_options]
