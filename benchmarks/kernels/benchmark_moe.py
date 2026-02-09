@@ -735,6 +735,28 @@ def get_weight_block_size_safety(config, default_value=None):
     return default_value
 
 
+def get_quantization_group_size(config) -> int | None:
+    """Extract the quantization group size from the model config.
+
+    Supports AWQ-style configs (direct 'group_size' key) and
+    compressed-tensors configs (nested inside 'config_groups').
+    """
+    quantization_config = getattr(config, "quantization_config", {})
+    if not isinstance(quantization_config, dict):
+        return None
+    # AWQ / GPTQ style: group_size is a top-level key
+    gs = quantization_config.get("group_size")
+    if gs is not None:
+        return gs
+    # compressed-tensors style: group_size is nested in config_groups
+    for group_cfg in quantization_config.get("config_groups", {}).values():
+        weights = group_cfg.get("weights", {})
+        gs = weights.get("group_size")
+        if gs is not None:
+            return gs
+    return None
+
+
 def main(args: argparse.Namespace):
     print(args)
 
@@ -811,9 +833,17 @@ def main(args: argparse.Namespace):
     use_int4_w4a16 = args.dtype == "int4_w4a16"
     block_quant_shape = get_weight_block_size_safety(config)
     if use_int4_w4a16:
+        group_size = get_quantization_group_size(config)
+        if group_size is None:
+            raise ValueError(
+                "Could not determine group_size from model config. "
+                "The model's quantization_config must contain a 'group_size' "
+                "field (AWQ/GPTQ) or 'config_groups.*.weights.group_size' "
+                "(compressed-tensors)."
+            )
         # For int4_w4a16, block_shape = [0, group_size]
         # block_shape[0]=0 means no block quantization on N dimension
-        block_quant_shape = [0, args.group_size]
+        block_quant_shape = [0, group_size]
 
     if args.batch_size is None:
         batch_sizes = [
@@ -963,12 +993,6 @@ if __name__ == "__main__":
         type=str,
         choices=["auto", "fp8_w8a8", "int8_w8a16", "int4_w4a16"],
         default="auto",
-    )
-    parser.add_argument(
-        "--group-size",
-        type=int,
-        default=32,
-        help="Group size for int4_w4a16 quantization (default: 32)",
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument(
