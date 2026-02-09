@@ -54,7 +54,10 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         )
 
     async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
+        self,
+        audio_data: bytes,
+        request: TranscriptionRequest,
+        raw_request: Request | None = None,
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
@@ -124,7 +127,10 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         )
 
     async def create_translation(
-        self, audio_data: bytes, request: TranslationRequest, raw_request: Request
+        self,
+        audio_data: bytes,
+        request: TranslationRequest,
+        raw_request: Request | None = None,
     ) -> (
         TranslationResponse
         | TranslationResponseVerbose
