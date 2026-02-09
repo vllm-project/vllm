@@ -168,14 +168,24 @@ json2envs() {
 }
 
 wait_for_server() {
+  local timeout_val="${1:-1200}"
+  timeout "$timeout_val" bash -c '
+    until curl -sf http://localhost:8000/v1/models >/dev/null; do
+      sleep 1
+    done
+  '
+}
+
+
+#wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  local timeout_val="1200"
-  timeout "$timeout_val" bash -c '
-    until curl -X POST localhost:8000/v1/completions; do
-      sleep 1
-    done' && return 0 || return 1
-}
+#  local timeout_val="1200"
+#  timeout "$timeout_val" bash -c '
+#    until curl -X POST localhost:8000/v1/completions; do
+#      sleep 1
+#    done' && return 0 || return 1
+#}
 
 kill_processes_launched_by_current_bash() {
   # Kill all python processes launched from current bash script
