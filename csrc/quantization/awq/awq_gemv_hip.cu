@@ -24,8 +24,7 @@
 // Accumulates in fp32 for precision, supports SPLIT_K = 1, 2, 4, 8, 16
 // ============================================================================
 template <int OUTPUT_PER_THREAD, int SPLIT_K>
-__global__
-__launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
+__global__ __launch_bounds__(SPLIT_K * 32) void awq_gemv_kernel_splitk(
     const __half* __restrict__ activation,  // [K]
     const uint32_t* __restrict__ qweight,   // [K, N/8]
     const __half* __restrict__ scales,      // [K/G, N]
@@ -34,9 +33,8 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
     size_t M, size_t K, size_t N, size_t G) {
   static_assert(OUTPUT_PER_THREAD == 8,
                 "Split-K only supports OUTPUT_PER_THREAD=8");
-  static_assert(SPLIT_K == 1 || SPLIT_K == 2 || SPLIT_K == 4 || SPLIT_K == 8 ||
-                    SPLIT_K == 16,
-                "SPLIT_K must be 1, 2, 4, 8, or 16");
+  static_assert(SPLIT_K >= 1 && SPLIT_K <= 20,
+                "SPLIT_K must be between 1 and 20");
 
   // Thread organization: SPLIT_K splits of 32 threads each
   // SPLIT_K=2: 64 threads/block, SPLIT_K=4: 128 threads/block, SPLIT_K=8: 256
@@ -310,72 +308,101 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
 
   __syncthreads();
 
-  // Tree reduction across splits (in fp32)
-  // For SPLIT_K=2: one reduction step
-  // For SPLIT_K=4: two reduction steps
-  // For SPLIT_K=8: three reduction steps
-  // For SPLIT_K=16: four reduction steps
-  if constexpr (SPLIT_K >= 16) {
-    // Step 0: splits 0-7 add splits 8-15
-    if (split_id < 8) {
-      float* other_smem =
-          &smem_f[(split_id + 8) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+  // Helper: check if SPLIT_K is a power of 2
+  constexpr bool IS_POW2 = (SPLIT_K & (SPLIT_K - 1)) == 0;
+
+  if constexpr (IS_POW2) {
+    // Tree reduction across splits (in fp32)
+    // For SPLIT_K=2: one reduction step
+    // For SPLIT_K=4: two reduction steps
+    // For SPLIT_K=8: three reduction steps
+    // For SPLIT_K=16: four reduction steps
+    if constexpr (SPLIT_K >= 16) {
+      // Step 0: splits 0-7 add splits 8-15
+      if (split_id < 8) {
+        float* other_smem =
+            &smem_f[(split_id + 8) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    if constexpr (SPLIT_K >= 8) {
+      // Step 1: splits 0-3 add splits 4-7
+      if (split_id < 4) {
+        float* other_smem =
+            &smem_f[(split_id + 4) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    if constexpr (SPLIT_K >= 4) {
+      // Step 2: splits 0-1 add splits 2-3
+      if (split_id < 2) {
+        float* other_smem =
+            &smem_f[(split_id + 2) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    // Final step: split 0 adds split 1
+    if (split_id == 0) {
+      float* other_smem = &smem_f[1 * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                                  thread_in_split * OUTPUT_PER_THREAD];
+
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
         acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
       }
-    }
-    __syncthreads();
-  }
 
-  if constexpr (SPLIT_K >= 8) {
-    // Step 1: splits 0-3 add splits 4-7
-    if (split_id < 4) {
-      float* other_smem =
-          &smem_f[(split_id + 4) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+      // Write outputs (convert fp32 accumulators to fp16)
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-        acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
+        size_t col = col_start + i;
+        if (col < N) {
+          output[col] = __float2half(acc[i]);
+        }
       }
     }
-    __syncthreads();
-  }
+  } else {
+    // Non-power-of-2 SPLIT_K: serial reduction by split 0
+    // For SPLIT_K=5,10,20: split 0 sums all other splits' partial results.
+    // The reduction cost is negligible (SPLIT_K-1 additions of 8 floats each)
+    // compared to the main compute loop.
+    if (split_id == 0) {
+      for (int s = 1; s < SPLIT_K; s++) {
+        float* other_smem = &smem_f[s * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] += other_smem[i];
+        }
+      }
 
-  if constexpr (SPLIT_K >= 4) {
-    // Step 2: splits 0-1 add splits 2-3
-    if (split_id < 2) {
-      float* other_smem =
-          &smem_f[(split_id + 2) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+      // Write outputs (convert fp32 accumulators to fp16)
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-        acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
-      }
-    }
-    __syncthreads();
-  }
-
-  // Final step: split 0 adds split 1
-  if (split_id == 0) {
-    float* other_smem = &smem_f[1 * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                                thread_in_split * OUTPUT_PER_THREAD];
-
-  #pragma unroll
-    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-      acc[i] = my_smem[i] + other_smem[i];
-    }
-
-    // Write outputs (convert fp32 accumulators to fp16)
-  #pragma unroll
-    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-      size_t col = col_start + i;
-      if (col < N) {
-        output[col] = __float2half(acc[i]);
+        size_t col = col_start + i;
+        if (col < N) {
+          output[col] = __float2half(acc[i]);
+        }
       }
     }
   }
@@ -492,23 +519,44 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
     // Explicit split-k from Python config
     effective_splitk = split_k;
   } else {
-    // Fallback heuristic (safety net when no config is available)
-    if ((num_groups % 16 == 0) && N <= 4096) {
-      effective_splitk = 16;
-    } else if ((num_groups % 8 == 0) && N <= 16384) {
-      effective_splitk = 8;
-    } else if (num_groups % 4 == 0) {
-      effective_splitk = 4;
-    } else if (num_groups % 2 == 0) {
-      effective_splitk = 2;
+    // Fallback heuristic: find the largest divisor of num_groups (up to 20)
+    // that provides good parallelism without excessive overhead.
+    // Target: ~4-8 groups per split for good balance of parallelism vs.
+    // reduction overhead, scaled by N (larger N needs less K-parallelism).
+    int64_t target_groups_per_split;
+    if (N <= 4096) {
+      target_groups_per_split = 2;  // small N: maximize K-parallelism
+    } else if (N <= 16384) {
+      target_groups_per_split = 4;
     } else {
-      effective_splitk = 1;
+      target_groups_per_split = 5;  // large N: less K-parallelism needed
+    }
+    int64_t target_sk =
+        std::max(int64_t(1), num_groups / target_groups_per_split);
+    target_sk = std::min(target_sk, int64_t(20));
+
+    // Find the largest divisor of num_groups that is <= target_sk
+    effective_splitk = 1;
+    for (int64_t sk = target_sk; sk >= 1; sk--) {
+      if (num_groups % sk == 0) {
+        effective_splitk = sk;
+        break;
+      }
     }
   }
 
-  // Validate divisibility: fall back to lower split-k if needed
-  while (effective_splitk > 1 && num_groups % effective_splitk != 0) {
-    effective_splitk /= 2;
+  // Validate: effective_splitk must be in [1, 20] and divide num_groups.
+  // If not, find the largest value <= effective_splitk that divides num_groups.
+  effective_splitk = std::min(effective_splitk, int64_t(20));
+  if (effective_splitk < 1 || num_groups % effective_splitk != 0) {
+    int64_t orig = std::max(effective_splitk, int64_t(1));
+    effective_splitk = 1;  // safe default
+    for (int64_t sk = std::min(orig, int64_t(20)); sk >= 1; sk--) {
+      if (num_groups % sk == 0) {
+        effective_splitk = sk;
+        break;
+      }
+    }
   }
 
   // Helper to launch the kernel with a specific SPLIT_K
@@ -531,16 +579,61 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
             static_cast<size_t>(G));
   };
 
-  // Dispatch to the appropriate template instantiation
+  // Dispatch to the appropriate template instantiation (1-20)
   switch (effective_splitk) {
+    case 20:
+      launch.template operator()<20>();
+      break;
+    case 19:
+      launch.template operator()<19>();
+      break;
+    case 18:
+      launch.template operator()<18>();
+      break;
+    case 17:
+      launch.template operator()<17>();
+      break;
     case 16:
       launch.template operator()<16>();
+      break;
+    case 15:
+      launch.template operator()<15>();
+      break;
+    case 14:
+      launch.template operator()<14>();
+      break;
+    case 13:
+      launch.template operator()<13>();
+      break;
+    case 12:
+      launch.template operator()<12>();
+      break;
+    case 11:
+      launch.template operator()<11>();
+      break;
+    case 10:
+      launch.template operator()<10>();
+      break;
+    case 9:
+      launch.template operator()<9>();
       break;
     case 8:
       launch.template operator()<8>();
       break;
+    case 7:
+      launch.template operator()<7>();
+      break;
+    case 6:
+      launch.template operator()<6>();
+      break;
+    case 5:
+      launch.template operator()<5>();
+      break;
     case 4:
       launch.template operator()<4>();
+      break;
+    case 3:
+      launch.template operator()<3>();
       break;
     case 2:
       launch.template operator()<2>();

@@ -332,12 +332,22 @@ def main():
     parser.add_argument(
         "--peak-bw",
         type=float,
-        default=231.0,
-        help="Peak read bandwidth in GB/s (default: 214 for LPDDR5X-8000)",
+        default=None,
+        help="Peak read bandwidth in GiB/s (auto-detected if not set)",
+    )
+    parser.add_argument(
+        "--rep",
+        type=int,
+        default=200,
+        help="Number of repetitions for each benchmark (default: 200)",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=50,
+        help="Number of warmup iterations (default: 50)",
     )
     args = parser.parse_args()
-
-    PEAK_BW = args.peak_bw
 
     # Check GPU utilization early, before any GPU work (result printed in summary)
     gpu_idle, gpu_utilization, gpu_error = check_gpu_idle()
@@ -375,14 +385,21 @@ def main():
         (6144, 2560, 128),  # qkv fused (actual from profile)
         (19456, 2560, 128),  # gate_up_proj (9728 * 2)
         (2560, 9728, 128),  # down_proj
-        # Qwen2.5-7B (hidden=3584, intermediate=18944)
+        # Qwen2.5-VL-3B (hidden=2048, intermediate=11008)
+        (22016, 2048, 128),  # gate_up_proj (11008 * 2)
+        (2048, 11008, 128),  # down_proj
+        # Qwen2.5-7B / Qwen2.5-VL-7B (hidden=3584, intermediate=18944)
         (3584, 3584, 128),  # q/o proj
         (4608, 3584, 128),  # qkv fused (3584 + 512 + 512)
         (37888, 3584, 128),  # gate_up_proj (18944 * 2)
         (3584, 18944, 128),  # down_proj
-        # LLaMA2-7B shapes (hidden=4096, intermediate=11008)
+        (152064, 3584, 128),  # lm_head (Qwen2.5-VL-7B)
+        # LLaMA-3.1-8B (hidden=4096, intermediate=14336)
         (4096, 4096, 128),  # q/o proj
         (6144, 4096, 128),  # qkv fused (4096 + 1024 + 1024 for GQA)
+        (28672, 4096, 128),  # gate_up_proj (14336 * 2)
+        (4096, 14336, 128),  # down_proj
+        # LLaMA2-7B shapes (hidden=4096, intermediate=11008)
         (11008, 4096, 128),  # up_proj or gate_proj
         (12288, 4096, 128),  # qkv alternative
         (22016, 4096, 128),  # gate_up_proj (11008 * 2)
@@ -393,51 +410,134 @@ def main():
         (19456, 9728, 128),
     ]
 
-    # Best known performance (GB/s) for each shape (N, K, group_size)
-    # Used to detect performance regressions
-    # Updated: 2026-01-12 with hybrid pointer optimization (simplified ptr + memory barrier)
-    # Tolerance: 5% below reference triggers a warning
+    # =========================================================================
+    # Per-GPU reference performance (GiB/s) and peak bandwidth
+    # =========================================================================
+    # Best known performance (GiB/s) for each shape (N, K, group_size).
+    # Used to detect performance regressions.
+    # Tolerance: 5% below reference triggers a warning.
     PERF_TOLERANCE = 0.05  # 5% tolerance for measurement noise
-    BEST_KNOWN_PERF = {
-        # (N, K, group_size): best_known_gbps
-        # NOTE: Run benchmarks on idle GPU to establish baselines!
-        # Small shapes (N*K < 10M) have lower efficiency due to launch overhead
+
+    # Radeon 8060S (gfx1151): Strix Halo, 16 CUs, LPDDR5X-8000
+    # Updated: 2026-01-12 with hybrid pointer optimization
+    # NOTE: values established with return_mode="min", need re-baselining with "median"
+    BEST_KNOWN_PERF_8060S = {
+        # (N, K, group_size): best_known_gibs
+        # NOTE: values converted from GB/s, need re-baselining on 8060S
         #
         # Qwen2.5-0.5B-Instruct
-        (896, 896, 128): 21.6,
-        (1152, 896, 128): 25.7,
-        (9728, 896, 128): 149.0,
-        (896, 4864, 128): 60.0,
-        # Gemma-2B - small N shapes have lower efficiency
-        (2048, 2048, 128): 125.0,  # improved +14% with hybrid pointer opt
-        (2560, 2048, 128): 141.0,  # improved +5% with hybrid pointer opt
-        (32768, 2048, 128): 198.0,  # large N, good efficiency
-        (2048, 16384, 128): 199.0,  # improved +16% with hybrid pointer opt
-        # Qwen3-1.7B / Qwen3-VL-2B / Cosmos-Reason2-2B - all K divisible by 16
-        (4096, 2048, 128): 167.0,  # qkv fused, split_k=4 (~72% eff)
-        (12288, 2048, 128): 200.0,  # gate_up, large N (~87% eff)
-        (2048, 6144, 128): 174.0,  # improved +17% with hybrid pointer opt
+        (896, 896, 128): 20.1,
+        (1152, 896, 128): 23.9,
+        (9728, 896, 128): 138.8,
+        (896, 4864, 128): 55.9,
+        # Gemma-2B
+        (2048, 2048, 128): 116.4,
+        (2560, 2048, 128): 131.3,
+        (32768, 2048, 128): 184.4,
+        (2048, 16384, 128): 185.3,
+        # Qwen3-1.7B / Qwen3-VL-2B / Cosmos-Reason2-2B
+        (4096, 2048, 128): 155.5,
+        (12288, 2048, 128): 186.3,
+        (2048, 6144, 128): 162.0,
         # Qwen3-4B
-        (2560, 2560, 128): 86.0,  # improved +8% with hybrid pointer opt
-        (6144, 2560, 128): 188.0,  # improved +11% with hybrid pointer opt
-        (19456, 2560, 128): 218.0,  # large N, ~94% eff
-        (2560, 9728, 128): 190.0,  # improved +6% with hybrid pointer opt
-        # Qwen2.5-7B - padded for optimal split_k where overhead < 15%
-        (3584, 3584, 128): 163.0,  # small N, padded for split_k=7 (~71% eff)
-        (4608, 3584, 128): 162.0,  # improved +4% with hybrid pointer opt
-        (37888, 3584, 128): 218.0,  # large N, no padding needed
-        (3584, 18944, 128): 204.0,  # padded for split_k=37 (~88% eff)
+        (2560, 2560, 128): 80.1,
+        (6144, 2560, 128): 175.1,
+        (19456, 2560, 128): 203.0,
+        (2560, 9728, 128): 176.9,
+        # Qwen2.5-7B
+        (3584, 3584, 128): 151.8,
+        (4608, 3584, 128): 150.9,
+        (37888, 3584, 128): 203.0,
+        (3584, 18944, 128): 190.0,
         # LLaMA2-7B
-        (4096, 4096, 128): 187.0,
-        (6144, 4096, 128): 209.0,  # improved +3% with hybrid pointer opt
-        (11008, 4096, 128): 209.0,
-        (12288, 4096, 128): 215.0,
-        (22016, 4096, 128): 221.0,
-        (4096, 11008, 128): 194.0,
+        (4096, 4096, 128): 174.2,
+        (6144, 4096, 128): 194.6,
+        (11008, 4096, 128): 194.6,
+        (12288, 4096, 128): 200.2,
+        (22016, 4096, 128): 205.8,
+        (4096, 11008, 128): 180.7,
         # Additional
-        (2560, 4096, 128): 169.0,  # improved +4% with hybrid pointer opt
-        (19456, 9728, 128): 228.0,  # improved +1% with hybrid pointer opt
+        (2560, 4096, 128): 157.4,
+        (19456, 9728, 128): 212.3,
     }
+    PEAK_BW_8060S = 215.1  # GiB/s measured via copy benchmark (231 GB/s)
+
+    # Radeon 890M (gfx1150): Strix Point, 8 CUs, LPDDR5X-5600
+    # Updated: 2026-02-09, bench_cuda_events timing, min of 2 runs
+    BEST_KNOWN_PERF_890M = {
+        # (N, K, group_size): best_known_gibs
+        #
+        # Qwen2.5-0.5B-Instruct
+        (896, 896, 128): 6.7,
+        (1152, 896, 128): 8.4,
+        (9728, 896, 128): 44.3,
+        (896, 4864, 128): 26.2,
+        # Gemma-2B
+        (2048, 2048, 128): 45.9,
+        (2560, 2048, 128): 41.5,
+        (32768, 2048, 128): 73.5,
+        (2048, 16384, 128): 58.5,
+        # Qwen3-1.7B / Qwen3-VL-2B / Cosmos-Reason2-2B
+        (4096, 2048, 128): 53.1,
+        (12288, 2048, 128): 70.2,
+        (2048, 6144, 128): 61.5,
+        # Qwen3-4B
+        (2560, 2560, 128): 46.5,
+        (6144, 2560, 128): 63.3,
+        (19456, 2560, 128): 73.7,
+        (2560, 9728, 128): 63.4,
+        # Qwen2.5-VL-3B
+        (22016, 2048, 128): 73.7,
+        (2048, 11008, 128): 59.9,
+        # Qwen2.5-7B / Qwen2.5-VL-7B
+        (3584, 3584, 128): 62.0,
+        (4608, 3584, 128): 66.6,
+        (37888, 3584, 128): 77.3,
+        (3584, 18944, 128): 76.1,
+        (152064, 3584, 128): 79.1,
+        # LLaMA-3.1-8B
+        (4096, 4096, 128): 66.3,
+        (6144, 4096, 128): 62.0,
+        (28672, 4096, 128): 77.2,
+        (4096, 14336, 128): 76.7,
+        # LLaMA2-7B
+        (11008, 4096, 128): 74.5,
+        (12288, 4096, 128): 75.0,
+        (22016, 4096, 128): 75.5,
+        (4096, 11008, 128): 71.4,
+        # Additional
+        (2560, 4096, 128): 54.8,
+        (19456, 9728, 128): 74.3,
+    }
+    PEAK_BW_890M = 80.1  # GiB/s measured via copy benchmark (86 GB/s)
+
+    # --- Runtime GPU detection ---
+    gpu_name = torch.cuda.get_device_name(0)
+    if "8060" in gpu_name:
+        BEST_KNOWN_PERF = BEST_KNOWN_PERF_8060S
+        DEFAULT_PEAK_BW = PEAK_BW_8060S
+        gpu_profile = "Radeon 8060S"
+    elif "890M" in gpu_name:
+        BEST_KNOWN_PERF = BEST_KNOWN_PERF_890M
+        DEFAULT_PEAK_BW = PEAK_BW_890M
+        gpu_profile = "Radeon 890M"
+    else:
+        # Unknown GPU: no reference values, use conservative peak BW
+        BEST_KNOWN_PERF = {}
+        DEFAULT_PEAK_BW = 93.1  # ~100 GB/s in GiB/s
+        gpu_profile = f"Unknown ({gpu_name})"
+
+    PEAK_BW = args.peak_bw if args.peak_bw is not None else DEFAULT_PEAK_BW
+    print(f"GPU: {gpu_name}")
+    print(f"Performance profile: {gpu_profile}")
+    print(
+        f"Peak bandwidth: {PEAK_BW} GiB/s"
+        f"{' (auto)' if args.peak_bw is None else ' (override)'}"
+    )
+
+    # Bandwidth is reported in GiB/s (1 GiB = 1024^3 bytes)
+    # Given time in ms: GiB/s = bytes / (ms * 1e-3) / 1024^3
+    GIB_DIVISOR = 1024**3 / 1000  # multiply ms by this to get GiB denominator
 
     def calculate_bytes(K, N, group_size):
         """Calculate bytes moved for bandwidth calculation."""
@@ -740,6 +840,41 @@ def main():
 
         return qweight_padded, qzeros_padded, scales_padded, padded_K
 
+    # L2 cache flush buffer (64 MB > L2 size to ensure full flush)
+    flush_buf = torch.empty(64 * 1024 * 1024 // 4, dtype=torch.float32, device="cuda")
+
+    def bench_cuda_events(fn, warmup=50, rep=200):
+        """Benchmark using CUDA events for precise GPU-side timing.
+
+        Unlike triton.testing.do_bench which measures wall time (including
+        Python overhead), this measures only GPU kernel execution time.
+        Uses L2 cache flushing + trimmed mean (drop top/bottom 5%).
+        """
+        # Warmup
+        for _ in range(warmup):
+            flush_buf.zero_()
+            fn()
+        torch.cuda.synchronize()
+
+        # Benchmark
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        latencies = []
+        for _ in range(rep):
+            flush_buf.zero_()
+            torch.cuda.synchronize()
+            start_event.record()
+            fn()
+            end_event.record()
+            end_event.synchronize()
+            latencies.append(start_event.elapsed_time(end_event))  # ms
+
+        # Trimmed mean: drop top/bottom 5%
+        latencies.sort()
+        trim = max(1, len(latencies) // 20)
+        trimmed = latencies[trim:-trim]
+        return sum(trimmed) / len(trimmed)
+
     def run_benchmark(shapes, include_autoawq=False, autoawq_module=None):
         """Run benchmarks for all shapes."""
         # GPU idle check moved to start of main() to avoid false positives
@@ -754,11 +889,11 @@ def main():
                 f"{'N':>6} x {'K':<6} | {'G':>4} | {'vLLM Triton':<20} | {'AutoAWQ CUDA':<20} | {'Speedup':>8}"
             )
             print(
-                f"{'':>6}   {'':>6} | {'':>4} | {'GB/s':>8} {'Time':>10} | {'GB/s':>8} {'Time':>10} | {'':>8}"
+                f"{'':>6}   {'':>6} | {'':>4} | {'GiB/s':>8} {'Time':>10} | {'GiB/s':>8} {'Time':>10} | {'':>8}"
             )
         else:
             print(
-                f"{'N':>6} x {'K':<6} | {'G':>4} | {'Padded':>14} | {'Config':<22} | {'GB/s':>10} | {'Time':>10} | {'% Peak':>10} | {'vs Ref':>10}"
+                f"{'N':>6} x {'K':<6} | {'G':>4} | {'Padded':>14} | {'Config':<22} | {'GiB/s':>10} | {'Time':>10} | {'% Peak':>10} | {'vs Ref':>10}"
             )
         print("-" * 130)
 
@@ -815,10 +950,8 @@ def main():
                     input_for_bench, qweight, scales, qzeros, split_k_iters=8
                 )
 
-            ms_triton = triton.testing.do_bench(
-                run_triton, warmup=25, rep=100, return_mode="min"
-            )
-            bw_triton = bytes_moved / (ms_triton * 1e6)  # Use original data size
+            ms_triton = bench_cuda_events(run_triton, warmup=args.warmup, rep=args.rep)
+            bw_triton = bytes_moved / (ms_triton * GIB_DIVISOR)
             pct_peak = bw_triton / PEAK_BW * 100
 
             if can_run_autoawq:
@@ -832,10 +965,10 @@ def main():
                         input_tensor, kernel_awq, scales_awq, zeros_awq, group_size
                     )
 
-                ms_autoawq = triton.testing.do_bench(
-                    run_autoawq, warmup=25, rep=100, return_mode="min"
+                ms_autoawq = bench_cuda_events(
+                    run_autoawq, warmup=args.warmup, rep=args.rep
                 )
-                bw_autoawq = bytes_moved / (ms_autoawq * 1e6)
+                bw_autoawq = bytes_moved / (ms_autoawq * GIB_DIVISOR)
                 speedup = ms_autoawq / ms_triton  # >1 means Triton is faster
 
                 print(
@@ -893,7 +1026,7 @@ def main():
             print("-" * 70)
             for N, K, G, actual, expected, ratio in regressions:
                 print(
-                    f"  {N}x{K} G={G}: {actual:.1f} GB/s vs {expected:.1f} GB/s expected ({ratio * 100:.0f}%)"
+                    f"  {N}x{K} G={G}: {actual:.1f} GiB/s vs {expected:.1f} GiB/s expected ({ratio * 100:.0f}%)"
                 )
             print("-" * 70)
             print(
@@ -974,10 +1107,10 @@ def main():
                             out = run()
                             diff = (out[0, :N] - output_ref[0, :N]).abs().max().item()
                             if diff < 0.1:
-                                ms = triton.testing.do_bench(
-                                    run, warmup=25, rep=100, return_mode="min"
+                                ms = bench_cuda_events(
+                                    run, warmup=args.warmup, rep=args.rep
                                 )
-                                bw = bytes_moved / (ms * 1e6)
+                                bw = bytes_moved / (ms * GIB_DIVISOR)
                                 if bw > best_bw:
                                     best_bw = bw
                                     best_config = f"block_n={block_n}, warps={num_warps}, split_k={split_k}"
@@ -985,7 +1118,7 @@ def main():
                             pass
 
             print(
-                f"  BEST: {best_bw:.1f} GB/s ({best_bw / PEAK_BW * 100:.1f}%), {best_config}"
+                f"  BEST: {best_bw:.1f} GiB/s ({best_bw / PEAK_BW * 100:.1f}%), {best_config}"
             )
 
     def calculate_gemm_bytes(M, K, N, group_size):
@@ -1013,7 +1146,7 @@ Tuning parameters from MI300 commit 1178c7f18:
 
 Strix Halo differences:
   - 16 CUs (vs 304 on MI300)
-  - ~256 GB/s LPDDR5X (vs ~5.3 TB/s HBM)
+  - ~238 GiB/s LPDDR5X (vs ~4.9 TiB/s HBM)
   - 64 MB L3 cache shared CPU/GPU
   - Higher memory latency -> may benefit from more pipeline stages
 """)
@@ -1046,7 +1179,7 @@ Strix Halo differences:
             print(f"M = {M}")
             print(f"{'=' * 130}")
             print(
-                f"{'N':>6} x {'K':<6} | {'Config':<50} | {'Time':>10} | {'TFLOPS':>8} | {'GB/s':>10} | {'% Peak':>8}"
+                f"{'N':>6} x {'K':<6} | {'Config':<50} | {'Time':>10} | {'TFLOPS':>8} | {'GiB/s':>10} | {'% Peak':>8}"
             )
             print("-" * 130)
 
@@ -1149,11 +1282,10 @@ Strix Halo differences:
                                                 continue
 
                                             # Benchmark
-                                            ms = triton.testing.do_bench(
+                                            ms = bench_cuda_events(
                                                 run,
-                                                warmup=10,
-                                                rep=50,
-                                                return_mode="min",
+                                                warmup=args.warmup,
+                                                rep=args.rep,
                                             )
                                             if ms < best_time:
                                                 best_time = ms
@@ -1164,7 +1296,7 @@ Strix Halo differences:
                                             pass
 
                 if best_correct:
-                    bw = bytes_moved / (best_time * 1e6)
+                    bw = bytes_moved / (best_time * GIB_DIVISOR)
                     tflops = flops / (best_time * 1e9)
                     pct_peak = bw / PEAK_BW * 100
                     print(
@@ -1244,7 +1376,9 @@ Based on benchmarking, consider these changes for Strix Halo:
         print("   Benchmark results may be inaccurate.")
 
     print(f"""
-Peak memory bandwidth: {PEAK_BW} GB/s (measured via copy benchmark)
+GPU: {gpu_name}
+Performance profile: {gpu_profile}
+Peak memory bandwidth: {PEAK_BW} GiB/s
 """)
 
     if args.autoawq:
