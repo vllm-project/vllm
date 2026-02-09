@@ -13,6 +13,11 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
+torch_npu = None
+with contextlib.suppress(ImportError):
+    import torch_npu as _torch_npu
+    torch_npu = _torch_npu
+
 if not current_platform.is_tpu() and not current_platform.is_xpu():
     try:
         import vllm._C
@@ -254,6 +259,15 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
+    if (torch_npu is not None and key is not None
+            and query.device.type == "npu" and key.device.type == "npu"):
+        if not query.is_contiguous():
+            query = query.contiguous()
+        if not key.is_contiguous():
+            key = key.contiguous()
+        torch_npu._npu_rotary_embedding(positions, query, key, head_size,
+                                        cos_sin_cache, is_neox)
+        return
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
 
@@ -263,11 +277,18 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
     input_contiguous = input.contiguous()
+    if torch_npu is not None and input_contiguous.device.type == "npu":
+        npu_out, _ = torch_npu.npu_rms_norm(input_contiguous, weight, epsilon)
+        out.copy_(npu_out)
+        return
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
+    if torch_npu is not None and input.device.type == "npu":
+        torch_npu.npu_add_rms_norm(input, residual, weight, epsilon)
+        return
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -309,7 +330,7 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: A boolean tensor indicating which tokens appear in the output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
-    if logits.is_cuda and logits.is_contiguous():
+    if logits.device.type == "cuda" and logits.is_contiguous():
         apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
                                         repetition_penalties)
     else:

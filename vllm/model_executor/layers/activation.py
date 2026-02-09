@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom activation functions."""
+import contextlib
 import math
 from typing import Optional
 
@@ -17,6 +18,11 @@ from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
 logger = init_logger(__name__)
+
+torch_npu = None
+with contextlib.suppress(ImportError):
+    import torch_npu as _torch_npu
+    torch_npu = _torch_npu
 
 
 @CustomOp.register("fatrelu_and_mul")
@@ -94,6 +100,11 @@ class SiluAndMul(CustomOp):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        if torch_npu is not None and x.device.type == "npu":
+            return torch_npu.npu_swiglu(x)
+        return self.forward_native(x)
 
 
 @CustomOp.register("mul_and_silu")
