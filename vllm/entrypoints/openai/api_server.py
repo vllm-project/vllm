@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -157,8 +156,7 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
-    args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...] | None = None
+    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
