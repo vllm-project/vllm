@@ -27,10 +27,10 @@ mistral_common[image,audio] >= 1.9.0 # required for voxtral test
 num2words # required for smolvlm test
 opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
-lm-eval[api]>=0.4.9.2 # required for model evaluation test
+lm-eval[api]>=0.4.10 # required for model evaluation test
 mteb>=1.38.11, <2 # required for mteb test
-transformers==4.57.5
-tokenizers==0.22.0
+transformers @ git+https://github.com/huggingface/transformers.git@main
+tokenizers==0.22.2
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
 bitsandbytes>=0.46.1

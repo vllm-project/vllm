@@ -78,7 +78,7 @@ def test_models(
     from packaging.version import Version
 
     installed = Version(transformers.__version__)
-    required = Version("5.0.0")
+    required = Version("5.2.0.dev0")
     if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
         pytest.skip(
             "MoE models with the Transformers modeling backend require "

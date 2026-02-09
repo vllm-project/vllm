@@ -98,7 +98,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
+    uv pip install accelerate pytest pytest_asyncio lm_eval[api] modelscope
 
 # install development dependencies (for testing)
 RUN uv pip install -e tests/vllm_test_utils

@@ -854,6 +854,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
         },
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "MiniCPMVBatchFeature is incompatible with its base class in "
+                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            )
+        },
         trust_remote_code=True,
     ),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(

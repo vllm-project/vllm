@@ -2,10 +2,8 @@
 #    uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match --torch-backend cu129 --python-platform x86_64-manylinux_2_28 --python-version 3.12
 absl-py==2.1.0
     # via rouge-score
-accelerate==1.0.1
-    # via
-    #   lm-eval
-    #   peft
+accelerate==1.1.0
+    # via peft
 aenum==3.1.16
     # via lightly
 affine==2.4.0
@@ -128,6 +126,7 @@ click==8.1.7
     #   ray
     #   schemathesis
     #   typer
+    #   typer-slim
     #   uvicorn
 click-plugins==1.1.1.2
     # via
@@ -144,7 +143,6 @@ colorama==0.4.6
     #   perceptron
     #   sacrebleu
     #   schemathesis
-    #   tqdm-multiprocess
 colorful==0.5.6
     # via ray
 colorlog==6.10.1
@@ -233,7 +231,6 @@ filelock==3.16.1
     #   huggingface-hub
     #   ray
     #   torch
-    #   transformers
     #   virtualenv
 fiona==1.10.1
     # via torchgeo
@@ -325,7 +322,7 @@ h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
-hf-xet==1.1.7
+hf-xet==1.2.0
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
@@ -338,9 +335,10 @@ httpcore==1.0.6
 httpx==0.27.2
     # via
     #   -r requirements/test.in
+    #   huggingface-hub
     #   perceptron
     #   schemathesis
-huggingface-hub==0.36.2
+huggingface-hub==1.4.1
     # via
     #   accelerate
     #   datasets
@@ -402,6 +400,7 @@ jinja2==3.1.6
     #   datamodel-code-generator
     #   flask
     #   genai-perf
+    #   lm-eval
     #   mlflow
     #   torch
 jiwer==3.0.5
@@ -466,7 +465,7 @@ lightning-utilities==0.14.3
     #   torchmetrics
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.9.2
+lm-eval==0.4.10
     # via -r requirements/test.in
 lxml==5.3.0
     # via
@@ -539,8 +538,6 @@ numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
-numexpr==2.10.1
-    # via lm-eval
 numpy==2.2.6
     # via
     #   -r requirements/test.in
@@ -564,12 +561,12 @@ numpy==2.2.6
     #   librosa
     #   lightly
     #   lightly-utils
+    #   lm-eval
     #   matplotlib
     #   mistral-common
     #   mlflow
     #   mteb
     #   numba
-    #   numexpr
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -730,10 +727,8 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.16.0
-    # via
-    #   -r requirements/test.in
-    #   lm-eval
+peft==0.18.1
+    # via -r requirements/test.in
 perceptron==0.1.4
     # via -r requirements/test.in
 perf-analyzer==0.1.0
@@ -812,8 +807,6 @@ pyasn1==0.6.1
     #   rsa
 pyasn1-modules==0.4.2
     # via google-auth
-pybind11==2.13.6
-    # via lm-eval
 pycocotools==2.0.8
     # via terratorch
 pycountry==24.6.1
@@ -966,7 +959,6 @@ requests==2.32.3
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
-    #   huggingface-hub
     #   lightly
     #   lm-eval
     #   mistral-common
@@ -978,7 +970,6 @@ requests==2.32.3
     #   schemathesis
     #   starlette-testclient
     #   tiktoken
-    #   transformers
 responses==0.25.3
     # via genai-perf
 rfc3339-validator==0.1.4
@@ -1065,6 +1056,7 @@ shapely==2.1.1
     #   torchgeo
 shellingham==1.5.4
     # via
+    #   huggingface-hub
     #   perceptron
     #   typer
 six==1.16.0
@@ -1159,7 +1151,7 @@ timm==1.0.17
     #   segmentation-models-pytorch
     #   terratorch
     #   torchgeo
-tokenizers==0.22.0
+tokenizers==0.22.2
     # via
     #   -r requirements/test.in
     #   transformers
@@ -1178,7 +1170,6 @@ torch==2.10.0+cu129
     #   kornia
     #   lightly
     #   lightning
-    #   lm-eval
     #   mteb
     #   open-clip-torch
     #   peft
@@ -1237,15 +1228,11 @@ tqdm==4.66.6
     #   pytorch-lightning
     #   segmentation-models-pytorch
     #   sentence-transformers
-    #   tqdm-multiprocess
     #   transformers
-tqdm-multiprocess==0.0.11
-    # via lm-eval
-transformers==4.57.5
+transformers @ git+https://github.com/huggingface/transformers.git@711f27972f1bdffc3b0f27b21a57416bc43a2a5b
     # via
     #   -r requirements/test.in
     #   genai-perf
-    #   lm-eval
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -1264,6 +1251,10 @@ typer==0.15.2
     # via
     #   fastsafetensors
     #   perceptron
+typer-slim==0.20.0
+    # via
+    #   huggingface-hub
+    #   transformers
 types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2
@@ -1281,6 +1272,7 @@ typing-extensions==4.15.0
     #   librosa
     #   lightning
     #   lightning-utilities
+    #   lm-eval
     #   mistral-common
     #   mlflow-skinny
     #   mteb
@@ -1298,6 +1290,7 @@ typing-extensions==4.15.0
     #   torch
     #   torchgeo
     #   typer
+    #   typer-slim
     #   typeshed-client
     #   typing-inspection
 typing-inspection==0.4.2
