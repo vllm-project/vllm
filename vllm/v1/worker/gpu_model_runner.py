@@ -3628,8 +3628,7 @@ class GPUModelRunner(
                 dp_metadata_list[0] = get_forward_context().dp_metadata
 
             # to support inequal AF,[ffn_size,ffn_size + min_size) send
-            logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
-            if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+            if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
                 self.afd_connector.send_dp_metadata_list(dp_metadata_list)
@@ -4985,8 +4984,7 @@ class GPUModelRunner(
                     dp_metadata_list[0] = get_forward_context().dp_metadata
 
                 # to support inequal AF,[ffn_size,ffn_size + min_size) send
-                logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
-                if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
                     self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)

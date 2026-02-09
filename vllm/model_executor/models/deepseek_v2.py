@@ -219,9 +219,13 @@ class DeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        print(f"jcz DeepseekV2MLP 1 x:{x.shape}", flush=True)
         gate_up, _ = self.gate_up_proj(x)
+        print(f"jcz DeepseekV2MLP 2 gate_up:{gate_up.shape}", flush=True)
         x = self.act_fn(gate_up)
+        print(f"jcz DeepseekV2MLP 3 x:{x.shape}", flush=True)
         x, _ = self.down_proj(x)
+        print(f"jcz DeepseekV2MLP 4 x:{x.shape}", flush=True)
         return x
 
 
@@ -330,6 +334,7 @@ class DeepseekV2MoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        print(f"jcz DeepseekV2MoE begin hidden_states:{hidden_states.shape}", flush=True)
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -1076,7 +1081,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def compute_ffn_output(self, hidden_states):
         assert self.afd_role == "ffn"
+        print(f"jcz deepseekv2 compute_ffn_output begin {type(self.mlp)}", flush=True)
         hidden_states = self.mlp(hidden_states)
+        print(f"jcz deepseekv2 compute_ffn_output end {type(self.mlp)}", flush=True)
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
             # Scaling the DeepseekV2MLP output, it is the input of

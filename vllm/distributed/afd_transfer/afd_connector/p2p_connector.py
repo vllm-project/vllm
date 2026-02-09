@@ -353,31 +353,29 @@ class P2PAFDConnector(AFDConnectorBase):
                 torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
             )
 
-        # When graph capturing, pre-allocate fixed recv buffers so each recv writes
-        # into the same buffer (required for CUDA graph capture).
+        # Pre-allocate fixed recv buffers so each recv writes into the same buffer
+        # (required for CUDA graph capture; also used in eager for consistency).
         # Key is (stage_idx, meta.size) so different shapes get separate buffers.
-        logger.info(f"jcz update_state_from_dp_metadata is_graph_capturing:{is_graph_capturing}")
-        if is_graph_capturing:
-            for stage_idx in range(num_of_stages):
-                meta = self._tensor_metadata_list[stage_idx]
-                buffer_key = (stage_idx, tuple(meta.size))
-                existing = self._recv_attn_buffers.get(buffer_key)
-                if (
-                    existing is not None
-                    and existing.shape == meta.size
-                    and existing.dtype == meta.dtype
-                    and existing.device == meta.device
-                ):
-                    logger.info(f"jcz update_state_from_dp_metadata existing is not None:{existing.shape} {buffer_key}")
-                    continue
-                logger.info(f"jcz update_state_from_dp_metadata existing is None:{buffer_key}")
-                self._recv_attn_buffers[buffer_key] = torch.empty(
-                    tuple(meta.size),
-                    dtype=meta.dtype,
-                    device=meta.device,
-                )
-        # When not capturing, we do not clear _recv_attn_buffers so that
-        # replayed graphs still have valid buffer addresses to write into.
+        for stage_idx in range(num_of_stages):
+            meta = self._tensor_metadata_list[stage_idx]
+            buffer_key = (stage_idx, tuple(meta.size))
+            existing = self._recv_attn_buffers.get(buffer_key)
+            if (
+                existing is not None
+                and existing.shape == meta.size
+                and existing.dtype == meta.dtype
+                and existing.device == meta.device
+            ):
+                logger.info(f"jcz update_state_from_dp_metadata existing buffer_key:{buffer_key}")
+                continue
+            logger.info(f"jcz update_state_from_dp_metadata not exist buffer_key:{buffer_key}")
+            self._recv_attn_buffers[buffer_key] = torch.empty(
+                tuple(meta.size),
+                dtype=meta.dtype,
+                device=meta.device,
+            )
+        # We do not clear _recv_attn_buffers so that replayed graphs still have
+        # valid buffer addresses to write into.
 
     # -------------------------------------------------------------------------
     #                                attn -> ffn
@@ -441,7 +439,7 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
         ref_tensor = None
-        if getattr(self, "is_graph_capturing", False):
+        if not self.config.model_config.enforce_eager:
             meta = self._tensor_metadata_list[ubatch_idx]
             buffer_key = (ubatch_idx, tuple(meta.size))
             ref_tensor = self._recv_attn_buffers.get(buffer_key)
