@@ -161,9 +161,7 @@ class NemotronHMoE(nn.Module):
         # Load balancing settings.
         self.enable_eplb = parallel_config.enable_eplb
 
-        self.n_redundant_experts = (
-            parallel_config.eplb_config.num_redundant_experts
-        )  # noqa: E501
+        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts  # noqa: E501
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -695,7 +693,6 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            should_add_loaded_param = True
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -717,11 +714,13 @@ class NemotronHModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
 
             # load other params
             else:
                 is_expert_weight = False
+                # Load expert weights with non batched format
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
@@ -753,64 +752,18 @@ class NemotronHModel(nn.Module):
                         return_success=True,
                     )
                     if success:
-                        name = name_mapped
+                        loaded_params.add(name_mapped)
                         break
                 else:
-                    # Todo - what about the third case
-                    # Todo - what is this shared_expert case? Do we need to handle it differently?
-                    if ".experts.down_proj" in name or ".experts.up_proj" in name:
-                        name_with_dot = name + "."
-                        print("@")
-                        for mapping in expert_params_mapping:
-                            param_name, weight_name, expert_id, shard_id = mapping
-
-                            if shard_id == "w3":
-                                continue
-                            # Add . since old format had a dot
-                            if (
-                                weight_name.replace(f".{expert_id}.", ".")
-                                not in name_with_dot
-                            ):
-                                continue
-
-                            is_expert_weight = True
-
-                            current_base_name = name_with_dot.replace(
-                                "experts.down_proj.",
-                                f"experts.{expert_id}.down_proj.weight",
-                            ).replace(
-                                "experts.up_proj.",
-                                f"experts.{expert_id}.up_proj.weight",
-                            )
-                            current_loaded_weight = loaded_weight[expert_id]
-
-                            name_mapped = current_base_name.replace(
-                                weight_name, param_name
-                            )
-
-                            if is_pp_missing_parameter(name_mapped, self):
-                                continue
-
-                            param = params_dict[name_mapped]
-                            # We should ask the weight loader to return success or not
-                            # here since otherwise we may skip experts with other
-                            # available replicas.
-                            weight_loader = typing.cast(
-                                Callable[..., bool], param.weight_loader
-                            )
-                            success = weight_loader(
-                                param,
-                                current_loaded_weight,
-                                name_mapped,
-                                shard_id=shard_id,
-                                expert_id=expert_id,
-                                return_success=True,
-                            )
-                            if success:
-                                should_add_loaded_param = False
-                                loaded_params.add(name_mapped)
-                                # We do all the mapping not just one since batched
-                                continue
+                    # Todo - can we detect better if this is a batched format?
+                    if self._is_batched_expert_weight(name, loaded_weight):
+                        self._load_batched_expert_params(
+                            expert_params_mapping,
+                            params_dict,
+                            loaded_params,
+                            name,
+                            loaded_weight,
+                        )
                         continue
                     # Check if it is a batched expert weight
                     # if so load it with the corresponding weight loader
@@ -825,10 +778,59 @@ class NemotronHModel(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
 
-            if should_add_loaded_param:
-                loaded_params.add(name)
         return loaded_params
+
+    def _get_weight_type(name: str) -> str | None:
+        if ".experts.down_proj" in name:
+            return "down_proj"
+        elif ".experts.up_proj" in name:
+            return "up_proj"
+        else:
+            raise ValueError(
+                f"Weight name {name} does not correspond to down_proj or up_proj"
+            )
+
+    def _is_batched_expert_weight(self, name: str, weight: torch.Tensor) -> bool:
+        if ".experts.down_proj" not in name and ".experts.up_proj" not in name:
+            return False
+        # Batched format has shape [num_experts, ...]
+        return weight.ndim >= 3 and weight.shape[0] == self.n_routed_experts
+
+    def _load_batched_expert_params(
+        self, expert_params_mapping, params_dict, loaded_params, name, loaded_weight
+    ) -> None:
+        # should be either down_proj or up_proj
+        weight_type = self._get_weight_type(name)
+        for mapping in expert_params_mapping:
+            param_name, weight_name, expert_id, shard_id = mapping
+
+            if weight_type not in weight_name:
+                continue
+
+            suffix = f"{param_name}weight"
+            name_mapped = name.replace(f"experts.{weight_type}", suffix)
+            current_loaded_weight = loaded_weight[expert_id]
+
+            if is_pp_missing_parameter(name_mapped, self):
+                continue
+
+            param = params_dict[name_mapped]
+            # We should ask the weight loader to return success or not
+            # here since otherwise we may skip experts with other
+            # available replicas.
+            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+            success = weight_loader(
+                param,
+                current_loaded_weight,
+                name_mapped,
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=True,
+            )
+            if success:
+                loaded_params.add(name_mapped)
 
 
 class NemotronHForCausalLM(
@@ -955,9 +957,7 @@ class NemotronHForCausalLM(
             self.num_moe_layers = len(self.moe_layers)
             self.num_logical_experts = example_moe.n_logical_experts
             self.num_physical_experts = example_moe.n_physical_experts
-            self.num_local_physical_experts = (
-                example_moe.n_local_physical_experts
-            )  # noqa: E501
+            self.num_local_physical_experts = example_moe.n_local_physical_experts  # noqa: E501
             self.num_routed_experts = example_moe.n_routed_experts
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
