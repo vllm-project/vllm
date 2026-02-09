@@ -44,15 +44,17 @@ if has_triton_kernels():
         )
         from triton_kernels.topk import topk
 
-        if current_platform.is_rocm():
-            try:
-                from triton_kernels.tensor import (
-                    SparseMatrix,
-                    make_ragged_tensor_metadata,
-                )
-            except ImportError:
+        try:
+            from triton_kernels.tensor import (
+                SparseMatrix,
+                make_ragged_tensor_metadata,
+            )
+        except ImportError:
+            if current_platform.is_rocm():
                 logger.warning_once("Using legacy triton_kernels on ROCm")
                 use_legacy_triton_kernels = True
+            else:
+                raise
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
