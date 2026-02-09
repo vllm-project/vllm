@@ -7,6 +7,8 @@ These tests verify that Whisper models can correctly load and use LoRA adapters
 for speech-to-text transcription tasks.
 """
 
+import pytest
+
 import vllm
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
@@ -20,6 +22,12 @@ WHISPER_MODEL = "openai/whisper-small"
 WHISPER_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
 
 # Note: whisper_lora_files fixture is defined in conftest.py
+
+
+@pytest.fixture(autouse=True)
+def use_spawn_for_whisper(monkeypatch):
+    """Whisper has issues with forked workers, use spawn instead."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
 def create_whisper_llm(enable_lora: bool = True, max_loras: int = 2):
