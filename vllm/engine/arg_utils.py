@@ -660,8 +660,14 @@ class EngineArgs:
         if os.path.isfile(self.torchao_config):
             self.hf_overrides["quantization_config_file"] = self.torchao_config
         else:
-            # Assume it's a JSON string
-            self.hf_overrides["quantization_config_dict_json"] = self.torchao_config
+            # Try to parse as JSON string first
+            try:
+                json.loads(self.torchao_config)
+                self.hf_overrides["quantization_config_dict_json"] = self.torchao_config
+            except json.JSONDecodeError:
+                # Not valid JSON, treat as file path
+                # (will raise FileNotFoundError later with clear message)
+                self.hf_overrides["quantization_config_file"] = self.torchao_config
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

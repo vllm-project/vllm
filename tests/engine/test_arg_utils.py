@@ -577,3 +577,19 @@ def test_torchao_config_merges_with_existing_hf_overrides():
     assert "some_key" in engine_args.hf_overrides
     assert engine_args.hf_overrides["some_key"] == "some_value"
     assert "quantization_config_dict_json" in engine_args.hf_overrides
+
+
+def test_torchao_config_invalid_path_treated_as_file():
+    """Test that invalid file path (not valid JSON) is treated as file path.
+
+    This ensures users get a clear FileNotFoundError instead of JSONDecodeError
+    when they have a typo in the file path.
+    """
+    invalid_path = "/nonexistent/path/to/config.json"
+    engine_args = EngineArgs(model="test-model", torchao_config=invalid_path)
+
+    assert engine_args.hf_overrides is not None
+    # Should be treated as file path, not JSON string
+    assert "quantization_config_file" in engine_args.hf_overrides
+    assert engine_args.hf_overrides["quantization_config_file"] == invalid_path
+    assert "quantization_config_dict_json" not in engine_args.hf_overrides
