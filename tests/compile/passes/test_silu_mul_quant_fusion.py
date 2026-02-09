@@ -10,7 +10,7 @@ import vllm.envs as envs
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
-from vllm._aiter_ops import IS_AITER_FOUND
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     FUSED_OPS,
@@ -186,7 +186,7 @@ CUDA_KERNELS = [
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
 EXTENDED_TESTCASES: list[tuple[type[Any], bool, None]] = [
-    (TestSiluMulGroupFp8QuantModel, False, None),
+    (TestSiluMulGroupFp8QuantModel, True, None),
 ]
 if current_platform.is_cuda():
     EXTENDED_TESTCASES.append((TestSiluMulNvfp4QuantModel, False, None))
@@ -216,6 +216,7 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: FP8ScaledMMLinearKernel | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
@@ -242,12 +243,15 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
         if IS_AITER_FOUND:
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
+
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
 
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
