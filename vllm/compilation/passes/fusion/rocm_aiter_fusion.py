@@ -587,17 +587,17 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            q, k, v, dummy = auto_functionalized(
+            results = auto_functionalized(
                 self.FUSED_OP,
-                q,
-                k,
-                v,
-                positions,
-                cos_sin_cache,
-                self.is_neox,
-                self.layer_name,
+                query=q,
+                key=k,
+                value=v,
+                positions=positions,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                layer_name=self.layer_name,
             )
-            return dummy, q, k, v
+            return results[0], results[1], results[2], v
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities

@@ -841,7 +841,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: str = "",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     This impl wraps the AITER call as well as fetching the KV cache and
     other attention metadata from the forward context. It also returns
@@ -924,7 +924,7 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     # especially since the RoPE would be inplace as well
 
     dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
-    return query, key, value, dummy
+    return dummy
 
 
 def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
@@ -935,12 +935,9 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: str = "",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    q_out = torch.empty_like(query)
-    k_out = torch.empty_like(key)
-    v_out = torch.empty_like(value)
+) -> torch.Tensor:
     dummy = torch.empty(0, device=query.device, dtype=query.dtype)
-    return q_out, k_out, v_out, dummy
+    return dummy
 
 
 # Global flag to ensure ops are registered only once

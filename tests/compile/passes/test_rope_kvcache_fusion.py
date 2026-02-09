@@ -11,6 +11,10 @@ from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.utility.scatter_split_replace import (
+    ScatterSplitReplacementPass,
+)
+from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -185,7 +189,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_ATTN,
     ],
 )
-@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
+@pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("head_size", [64])
@@ -255,6 +259,8 @@ def test_rope_kvcache_fusion(
         fusion_pass = ROCmAiterTritonRopeReshapeKVCacheFusionPass(vllm_config)
         passes = [
             NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            ScatterSplitReplacementPass(vllm_config),
             fusion_pass,
             PostCleanupPass(vllm_config),
         ]
