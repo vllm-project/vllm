@@ -54,6 +54,7 @@ class CPUWorker(Worker):
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        # Under numa binding some cores reserved for kv transfer in nixl_connector.py
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
