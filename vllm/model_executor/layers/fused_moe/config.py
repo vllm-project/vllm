@@ -494,6 +494,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "mxfp8",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -501,6 +502,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "int4",
+            "mxfp8",
         }
 
         if weight_dtype is None:
@@ -879,8 +881,11 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
-    is_sequence_parallel: bool  # whether sequence parallelism is used
     enable_eplb: bool  # whether to enable expert load balancing
+
+    @property
+    def is_sequence_parallel(self) -> bool:
+        return self.sp_size > 1
 
     @property
     def use_all2all_kernels(self):
@@ -1040,7 +1045,6 @@ class FusedMoEParallelConfig:
                 sp_size=sp_size_,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
-                is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
@@ -1061,7 +1065,6 @@ class FusedMoEParallelConfig:
             sp_size=sp_size_,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
-            is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
@@ -1081,7 +1084,6 @@ class FusedMoEParallelConfig:
             use_ep=False,
             all2all_backend="naive",
             enable_eplb=False,
-            is_sequence_parallel=False,
         )
 
 
