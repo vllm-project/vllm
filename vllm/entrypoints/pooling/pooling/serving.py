@@ -105,7 +105,9 @@ class OpenAIServingPooling(OpenAIServing):
                 validated_prompt = self.io_processor.parse_data(request.data)
 
                 raw_prompts = await self.io_processor.pre_process_async(
-                    prompt=validated_prompt, request_id=request_id
+                    prompt=validated_prompt,
+                    request_id=request_id,
+                    renderer=self.renderer,
                 )
                 engine_prompts = await self._preprocess_cmpl(
                     request,
