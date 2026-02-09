@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -185,7 +185,13 @@ class Scheduler(SchedulerInterface):
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience
-        # Example: https://github.com/neuralmagic/bart-plugin
+        # Example: https://github.com/vllm-project/bart-plugin
+        if self.is_encoder_decoder:
+            assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
+                "Encoder-decoder models are expected to implement the "
+                "multimodal interface with at most one modality."
+            )
+
         self.max_num_encoder_input_tokens = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
@@ -200,7 +206,7 @@ class Scheduler(SchedulerInterface):
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
         self._num_encoder_max_input_tokens = (
             mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
-            if mm_budget
+            if mm_budget and mm_budget.mm_max_toks_per_item
             else 0
         )
 
@@ -1094,7 +1100,7 @@ class Scheduler(SchedulerInterface):
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
-            num_encoder_embeds = mm_feature.mm_position.get_num_embeds
+            num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
 
             # The encoder output is needed if the two ranges overlap:
