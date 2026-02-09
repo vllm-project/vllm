@@ -19,7 +19,6 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -31,6 +30,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    prepare_dcp_local_seq_lens,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -593,19 +593,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size > 1:
-            dcp_rank = get_dcp_group().rank_in_group
-            local_seq_lens = get_dcp_local_seq_lens(
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
                 seq_lens,
+                num_reqs,
                 dcp_size=dcp_size,
-                dcp_rank=dcp_rank,
+                dcp_rank=get_dcp_group().rank_in_group,
                 cp_kv_cache_interleave_size=(
                     self.parallel_config.cp_kv_cache_interleave_size
                 ),
             )
-            self.input_buffers.dcp_local_seq_lens[:num_reqs].copy_(
-                local_seq_lens, non_blocking=True
-            )
-            self.input_buffers.dcp_local_seq_lens[num_reqs:].zero_()
 
         # Prepare M-RoPE positions.
         if self.uses_mrope:

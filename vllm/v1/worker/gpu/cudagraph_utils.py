@@ -14,11 +14,11 @@ from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
+    prepare_dcp_local_seq_lens,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
@@ -265,16 +265,14 @@ def prepare_inputs_to_capture(
         dcp_world_size = 1
         dcp_rank = 0
     if dcp_world_size > 1:
-        local_seq_lens = get_dcp_local_seq_lens(
-            input_buffers.seq_lens[:num_reqs],
+        prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_buffers.seq_lens,
+            num_reqs,
             dcp_size=dcp_world_size,
             dcp_rank=dcp_rank,
             cp_kv_cache_interleave_size=block_tables.cp_kv_cache_interleave_size,
         )
-        input_buffers.dcp_local_seq_lens[:num_reqs].copy_(
-            local_seq_lens, non_blocking=True
-        )
-        input_buffers.dcp_local_seq_lens[num_reqs:] = 0
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
