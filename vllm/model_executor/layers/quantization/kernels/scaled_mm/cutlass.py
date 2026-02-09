@@ -185,7 +185,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return (
                 False,
                 "The device compute capability of"
-                "{compute_capability} is not supported.",
+                f"{compute_capability} is not supported.",
             )
         return True, None
 
