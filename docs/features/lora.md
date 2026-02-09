@@ -10,7 +10,7 @@ them locally with
 ```python
 from huggingface_hub import snapshot_download
 
-sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+sql_lora_path = snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")
 ```
 
 Then we instantiate the base model and pass in the `enable_lora=True` flag:
@@ -19,7 +19,7 @@ Then we instantiate the base model and pass in the `enable_lora=True` flag:
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
-llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_lora=True)
+llm = LLM(model="meta-llama/Llama-3.2-3B-Instruct", enable_lora=True)
 ```
 
 We can now submit the prompts and call `llm.generate` with the `lora_request` parameter. The first parameter
@@ -55,13 +55,10 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
 `--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kick off the server:
 
 ```bash
-vllm serve meta-llama/Llama-2-7b-hf \
+vllm serve meta-llama/Llama-3.2-3B-Instruct \
     --enable-lora \
-    --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
+    --lora-modules sql-lora=jeeejeee/llama32-3b-text2sql-spider
 ```
-
-!!! note
-    The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time. Please check the latest commit ID in your environment to ensure you are using the correct one.
 
 The server entrypoint accepts all other LoRA configuration parameters (`max_loras`, `max_lora_rank`, `max_cpu_loras`,
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
@@ -75,7 +72,7 @@ with its base model (if `jq` is not installed, you can follow [this guide](https
         "object": "list",
         "data": [
             {
-                "id": "meta-llama/Llama-2-7b-hf",
+                "id": "meta-llama/Llama-3.2-3B-Instruct",
                 "object": "model",
                 ...
             },
@@ -162,10 +159,12 @@ Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adap
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
 
-You can either install existing plugins or implement your own. By default, vLLM comes with a [resolver plugin to load LoRA adapters from a local directory.](https://github.com/vllm-project/vllm/tree/main/vllm/plugins/lora_resolvers)
-To enable this resolver, set `VLLM_ALLOW_RUNTIME_LORA_UPDATING` to True, set `VLLM_PLUGINS` to include `lora_filesystem_resolver`, and then set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request using a LoRA adapter `foobar`,
-it will first look in the local directory for a directory `foobar`, and attempt to load the contents of that directory as a LoRA adapter. If successful, the request will complete as normal and
-that adapter will then be available for normal use on the server.
+You can either install existing plugins or implement your own. By default, vLLM comes with a [resolver plugin to load LoRA adapters from a local directory, as well as a resolver plugin to load LoRA adapters from repositories on Hugging Face Hub](https://github.com/vllm-project/vllm/tree/main/vllm/plugins/lora_resolvers)
+To enable either of these resolvers, you must `set VLLM_ALLOW_RUNTIME_LORA_UPDATING` to True.
+
+- To leverage a local directory, set `VLLM_PLUGINS` to include `lora_filesystem_resolver` and set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request using a LoRA adapter `foobar`,
+it will first look in the local directory for a directory `foobar`, and attempt to load the contents of that directory as a LoRA adapter. If successful, the request will complete as normal and that adapter will then be available for normal use on the server.
+- To leverage repositories on Hugging Face Hub, set `VLLM_PLUGINS` to include `lora_hf_hub_resolver` and set `VLLM_LORA_RESOLVER_HF_REPO_LIST` to a comma separated list of repository IDs on Hugging Face Hub. When vLLM receives a request for the LoRA adapter `my/repo/subpath`, it will download the adapter at the `subpath` of `my/repo` if it exists and contains an `adapter_config.json`, then build a request to the cached dir for the adapter, similar to the `lora_filesystem_resolver`. Please note that enabling remote downloads is insecure and not intended for use in production environments.
 
 Alternatively, follow these example steps to implement your own plugin:
 
@@ -213,19 +212,37 @@ Alternatively, follow these example steps to implement your own plugin:
 
     For more details, refer to the [vLLM's Plugins System](../design/plugin_system.md).
 
+### In-Place LoRA Reloading
+
+When dynamically loading LoRA adapters, you may need to replace an existing adapter with updated weights while keeping the same name. The `load_inplace` parameter enables this functionality. This commonly occurs in asynchronous reinforcement learning setups, where adapters are continuously updated and swapped in without interrupting ongoing inference.
+
+When `load_inplace=True`, vLLM will replace the existing adapter with the new one.
+
+Example request to load or replace a LoRA adapter with the same name:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "my-adapter",
+    "lora_path": "/path/to/adapter/v2",
+    "load_inplace": true
+}'
+```
+
 ## New format for `--lora-modules`
 
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
 
 ```bash
---lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
+--lora-modules  sql-lora=jeeejeee/llama32-3b-text2sql-spider
 ```
 
 This would only include the `name` and `path` for each LoRA module, but did not provide a way to specify a `base_model_name`.
 Now, you can specify a base_model_name alongside the name and path using JSON format. For example:
 
 ```bash
---lora-modules '{"name": "sql-lora", "path": "/path/to/lora", "base_model_name": "meta-llama/Llama-2-7b"}'
+--lora-modules '{"name": "sql-lora", "path": "jeeejeee/llama32-3b-text2sql-spider", "base_model_name": "meta-llama/Llama-3.2-3B-Instruct"}'
 ```
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
@@ -234,7 +251,7 @@ To provide the backward compatibility support, you can still use the old key-val
 
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
 
-- The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
+- The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-3.2-3B-Instruct`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
 ??? console "Command output"
@@ -246,11 +263,11 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
         "object": "list",
         "data": [
             {
-            "id": "meta-llama/Llama-2-7b-hf",
+            "id": "meta-llama/Llama-3.2-3B-Instruct",
             "object": "model",
             "created": 1715644056,
             "owned_by": "vllm",
-            "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
+            "root": "meta-llama/Llama-3.2-3B-Instruct",
             "parent": null,
             "permission": [
                 {
@@ -263,8 +280,8 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
             "object": "model",
             "created": 1715644056,
             "owned_by": "vllm",
-            "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
-            "parent": meta-llama/Llama-2-7b-hf,
+            "root": "jeeejeee/llama32-3b-text2sql-spider",
+            "parent": "meta-llama/Llama-3.2-3B-Instruct",
             "permission": [
                 {
                 ....
@@ -277,7 +294,7 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 
 ## LoRA Support for Tower and Connector of Multi-Modal Model
 
-Currently, vLLM experimentally supports LoRA for the Tower and Connector components of multi-modal models. To enable this feature, you need to implement the corresponding token helper functions for the tower and connector. For more details on the rationale behind this approach, please refer to [PR 26674](https://github.com/vllm-project/vllm/pull/26674). We welcome contributions to extend LoRA support to additional models' tower and connector.
+Currently, vLLM experimentally supports LoRA for the Tower and Connector components of multi-modal models. To enable this feature, you need to implement the corresponding token helper functions for the tower and connector. For more details on the rationale behind this approach, please refer to [PR 26674](https://github.com/vllm-project/vllm/pull/26674). We welcome contributions to extend LoRA support to additional models' tower and connector. Please refer to [Issue 31479](https://github.com/vllm-project/vllm/issues/31479) to check the current model support status.
 
 ## Default LoRA Models For Multimodal Models
 

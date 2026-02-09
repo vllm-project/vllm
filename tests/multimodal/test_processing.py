@@ -9,8 +9,8 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import (
-    InputProcessingContext,
+from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
@@ -22,7 +22,6 @@ from vllm.multimodal.processing import (
     iter_token_matches,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import MultiModalProfiler
 
 from .utils import random_image
 
@@ -902,41 +901,6 @@ def test_find_mm_placeholders(
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
-    ("limit", "num_supported", "is_valid"),
-    [
-        (0, 0, True),
-        (0, 1, True),
-        (1, 0, False),
-        (1, 1, True),
-        (1, 2, True),
-        (2, 1, False),
-        (2, 2, True),
-    ],
-)
-def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
-    limit_mm_per_prompt = {"image": limit}
-
-    model_config = ModelConfig(
-        model=model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
-
-    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    processor._supported_mm_limits = {"image": num_supported}
-
-    profiler = MultiModalProfiler(processor)
-
-    exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
-
-    with exc_ctx:
-        profiler.get_decoder_dummy_data(
-            model_config.max_model_len,
-            mm_counts=limit_mm_per_prompt,
-        )
-
-
-@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
-@pytest.mark.parametrize(
     ("num_images", "limit", "is_valid"),
     [
         (0, 0, True),
@@ -972,9 +936,53 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     with exc_ctx:
         processor.apply(
             "<image>" * num_images,
-            mm_data=mm_data,
+            mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    ("user_limit", "supported_limit"),
+    [
+        (0, 0),
+        (0, 1),
+        (1, 0),  # user wants 1, model supports 0 → capped to 0
+        (1, 1),
+        (1, 2),
+        (2, 1),  # user wants 2, model supports 1 → capped to 1
+        (2, 2),
+        (5, 1),  # large user limit, low model support → capped to 1
+        (1, 5),
+        (10, 0),  # large user limit, no model support → capped to 0
+    ],
+)
+def test_budget_caps_prevent_dummy_input_validation_failure(
+    model_id, user_limit, supported_limit
+):
+    limit_mm_per_prompt = {"image": user_limit}
+
+    model_config = ModelConfig(
+        model=model_id,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
+
+    # This is what budget.py uses to derive mm_counts
+    allowed = processor.info.allowed_mm_limits
+
+    assert allowed["image"] <= supported_limit, (
+        f"allowed_mm_limits['image']={allowed['image']} exceeds "
+        f"supported_limit={supported_limit}"
+    )
+
+    assert allowed["image"] <= user_limit, (
+        f"allowed_mm_limits['image']={allowed['image']} exceeds user_limit={user_limit}"
+    )
+
+    assert allowed["image"] == min(user_limit, supported_limit)
 
 
 class DummyProcessor:
@@ -1021,9 +1029,8 @@ def test_hf_processor_init_kwargs(
         DummyProcessor,  # type: ignore[arg-type]
         **inference_kwargs,
     )
-
-    for k, v in expected_kwargs.items():
-        assert getattr(processor, k) == v
+    assert processor.a == expected_kwargs["a"]
+    assert processor.b == expected_kwargs["b"]
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy

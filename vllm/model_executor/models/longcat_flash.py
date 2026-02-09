@@ -236,9 +236,9 @@ class FlashMLP(nn.Module):
 class LongcatRouter(nn.Module):
     def __init__(
         self,
-        config,
-        zero_expert_num=0,
-        rounter_params_dtype=torch.bfloat16,
+        config: FlashConfig,
+        zero_expert_num: int,
+        rounter_params_dtype: torch.dtype,
         prefix: str = "",
     ):
         super().__init__()
@@ -309,6 +309,7 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
+            router_logits_dtype=self.rounter_params_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -520,7 +521,7 @@ class FlashModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -605,7 +606,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -626,6 +627,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

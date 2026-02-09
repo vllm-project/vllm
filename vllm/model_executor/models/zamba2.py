@@ -16,11 +16,11 @@ import torch
 from torch import nn
 from transformers import Zamba2Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -32,6 +32,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -86,7 +88,13 @@ class Zamba2LoRA(nn.Module):
             B_class = MergedColumnParallelLinear
         else:
             B_class = ColumnParallelLinear
-        self.B = B_class(rank, output_dim, bias=False, quant_config=quant_config)
+        self.B = B_class(
+            rank,
+            output_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.B",
+        )
 
     def forward(
         self,
@@ -346,6 +354,7 @@ class Zamba2MLP(nn.Module):
                     config.adapter_rank,
                     2 * [self.intermediate_size],
                     quant_config,
+                    prefix=f"{prefix}.gate_up_proj_adapter_list.{block_idx}",
                 )
             else:
                 gate_up_proj_adapter = nn.Identity()
@@ -762,7 +771,7 @@ class Zamba2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
@@ -884,6 +893,10 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         """Initialize the Zamba2 model for causal language modeling.
 
@@ -934,7 +947,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: Any,

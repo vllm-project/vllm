@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
@@ -85,11 +85,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: "DraftTokenIds", scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update scheduler output with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            scheduler_output: Update the given scheduler_output
+                with the corresponding draft token ids.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -168,12 +184,21 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings are not reused.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
     @abstractmethod
-    def make_stats(self) -> Optional["SchedulerStats"]:
+    def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
 
         The SchedulerStats object is created for every scheduling step.
@@ -185,5 +210,5 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
-    def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
+    def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None
