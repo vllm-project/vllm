@@ -494,8 +494,7 @@ class SpecDecodeBaseProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-        logits = self.model.compute_logits(sample_hidden_states)
-
+        
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             draft_token_ids = self.model.sample_chain(sample_hidden_states)
