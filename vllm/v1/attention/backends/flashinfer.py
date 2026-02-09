@@ -574,18 +574,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
-        # TRTLLM attention requires strictly contiguous KV cache tensors.
-        # When KV transfer (P/D disaggregation) is enabled, the KV cache may be
-        # permuted into non-contiguous views, which causes assertion failures.
         self._kv_transfer_enabled = vllm_config.kv_transfer_config is not None
-        if can_use_trtllm and self._kv_transfer_enabled:
-            logger.info_once(
-                "TRTLLM attention is disabled because KV transfer "
-                "(P/D disaggregation) is enabled. TRTLLM attention requires "
-                "strictly contiguous KV cache tensors which may not be "
-                "guaranteed with KV transfer."
-            )
-            can_use_trtllm = False
 
         if (
             can_use_trtllm
@@ -1446,7 +1435,6 @@ class FlashInferImpl(AttentionImpl):
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(prefill_query)
-                assert is_strictly_contiguous(kv_cache_permute)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_prefill)
                 assert is_strictly_contiguous(seq_lens_prefill)
@@ -1471,6 +1459,13 @@ class FlashInferImpl(AttentionImpl):
                     # and fp8 kv cache. So to enable prefill attention
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill
+                    #
+                    # The FP8 dequant Triton kernel computes strides from
+                    # shape, so it requires a strictly contiguous kv_cache.
+                    assert is_strictly_contiguous(kv_cache_permute), (
+                        "FP8 KV cache dequantization requires strictly "
+                        "contiguous kv_cache tensor"
+                    )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
                         block_tables_prefill,
@@ -1560,7 +1555,6 @@ class FlashInferImpl(AttentionImpl):
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(decode_query)
-                assert is_strictly_contiguous(kv_cache_permute)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
                 assert is_strictly_contiguous(seq_lens_decode)
