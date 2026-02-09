@@ -13,7 +13,7 @@ from torch.func import functional_call
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import LoadConfig, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -789,7 +789,8 @@ def get_draft_quant_config(
         The draft model's config if available, None otherwise.
     """
     draft_model_config = vllm_config.speculative_config.draft_model_config
-    draft_load_config = vllm_config.load_config
+    # Use LoadConfig() if load_config is None to prevent AttributeError
+    draft_load_config = vllm_config.load_config or LoadConfig()
 
     return (
         VllmConfig.get_quantization_config(draft_model_config, draft_load_config)

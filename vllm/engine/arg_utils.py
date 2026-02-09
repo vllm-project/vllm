@@ -592,6 +592,9 @@ class EngineArgs:
         "weight_transfer_config",
     )
 
+    # TorchAO quantization config - can be a JSON string or file path
+    torchao_config: str | None = None
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -608,6 +611,11 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+
+        # Process torchao_config and merge into hf_overrides
+        if self.torchao_config is not None:
+            self._merge_torchao_config()
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -632,6 +640,28 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
+
+    def _merge_torchao_config(self):
+        """Merge torchao_config into hf_overrides.
+
+        The torchao_config can be either a JSON string or a file path.
+        If it's a file path, set 'quantization_config_file' in hf_overrides.
+        If it's a JSON string, set 'quantization_config_dict_json' in hf_overrides.
+        """
+        import os
+
+        if self.hf_overrides is None:
+            self.hf_overrides = {}
+        elif isinstance(self.hf_overrides, str):
+            # hf_overrides might be a JSON string from CLI
+            self.hf_overrides = json.loads(self.hf_overrides)
+
+        # Check if torchao_config is a file path or JSON string
+        if os.path.isfile(self.torchao_config):
+            self.hf_overrides["quantization_config_file"] = self.torchao_config
+        else:
+            # Assume it's a JSON string
+            self.hf_overrides["quantization_config_dict_json"] = self.torchao_config
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -748,6 +778,14 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+        load_group.add_argument(
+            "--torchao-config",
+            type=str,
+            default=None,
+            help="TorchAO quantization config. Can be a JSON string or "
+            "a path to a JSON config file. The config will be merged "
+            "into hf_overrides for TorchAO quantization initialization.",
         )
 
         # Attention arguments

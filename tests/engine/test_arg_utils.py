@@ -523,3 +523,57 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_torchao_config_cli_arg_parser():
+    """Test that --torchao-config CLI argument is parsed correctly."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value should be None
+    args = parser.parse_args([])
+    assert args.torchao_config is None
+
+    # JSON string
+    json_config = '{"quant_type": {"default": {"_type": "int8_weight_only"}}}'
+    args = parser.parse_args(["--torchao-config", json_config])
+    assert args.torchao_config == json_config
+
+
+def test_torchao_config_merges_to_hf_overrides_json_string():
+    """Test that torchao_config JSON string is merged into hf_overrides."""
+    json_config = '{"quant_type": {"default": {"_type": "int8_weight_only"}}}'
+    engine_args = EngineArgs(model="test-model", torchao_config=json_config)
+
+    assert engine_args.hf_overrides is not None
+    assert "quantization_config_dict_json" in engine_args.hf_overrides
+    assert engine_args.hf_overrides["quantization_config_dict_json"] == json_config
+
+
+def test_torchao_config_merges_to_hf_overrides_file_path(tmp_path):
+    """Test that torchao_config file path is merged into hf_overrides."""
+    # Create a temporary config file
+    config_file = tmp_path / "torchao_config.json"
+    config_file.write_text('{"quant_type": {"default": {}}}')
+
+    engine_args = EngineArgs(model="test-model", torchao_config=str(config_file))
+
+    assert engine_args.hf_overrides is not None
+    assert "quantization_config_file" in engine_args.hf_overrides
+    assert engine_args.hf_overrides["quantization_config_file"] == str(config_file)
+
+
+def test_torchao_config_merges_with_existing_hf_overrides():
+    """Test that torchao_config merges with existing hf_overrides."""
+    json_config = '{"quant_type": {"default": {}}}'
+    existing_overrides = {"some_key": "some_value"}
+
+    engine_args = EngineArgs(
+        model="test-model",
+        hf_overrides=existing_overrides,
+        torchao_config=json_config,
+    )
+
+    assert engine_args.hf_overrides is not None
+    assert "some_key" in engine_args.hf_overrides
+    assert engine_args.hf_overrides["some_key"] == "some_value"
+    assert "quantization_config_dict_json" in engine_args.hf_overrides

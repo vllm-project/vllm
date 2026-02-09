@@ -458,8 +458,10 @@ class VocabParallelEmbedding(CustomOp):
 
         # Copy the data. Select chunk corresponding to current shard.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0] :].data.fill_(0)
+        # Do not use .data accessor to preserve TorchAO tensor subclass attributes
+        # (e.g., tensor_data_names) that are essential for quantization.
+        param[: loaded_weight.shape[0]].copy_(loaded_weight)
+        param[loaded_weight.shape[0] :].fill_(0)
 
     def forward_native(self, input_):
         if self.tp_size > 1:
