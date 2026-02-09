@@ -147,7 +147,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         block_hashes: list[bytes] | None = None,
         token_ids: list[int] | None = None,
-    ):
+    ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
