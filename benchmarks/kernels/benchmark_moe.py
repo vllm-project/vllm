@@ -221,34 +221,23 @@ def benchmark_config(
 
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
-        from vllm.model_executor.layers.fused_moe.config import (
-            int4_w4a16_moe_quant_config,
-        )
 
-        if use_int4_w4a16:
-            quant_config = int4_w4a16_moe_quant_config(
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=None,
-                w2_zp=None,
-                block_shape=block_quant_shape,
-            )
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
         else:
-            if use_fp8_w8a8:
-                quant_dtype = torch.float8_e4m3fn
-            elif use_int8_w8a16:
-                quant_dtype = torch.int8
-            else:
-                quant_dtype = None
+            quant_dtype = None
 
-            quant_config = FusedMoEQuantConfig.make(
-                quant_dtype=quant_dtype,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
-                block_shape=block_quant_shape,
-            )
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+            weight_dtype="int4" if use_int4_w4a16 else None,
+        )
 
         deep_gemm_experts = None
         if use_deep_gemm:
