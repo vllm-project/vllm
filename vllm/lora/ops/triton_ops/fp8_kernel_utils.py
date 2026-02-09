@@ -8,6 +8,66 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _accumulate_mm(
+    tiled_a,
+    tiled_b,
+    accumulator,
+    a_scale_ptr,
+    b_scale_ptr,
+    a_scale_k_stride,
+    b_scale_k_stride,
+    iter_k,
+    group_k: tl.constexpr,
+    group_n: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a8: tl.constexpr,
+    use_int8_w8a16: tl.constexpr,
+):
+    """
+    Core matrix multiplication and accumulation logic with quantization support.
+
+    Args:
+        tiled_a: Loaded tile from A matrix
+        tiled_b: Loaded tile from B matrix
+        accumulator: Current accumulator value
+        a_scale_ptr: Scale pointer for A matrix
+        b_scale_ptr: Scale pointer for B matrix
+        a_scale_k_stride: K dimension stride for A's block-wise scales
+        b_scale_k_stride: K dimension stride for B's block-wise scales
+        iter_k: Current iteration's global K offset
+        group_k: Block size for K dimension in block-wise quantization
+        group_n: Block size for N dimension in block-wise quantization
+        use_fp8_w8a8: Whether using FP8 W8A8 quantization
+        use_int8_w8a8: Whether using INT8 W8A8 quantization
+        use_int8_w8a16: Whether using INT8 W8A16 quantization
+
+    Returns:
+        Updated accumulator
+    """
+    if use_int8_w8a16:
+        accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
+    elif use_fp8_w8a8 or use_int8_w8a8:
+        if group_k > 0 and group_n > 0:
+            # Block-wise quantization: scales are loaded per block
+            offs_ks = iter_k // group_k
+            # a_scale_ptr is (BLOCK_M,) tensor of base pointers per row
+            # Load scale for current K-group, result shape: (BLOCK_M,)
+            a_scale = tl.load(a_scale_ptr + offs_ks * a_scale_k_stride)
+            # b_scale_ptr is (BLOCK_N,) tensor with N-offset pre-baked
+            # Load scale for current K-group, result shape: (BLOCK_N,)
+            b_scale = tl.load(b_scale_ptr + offs_ks * b_scale_k_stride)
+            accumulator += (
+                tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+            )
+        elif use_fp8_w8a8:
+            # Tensor-wise or per-channel: accumulate and scale at end
+            accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
+    else:
+        accumulator += tl.dot(tiled_a, tiled_b)
+    return accumulator
+
+
+@triton.jit
 def fp8_mm_k(
     a_ptr,
     b_ptr,
@@ -91,26 +151,21 @@ def fp8_mm_k(
             if CAST_TYPE:
                 tiled_a = tiled_a.to(b_dtype)
 
-            if use_int8_w8a16:
-                accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-            elif use_fp8_w8a8 or use_int8_w8a8:
-                if group_k > 0 and group_n > 0:
-                    # Block-wise quantization: scales are loaded per block
-                    offs_ks = iter_k // group_k
-                    # a_scale_ptr is (BLOCK_M,) tensor of base pointers per row
-                    # Load scale for current K-group, result shape: (BLOCK_M,)
-                    a_scale = tl.load(a_scale_ptr + offs_ks * a_scale_k_stride)
-                    # b_scale_ptr is (BLOCK_N,) tensor with N-offset pre-baked
-                    # Load scale for current K-group, result shape: (BLOCK_N,)
-                    b_scale = tl.load(b_scale_ptr + offs_ks * b_scale_k_stride)
-                    accumulator += (
-                        tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
-                    )
-                elif use_fp8_w8a8:
-                    # Tensor-wise or per-channel: accumulate and scale at end
-                    accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-            else:
-                accumulator += tl.dot(tiled_a, tiled_b)
+            accumulator = _accumulate_mm(
+                tiled_a,
+                tiled_b,
+                accumulator,
+                a_scale_ptr,
+                b_scale_ptr,
+                a_scale_k_stride,
+                b_scale_k_stride,
+                iter_k,
+                group_k,
+                group_n,
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+            )
         else:
             if iter_k >= K:
                 pass
@@ -122,26 +177,21 @@ def fp8_mm_k(
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
 
-                if use_int8_w8a16:
-                    accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                elif use_fp8_w8a8 or use_int8_w8a8:
-                    if group_k > 0 and group_n > 0:
-                        # Block-wise quantization: scales are loaded per block
-                        offs_ks = iter_k // group_k
-                        # a_scale_ptr is (BLOCK_M,) tensor of base pointers per row
-                        a_scale = tl.load(a_scale_ptr + offs_ks * a_scale_k_stride)
-                        # b_scale_ptr is (BLOCK_N,) tensor with N-offset pre-baked
-                        b_scale = tl.load(b_scale_ptr + offs_ks * b_scale_k_stride)
-                        accumulator += (
-                            tl.dot(tiled_a, tiled_b)
-                            * a_scale[:, None]
-                            * b_scale[None, :]
-                        )
-                    elif use_fp8_w8a8:
-                        # Tensor-wise or per-channel: accumulate and scale at end
-                        accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(tiled_a, tiled_b)
+                accumulator = _accumulate_mm(
+                    tiled_a,
+                    tiled_b,
+                    accumulator,
+                    a_scale_ptr,
+                    b_scale_ptr,
+                    a_scale_k_stride,
+                    b_scale_k_stride,
+                    iter_k,
+                    group_k,
+                    group_n,
+                    use_fp8_w8a8,
+                    use_int8_w8a8,
+                    use_int8_w8a16,
+                )
             else:
                 k_offsets = tl.arange(0, BLOCK_K)
                 mask = iter_k + k_offsets < K
@@ -152,26 +202,21 @@ def fp8_mm_k(
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
 
-                if use_int8_w8a16:
-                    accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                elif use_fp8_w8a8 or use_int8_w8a8:
-                    if group_k > 0 and group_n > 0:
-                        # Block-wise quantization: scales are loaded per block
-                        offs_ks = iter_k // group_k
-                        # a_scale_ptr is (BLOCK_M,) tensor of base pointers per row
-                        a_scale = tl.load(a_scale_ptr + offs_ks * a_scale_k_stride)
-                        # b_scale_ptr is (BLOCK_N,) tensor with N-offset pre-baked
-                        b_scale = tl.load(b_scale_ptr + offs_ks * b_scale_k_stride)
-                        accumulator += (
-                            tl.dot(tiled_a, tiled_b)
-                            * a_scale[:, None]
-                            * b_scale[None, :]
-                        )
-                    elif use_fp8_w8a8:
-                        # Tensor-wise or per-channel: accumulate and scale at end
-                        accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(tiled_a, tiled_b)
+                accumulator = _accumulate_mm(
+                    tiled_a,
+                    tiled_b,
+                    accumulator,
+                    a_scale_ptr,
+                    b_scale_ptr,
+                    a_scale_k_stride,
+                    b_scale_k_stride,
+                    iter_k,
+                    group_k,
+                    group_n,
+                    use_fp8_w8a8,
+                    use_int8_w8a8,
+                    use_int8_w8a16,
+                )
 
         a_ptr += STEP_K * ak_stride
         b_ptr += STEP_K * bk_stride
@@ -226,6 +271,7 @@ def do_shrink_kernel_fp8(
     use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """
     Given an array of integers that identifies the rows of A, ram,
@@ -343,7 +389,7 @@ def do_shrink_kernel_fp8(
         per_channel_quant,
         False,
         cur_lora_ptr.dtype.element_ty,
-        False,  # USE_GDC is always False in shrink kernel
+        USE_GDC,
         base_k=pid_sk * BLOCK_K,
     )
     # GDC launch dependents hints the runtime system to launch dependent kernels.
