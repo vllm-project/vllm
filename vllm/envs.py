@@ -273,7 +273,7 @@ def use_aot_compile() -> bool:
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.11.0.dev") and not disable_compile_cache()
         else "0"
     )
 

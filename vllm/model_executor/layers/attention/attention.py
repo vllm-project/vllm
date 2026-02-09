@@ -422,9 +422,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
+            kv_cache_dummy_dep = None
             if self.use_direct_call:
-                kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache_update:
+                # Skip this if sharing KV cache with an earlier attention layer.
+                if (
+                    not self.attn_backend.forward_includes_kv_cache_update
+                    and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
+                ):
                     kv_cache_dummy_dep = unified_kv_cache_update(
                         key, value, self.layer_name
                     )
@@ -437,10 +443,12 @@ class Attention(nn.Module, AttentionLayerBase):
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             else:
-                kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache_update and (
-                    # torch can only dispatch custom op if a tensor is passed
-                    key is not None or value is not None
+                # Skip this if sharing KV cache with an earlier attention layer.
+                if (
+                    not self.attn_backend.forward_includes_kv_cache_update
+                    and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
