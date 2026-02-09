@@ -247,8 +247,8 @@ class ModelConfig:
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
     """The token to use as HTTP bearer authorization for remote files . If
-    `True`, will use the token generated when running `huggingface-cli login`
-    (stored in `~/.huggingface`)."""
+    `True`, will use the token generated when running `hf auth login`
+    (stored in `~/.cache/huggingface/token`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
@@ -878,6 +878,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "modelopt_mxfp8",
                 "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
