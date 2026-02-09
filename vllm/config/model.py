@@ -297,6 +297,7 @@ class ModelConfig:
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
+    disable_mm_input: InitVar[bool | None] = None
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
@@ -411,6 +412,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
+        disable_mm_input: bool | None,
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
@@ -576,6 +578,7 @@ class ModelConfig:
                 mm_encoder_tp_mode = "weights"
 
             mm_config_kwargs = dict(
+                disable_mm_input=disable_mm_input,
                 limit_per_prompt=limit_mm_per_prompt,
                 enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,

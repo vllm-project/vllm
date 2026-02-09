@@ -54,8 +54,12 @@ DummyOptions: TypeAlias = (
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
+    disable_mm_input: bool = False
+    """If True, disables all multimodal inputs by setting all modality limits
+    to 0. Equivalent to setting --limit-mm-per-prompt to 0 for every
+    modality."""
     limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
-    """The maximum number of input items and options allowed per 
+    """The maximum number of input items and options allowed per
         prompt for each modality.
     Defaults to 999 for each modality.
 
@@ -63,11 +67,11 @@ class MultiModalConfig:
         {"image": 16, "video": 2}
 
     Configurable format (with options):
-        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512}, 
+        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512},
         "image": {"count": 5, "width": 512, "height": 512}}
 
     Mixed format (combining both):
-        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
+        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
     """
     enable_mm_embeds: bool = False
@@ -223,6 +227,9 @@ class MultiModalConfig:
         Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
+        if self.disable_mm_input:
+            return 0
+
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:
