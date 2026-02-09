@@ -80,6 +80,11 @@ class MultiModalConfig:
     for the OpenAI-compatible server, this refers to chat messages with content
     `"type": "*_embeds"`.
 
+    When enabled with `--limit-mm-per-prompt` set to 0 for a modality,
+    precomputed embeddings skip count validation for that modality, 
+    saving memory by not loading encoder modules while still enabling 
+    embeddings as an input. Limits greater than 0 still apply to embeddings.
+
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
     media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
