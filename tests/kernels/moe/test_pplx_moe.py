@@ -29,6 +29,7 @@ except ImportError:
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import _set_vllm_config
 from tests.kernels.moe.utils import (
+    make_dummy_moe_config,
     make_shared_experts,
     make_test_weights,
     naive_batched_moe,
@@ -44,8 +45,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
@@ -184,7 +185,7 @@ def test_fused_moe_batched_experts(
     dtype: torch.dtype,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -491,7 +492,7 @@ def test_pplx_prepare_finalize_slow(
     if per_act_token_quant and block_shape is not None:
         pytest.skip("Skip illegal quantization combination")
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
     device = "cuda"
@@ -584,12 +585,14 @@ def pplx_moe(
         max_num_tokens=max_num_tokens,
         num_dispatchers=prepare_finalize.num_dispatchers(),
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
 
     fused_experts = FusedMoEModularKernel(
         prepare_finalize,
         experts,
         shared_experts,
+        inplace=False,
     )
 
     # Note: for now use_compile will error out if the problem size is
@@ -809,7 +812,7 @@ def test_pplx_moe_slow(
     block_shape: list[int] | None,
     use_internode: bool,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
 
@@ -888,7 +891,7 @@ def _pplx_test_loop(
         new_vllm_config.parallel_config.enable_expert_parallel = True
         _set_vllm_config(new_vllm_config, pgi.world_size, pgi.rank, pgi.local_rank)
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     combos = itertools.product(
         PPLX_COMBOS, NUM_EXPERTS, TOP_KS, DTYPES, [False, True], [None, [128, 128]]
     )
@@ -982,7 +985,7 @@ def test_pplx_prepare_finalize(
     world_dp_size: tuple[int, int],
     use_internode: bool,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     parallel_launch(
         world_size * dp_size,
@@ -1005,7 +1008,7 @@ def test_pplx_moe(
     use_internode: bool,
     use_shared_experts: bool,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     parallel_launch(
         world_size,

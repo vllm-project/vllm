@@ -288,8 +288,8 @@ def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
     )
     cluster_shape = (
         f"{schedule_config.cluster_shape_mnk[0]}"
-        + f"x{schedule_config.cluster_shape_mnk[1]}"
-        + f"x{schedule_config.cluster_shape_mnk[2]}"
+        f"x{schedule_config.cluster_shape_mnk[1]}"
+        f"x{schedule_config.cluster_shape_mnk[2]}"
     )
     kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule].split(
         "::"
@@ -301,7 +301,7 @@ def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
 
     return (
         f"{tile_shape}_{cluster_shape}_{kernel_schedule}"
-        + f"_{epilogue_schedule}_{tile_scheduler}"
+        f"_{epilogue_schedule}_{tile_scheduler}"
     )
 
 

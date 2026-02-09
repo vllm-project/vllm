@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
@@ -26,8 +25,7 @@ MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 LoRAExtraVocabSize = Literal[256, 512]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -60,6 +58,13 @@ class LoRAConfig:
     of multimodal models will be enabled. This is an experimental feature and 
     currently only supports some MM models such as the Qwen VL series. The default 
     is False."""
+    specialize_active_lora: bool = False
+    """Whether to construct lora kernel grid by the number of active LoRA adapters.
+    When set to True, separate cuda graphs will be captured for different counts
+    of active LoRAs (powers of 2 up to max_loras), which can improve performance
+    for variable LoRA usage patterns at the cost of increased startup time and
+    memory usage. Only takes effect when cudagraph_specialize_lora is True.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -90,7 +95,7 @@ class LoRAConfig:
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})"
+                f"max_loras ({self.max_loras})."
             )
 
         return self

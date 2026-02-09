@@ -6,15 +6,20 @@ kernel. Both kernels take in fp8 quantized weights and 16-bit activations,
 but use different quantization strategies and backends.
 """
 
-import nvtx
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8
+from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.workspace import init_workspace_manager
 
 # Weight shapes for different models: [num_experts, topk, hidden_size,
 # intermediate_size]
@@ -58,6 +63,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
+    init_workspace_manager(torch.cuda.current_device())
     (m, k, n) = mkn
 
     dtype = torch.half
@@ -120,85 +126,6 @@ def bench_run(
     # Force per-tensor quantization for all cases
     per_act_token = False
 
-    # Create stride tensors for CUTLASS
-    ab_strides1 = torch.full((num_experts,), k, dtype=torch.int64, device=device)
-    ab_strides2 = torch.full((num_experts,), n, dtype=torch.int64, device=device)
-    c_strides1 = torch.full((num_experts,), 2 * n, dtype=torch.int64, device=device)
-    c_strides2 = torch.full((num_experts,), k, dtype=torch.int64, device=device)
-
-    def run_triton_moe(
-        a: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        a1_scale: torch.Tensor,
-        a2_scale: torch.Tensor,
-        num_repeats: int,
-    ):
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            per_act_token_quant=per_act_token,
-            per_out_ch_quant=per_out_ch,
-        )
-
-        for _ in range(num_repeats):
-            fused_experts(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
-            )
-
-    def run_cutlass_moe_fp8(
-        a: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        ab_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides1: torch.Tensor,
-        c_strides2: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        a1_scale: torch.Tensor,
-        a2_scale: torch.Tensor,
-        num_repeats: int,
-    ):
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            per_act_token_quant=per_act_token,
-            per_out_ch_quant=per_out_ch,
-        )
-
-        for _ in range(num_repeats):
-            with nvtx.annotate("cutlass_moe_fp8", color="blue"):
-                cutlass_moe_fp8(
-                    a=a,
-                    w1_q=w1,
-                    w2_q=w2,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    ab_strides1=ab_strides1,
-                    ab_strides2=ab_strides2,
-                    c_strides1=c_strides1,
-                    c_strides2=c_strides2,
-                    quant_config=quant_config,
-                    activation="silu",
-                    global_num_experts=num_experts,
-                )
-
     # Pre-create quantization config to avoid creating it inside CUDA graph
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
@@ -209,23 +136,31 @@ def bench_run(
         per_out_ch_quant=per_out_ch,
     )
 
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        CutlassExpertsFp8(
+            moe_config=make_dummy_moe_config(
+                num_experts=num_experts,
+                hidden_dim=k,
+                intermediate_size_per_partition=n,
+                in_dtype=a.dtype,
+            ),
+            quant_config=quant_config,
+        ),
+    )
+
     # Create CUDA graphs for CUTLASS (match benchmark_moe.py pattern exactly)
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(cutlass_graph, stream=cutlass_stream):
         # Capture 10 invocations like benchmark_moe.py
         for _ in range(10):
-            cutlass_moe_fp8(
-                a=a,
-                w1_q=w1_fp8q_cutlass,
-                w2_q=w2_fp8q_cutlass,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                ab_strides1=ab_strides1,
-                ab_strides2=ab_strides2,
-                c_strides1=c_strides1,
-                c_strides2=c_strides2,
-                quant_config=quant_config,
+            fn(
+                a,
+                w1_fp8q_cutlass,
+                w2_fp8q_cutlass,
+                topk_weights,
+                topk_ids,
                 activation="silu",
                 global_num_experts=num_experts,
             )
@@ -297,6 +232,10 @@ def bench_run(
 
 
 def main(args):
+    # Initialize workspace manager (required for CUTLASS MoE kernels)
+    device = torch.device("cuda:0")
+    init_workspace_manager(device)
+
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")

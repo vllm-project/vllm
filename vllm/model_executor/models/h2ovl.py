@@ -22,7 +22,7 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing.processor import (
     MultiModalProcessingInfo,
     PromptReplacement,
     PromptUpdate,

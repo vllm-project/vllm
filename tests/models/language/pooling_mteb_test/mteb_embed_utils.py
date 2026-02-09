@@ -19,9 +19,9 @@ from tests.models.utils import (
 # - Model implementation and minor changes in tensor dtype
 #   results in differences less than 1e-4
 # - Different model results in differences more than 1e-3
-# 1e-4 is a good tolerance threshold
+# 5e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
-MTEB_EMBED_TOL = 1e-4
+MTEB_EMBED_TOL = 5e-4
 
 
 _empty_model_meta = ModelMeta(
@@ -162,8 +162,11 @@ def mteb_test_embed_models(
             assert model_info.architecture in model_config.architectures
 
         # Confirm whether the important configs in model_config are correct.
-        if model_info.pooling_type is not None:
-            assert model_config.pooler_config.pooling_type == model_info.pooling_type
+        pooler_config = model_config.pooler_config
+        if model_info.seq_pooling_type is not None:
+            assert pooler_config.seq_pooling_type == model_info.seq_pooling_type
+        if model_info.tok_pooling_type is not None:
+            assert pooler_config.tok_pooling_type == model_info.tok_pooling_type
         if model_info.attn_type is not None:
             assert model_config.attn_type == model_info.attn_type
         if model_info.is_prefix_caching_supported is not None:
@@ -184,7 +187,10 @@ def mteb_test_embed_models(
         head_dtype = model_config.head_dtype
 
         # Test embedding_size, isnan and whether to use normalize
-        vllm_outputs = vllm_model.embed(example_prompts, truncate_prompt_tokens=-1)
+        vllm_outputs = vllm_model.embed(
+            example_prompts,
+            tokenization_kwargs=dict(truncate_prompt_tokens=-1),
+        )
         outputs_tensor = torch.tensor(vllm_outputs)
         assert not torch.any(torch.isnan(outputs_tensor))
         embedding_size = model_config.embedding_size

@@ -22,18 +22,18 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
-from .utils import make_test_weights
+from .utils import make_dummy_moe_config, make_test_weights
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
@@ -192,9 +192,13 @@ def make_ll_modular_kernel(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    return FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_ht_modular_kernel(
@@ -219,9 +223,15 @@ def make_ht_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = DeepGemmExperts(quant_config)
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    fused_experts = DeepGemmExperts(
+        moe_config=make_dummy_moe_config(),
+        quant_config=quant_config,
+    )
+    return FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_modular_kernel(
@@ -314,7 +324,6 @@ def deepep_deepgemm_moe_impl(
             w2=w2,
             topk_weights=test_tensors.topk_weights,
             topk_ids=test_tensors.topk,
-            inplace=False,
             activation="silu",
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
@@ -349,9 +358,6 @@ def triton_impl(
         topk_ids=topk_ids,
         inplace=False,
         quant_config=quant_config,
-        # Make sure this is set to False so we
-        # don't end up comparing the same implementation.
-        allow_deep_gemm=False,
     )
 
 
@@ -367,7 +373,7 @@ def _test_deepep_deepgemm_moe(
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
 
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     w1 = w1.to(device=torch.cuda.current_device())
     w2 = w2.to(device=torch.cuda.current_device())
@@ -456,7 +462,7 @@ def test_ht_deepep_deepgemm_moe(
     """
 
     m, n, k = mnk
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
@@ -531,7 +537,7 @@ def test_ll_deepep_deepgemm_moe(
     assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")

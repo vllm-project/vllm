@@ -43,8 +43,8 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionToolsParam,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
@@ -66,6 +66,14 @@ MCP_BUILTIN_TOOLS: set[str] = {
     "web_search_preview",
     "code_interpreter",
     "container",
+}
+
+# Mapping from built-in tool recipient names to their MCP server labels.
+# This ensures consistency between streaming and non-streaming responses.
+_BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
+    "python": "code_interpreter",
+    "browser": "web_search_preview",
+    "container": "container",
 }
 
 
@@ -187,14 +195,9 @@ def parse_response_input(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        if role == "system":
-            # User is trying to set a system message. Change it to:
-            # <|start|>developer<|message|># Instructions
-            # {instructions}<|end|>
-            role = "developer"
-            text_prefix = "Instructions:\n"
-        else:
-            text_prefix = ""
+        # Add prefix for developer messages.
+        # <|start|>developer<|message|># Instructions {instructions}<|end|>
+        text_prefix = "Instructions:\n" if role == "developer" else ""
         if isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:
@@ -326,13 +329,9 @@ def parse_chat_input_to_harmony_message(
             commentary_msg = commentary_msg.with_channel("commentary")
             msgs.append(commentary_msg)
 
-        reasoning_content = chat_msg.get("reasoning") or chat_msg.get(
-            "reasoning_content"
-        )
-        if reasoning_content:
-            analysis_msg = Message.from_role_and_content(
-                Role.ASSISTANT, reasoning_content
-            )
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
             analysis_msg = analysis_msg.with_channel("analysis")
             msgs.append(analysis_msg)
 
@@ -367,9 +366,9 @@ def parse_chat_input_to_harmony_message(
         return [msg]
 
     # Non-tool reasoning content
-    reasoning_content = chat_msg.get("reasoning") or chat_msg.get("reasoning_content")
-    if role == "assistant" and reasoning_content:
-        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_content)
+    reasoning = chat_msg.get("reasoning")
+    if role == "assistant" and reasoning:
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
         analysis_msg = analysis_msg.with_channel("analysis")
         msgs.append(analysis_msg)
 
@@ -550,7 +549,7 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
     return output_items
 
 
-def _parse_reasoning_content(message: Message) -> list[ResponseOutputItem]:
+def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
     for content in message.content:
@@ -610,7 +609,13 @@ def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
 
 def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse MCP calls into MCP call items."""
-    server_label, tool_name = _parse_mcp_recipient(recipient)
+    # Handle built-in tools that need server_label mapping
+    if recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        server_label = _BUILTIN_TOOL_TO_MCP_SERVER_LABEL[recipient]
+        tool_name = recipient
+    else:
+        server_label, tool_name = _parse_mcp_recipient(recipient)
+
     output_items = []
     for content in message.content:
         response_item = McpCall(
@@ -639,7 +644,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     recipient = message.recipient
 
     if recipient is not None:
-        # Browser tool calls
+        # Browser tool calls (browser.search, browser.open, browser.find)
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
 
@@ -647,11 +652,9 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         elif message.channel == "commentary" and recipient.startswith("functions."):
             output_items.extend(_parse_function_call(message, recipient))
 
-        # Built-in tools are treated as reasoning
-        elif recipient.startswith(("python", "browser", "container")):
-            # Built-in tool recipients (python/browser/container)
-            # generate reasoning output
-            output_items.extend(_parse_reasoning_content(message))
+        # Built-in MCP tools (python, browser, container)
+        elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            output_items.extend(_parse_reasoning(message))
 
         # All other recipients are MCP calls
         else:
@@ -659,12 +662,12 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     # No recipient - handle based on channel for non-tool messages
     elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning_content(message))
+        output_items.extend(_parse_reasoning(message))
 
     elif message.channel == "commentary":
         # Per Harmony format, commentary channel can contain preambles to calling
         # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning_content(message))
+        output_items.extend(_parse_reasoning(message))
 
     elif message.channel == "final":
         output_items.append(_parse_final_message(message))
@@ -697,13 +700,23 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                     status="in_progress",
                 )
             ]
-        # Built-in tools (python, browser, container) should be treated as reasoning
-        elif not (
-            current_recipient.startswith("python")
-            or current_recipient.startswith("browser")
-            or current_recipient.startswith("container")
-        ):
-            # All other recipients are MCP calls
+        # Built-in MCP tools (python, browser, container)
+        elif current_recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            return [
+                ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(
+                            text=parser.current_content, type="reasoning_text"
+                        )
+                    ],
+                    status=None,
+                )
+            ]
+        # All other recipients are MCP calls
+        else:
             rid = random_uuid()
             server_label, tool_name = _parse_mcp_recipient(current_recipient)
             return [
