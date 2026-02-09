@@ -752,11 +752,6 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-        if self._client_count > 1 and mode != "keep":
-            raise NotImplementedError(
-                "pause_generation is not supported with --api-server-count > 1 "
-                "when mode is not 'keep'"
-            )
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
 
     async def resume_generation(self) -> None:
