@@ -291,7 +291,7 @@ class Fp8LinearMethod(LinearMethodBase):
             or envs.VLLM_TEST_FORCE_FP8_MARLIN
         )
         # Disable marlin for rocm
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             self.use_marlin = False
         if vllm_is_batch_invariant():
             self.use_marlin = False
