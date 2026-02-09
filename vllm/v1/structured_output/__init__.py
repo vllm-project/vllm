@@ -356,6 +356,13 @@ class StructuredOutputManager:
                 request.structured_output_request.reasoning_ended = (
                     self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
                 )
+
+            # Check if reasoning has actually ended by looking at tokens
+            # This handles async scheduling where flags might be stale
+            if self.reasoner.is_reasoning_end(list(request.all_token_ids)):
+                # Also update the flag for consistency
+                request.structured_output_request.reasoning_ended = True
+                return True
             return request.structured_output_request.reasoning_ended
         return True
 
