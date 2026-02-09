@@ -552,34 +552,27 @@ class precompiled_wheel_utils:
     def resolve_wheel_metadata(
         commit: str, variant: str
     ) -> tuple[list[dict] | None, str | None]:
-        try_default = False
-        wheels, repo_url = None, None
         print(f"Using precompiled wheel commit {commit} with variant {variant}")
         try:
-            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                commit, variant
-            )
+            return precompiled_wheel_utils.fetch_metadata_for_variant(commit, variant)
         except Exception as e:
             logger.warning(
                 "Failed to fetch precompiled wheel metadata for variant %s: %s",
                 variant,
                 e,
             )
-            try_default = True  # try outside handler to keep the stacktrace simple
-        if try_default:
-            print("Trying the default variant from remote")
-            try:
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to fetch precompiled wheel metadata for commit %s: %s",
-                    commit,
-                    e,
-                )
-            # if this also fails, then we have nothing more to try / cache
-        return wheels, repo_url
+
+        print("Trying the default variant from remote")
+        try:
+            return precompiled_wheel_utils.fetch_metadata_for_variant(commit, None)
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch precompiled wheel metadata for commit %s: %s",
+                commit,
+                e,
+            )
+
+        return None, None
 
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
