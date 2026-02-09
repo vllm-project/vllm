@@ -275,6 +275,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "zai-org/GLM-4.7-Flash",
         min_transformers_version="5.0.0",
     ),
+    "GlmMoeDsaForCausalLM": _HfExamplesInfo(
+        "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -966,6 +969,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-VL-30B-A3B-Instruct",
         max_model_len=4096,
         min_transformers_version="4.57",
+    ),
+    "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        speculative_model="Qwen/Qwen3.5-9B-Instruct",
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeMTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
+        min_transformers_version="5.1.0",
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",

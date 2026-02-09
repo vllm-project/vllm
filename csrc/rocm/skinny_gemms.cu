@@ -29,8 +29,7 @@
   #define __HIP__MI3XX__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__) || \
-                           defined(__gfx1150__) || defined(__gfx1151__))
+#if defined(__HIPCC__) && defined(__GFX11__)
   #define __HIP__GFX11__
 #endif
 
@@ -50,6 +49,15 @@ int get_lds_size() {
     result = (substring == std::string::npos ? 64 * 1024 : 160 * 1024);
     is_cached = true;
   }
+  return result;
+}
+
+bool is_gfx11() {
+  static const bool result = [] {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx11") != std::string::npos;
+  }();
   return result;
 }
 
@@ -290,7 +298,7 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   return out_c;
 }
 
-// GFX11 (RDNA3/4) renamed v_dot2c_f32_f16 to v_dot2acc_f32_f16
+// GFX11 (RDNA3) renamed v_dot2c_f32_f16 to v_dot2acc_f32_f16
 #if defined(__HIP__GFX11__)
   #define DOT2C_FP16_INSN "v_dot2acc_f32_f16"
 #else
@@ -360,19 +368,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not going to work!
   //----------------------------------------------------
-  #if defined(__HIP__GFX11__)
-  // Reserve 128 bytes of LDS for cross-wavefront reduction arrays.
-  constexpr int xwf_lds_elems =
-      (WvPrGrp * (sizeof(float) + sizeof(int))) / sizeof(scalar_t);
-  constexpr int s_len = max_lds_len - xwf_lds_elems;
-  __shared__ scalar_t s[s_len];
-  __shared__ float __xwf[WvPrGrp];
-  __shared__ volatile int __xwf_ready[WvPrGrp];
-  if (threadIdx.x == 0) __xwf_ready[threadIdx.y] = 0;
-  #else
-  constexpr int s_len = max_lds_len;
-  __shared__ scalar_t s[s_len];
-  #endif
+  __shared__ scalar_t s[max_lds_len];
 
   //----------------------------------------------------
   // Fetch the activation matrix to LDS
@@ -383,11 +379,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = 0; k < min__(K * N, s_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min__(K * N, s_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -509,26 +505,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     if constexpr (!use_mfma) {
   #if defined(__HIP__GFX11__)
-      // Wave32: butterfly reduce within each 32-lane wavefront
+      // Wave32: butterfly reduce within the single wavefront per row
       for (int n = 0; n < N; n++)
         for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
 
-      // Cross-wavefront combine via producer-consumer handshake.
-      // Serialize over N*YTILE values using a single float slot per wave.
-      for (int n = 0; n < N; n++) {
-        for (int i = 0; i < YTILE; i++) {
-          if (threadIdx.x == 32) {
-            while (__xwf_ready[threadIdx.y] != 0) {
-            }
-            __xwf[threadIdx.y] = sum[n][i];
-            __threadfence_block();
-            __xwf_ready[threadIdx.y] = 1;
-          }
-          if (threadIdx.x == 0) {
-            while (__xwf_ready[threadIdx.y] != 1) {
-            }
-            __threadfence_block();
-            sum[n][i] += __xwf[threadIdx.y];
+      // Lane 0 has the complete sum; write the result
+      if (threadIdx.x == 0) {
+        for (int n = 0; n < N; n++) {
+          for (int i = 0; i < YTILE; i++) {
             if constexpr (std::is_same_v<scalar_t, half>) {
               if (BIAS)
                 sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
@@ -538,7 +522,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                     __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
             }
             C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
-            __xwf_ready[threadIdx.y] = 0;
           }
         }
       }
@@ -681,18 +664,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not going to work!
   //----------------------------------------------------
-  #if defined(__HIP__GFX11__)
-  constexpr int xwf_lds_elems =
-      (WvPrGrp * (sizeof(float) + sizeof(int))) / sizeof(scalar_t);
-  constexpr int s_len = max_lds_len - xwf_lds_elems;
-  __shared__ scalar_t s[s_len];
-  __shared__ float __xwf[WvPrGrp];
-  __shared__ volatile int __xwf_ready[WvPrGrp];
-  if (threadIdx.x == 0) __xwf_ready[threadIdx.y] = 0;
-  #else
-  constexpr int s_len = max_lds_len;
-  __shared__ scalar_t s[s_len];
-  #endif
+  __shared__ scalar_t s[max_lds_len];
 
   //----------------------------------------------------
   // Computation of columns that need to be committed to memory!
@@ -729,11 +701,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = 0; k < min__(K * N, s_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min__(K * N, s_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -817,7 +789,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         // Fetch A activation matrix in interleaved fashion from LDS or memory
 
         for (int n = 0; n < N; n++) {
-          if (k_ + K * n < s_len)
+          if (k_ + K * n < max_lds_len)
             bigA[n][k2] = *((const bigType*)(&(s[k_ + K * n])));
           else
             bigA[n][k2] = *((const bigType*)(&(A[k_ + K * n])));
@@ -856,23 +828,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     if constexpr (!use_mfma) {
   #if defined(__HIP__GFX11__)
+      // Wave32: butterfly reduce within the single wavefront per row
       for (int n = 0; n < N; n++)
         for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
 
-      for (int n = 0; n < N; n++) {
-        for (int i = 0; i < YTILE; i++) {
-          if (threadIdx.x == 32) {
-            while (__xwf_ready[threadIdx.y] != 0) {
-            }
-            __xwf[threadIdx.y] = sum[n][i];
-            __threadfence_block();
-            __xwf_ready[threadIdx.y] = 1;
-          }
-          if (threadIdx.x == 0) {
-            while (__xwf_ready[threadIdx.y] != 1) {
-            }
-            __threadfence_block();
-            sum[n][i] += __xwf[threadIdx.y];
+      // Lane 0 has the complete sum; write the result
+      if (threadIdx.x == 0) {
+        for (int n = 0; n < N; n++) {
+          for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               if constexpr (std::is_same_v<scalar_t, half>) {
                 if (BIAS)
@@ -884,7 +847,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               }
               C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
             }
-            __xwf_ready[threadIdx.y] = 0;
           }
         }
       }
@@ -1044,18 +1006,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not going to work!
   //----------------------------------------------------
-  #if defined(__HIP__GFX11__)
-  constexpr int xwf_lds_elems =
-      (WvPrGrp * (sizeof(float) + sizeof(int))) / sizeof(scalar_t);
-  constexpr int s_len = max_lds_len - xwf_lds_elems;
-  __shared__ scalar_t s[s_len];
-  __shared__ float __xwf[WvPrGrp];
-  __shared__ volatile int __xwf_ready[WvPrGrp];
-  if (threadIdx.x == 0) __xwf_ready[threadIdx.y] = 0;
-  #else
-  constexpr int s_len = max_lds_len;
-  __shared__ scalar_t s[s_len];
-  #endif
+  __shared__ scalar_t s[max_lds_len];
 
   //----------------------------------------------------
   // Computation of columns that need to be committed to memory!
@@ -1096,11 +1047,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   #define PCML
   #ifndef PCML
-  for (uint32_t k = 0; k < min__(K * N, s_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min__(K * N, s_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -1110,7 +1061,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #define TUC (THRDS * UNRL * A_CHUNK)
   uint32_t kBase = 0;
   // find biggest k size that fits in LDS
-  uint32_t kFit = (s_len) / N;
+  uint32_t kFit = (max_lds_len) / N;
   // kFit = (kFit%TWC==0) ? kFit : (kFit-kFit%TWC+TWC); //round up to multiple
   // of TUC
   kFit = (kFit % TUC == 0)
@@ -1270,23 +1221,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //----------------------------------------------------
     if constexpr (!use_mfma) {
   #if defined(__HIP__GFX11__)
+      // Wave32: butterfly reduce within the single wavefront per row
       for (int n = 0; n < N; n++)
         for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
 
-      for (int n = 0; n < N; n++) {
-        for (int i = 0; i < YTILE; i++) {
-          if (threadIdx.x == 32) {
-            while (__xwf_ready[threadIdx.y] != 0) {
-            }
-            __xwf[threadIdx.y] = sum[n][i];
-            __threadfence_block();
-            __xwf_ready[threadIdx.y] = 1;
-          }
-          if (threadIdx.x == 0) {
-            while (__xwf_ready[threadIdx.y] != 1) {
-            }
-            __threadfence_block();
-            sum[n][i] += __xwf[threadIdx.y];
+      // Lane 0 has the complete sum; write the result
+      if (threadIdx.x == 0) {
+        for (int n = 0; n < N; n++) {
+          for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               if constexpr (std::is_same_v<scalar_t, half>) {
                 if (BIAS)
@@ -1298,7 +1240,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               }
               C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
             }
-            __xwf_ready[threadIdx.y] = 0;
           }
         }
       }
@@ -1461,23 +1402,29 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK(_YTILE, _UNRL, _N)                                        \
+#define WVSPLITK_LAUNCH(_THRDS, _YTILE, _UNRL, _N)                         \
   {                                                                        \
-    dim3 block(64, 16);                                                    \
+    dim3 block(_THRDS, 16);                                                \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, 16);                    \
     if ((K_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))              \
-      wvSplitK_hf_sml_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>               \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>           \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
     else if (K_in * N_in <= max_lds_len * 1.2)                             \
-      wvSplitK_hf_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>                   \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>               \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
     else                                                                   \
-      wvSplitK_hf_big_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>               \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>           \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
   }
+
+#define WVSPLITK(_YTILE, _UNRL, _N)        \
+  if (is_gfx11())                          \
+    WVSPLITK_LAUNCH(32, _YTILE, _UNRL, _N) \
+  else                                     \
+    WVSPLITK_LAUNCH(64, _YTILE, _UNRL, _N)
 
 #define WVSPLIT_TILE(_sYT, __N)                           \
   {                                                       \

@@ -194,7 +194,9 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
 
-    assert torch.allclose(out, ref_out, rtol=0.01)
+    # Accumulation error in fp16 GEMM scales with sqrt(K)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    assert torch.allclose(out, ref_out, rtol=0.01, atol=atol)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
