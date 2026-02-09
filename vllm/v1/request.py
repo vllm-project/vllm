@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -164,10 +163,12 @@ class Request:
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
-        if block_hasher is not None:
-            self.get_hash_new_full_blocks = partial(block_hasher, self)
-            self.block_hashes = self.get_hash_new_full_blocks()
+        # Store the block hasher without binding self to avoid creating a
+        # reference cycle (Request -> partial -> Request) that prevents
+        # immediate garbage collection via reference counting.
+        self._block_hasher: Callable[["Request"], list[BlockHash]] | None = block_hasher
+        if self._block_hasher is not None:
+            self.block_hashes = self._block_hasher(self)
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
@@ -212,8 +213,8 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
-        if self.get_hash_new_full_blocks is not None:
-            self.block_hashes.extend(self.get_hash_new_full_blocks())
+        if self._block_hasher is not None:
+            self.block_hashes.extend(self._block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
