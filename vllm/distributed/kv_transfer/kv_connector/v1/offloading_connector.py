@@ -85,11 +85,11 @@ class OffloadingConnectorStats(KVConnectorStats):
         for transfer_type, ops_list in self.data.items():
             assert isinstance(ops_list, list)
             total_bytes = 0
-            total_time = 0
+            total_time = 0.0
             for op in ops_list:
-                assert isinstance(op, dict)
-                total_bytes += op["op_size"]
-                total_time += op["op_time"]
+                assert isinstance(op, OffloadingOperationMetrics)
+                total_bytes += op.op_size
+                total_time += op.op_time
             return_dict[f"{transfer_type}_total_bytes"] = total_bytes
             return_dict[f"{transfer_type}_total_time"] = total_time
         return return_dict
