@@ -184,6 +184,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             out_dtype=output_dtype,
             As=input_scale,
             Bs=weight_scale_inv,
+            use_triton=use_triton,
         )
 
         if bias is not None:
