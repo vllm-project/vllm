@@ -144,6 +144,56 @@ def _kimia_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     )
 
 
+def _has_nonzero_mm_inputs(*items: object) -> bool:
+    for item in items:
+        if isinstance(item, torch.Tensor):
+            if item.numel() > 0 and bool(torch.any(item)):
+                return True
+        elif isinstance(item, (list, tuple)):
+            for elem in item:
+                if (
+                    isinstance(elem, torch.Tensor)
+                    and elem.numel() > 0
+                    and bool(torch.any(elem))
+                ):
+                    return True
+    return False
+
+
+def _flatten_seq_inputs(value: object) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.dim() <= 1:
+            return value
+        return value.reshape(-1)
+    if isinstance(value, (list, tuple)):
+        elems = [elem for elem in value if isinstance(elem, torch.Tensor)]
+        if not elems:
+            return None
+        if len(elems) == 1:
+            return elems[0]
+        return torch.cat([elem.reshape(-1) for elem in elems], dim=0)
+    return None
+
+
+def _flatten_feature_inputs(value: object) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.dim() <= 2:
+            return value
+        return value.reshape(-1, value.shape[-1])
+    if isinstance(value, (list, tuple)):
+        elems = [elem for elem in value if isinstance(elem, torch.Tensor)]
+        if not elems:
+            return None
+        if len(elems) == 1:
+            return elems[0]
+        return torch.cat(elems, dim=0)
+    return None
+
+
 class KimiAudioASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         # We only need HF config values (token ids) and let vLLM handle weights.
@@ -431,40 +481,24 @@ class KimiAudioForConditionalGeneration(
         text_input_ids = kwargs.pop("text_input_ids", None)
         audio_input_ids = kwargs.pop("audio_input_ids", None)
 
-        # Squeeze batch dimension if present (vLLM returns batched tensors
-        # but embed_input_ids is called per-sequence)
-
-        if (
-            isinstance(whisper_input_features, torch.Tensor)
-            and whisper_input_features.dim() == 3
-        ):
-            whisper_input_features = whisper_input_features.squeeze(0)
-
-        if (
-            isinstance(is_continuous_mask, torch.Tensor)
-            and is_continuous_mask.dim() == 2
-        ):
-            is_continuous_mask = is_continuous_mask.squeeze(0)
-
-        if isinstance(text_input_ids, torch.Tensor) and text_input_ids.dim() == 2:
-            text_input_ids = text_input_ids.squeeze(0)
-
-        if isinstance(audio_input_ids, torch.Tensor) and audio_input_ids.dim() == 2:
-            audio_input_ids = audio_input_ids.squeeze(0)
+        flat_whisper = _flatten_feature_inputs(whisper_input_features)
+        flat_mask = _flatten_seq_inputs(is_continuous_mask)
+        flat_text_ids = _flatten_seq_inputs(text_input_ids)
+        flat_audio_ids = _flatten_seq_inputs(audio_input_ids)
 
         true_input_ids = input_ids
-        if isinstance(text_input_ids, torch.Tensor) and (
+        if isinstance(flat_text_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
-            or text_input_ids.shape[-1] == input_ids.shape[-1]
+            or flat_text_ids.shape[-1] == input_ids.shape[-1]
         ):
             # For text-only generation, the model expects to consume the text
             # stream (audio positions filled with blank/control tokens).
-            true_input_ids = text_input_ids
-        elif isinstance(audio_input_ids, torch.Tensor) and (
+            true_input_ids = flat_text_ids
+        elif isinstance(flat_audio_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
-            or audio_input_ids.shape[-1] == input_ids.shape[-1]
+            or flat_audio_ids.shape[-1] == input_ids.shape[-1]
         ):
-            true_input_ids = audio_input_ids
+            true_input_ids = flat_audio_ids
 
         # Base token embeddings. vLLM uses flattened token tensors, so
         # embed_tokens returns [S, H] for [S] input ids.
@@ -472,24 +506,18 @@ class KimiAudioForConditionalGeneration(
         device = emb.device
 
         # Add whisper features on masked positions.
-        if isinstance(whisper_input_features, torch.Tensor):
-            whisper_feats = whisper_input_features.to(device=device, dtype=emb.dtype)
-
-            # whisper_feats can be either:
-            # - raw Whisper features: [S, 5120] or [B, S, 5120]
-            # - already projected embeddings: [S, H] or [B, S, H]
-            if whisper_feats.dim() == 3 and whisper_feats.size(0) == 1:
-                whisper_feats = whisper_feats.squeeze(0)
+        if isinstance(flat_whisper, torch.Tensor):
+            whisper_feats = flat_whisper.to(device=device, dtype=emb.dtype)
 
             if whisper_feats.shape[0] != emb.shape[0]:
                 # Kimi-Audio can provide continuous whisper features only for the
                 # positions where `is_continuous_mask` is true. In this case,
                 # `whisper_feats` length should match the number of true mask
                 # entries, not the full token sequence length.
-                if not isinstance(is_continuous_mask, torch.Tensor):
+                if not isinstance(flat_mask, torch.Tensor):
                     return emb
 
-                mask = is_continuous_mask.to(device=device, dtype=torch.bool)
+                mask = flat_mask.to(device=device, dtype=torch.bool)
                 if mask.dim() != 1 or mask.shape[0] != emb.shape[0]:
                     return emb
 
@@ -520,12 +548,12 @@ class KimiAudioForConditionalGeneration(
                 # Use the model's vq_adaptor to project raw Whisper features.
                 whisper_emb = self.model.vq_adaptor(whisper_sbF).squeeze(1)
 
-            if isinstance(is_continuous_mask, torch.Tensor):
-                mask = is_continuous_mask.to(device)
-                if mask.dim() == 2 and mask.size(0) == 1:
-                    mask = mask.squeeze(0)
+            if isinstance(flat_mask, torch.Tensor):
+                mask = flat_mask.to(device)
                 if mask.dtype != torch.bool:
                     mask = mask.to(torch.bool)
+                if mask.dim() != 1:
+                    mask = mask.reshape(-1)
 
                 mask_f = mask[:, None]
                 whisper_emb = whisper_emb * mask_f
@@ -535,10 +563,8 @@ class KimiAudioForConditionalGeneration(
                 emb = emb * (~mask_f) + encoder_add * mask_f
 
         # Add aligned text embeddings (instruction etc.)
-        if isinstance(text_input_ids, torch.Tensor) and torch.any(text_input_ids != 0):
-            text_ids = text_input_ids.to(device)
-            if text_ids.dim() == 2 and text_ids.size(0) == 1:
-                text_ids = text_ids.squeeze(0)
+        if isinstance(flat_text_ids, torch.Tensor) and torch.any(flat_text_ids != 0):
+            text_ids = flat_text_ids.to(device)
             emb = emb + self.model.embed_tokens(text_ids)
 
         return emb
@@ -776,15 +802,18 @@ class KimiAudioForConditionalGeneration(
         # IMPORTANT (V1): vLLM may provide `inputs_embeds` computed from
         # placeholder token ids. If we have Kimi-Audio multimodal tensors,
         # rebuild `inputs_embeds` using the native embed_input_ids mixing path.
-        if isinstance(true_input_ids, torch.Tensor) and isinstance(
-            whisper_input_features, torch.Tensor
+        if (
+            isinstance(true_input_ids, torch.Tensor)
+            and whisper_input_features is not None
         ):
-            expected_real_inference = true_input_ids.numel() > 50 or (
-                whisper_input_features.dim() == 3
-                and whisper_input_features.shape[1] > 50
+            has_real_mm_inputs = _has_nonzero_mm_inputs(
+                whisper_input_features,
+                is_continuous_mask,
+                text_input_ids,
+                audio_input_ids,
             )
 
-            if expected_real_inference:
+            if has_real_mm_inputs:
                 # Get the original inputs_embeds from the base model if not provided
                 original_inputs_embeds = kwargs.get("inputs_embeds")
                 if original_inputs_embeds is None and len(args) > 2:
@@ -803,32 +832,68 @@ class KimiAudioForConditionalGeneration(
                 # Ensure the mixed embeddings match the expected sequence length
                 # to avoid rotary embedding mismatches with positions tensor
                 if original_inputs_embeds is not None:
-                    expected_seq_len = original_inputs_embeds.shape[0]
-                    actual_seq_len = mixed_embeds.shape[0]
+                    if mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 2:
+                        mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
 
-                    if expected_seq_len != actual_seq_len:
-                        # Pad or truncate the mixed embeddings to match expected length
-                        if actual_seq_len > expected_seq_len:
-                            # Truncate to expected length
-                            mixed_embeds = mixed_embeds[:expected_seq_len]
-                        else:
-                            # Pad to expected length using the last embedding
-                            if actual_seq_len > 0:
-                                padding = mixed_embeds[-1:].expand(
-                                    expected_seq_len - actual_seq_len, -1
-                                )
-                                mixed_embeds = torch.cat([mixed_embeds, padding], dim=0)
+                    if mixed_embeds.dim() == 2:
+                        expected_seq_len = original_inputs_embeds.shape[0]
+                        actual_seq_len = mixed_embeds.shape[0]
+
+                        if expected_seq_len != actual_seq_len:
+                            # Pad or truncate mixed embeddings to match expected length.
+                            if actual_seq_len > expected_seq_len:
+                                # Truncate to expected length
+                                mixed_embeds = mixed_embeds[:expected_seq_len]
                             else:
-                                # If no embeddings exist, create zero embeddings
-                                device = mixed_embeds.device
-                                dtype = mixed_embeds.dtype
-                                hidden_size = mixed_embeds.shape[-1]
-                                mixed_embeds = torch.zeros(
-                                    expected_seq_len,
-                                    hidden_size,
-                                    device=device,
-                                    dtype=dtype,
-                                )
+                                # Pad to expected length using the last embedding
+                                if actual_seq_len > 0:
+                                    padding = mixed_embeds[-1:].expand(
+                                        expected_seq_len - actual_seq_len, -1
+                                    )
+                                    mixed_embeds = torch.cat(
+                                        [mixed_embeds, padding], dim=0
+                                    )
+                                else:
+                                    # If no embeddings exist, create zero embeddings
+                                    device = mixed_embeds.device
+                                    dtype = mixed_embeds.dtype
+                                    hidden_size = mixed_embeds.shape[-1]
+                                    mixed_embeds = torch.zeros(
+                                        expected_seq_len,
+                                        hidden_size,
+                                        device=device,
+                                        dtype=dtype,
+                                    )
+                    elif mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 3:
+                        expected_seq_len = original_inputs_embeds.shape[1]
+                        actual_seq_len = mixed_embeds.shape[1]
+
+                        if expected_seq_len != actual_seq_len:
+                            if actual_seq_len > expected_seq_len:
+                                mixed_embeds = mixed_embeds[:, :expected_seq_len, :]
+                            else:
+                                if actual_seq_len > 0:
+                                    padding = mixed_embeds[:, -1:, :].expand(
+                                        -1,
+                                        expected_seq_len - actual_seq_len,
+                                        -1,
+                                    )
+                                    mixed_embeds = torch.cat(
+                                        [mixed_embeds, padding], dim=1
+                                    )
+                                else:
+                                    device = mixed_embeds.device
+                                    dtype = mixed_embeds.dtype
+                                    hidden_size = mixed_embeds.shape[-1]
+                                    mixed_embeds = torch.zeros(
+                                        (
+                                            mixed_embeds.shape[0],
+                                            expected_seq_len,
+                                            hidden_size,
+                                        ),
+                                        device=device,
+                                        dtype=dtype,
+                                    )
 
                 kwargs["inputs_embeds"] = mixed_embeds
 
