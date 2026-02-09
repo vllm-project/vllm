@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -18,9 +19,11 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -234,11 +237,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
+            cp_kv_cache_interleave_size=(
+                self.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
 
         self.attn_backends, self.attn_metadata_builders = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        check_attention_cp_compatibility(self.vllm_config)
         if self.do_spec_decode:
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -279,6 +286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
         )
         input_batch.attn_metadata = attn_metadata
         input_batch.slot_mappings = slot_mappings_by_layer
@@ -583,6 +591,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        if dcp_size > 1:
+            dcp_rank = get_dcp_group().rank_in_group
+            local_seq_lens = get_dcp_local_seq_lens(
+                seq_lens,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
+                cp_kv_cache_interleave_size=(
+                    self.parallel_config.cp_kv_cache_interleave_size
+                ),
+            )
+            self.input_buffers.dcp_local_seq_lens[:num_reqs].copy_(
+                local_seq_lens, non_blocking=True
+            )
+            self.input_buffers.dcp_local_seq_lens[num_reqs:].zero_()
+
         # Prepare M-RoPE positions.
         if self.uses_mrope:
             self.mrope_states.prepare_mrope_positions(
@@ -629,6 +653,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
