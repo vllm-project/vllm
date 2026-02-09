@@ -4,9 +4,9 @@
  * __device__ helper functions to deal with float -> quant datatype conversion
  */
 
-#include "quantization/vectorization.cuh"
+#include "stable/quantization/vectorization.cuh"
 // TODO(luka/varun):refactor common.cuh to use this file instead
-#include "quantization/w8a8/fp8/common.cuh"
+#include "stable/quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 
