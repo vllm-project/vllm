@@ -176,9 +176,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
-            renormalize=config.norm_topk_prob
-            if hasattr(config, "norm_topk_prob")
-            else True,
+            renormalize=getattr(config, "norm_topk_prob", True),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
@@ -1044,9 +1042,7 @@ class Qwen3NextModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts
-            if hasattr(self.config, "num_experts")
-            else 0,
+            num_experts=getattr(self.config, "num_experts", 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
