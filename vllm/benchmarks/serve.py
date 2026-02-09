@@ -1589,7 +1589,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         tokenizer_id = None
         tokenizer_mode = None
     else:
-        tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
+        tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
         tokenizer_mode = args.tokenizer_mode
 
     if tokenizer_id or tokenizer_mode:
