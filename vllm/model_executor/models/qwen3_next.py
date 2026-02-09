@@ -106,16 +106,16 @@ KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
 def fi_chunk_gated_delta_rule(
-    q,
-    k,
-    v,
-    g,
-    beta,
-    initial_state,
-    output_final_state,
-    cu_seqlens,
-    head_first=False,
-    use_qk_l2norm_in_kernel=True,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.LongTensor | None = None,
+    head_first: bool = False,
+    use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -126,11 +126,12 @@ def fi_chunk_gated_delta_rule(
         k = l2norm_fwd(k)
 
     # use flashinfer implementation
-    q = rearrange(q, "1 l h d -> l h d").contiguous()
-    k = rearrange(k, "1 l h d -> l h d").contiguous()
-    v = rearrange(v, "1 l h d -> l h d").contiguous()
-    g = rearrange(g, "1 b h -> b h").contiguous()
-    beta = rearrange(beta, "1 b h -> b h").contiguous()
+    q = q.squeeze(0).contiguous()
+    k = k.squeeze(0).contiguous()
+    v = v.squeeze(0).contiguous()
+
+    g = g.squeeze(0).contiguous()
+    beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
