@@ -11,6 +11,7 @@
   #include <c10/hip/HIPStream.h>
   #include <hip/hip_runtime.h>
   #include <hip/hip_fp16.h>
+  #include <algorithm>
 
   // IMPORTANT: Force assert to be active even with -DNDEBUG
   // The assert() call generates code that prevents the compiler from
@@ -18,6 +19,28 @@
   // code. See benchmark_ddr/vgpr_assert_minimal.hip for a minimal reproducer.
   #undef NDEBUG
   #include <cassert>
+
+// ============================================================================
+// FP16 bit-trick dequantization helpers
+// Reinterpret a uint32 as a pair of fp16 values (__half2) via union cast.
+// Used to construct half2 values by OR-ing 4-bit nibbles with the fp16
+// encoding of 1024.0 (0x6400), avoiding expensive int-to-float conversions.
+// ============================================================================
+__forceinline__ __device__ __half2 uint32_as_half2(uint32_t val) {
+  union {
+    uint32_t u;
+    __half2 h;
+  } converter;
+  converter.u = val;
+  return converter.h;
+}
+
+// Two copies of fp16(1024.0) packed as half2: 0x6400_6400
+// fp16 bit layout: [sign(1)][exponent(5)][mantissa(10)]
+// 0x6400 = 0_11001_0000000000 = 2^(25-15) * 1.0 = 1024.0
+// OR-ing a 4-bit value into the low nibble gives 1024 + value.
+// OR-ing into bits [7:4] gives 1024 + value*16.
+static constexpr uint32_t FP16_1024_PAIR = 0x64006400u;
 
 // ============================================================================
 // AWQ GEMV Kernel with Split-K parallelism
@@ -145,17 +168,24 @@ __global__ __launch_bounds__(SPLIT_K * 32) void awq_gemv_kernel_splitk(
       }                                                                \
     } while (0)
 
+  /* FP16 bit-trick zero extraction: OR nibble pairs with fp16(1024.0)    \
+     to construct half2 values without int-to-float conversion.            \
+     Low-nibble pairs get half2(1024+z0, 1024+z1).                         \
+     High-nibble pairs get half2(1024+z2*16, 1024+z3*16).                  \
+     The 1024 bias cancels when subtracting from weight half2. */
   #define EXTRACT_ZEROS_IN_BUF_SK(buf_idx)                          \
     do {                                                            \
       _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) { \
-        _Pragma("unroll") for (int b = 0; b < 4; b++) {             \
-          uint16_t zero0 = static_cast<uint16_t>(                   \
-              (packed_zeros[buf_idx][j] >> (b * 4)) & 0xF);         \
-          uint16_t zero1 = static_cast<uint16_t>(                   \
-              (packed_zeros[buf_idx][j] >> (b * 4 + 16)) & 0xF);    \
-          zeros2[buf_idx][j * 4 + b] = __halves2half2(              \
-              __ushort2half_rn(zero0), __ushort2half_rn(zero1));    \
-        }                                                           \
+        uint32_t za = packed_zeros[buf_idx][j];                     \
+        zeros2[buf_idx][j * 4 + 0] =                                \
+            uint32_as_half2((za & 0x000f000fu) | FP16_1024_PAIR);   \
+        zeros2[buf_idx][j * 4 + 1] =                                \
+            uint32_as_half2((za & 0x00f000f0u) | FP16_1024_PAIR);   \
+        za >>= 8;                                                   \
+        zeros2[buf_idx][j * 4 + 2] =                                \
+            uint32_as_half2((za & 0x000f000fu) | FP16_1024_PAIR);   \
+        zeros2[buf_idx][j * 4 + 3] =                                \
+            uint32_as_half2((za & 0x00f000f0u) | FP16_1024_PAIR);   \
       }                                                             \
     } while (0)
 
@@ -168,32 +198,65 @@ __global__ __launch_bounds__(SPLIT_K * 32) void awq_gemv_kernel_splitk(
       }                                                                 \
     } while (0)
 
-  #define ACCUMULATE_SLOT_SK(slot)                                            \
-    do {                                                                      \
-      __half2 a2 = act2[(slot) / 2];                                          \
-      __half act_val = ((slot) % 2 == 0) ? __low2half(a2) : __high2half(a2);  \
-      float act_f = __half2float(act_val);                                    \
-      _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) {           \
-        _Pragma("unroll") for (int b = 0; b < 4; b++) {                       \
-          uint16_t w0 = static_cast<uint16_t>((w[slot][j] >> (b * 4)) & 0xF); \
-          uint16_t w1 =                                                       \
-              static_cast<uint16_t>((w[slot][j] >> (b * 4 + 16)) & 0xF);      \
-          __half2 weight2 =                                                   \
-              __halves2half2(__ushort2half_rn(w0), __ushort2half_rn(w1));     \
-          /* dequant = (weight - zero) * scale in fp32 */                     \
-          __half2 z2 = zeros2[curr_buf][j * 4 + b];                           \
-          __half2 s2 = scales2[curr_buf][j * 4 + b];                          \
-          float dequant0 = (__half2float(__low2half(weight2)) -               \
-                            __half2float(__low2half(z2))) *                   \
-                           __half2float(__low2half(s2));                      \
-          float dequant1 = (__half2float(__high2half(weight2)) -              \
-                            __half2float(__high2half(z2))) *                  \
-                           __half2float(__high2half(s2));                     \
-          /* acc += activation * dequant in fp32 */                           \
-          acc[(j * 4 + b) * 2] += act_f * dequant0;                           \
-          acc[(j * 4 + b) * 2 + 1] += act_f * dequant1;                       \
-        }                                                                     \
-      }                                                                       \
+  /* FP16 bit-trick weight dequantization:                                   \
+     Extract 4-bit nibble pairs as half2 by OR-ing with fp16(1024.0).        \
+     Subtract zero half2 (same format) — the +1024 bias cancels exactly.     \
+     Low-nibble pairs: diff = (w-z, w'-z') — exact result.                   \
+     High-nibble pairs: diff = ((w-z)*16, (w'-z')*16) — divide by 16.       \
+     Then multiply by scale and accumulate in fp32. */
+  #define ACCUMULATE_SLOT_SK(slot)                                             \
+    do {                                                                       \
+      __half2 a2 = act2[(slot) / 2];                                           \
+      __half act_val = ((slot) % 2 == 0) ? __low2half(a2) : __high2half(a2);   \
+      float act_f = __half2float(act_val);                                     \
+      _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) {            \
+        uint32_t qa = w[slot][j];                                              \
+        /* Pair 0: low nibble → elements 0,1 */                                \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x000f000fu) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 0]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 0];                           \
+          float d0 = __half2float(__low2half(diff));                           \
+          float d1 = __half2float(__high2half(diff));                          \
+          acc[(j * 4 + 0) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 0) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        /* Pair 1: high nibble → elements 2,3 (has ×16, corrected) */          \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x00f000f0u) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 1]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 1];                           \
+          float d0 = __half2float(__low2half(diff)) * 0.0625f;                 \
+          float d1 = __half2float(__high2half(diff)) * 0.0625f;                \
+          acc[(j * 4 + 1) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 1) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        qa >>= 8;                                                              \
+        /* Pair 2: low nibble → elements 4,5 */                                \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x000f000fu) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 2]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 2];                           \
+          float d0 = __half2float(__low2half(diff));                           \
+          float d1 = __half2float(__high2half(diff));                          \
+          acc[(j * 4 + 2) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 2) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        /* Pair 3: high nibble → elements 6,7 (has ×16, corrected) */          \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x00f000f0u) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 3]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 3];                           \
+          float d0 = __half2float(__low2half(diff)) * 0.0625f;                 \
+          float d1 = __half2float(__high2half(diff)) * 0.0625f;                \
+          acc[(j * 4 + 3) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 3) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+      }                                                                        \
     } while (0)
 
   // Load zeros and scales for first group of this split
