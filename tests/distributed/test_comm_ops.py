@@ -20,7 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
-from vllm.v1.worker.gpu_worker import _AsyncIntermediateTensors
+from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
     init_test_distributed_environment,
@@ -265,8 +265,8 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
     assert td["b"].shape == torch.Size([2])
 
     # simulate worker-side "defer wait": wait + postprocess later.
-    for h in handles:
-        h.wait()
+    for handle in handles:
+        handle.wait()
     for fn in postprocess:
         fn()
 
@@ -285,7 +285,7 @@ def test_async_intermediate_tensors_lazy_wait() -> None:
     def post() -> None:
         post_calls["n"] += 1
 
-    it = _AsyncIntermediateTensors(
+    it = AsyncIntermediateTensors(
         {"x": torch.tensor([1])},
         comm_handles=[work],
         comm_postprocess=[post],

@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
-class _AsyncIntermediateTensors(IntermediateTensors):
+class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
     def __init__(
@@ -85,8 +85,8 @@ class _AsyncIntermediateTensors(IntermediateTensors):
         if self._comm_waited:
             return
         if self._comm_handles:
-            for h in self._comm_handles:
-                h.wait()
+            for handle in self._comm_handles:
+                handle.wait()
         if self._comm_postprocess:
             for fn in self._comm_postprocess:
                 fn()
@@ -688,7 +688,7 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
-            intermediate_tensors = _AsyncIntermediateTensors(
+            intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,

@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import Any
+from typing import Any, Protocol
 from unittest.mock import patch
 
 import torch
@@ -62,6 +62,12 @@ class GraphCaptureContext:
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
+
+
+class Handle(Protocol):
+    def is_completed(self) -> bool: ...
+
+    def wait(self) -> None: ...
 
 
 def _split_tensor_dict(
@@ -828,8 +834,8 @@ class GroupCoordinator:
             all_gather_group=all_gather_group,
             all_gather_tensors=all_gather_tensors,
         )
-        for h in handles:
-            h.wait()
+        for handle in handles:
+            handle.wait()
         return None
 
     def isend_tensor_dict(
@@ -838,7 +844,7 @@ class GroupCoordinator:
         dst: int | None = None,
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
-    ) -> list[Any]:
+    ) -> list[Handle]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return []
         if self.use_cpu_custom_send_recv:
@@ -868,7 +874,7 @@ class GroupCoordinator:
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
-        handles: list[Any] = []
+        handles: list[Handle] = []
         for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 continue
@@ -921,8 +927,8 @@ class GroupCoordinator:
             all_gather_group=all_gather_group,
             all_gather_tensors=all_gather_tensors,
         )
-        for h in handles:
-            h.wait()
+        for handle in handles:
+            handle.wait()
         for fn in postprocess:
             fn()
         return tensor_dict
@@ -933,7 +939,9 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> tuple[
-        dict[str, torch.Tensor | Any] | None, list[Any], list[Callable[[], None]]
+        dict[str, torch.Tensor | Any] | None,
+        list[Handle],
+        list[Callable[[], None]],
     ]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
@@ -960,7 +968,7 @@ class GroupCoordinator:
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
-        handles: list[Any] = []
+        handles: list[Handle] = []
         postprocess: list[Callable[[], None]] = []
 
         for key, value in recv_metadata_list:
