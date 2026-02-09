@@ -4,7 +4,7 @@
 import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import Field, SkipValidation, model_validator, BaseModel
+from pydantic import BaseModel, Field, SkipValidation, model_validator
 from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
@@ -169,8 +169,8 @@ class SpeculativeConfig:
     """The parallel configuration for the target model."""
 
     # dynamic speculative decoding control
-    """Path to config file for dynamic speculative decoding, if provided."""
     dynamic_config_path: str | None = None
+    """Path to config file for dynamic speculative decoding, if provided."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -565,6 +565,7 @@ class SpeculativeConfig:
         # load DynamicSpeculativeConfig: maybe use get_hf_file_to_dict() later
         if self.dynamic_config_path is not None:
             import json
+
             with open(self.dynamic_config_path) as f:
                 data = json.load(f)
 

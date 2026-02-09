@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 
 from vllm.config.speculative import DynamicSpeculativeConfig
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class DynamicSpeculativeDecodingManager:
@@ -15,7 +13,7 @@ class DynamicSpeculativeDecodingManager:
 
     def __init__(
         self,
-        dynamic_config: DynamicSpeculativeConfig | None,
+        dynamic_config: DynamicSpeculativeConfig,
         vllm_max_batch_size: int,
         vllm_num_speculative_tokens: int,
         warmup_steps: int = 10,  # TODO: make this configurable
@@ -36,9 +34,7 @@ class DynamicSpeculativeDecodingManager:
 
         assert self.dynamic_config.max_num_speculative_tokens == len(
             self.dynamic_config.acceptance_rate_per_pos
-        ), (
-            "max_num_speculative_tokens must be equal to the length of acceptance_rate_per_pos"
-        )
+        ), "max_num_speculative_tokens != len(acceptance_rate_per_pos)"
         assert self.dynamic_config.max_num_speculative_tokens > 0, (
             "max_num_speculative_tokens must be > 0"
         )
@@ -46,10 +42,10 @@ class DynamicSpeculativeDecodingManager:
             "all acceptance_rate_per_pos values must be in (0, 1)"
         )
         assert 1 in self.dynamic_config.batch_stats, (
-            f"batch size 1 must be available, found: {self.dynamic_config.batch_stats.keys()}"
+            f"BS 1 not found in {self.dynamic_config.batch_stats.keys()}"
         )
         assert vllm_max_batch_size in self.dynamic_config.batch_stats, (
-            f"vllm max_num_seqs {vllm_max_batch_size} must be available, found: {self.dynamic_config.batch_stats.keys()}"
+            f"max BS not found in {self.dynamic_config.batch_stats.keys()}"
         )
 
         for bs in self.available_batch_sizes:
@@ -153,8 +149,8 @@ class DynamicSpeculativeDecodingManager:
         if num_drafts in batch_stats:
             return batch_stats[num_drafts]
         else:
-            lower_num_draft = max(k for k in batch_stats.keys() if k < num_drafts)
-            upper_num_draft = min(k for k in batch_stats.keys() if k > num_drafts)
+            lower_num_draft = max(k for k in batch_stats if k < num_drafts)
+            upper_num_draft = min(k for k in batch_stats if k > num_drafts)
 
             ratio = (num_drafts - lower_num_draft) / (upper_num_draft - lower_num_draft)
             lower_itl = batch_stats[lower_num_draft]

@@ -395,7 +395,7 @@ class SpecDecodeBaseProposer:
         # Use optimal num speculative tokens if provided
         if optimal_num_speculative_tokens is not None:
             self.num_speculative_tokens = optimal_num_speculative_tokens
-        
+
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":

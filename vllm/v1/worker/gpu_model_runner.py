@@ -153,8 +153,8 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
-from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -499,10 +499,6 @@ class GPUModelRunner(
                 )
             else:
                 self.dynamic_sd_manager = None
-
-            # REMOVE
-            if self.dynamic_sd_manager:
-                print(f"_optimal_num_speculative_tokens: {self.dynamic_sd_manager._optimal_num_speculative_tokens}")
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}

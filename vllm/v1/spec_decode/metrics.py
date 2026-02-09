@@ -47,9 +47,6 @@ class SpecDecodingStats:
         for i in range(num_draft_tokens):
             self.num_draft_tokens_per_pos[i] += 1
 
-        # REMOVE
-        # print(f"self.num_drafts: {self.num_drafts}, num_draft_tokens: {num_draft_tokens}, num_accepted_tokens: {num_accepted_tokens}")
-
 
 class SpecDecodingLogging:
     """Aggregate and log spec decoding metrics.

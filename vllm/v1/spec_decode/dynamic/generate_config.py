@@ -1,19 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import pprint
 import time
 from pathlib import Path
 
+from vllm.v1.spec_decode.offline import main as spec_decode_main
+
+from vllm.benchmarks.datasets import add_dataset_parser
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep
 from vllm.benchmarks.sweep.serve import SweepServeArgs, run_main
 from vllm.config.speculative import DynamicSpeculativeConfig
-from vllm.v1.spec_decode.offline import main as spec_decode_main
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.benchmarks.datasets import add_dataset_parser
 
 
-def build_serve_params(method, draft_dir, tp,
-                       num_speculative_tokens_list,
-                       prompt_lookup_max, prompt_lookup_min):
+def build_serve_params(
+    method,
+    draft_dir,
+    tp,
+    num_speculative_tokens_list,
+    prompt_lookup_max,
+    prompt_lookup_min,
+):
     """Build serve parameter sweep for vanilla + speculative decode configs.
 
     Each entry becomes a separate server configuration in the sweep.
@@ -27,35 +35,41 @@ def build_serve_params(method, draft_dir, tp,
     # Speculative decoding configs with varying num_speculative_tokens
     if method == "ngram":
         for k in num_speculative_tokens_list:
-            records.append({
-                "_benchmark_name": f"ngram-k-{k}",
-                "speculative_config": {
-                    "method": "ngram",
-                    "num_speculative_tokens": k,
-                    "prompt_lookup_max": prompt_lookup_max,
-                    "prompt_lookup_min": prompt_lookup_min,
-                },
-            })
+            records.append(
+                {
+                    "_benchmark_name": f"ngram-k-{k}",
+                    "speculative_config": {
+                        "method": "ngram",
+                        "num_speculative_tokens": k,
+                        "prompt_lookup_max": prompt_lookup_max,
+                        "prompt_lookup_min": prompt_lookup_min,
+                    },
+                }
+            )
     elif method in ("eagle", "eagle3"):
         for k in num_speculative_tokens_list:
-            records.append({
-                "_benchmark_name": f"{method}-k-{k}",
-                "speculative_config": {
-                    "method": method,
-                    "model": draft_dir,
-                    "num_speculative_tokens": k,
-                    "draft_tensor_parallel_size": tp,
-                },
-            })
+            records.append(
+                {
+                    "_benchmark_name": f"{method}-k-{k}",
+                    "speculative_config": {
+                        "method": method,
+                        "model": draft_dir,
+                        "num_speculative_tokens": k,
+                        "draft_tensor_parallel_size": tp,
+                    },
+                }
+            )
     elif method == "mtp":
         for k in num_speculative_tokens_list:
-            records.append({
-                "_benchmark_name": f"mtp-k-{k}",
-                "speculative_config": {
-                    "method": "mtp",
-                    "num_speculative_tokens": k,
-                },
-            })
+            records.append(
+                {
+                    "_benchmark_name": f"mtp-k-{k}",
+                    "speculative_config": {
+                        "method": "mtp",
+                        "num_speculative_tokens": k,
+                    },
+                }
+            )
 
     return ParameterSweep.from_records(records)
 
@@ -68,11 +82,13 @@ def build_bench_params(batch_size_list, num_batches):
     records = []
     for bs in batch_size_list:
         num_prompts = num_batches * bs
-        records.append({
-            "_benchmark_name": f"bs-{bs}",
-            "max_concurrency": bs,
-            "num_prompts": num_prompts,
-        })
+        records.append(
+            {
+                "_benchmark_name": f"bs-{bs}",
+                "max_concurrency": bs,
+                "num_prompts": num_prompts,
+            }
+        )
     return ParameterSweep.from_records(records)
 
 
@@ -109,23 +125,35 @@ def run_profiling_sweep(args):
     """Run profiling benchmarks using vllm bench sweep serve."""
     # Base serve command (static params shared across all serve configs)
     serve_cmd = [
-        "vllm", "serve", args.model_dir,
+        "vllm",
+        "serve",
+        args.model_dir,
         "--disable-log-requests",
-        "--gpu-memory-utilization", "0.95",
-        "--max-num-seqs", str(args.max_vllm_batch_size),
-        "--tensor-parallel-size", str(args.tp),
+        "--gpu-memory-utilization",
+        "0.95",
+        "--max-num-seqs",
+        str(args.max_vllm_batch_size),
+        "--tensor-parallel-size",
+        str(args.tp),
         "--enable-chunked-prefill",
         "--no-enable-prefix-caching",
     ]
 
     # Base bench command (static params shared across all bench configs)
     bench_cmd = [
-        "vllm", "bench", "serve",
-        "--model", args.model_dir,
-        "--backend", "openai-chat",
-        "--endpoint", "/v1/chat/completions",
-        "--dataset-name", args.dataset_name,
-        "--dataset-path", args.dataset_path,
+        "vllm",
+        "bench",
+        "serve",
+        "--model",
+        args.model_dir,
+        "--backend",
+        "openai-chat",
+        "--endpoint",
+        "/v1/chat/completions",
+        "--dataset-name",
+        args.dataset_name,
+        "--dataset-path",
+        args.dataset_path,
         f"--temperature={args.temp}",
         f"--top-p={args.top_p}",
         f"--top-k={args.top_k}",
@@ -172,15 +200,17 @@ def main():
 
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--draft-dir", type=str, default=None)
-    parser.add_argument("--method", type=str, default="eagle",
-                        choices=["ngram", "eagle", "eagle3", "mtp"])
     parser.add_argument(
-        "--num-speculative-tokens-list", nargs="*", type=int,
-        default=[1, 3, 5]
+        "--method",
+        type=str,
+        default="eagle",
+        choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument(
-        "--batch-size-list", nargs="*", type=int,
-        default=[1, 4, 16, 64, 256]
+        "--num-speculative-tokens-list", nargs="*", type=int, default=[1, 3, 5]
+    )
+    parser.add_argument(
+        "--batch-size-list", nargs="*", type=int, default=[1, 4, 16, 64, 256]
     )
     parser.add_argument(
         "--max-vllm-batch-size",
@@ -196,8 +226,12 @@ def main():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--output-len", type=int, default=256)
-    parser.add_argument("--num-batches", type=int, default=20,
-                        help="Number of batches to run for each benchmark.")
+    parser.add_argument(
+        "--num-batches",
+        type=int,
+        default=20,
+        help="Number of batches to run for each benchmark.",
+    )
     parser.add_argument("--custom-mm-prompts", action="store_true")
 
     args = parser.parse_args()
@@ -206,9 +240,11 @@ def main():
     args.print_output = False
     args.num_spec_tokens = max(args.num_speculative_tokens_list)
     args.eagle_dir = args.draft_dir
-    args.result_dir = (f"{args.result_dir}/tp-{args.tp}_temp-{args.temp}"
-                       f"_top_p-{args.top_p}_top_k-{args.top_k}"
-                       f"/{args.dataset_path}/")
+    args.result_dir = (
+        f"{args.result_dir}/tp-{args.tp}_temp-{args.temp}"
+        f"_top_p-{args.top_p}_top_k-{args.top_k}"
+        f"/{args.dataset_path}/"
+    )
 
     assert args.max_vllm_batch_size == max(args.batch_size_list), (
         "max_vllm_batch_size must be equal to max of batch_size_list"
