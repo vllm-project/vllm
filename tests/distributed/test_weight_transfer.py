@@ -3,7 +3,7 @@
 """Tests for weight transfer engine backends.
 
 Unit tests for engine classes (parsing, validation, registry).
-Integration test for NCCL weight transfer between processes using Ray.
+Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 from unittest.mock import MagicMock
@@ -15,6 +15,11 @@ import torch
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCWeightTransferEngine,
+    IPCWeightTransferInitInfo,
+    IPCWeightTransferUpdateInfo,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferEngine,
     NCCLWeightTransferInitInfo,
@@ -154,6 +159,13 @@ class TestEngineRegistry:
         parallel_config = create_mock_parallel_config()
         engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
         assert isinstance(engine, NCCLWeightTransferEngine)
+
+    def test_create_engine_ipc(self):
+        """Test factory creates IPC engine."""
+        config = WeightTransferConfig(backend="ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
+        assert isinstance(engine, IPCWeightTransferEngine)
 
     def test_create_engine_invalid_backend(self):
         """Test factory raises for invalid backend."""
@@ -344,3 +356,338 @@ def test_nccl_weight_transfer_between_processes():
         f"Received shape: {result['received_shape']}, "
         f"Received sum: {result['received_sum']}"
     )
+
+
+# --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
+
+
+class TestIPCWeightTransferUpdateInfoValidation:
+    """Test IPCWeightTransferUpdateInfo dataclass validation."""
+
+    def test_valid_update_info(self):
+        """Test creating valid IPCWeightTransferUpdateInfo."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        # Create a dummy tensor and IPC handle
+        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle}]
+
+        info = IPCWeightTransferUpdateInfo(
+            names=["layer.weight"],
+            dtype_names=["float32"],
+            shapes=[[10, 10]],
+            ipc_handles=ipc_handles,
+        )
+        assert info.names == ["layer.weight"]
+        assert info.dtype_names == ["float32"]
+        assert info.shapes == [[10, 10]]
+        assert len(info.ipc_handles) == 1
+
+    def test_mismatched_dtype_names_raises(self):
+        """Test that mismatched dtype_names length raises ValueError."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
+
+        with pytest.raises(ValueError, match="dtype_names"):
+            IPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32"],  # Only one dtype
+                shapes=[[10, 10], [10]],
+                ipc_handles=ipc_handles,
+            )
+
+    def test_mismatched_shapes_raises(self):
+        """Test that mismatched shapes length raises ValueError."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
+
+        with pytest.raises(ValueError, match="shapes"):
+            IPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32", "float32"],
+                shapes=[[10, 10]],  # Only one shape
+                ipc_handles=ipc_handles,
+            )
+
+    def test_mismatched_ipc_handles_raises(self):
+        """Test that mismatched ipc_handles length raises ValueError."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle}]  # Only one handle
+
+        with pytest.raises(ValueError, match="ipc_handles"):
+            IPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32", "float32"],
+                shapes=[[10, 10], [10]],
+                ipc_handles=ipc_handles,
+            )
+
+    def test_empty_lists_valid(self):
+        """Test that empty lists are valid."""
+        info = IPCWeightTransferUpdateInfo(
+            names=[],
+            dtype_names=[],
+            shapes=[],
+            ipc_handles=[],
+        )
+        assert len(info.names) == 0
+
+
+# --- Unit Tests: IPC Engine Parsing ---
+
+
+class TestIPCEngineParsing:
+    """Test IPCWeightTransferEngine parsing methods."""
+
+    def test_parse_update_info_valid(self):
+        """Test parsing valid update info dict."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if torch.cuda.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        config = WeightTransferConfig(backend="ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = IPCWeightTransferEngine(config, parallel_config)
+
+        # Create dummy IPC handles
+        dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
+        dummy_tensor2 = torch.ones(50, device="cuda:0")
+        ipc_handle1 = reduce_tensor(dummy_tensor1)
+        ipc_handle2 = reduce_tensor(dummy_tensor2)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle1}, {gpu_uuid: ipc_handle2}]
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["w1", "w2"],
+                "dtype_names": ["float32", "bfloat16"],
+                "shapes": [[100, 100], [50]],
+                "ipc_handles": ipc_handles,
+            }
+        )
+
+        assert isinstance(update_info, IPCWeightTransferUpdateInfo)
+        assert update_info.names == ["w1", "w2"]
+        assert update_info.dtype_names == ["float32", "bfloat16"]
+        assert update_info.shapes == [[100, 100], [50]]
+        assert len(update_info.ipc_handles) == 2
+
+
+# --- Integration Test: IPC Weight Transfer Between Ray Tasks ---
+
+
+def get_physical_gpu_id(device_index: int = 0) -> str:
+    """Get physical GPU UUID for a device."""
+    props = torch.cuda.get_device_properties(device_index)
+    return str(props.uuid)
+
+
+@ray.remote(num_gpus=0.5)
+class TrainerActor:
+    """Trainer actor that creates and holds CUDA IPC handles."""
+
+    def __init__(self, tensor_shape: list[int], tensor_dtype: str):
+        import torch
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        # Create tensor on GPU and keep it alive
+        dtype = getattr(torch, tensor_dtype)
+        self.tensor = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
+        self.tensor.fill_(42.0)  # Fill with 42 to verify correct transfer
+
+        # Create IPC handle (tensor must stay alive for IPC to work)
+        ipc_handle = reduce_tensor(self.tensor)
+        gpu_uuid = get_physical_gpu_id(0)
+
+        torch.cuda.synchronize()
+
+        self.ipc_handle_dict = {
+            "ipc_handle": ipc_handle,
+            "gpu_uuid": gpu_uuid,
+            "shape": tensor_shape,
+            "dtype": tensor_dtype,
+        }
+
+    def get_ipc_handle_dict(self) -> dict:
+        """Return IPC handle dict. Tensor stays alive in this actor."""
+        return self.ipc_handle_dict
+
+
+@ray.remote(num_gpus=0.5)
+def inference_receive_ipc_tensor(
+    ipc_handle_dict: dict,
+) -> dict:
+    """Inference task that receives tensor via IPCWeightTransferEngine."""
+    from unittest.mock import MagicMock
+
+    import torch
+
+    from vllm.config.parallel import ParallelConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
+    from vllm.distributed.weight_transfer.ipc_engine import (
+        IPCWeightTransferEngine,
+        IPCWeightTransferUpdateInfo,
+    )
+
+    # Create engine with mock parallel config
+    config = WeightTransferConfig(backend="ipc")
+    parallel_config = MagicMock(spec=ParallelConfig)
+    parallel_config.rank = 0
+    parallel_config.world_size = 1
+    parallel_config.data_parallel_rank = 0
+
+    engine = IPCWeightTransferEngine(config, parallel_config)
+
+    # Initialize the engine (no-op for IPC)
+    init_info = IPCWeightTransferInitInfo()
+    engine.init_transfer_engine(init_info)
+
+    # Receive weights with a no-op load_weights that captures the tensor
+    received_tensors = []
+
+    def noop_load_weights(weights: list[tuple[str, torch.Tensor]]):
+        for name, tensor in weights:
+            # Clone tensor to keep it after engine cleans up
+            received_tensors.append((name, tensor.clone()))
+
+    # Create update info with IPC handle
+    update_info = IPCWeightTransferUpdateInfo(
+        names=["test.weight"],
+        dtype_names=[ipc_handle_dict["dtype"]],
+        shapes=[ipc_handle_dict["shape"]],
+        ipc_handles=[{ipc_handle_dict["gpu_uuid"]: ipc_handle_dict["ipc_handle"]}],
+    )
+    engine.receive_weights(update_info, noop_load_weights)
+    torch.cuda.synchronize()
+
+    # Verify we received the tensor
+    success = False
+    received_shape = None
+    received_sum = None
+
+    if len(received_tensors) == 1:
+        name, tensor = received_tensors[0]
+        received_shape = list(tensor.shape)
+        received_sum = tensor.sum().item()
+        # Check shape matches and values are all 42s (trainer sends 42s)
+        if received_shape == ipc_handle_dict["shape"]:
+            expected_sum = 42.0 * torch.tensor(ipc_handle_dict["shape"]).prod().item()
+            if abs(received_sum - expected_sum) < 0.01:
+                success = True
+
+    engine.shutdown()
+
+    return {
+        "success": success,
+        "received_shape": received_shape,
+        "received_sum": received_sum,
+    }
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 1,
+    reason="Need at least 1 GPU to run IPC weight transfer test.",
+)
+def test_ipc_weight_transfer_between_processes():
+    """Test IPC weight transfer from trainer to inference process using Ray.
+
+    This test verifies that the IPCWeightTransferEngine can receive
+    tensors via CUDA IPC handles from a trainer process.
+    Note: IPC requires processes to be on the same GPU/node.
+    We use a placement group to ensure both processes are on the same GPU.
+    """
+    from ray.util.placement_group import placement_group
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+    ray.init(ignore_reinit_error=True)
+
+    # Create a placement group to ensure both processes are on the same GPU
+    # Use fractional GPUs so both tasks can share the same GPU bundle
+    pg = placement_group([{"GPU": 1, "CPU": 2}])
+    ray.get(pg.ready())
+
+    scheduling_strategy = PlacementGroupSchedulingStrategy(
+        placement_group=pg,
+        placement_group_capture_child_tasks=True,
+    )
+
+    # Tensor to transfer: 100x100 filled with 42s
+    tensor_shape = [100, 100]
+    tensor_dtype = "float32"
+
+    # Create trainer actor that holds the tensor and IPC handle (stays alive)
+    trainer_actor = TrainerActor.options(  # type: ignore[attr-defined]
+        scheduling_strategy=scheduling_strategy
+    ).remote(tensor_shape, tensor_dtype)
+
+    # Get IPC handle dict (tensor stays alive in trainer actor)
+    ipc_handle_dict = ray.get(trainer_actor.get_ipc_handle_dict.remote())
+
+    # Receive tensor in inference process using IPC handles (on same GPU)
+    # Trainer actor stays alive during this operation
+    inference_result = ray.get(
+        inference_receive_ipc_tensor.options(
+            scheduling_strategy=scheduling_strategy
+        ).remote(ipc_handle_dict)
+    )
+
+    assert inference_result["success"], (
+        f"IPC weight transfer failed. "
+        f"Received shape: {inference_result['received_shape']}, "
+        f"Received sum: {inference_result['received_sum']}"
+    )
+
+
+def test_ipc_receive_weights_missing_gpu_uuid_raises():
+    """Test that receive_weights raises if GPU UUID not found in IPC handles."""
+    from torch.multiprocessing.reductions import reduce_tensor
+
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    config = WeightTransferConfig(backend="ipc")
+    parallel_config = create_mock_parallel_config()
+    engine = IPCWeightTransferEngine(config, parallel_config)
+
+    # Create IPC handle with wrong GPU UUID
+    dummy_tensor = torch.ones(10, 10, device="cuda:0")
+    ipc_handle = reduce_tensor(dummy_tensor)
+    wrong_uuid = "wrong-uuid-12345"
+    ipc_handles = [{wrong_uuid: ipc_handle}]
+
+    update_info = IPCWeightTransferUpdateInfo(
+        names=["w"],
+        dtype_names=["float32"],
+        shapes=[[10, 10]],
+        ipc_handles=ipc_handles,
+    )
+
+    with pytest.raises(ValueError, match="IPC handle not found"):
+        engine.receive_weights(update_info, lambda x: None)
