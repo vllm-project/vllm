@@ -44,6 +44,7 @@ class MoeConfig:
     """
 
     backend: Mxfp4Backend | None = None
+    """MoE backend to use. If None, will be selected automatically."""
 
     def compute_hash(self) -> str:
         """
