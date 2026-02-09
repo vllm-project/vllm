@@ -101,6 +101,7 @@ class CompilerInterface:
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         """
@@ -232,7 +233,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+        supports_aot = is_torch_equal_or_newer("2.10.0")
 
         if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             logger.error(
@@ -301,6 +302,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
@@ -525,6 +527,7 @@ class InductorAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)

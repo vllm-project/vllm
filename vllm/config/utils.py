@@ -14,7 +14,6 @@ from dataclasses import MISSING, Field, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-import regex as re
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
@@ -142,34 +141,6 @@ def getattr_iter(
                 )
             return getattr(object, name)
     return default_factory() if default_factory is not None else default
-
-
-def contains_object_print(text: str) -> bool:
-    """
-    Check if the text looks like a printed Python object, e.g.
-    contains any substring matching the pattern: "at 0xFFFFFFF>"
-    We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64-bit system).
-
-    Args:
-        text (str): The text to check
-
-    Returns:
-        result (bool): `True` if a match is found, `False` otherwise.
-    """
-    pattern = r"at 0x[a-fA-F0-9]{2,16}>"
-    match = re.search(pattern, text)
-    return match is not None
-
-
-def assert_hashable(text: str) -> bool:
-    if not contains_object_print(text):
-        return True
-    raise AssertionError(
-        f"vLLM tried to hash some configs that may have Python objects ids "
-        f"in them. This is a bug, please file an issue. "
-        f"Text being hashed: {text}"
-    )
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -354,31 +325,6 @@ def hash_factors(items: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
 
 
-def handle_deprecated(
-    config: ConfigT,
-    old_name: str,
-    new_name_or_names: str | list[str],
-    removal_version: str,
-) -> None:
-    old_val = getattr(config, old_name)
-    if old_val is None:
-        return
-
-    if isinstance(new_name_or_names, str):
-        new_names = [new_name_or_names]
-    else:
-        new_names = new_name_or_names
-
-    msg = (
-        f"{old_name} is deprecated and will be removed in {removal_version}. "
-        f"Use {', '.join(new_names)} instead."
-    )
-    logger.warning(msg)
-
-    for new_name in new_names:
-        setattr(config, new_name, old_val)
-
-
 @dataclass
 class Range:
     """
@@ -409,3 +355,28 @@ class Range:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+def handle_deprecated(
+    config: ConfigT,
+    old_name: str,
+    new_name_or_names: str | list[str],
+    removal_version: str,
+) -> None:
+    old_val = getattr(config, old_name)
+    if old_val is None:
+        return
+
+    if isinstance(new_name_or_names, str):
+        new_names = [new_name_or_names]
+    else:
+        new_names = new_name_or_names
+
+    msg = (
+        f"{old_name} is deprecated and will be removed in {removal_version}. "
+        f"Use {', '.join(new_names)} instead."
+    )
+    logger.warning(msg)
+
+    for new_name in new_names:
+        setattr(config, new_name, old_val)
