@@ -282,8 +282,10 @@ class LMCacheMPRequestMetadata:
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
             op = LoadStoreOp(
-                token_ids=token_ids, block_ids=block_ids,
-                start=start_token_idx, end=end_token_idx,
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -336,8 +338,10 @@ class LMCacheMPRequestMetadata:
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
             op = LoadStoreOp(
-                token_ids=token_ids, block_ids=block_ids,
-                start=start_token_idx, end=end_token_idx,
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
             )
 
             ret = LMCacheMPRequestMetadata(
