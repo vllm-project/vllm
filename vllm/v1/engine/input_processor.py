@@ -693,7 +693,7 @@ class InputProcessor:
 
         max_prompt_len = (
             model_config.max_model_len
-            if prompt_type == "encoder"
+            if prompt_type == "decoder"
             else self.mm_encoder_cache_size
         )
         if prompt_len > max_prompt_len:
