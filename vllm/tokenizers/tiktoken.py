@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Collection, Set
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
@@ -22,6 +22,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         # Expose special_tokens as instance attribute (not property) for compatibility
         # This ensures hasattr() checks work reliably in instantiate_extra_tokens
         self.special_tokens = self.tokenizer.special_tokens
+        self.chat_template = getattr(self.tokenizer, "chat_template", None)
 
         # adapt to kimi-audio
         if "<|im_kimia_text_eos|>" in self.special_tokens:
@@ -90,9 +91,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
     def pad_id(self) -> int:
         """Expose pad_id for KimiAudioProcessor compatibility."""
         # Kimi-Audio uses kimia_assistant_msg_start as pad token
-        return self.special_tokens.get(
-            "<|im_kimia_assistant_msg_start|>", 151666
-        )
+        return self.special_tokens.get("<|im_kimia_assistant_msg_start|>", 151666)
 
     @property
     def pad_token_id(self) -> int:
@@ -114,6 +113,34 @@ class TikTokenTokenizer(PreTrainedTokenizer):
 
     def get_added_vocab(self) -> dict[str, int]:
         return {}
+
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, str]],
+        chat_template: str | None = None,
+        add_generation_prompt: bool = False,
+        tokenize: bool = True,
+        padding: bool = False,
+        truncation: bool = False,
+        max_length: int | None = None,
+        return_tensors: str | None = None,
+        return_dict: bool = False,
+        tokenizer_kwargs: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> str | list[int]:
+        return self.tokenizer.apply_chat_template(
+            conversation=conversation,
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=tokenize,
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            return_tensors=return_tensors,
+            return_dict=return_dict,
+            tokenizer_kwargs=tokenizer_kwargs,
+            **kwargs,
+        )
 
     def encode(
         self,

@@ -57,6 +57,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Qwen3ASRConfig": "vllm.transformers_utils.configs.qwen3_asr",
     "Qwen3NextConfig": "vllm.transformers_utils.configs.qwen3_next",
     "Tarsier2Config": "vllm.transformers_utils.configs.tarsier2",
+    "WhisperVQConfig": "vllm.transformers_utils.configs.kimi_audio",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
 }

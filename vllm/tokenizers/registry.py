@@ -36,6 +36,7 @@ _VLLM_TOKENIZERS = {
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    "tiktoken": ("tiktoken", "TikTokenTokenizer"),
 }
 
 
