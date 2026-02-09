@@ -117,15 +117,18 @@ def main():
     ctrl_thread.join()
 
     # Check gap at the pause point
-    pause_gap = token_times[pause_token_idx] - token_times[pause_token_idx - 1]
-    print(
-        f"\nGap after pause (token {pause_token_idx} -> "
-        f"{pause_token_idx + 1}): {pause_gap:.3f}s"
-    )
-    if pause_gap >= PAUSE_DURATION * 0.9:
-        print("Test passed! Pause synchronized across DP ranks.")
+    if pause_token_idx < len(token_times):
+        pause_gap = token_times[pause_token_idx] - token_times[pause_token_idx - 1]
+        print(
+            f"\nGap after pause (token {pause_token_idx} -> "
+            f"{pause_token_idx + 1}): {pause_gap:.3f}s"
+        )
+        if pause_gap >= PAUSE_DURATION * 0.9:
+            print("Test passed! Pause synchronized across DP ranks.")
+        else:
+            print(f"Test failed! Expected ~{PAUSE_DURATION}s gap, got {pause_gap:.3f}s")
     else:
-        print(f"Test failed! Expected ~{PAUSE_DURATION}s gap, got {pause_gap:.3f}s")
+        print("Test failed! No tokens were generated after resuming.")
 
 
 if __name__ == "__main__":
