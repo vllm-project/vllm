@@ -600,6 +600,32 @@ def _shift_and_gather_cache_1d_kernel(
     PADDED_SHIFT: tl.constexpr,
     BLOCK_TOKENS: tl.constexpr,
 ):
+    # Per-sequence "shift + gather" for packed 1D arrays (token ids, positions,
+    # slot mappings, ...).
+    #
+    # We operate on a packed batch where each sequence (request) occupies a
+    # contiguous window [start, end] (inclusive) in a flattened tensor.
+    # For the next speculative step, we build a right-shifted version of each
+    # window. The shift amount can differ per sequence.
+    #
+    # For a single sequence (0-based index i within its window):
+    #   - Prefix (i < shift):
+    #       dst[start + i] = cached[cached_len - shift + i]
+    #   - Body   (i >= shift):
+    #       dst[start + i] = src[start + i - shift]
+    #
+    # The vacated prefix is filled from a small per-sequence cache (up to
+    # MAX_SHIFT elements) that stores values from previous speculative steps.
+    #
+    # Example:
+    #   cached_tail = [a3, a4]
+    #   src_window  = [b0, b1, b2, b3, b4]
+    #   shift = 2
+    #   -> dst_window = [a3, a4, b0, b1, b2]
+    #
+    # After dst is produced, we refresh cached_ptr[seq, :] with a suffix of dst
+    # (specified by store_start / store_len) so the next call can populate its
+    # prefix from cache.
     pid_seq = tl.program_id(0)
     pid_blk = tl.program_id(1)
 
@@ -634,7 +660,11 @@ def _shift_and_gather_cache_1d_kernel(
     val = tl.where(cached_mask, val_cached, val_src)
     tl.store(dst_ptr + dst_idx, val, mask=mask)
 
-    # store to cached
+    # Store into the per-sequence cache.
+    #
+    # Cache layout: [batch_size, MAX_SHIFT] (flattened). We always write the
+    # full MAX_SHIFT region (zero-padded when store_len < MAX_SHIFT) to keep the
+    # cache contiguous.
     store_start = tl.load(store_start_ptr + pid_seq).to(tl.int32)
     store_len = tl.load(store_len_ptr + pid_seq).to(tl.int32)
     m = tl.arange(0, PADDED_SHIFT)
@@ -661,6 +691,27 @@ def _shift_and_gather_hidden_kernel(
     BLOCK_TOKENS: tl.constexpr,
     BLOCK_HIDDEN: tl.constexpr,
 ):
+    # Per-sequence "shift + gather" for hidden states.
+    #
+    # This kernel implements the same logical transformation as
+    # _shift_and_gather_cache_1d_kernel, but operates on hidden states with
+    # shape [num_tokens, hidden_size].
+    #
+    # Layout:
+    #   - src_ptr / dst_ptr: packed hidden states [num_tokens, hidden_size]
+    #   - cached_ptr: per-sequence cache [batch_size, MAX_SHIFT, hidden_size]
+    #
+    # For each sequence window [start, end] (inclusive) and its shift value, for
+    # 0-based index i within the window:
+    #   - Prefix (i < shift):
+    #       dst[start + i, :] = cached[seq, cached_len - shift + i, :]
+    #   - Body   (i >= shift):
+    #       dst[start + i, :] = src[start + i - shift, :]
+    #
+    # We tile over tokens (BLOCK_TOKENS) and hidden dim (BLOCK_HIDDEN) to avoid
+    # extremely large Triton tiles when hidden_size is large. As in the 1D
+    # kernel, we refresh cached_ptr[seq, :, :] with a suffix of dst so the next
+    # call can populate its prefix from cache.
     pid_seq = tl.program_id(0)
     pid_blk = tl.program_id(1)
     pid_hid = tl.program_id(2)
