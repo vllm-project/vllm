@@ -278,8 +278,6 @@ class LMCacheMPRequestMetadata:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
             block_ids = tracker.allocated_block_ids[start:end]
-
-            # Token mode: pass full token_ids with start/end range
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
@@ -334,8 +332,6 @@ class LMCacheMPRequestMetadata:
         )
         if end > start:
             block_ids = tracker.allocated_block_ids[start:end]
-
-            # Token mode: pass full token_ids with start/end range
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
@@ -403,7 +399,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             "lmcache.mp.host", "tcp://localhost"
         )
         server_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.port", 9006
+            "lmcache.mp.port", 5555
         )
 
         server_url = f"{server_host}:{server_port}"
