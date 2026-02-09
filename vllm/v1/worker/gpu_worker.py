@@ -42,6 +42,7 @@ from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -152,9 +153,6 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Any] = []
 
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner", scope="global")
-
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -220,6 +218,7 @@ class Worker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
@@ -271,6 +270,9 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+
+            if self.use_v2_model_runner:
+                logger.info_once("Using V2 Model Runner", scope="local")
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
@@ -441,6 +443,7 @@ class Worker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
+    @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
@@ -460,6 +463,7 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+    @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> None:
         warmup_sizes = []
 
