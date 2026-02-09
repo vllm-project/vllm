@@ -549,6 +549,39 @@ class precompiled_wheel_utils:
         return wheel_url, download_filename
 
     @staticmethod
+    def resolve_wheel_metadata(
+        commit: str, variant: str
+    ) -> tuple[list[dict] | None, str | None]:
+        try_default = False
+        wheels, repo_url = None, None
+        print(f"Using precompiled wheel commit {commit} with variant {variant}")
+        try:
+            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                commit, variant
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch precompiled wheel metadata for variant %s: %s",
+                variant,
+                e,
+            )
+            try_default = True  # try outside handler to keep the stacktrace simple
+        if try_default:
+            print("Trying the default variant from remote")
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, None
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch precompiled wheel metadata for commit %s: %s",
+                    commit,
+                    e,
+                )
+            # if this also fails, then we have nothing more to try / cache
+        return wheels, repo_url
+
+    @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """
         Try to determine the precompiled wheel URL or path to use.
@@ -588,26 +621,19 @@ class precompiled_wheel_utils:
                     ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-            print(f"Using precompiled wheel commit {commit} with variant {variant}")
-            try_default = False
+
             wheels, repo_url, download_filename = None, None, None
-            try:
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, variant
+
+            wheels, repo_url = precompiled_wheel_utils.resolve_wheel_metadata(
+                commit=commit, variant=variant
+            )
+            if wheels is None or repo_url is None:
+                print(f"Using latest available nightly wheel with variant {variant}")
+                commit = "nightly"
+                wheels, repo_url = precompiled_wheel_utils.resolve_wheel_metadata(
+                    commit=commit, variant=variant
                 )
-            except Exception as e:
-                logger.warning(
-                    "Failed to fetch precompiled wheel metadata for variant %s: %s",
-                    variant,
-                    e,
-                )
-                try_default = True  # try outside handler to keep the stacktrace simple
-            if try_default:
-                print("Trying the default variant from remote")
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    "nightly", None
-                )
-                # if this also fails, then we have nothing more to try / cache
+
             assert wheels is not None and repo_url is not None, (
                 "Failed to fetch precompiled wheel metadata"
             )
