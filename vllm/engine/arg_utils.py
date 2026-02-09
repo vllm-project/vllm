@@ -46,6 +46,7 @@ from vllm.config import (
     LoadConfig,
     LoRAConfig,
     ModelConfig,
+    MoeConfig,
     MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -184,9 +185,9 @@ def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str,
     elem_type = types[0]
 
     # Handle Ellipsis
-    assert all(t is elem_type for t in types if t is not Ellipsis), (
-        f"All non-Ellipsis elements must be of the same type. Got {types}."
-    )
+    assert all(
+        t is elem_type for t in types if t is not Ellipsis
+    ), f"All non-Ellipsis elements must be of the same type. Got {types}."
 
     # Handle Union types
     if get_origin(elem_type) in {Union, UnionType}:
@@ -538,6 +539,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    moe_config: MoeConfig = get_field(VllmConfig, "moe_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
@@ -601,6 +603,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.moe_config, dict):
+            self.moe_config = MoeConfig(**self.moe_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -1211,6 +1215,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--moe-config", "-mc", **vllm_kwargs["moe_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
@@ -1340,9 +1345,9 @@ class EngineArgs:
                     self.model_loader_extra_config.to_serializable()
                 )
             self.model_loader_extra_config["tensorizer_config"] = {}
-            self.model_loader_extra_config["tensorizer_config"]["tensorizer_dir"] = (
-                self.model
-            )
+            self.model_loader_extra_config["tensorizer_config"][
+                "tensorizer_dir"
+            ] = self.model
             self.validate_tensorizer_args()
 
         return LoadConfig(
@@ -1484,15 +1489,15 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        assert not headless or not self.data_parallel_hybrid_lb, (
-            "data_parallel_hybrid_lb is not applicable in headless mode"
-        )
-        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
-            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
-        )
-        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
-            "nnodes > 1 is only supported with data_parallel_backend=mp"
-        )
+        assert (
+            not headless or not self.data_parallel_hybrid_lb
+        ), "data_parallel_hybrid_lb is not applicable in headless mode"
+        assert not (
+            self.data_parallel_hybrid_lb and self.data_parallel_external_lb
+        ), "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
+        assert (
+            self.data_parallel_backend == "mp" or self.nnodes == 1
+        ), "nnodes > 1 is only supported with data_parallel_backend=mp"
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -1504,12 +1509,12 @@ class EngineArgs:
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
             local_world_size = world_size // self.nnodes
-            assert world_size % self.nnodes == 0, (
-                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
-            )
-            assert self.node_rank < self.nnodes, (
-                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
-            )
+            assert (
+                world_size % self.nnodes == 0
+            ), f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
+            assert (
+                self.node_rank < self.nnodes
+            ), f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
             inferred_data_parallel_rank = (
                 self.node_rank * local_world_size
             ) // world_size_within_dp
@@ -1572,9 +1577,9 @@ class EngineArgs:
                     self.node_rank,
                 )
         else:
-            assert not self.data_parallel_hybrid_lb, (
-                "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
-            )
+            assert (
+                not self.data_parallel_hybrid_lb
+            ), "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
 
             if self.data_parallel_backend == "ray" and (
                 envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
@@ -1699,9 +1704,11 @@ class EngineArgs:
                 lora_dtype=self.lora_dtype,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
-                max_cpu_loras=self.max_cpu_loras
-                if self.max_cpu_loras and self.max_cpu_loras > 0
-                else None,
+                max_cpu_loras=(
+                    self.max_cpu_loras
+                    if self.max_cpu_loras and self.max_cpu_loras > 0
+                    else None
+                ),
             )
             if self.enable_lora
             else None
@@ -1802,6 +1809,7 @@ class EngineArgs:
             device_config=device_config,
             load_config=load_config,
             attention_config=attention_config,
+            moe_config=self.moe_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
