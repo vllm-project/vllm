@@ -93,6 +93,7 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    input_audio_duration: float = 0.0  # in seconds
 
 
 class RequestFunc(Protocol):
@@ -422,6 +423,8 @@ async def async_request_openai_audio(
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        output.input_audio_duration = soundfile.info(f).duration
+        f.seek(0)
 
         generated_text = ""
         ttft = 0.0
@@ -442,7 +445,9 @@ async def async_request_openai_audio(
 
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            chunk = message.decode("utf-8").removeprefix("data: ")
+                            if type(message) is bytes:
+                                message = message.decode("utf-8")
+                            chunk = message.removeprefix("data: ")
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
