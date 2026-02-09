@@ -3669,7 +3669,8 @@ void paged_attention(
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
-  if (kv_cache_dtype == "auto") {
+  if (kv_cache_dtype == "auto" || kv_cache_dtype == "bfloat16" ||
+      kv_cache_dtype == "float16") {
     if (query.dtype() == at::ScalarType::Half) {
       CALL_CUSTOM_LAUNCHER_BLK_HEAD(
           _Float16, _Float16, vllm::Fp8KVCacheDataType::kAuto, MFMAType::F16);

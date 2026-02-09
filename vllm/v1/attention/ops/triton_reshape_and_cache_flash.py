@@ -145,7 +145,11 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype in (
+        "auto",
+        "bfloat16",
+        "float16",
+    ) or kv_cache_dtype.startswith("fp8"), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (
@@ -323,7 +327,11 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype in (
+        "auto",
+        "bfloat16",
+        "float16",
+    ) or kv_cache_dtype.startswith("fp8"), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (

@@ -378,12 +378,16 @@ def use_trtllm_attention(
         # CLI argument not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = kv_cache_dtype == "auto"
+            use_trtllm = kv_cache_dtype in ("auto", "bfloat16", "float16")
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
+            use_trtllm = num_tokens <= 256 and kv_cache_dtype in (
+                "auto",
+                "bfloat16",
+                "float16",
+            )
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
