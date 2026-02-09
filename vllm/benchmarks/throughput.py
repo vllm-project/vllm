@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
+    BimodalDataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
@@ -30,6 +31,7 @@ from vllm.benchmarks.datasets import (
     ShareGPTDataset,
     SonnetDataset,
     VisionArenaDataset,
+    add_bimodal_dataset_args,
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
 )
@@ -350,23 +352,43 @@ def get_requests(args, tokenizer):
 
     if args.dataset_name == "random" or (
         args.dataset_path is None
-        and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
+        and args.dataset_name
+        not in {"bimodal", "prefix_repetition", "random-mm", "random-rerank"}
     ):
+        dataset_cls = RandomDataset
         sample_kwargs["range_ratio"] = args.random_range_ratio
-        # prefer random_* arguments, fall back to regular arguments
         random_prefix_len = getattr(args, "random_prefix_len", None)
         sample_kwargs["prefix_len"] = (
             random_prefix_len if random_prefix_len is not None else args.prefix_len
         )
         random_input_len = getattr(args, "random_input_len", None)
         sample_kwargs["input_len"] = (
-            random_input_len if random_input_len is not None else args.input_len
+            random_input_len
+            if random_input_len is not None
+            else args.input_len
         )
         random_output_len = getattr(args, "random_output_len", None)
         sample_kwargs["output_len"] = (
             random_output_len if random_output_len is not None else args.output_len
         )
-        dataset_cls = RandomDataset
+    elif args.dataset_name == "bimodal":
+        dataset_cls = BimodalDataset
+        sample_kwargs["short_ratio"] = args.bimodal_short_ratio
+        sample_kwargs["short_input_range"] = (
+            args.bimodal_short_input_min,
+            args.bimodal_short_input_max,
+        )
+        sample_kwargs["short_output_range"] = (
+            args.bimodal_short_output_min,
+            args.bimodal_short_output_max,
+        )
+        sample_kwargs["long_input_range"] = (
+            args.bimodal_long_input_min,
+            args.bimodal_long_input_max,
+        )
+        sample_kwargs["long_output_len"] = args.bimodal_long_output_len
+        # Pass max_model_len for early validation (prevents CUDA OOB).
+        sample_kwargs["max_model_len"] = getattr(args, "max_model_len", None)
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
         if args.backend == "vllm-chat":
@@ -519,7 +541,7 @@ def validate_args(args):
     if (
         not args.dataset
         and not args.dataset_path
-        and args.dataset_name not in {"prefix_repetition"}
+        and args.dataset_name not in {"bimodal", "prefix_repetition"}
     ):
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
@@ -686,6 +708,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         choices=[
             "sharegpt",
             "random",
+            "bimodal",
             "sonnet",
             "burstgpt",
             "hf",
@@ -828,6 +851,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
+
+    # bimodal dataset options
+    bimodal_group = parser.add_argument_group("bimodal dataset options")
+    add_bimodal_dataset_args(bimodal_group)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

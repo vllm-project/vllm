@@ -668,7 +668,192 @@ class RandomDataset(BenchmarkDataset):
 
 
 # -----------------------------------------------------------------------------
-# Random Dataset Implementation (Synthetic Data)
+# Bimodal Dataset (Mixed Short Chat + Long RAG)
+# -----------------------------------------------------------------------------
+
+
+class BimodalDataset(RandomDataset):
+    """Synthetic bimodal workload: short chat-style + long RAG-style requests.
+
+    Real-world LLM traffic is rarely uniform.  Production systems typically
+    serve a mix of short conversational turns and long retrieval-augmented
+    generation (RAG) queries.  This dataset reproduces that pattern so
+    benchmarks can surface scheduling bottlenecks that uniform workloads hide:
+
+    * **Head-of-line blocking** -- long prefill chunks delay short-request
+      decode steps.
+    * **KV-cache memory pressure** -- long sequences reduce the effective
+      batch size, lowering throughput.
+    * **P99 latency spikes** -- short requests queued behind long prefills
+      experience disproportionate wait times.
+
+    All distribution parameters are configurable via CLI arguments
+    (``--bimodal-short-ratio``, ``--bimodal-short-input-min``, etc.)
+    or by passing them directly to :meth:`sample`.
+
+    Example::
+
+        vllm bench throughput --dataset-name bimodal --num-prompts 500 \\
+            --model Qwen/Qwen2.5-0.5B --max-model-len 8192
+    """
+
+    # Defaults -- overridable via CLI or sample() kwargs.
+    DEFAULT_SHORT_RATIO = 0.8
+    DEFAULT_SHORT_INPUT_MIN = 50
+    DEFAULT_SHORT_INPUT_MAX = 150
+    DEFAULT_SHORT_OUTPUT_MIN = 10
+    DEFAULT_SHORT_OUTPUT_MAX = 50
+    DEFAULT_LONG_INPUT_MIN = 2000
+    DEFAULT_LONG_INPUT_MAX = 4000
+    DEFAULT_LONG_OUTPUT_LEN = 128
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
+        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        input_len: int | None = None,
+        output_len: int | None = None,
+        batchsize: int = 1,
+        short_ratio: float = DEFAULT_SHORT_RATIO,
+        short_input_range: tuple[int, int] = (
+            DEFAULT_SHORT_INPUT_MIN, DEFAULT_SHORT_INPUT_MAX),
+        short_output_range: tuple[int, int] = (
+            DEFAULT_SHORT_OUTPUT_MIN, DEFAULT_SHORT_OUTPUT_MAX),
+        long_input_range: tuple[int, int] = (
+            DEFAULT_LONG_INPUT_MIN, DEFAULT_LONG_INPUT_MAX),
+        long_output_len: int = DEFAULT_LONG_OUTPUT_LEN,
+        max_model_len: int | None = None,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # --- Validate bimodal parameters ---
+        if not 0.0 <= short_ratio <= 1.0:
+            raise ValueError(
+                f"--bimodal-short-ratio must be in [0.0, 1.0], "
+                f"got {short_ratio}."
+            )
+        if short_input_range[0] > short_input_range[1]:
+            raise ValueError(
+                f"--bimodal-short-input-min ({short_input_range[0]}) must be "
+                f"<= --bimodal-short-input-max ({short_input_range[1]})."
+            )
+        if short_output_range[0] > short_output_range[1]:
+            raise ValueError(
+                f"--bimodal-short-output-min ({short_output_range[0]}) must be "
+                f"<= --bimodal-short-output-max ({short_output_range[1]})."
+            )
+        if long_input_range[0] > long_input_range[1]:
+            raise ValueError(
+                f"--bimodal-long-input-min ({long_input_range[0]}) must be "
+                f"<= --bimodal-long-input-max ({long_input_range[1]})."
+            )
+
+        # Validate that the longest possible sequence fits within the model
+        # for both the long arm and the short arm.
+        if max_model_len is not None:
+            long_worst = long_input_range[1] + long_output_len
+            if long_worst > max_model_len:
+                raise ValueError(
+                    f"BimodalDataset: long-arm maximum sequence length "
+                    f"(long_input_max={long_input_range[1]} + "
+                    f"long_output_len={long_output_len} = {long_worst}) "
+                    f"exceeds max_model_len={max_model_len}. Decrease "
+                    f"--bimodal-long-input-max / --bimodal-long-output-len, "
+                    f"or increase --max-model-len (only if the model natively "
+                    f"supports it)."
+                )
+            short_worst = short_input_range[1] + short_output_range[1]
+            if short_worst > max_model_len:
+                raise ValueError(
+                    f"BimodalDataset: short-arm maximum sequence length "
+                    f"(short_input_max={short_input_range[1]} + "
+                    f"short_output_max={short_output_range[1]} "
+                    f"= {short_worst}) exceeds "
+                    f"max_model_len={max_model_len}. Decrease "
+                    f"--bimodal-short-input-max / "
+                    f"--bimodal-short-output-max, or increase "
+                    f"--max-model-len."
+                )
+
+        # Store config so get_sampling_params() can read it.
+        self._short_ratio = short_ratio
+        self._short_input_range = short_input_range
+        self._short_output_range = short_output_range
+        self._long_input_range = long_input_range
+        self._long_output_len = long_output_len
+
+        # Parent validates input_len >= 1; use long-arm max as the reference.
+        return super().sample(
+            tokenizer=tokenizer,
+            num_requests=num_requests,
+            request_id_prefix=request_id_prefix,
+            no_oversample=no_oversample,
+            prefix_len=prefix_len,
+            range_ratio=range_ratio,
+            input_len=(input_len if input_len is not None
+                       else long_input_range[1]),
+            output_len=(output_len if output_len is not None
+                        else long_output_len),
+            batchsize=batchsize,
+            **kwargs,
+        )
+
+    def get_sampling_params(
+        self,
+        num_requests: int,
+        range_ratio: float,
+        input_len: int,
+        output_len: int,
+        tokenizer: TokenizerLike,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        num_special = int(tokenizer.num_special_tokens_to_add())
+
+        short_in_lo = max(1, self._short_input_range[0] - num_special)
+        short_in_hi = max(1, self._short_input_range[1] - num_special)
+        long_in_lo = max(1, self._long_input_range[0] - num_special)
+        long_in_hi = max(1, self._long_input_range[1] - num_special)
+
+        # Vectorized bimodal sampling.
+        is_short = self._rng.random(num_requests) < self._short_ratio
+        short_count = int(is_short.sum())
+        long_count = num_requests - short_count
+
+        input_lens = np.where(
+            is_short,
+            self._rng.integers(short_in_lo, short_in_hi + 1, num_requests),
+            self._rng.integers(long_in_lo, long_in_hi + 1, num_requests),
+        )
+        output_lens = np.where(
+            is_short,
+            self._rng.integers(
+                self._short_output_range[0],
+                self._short_output_range[1] + 1,
+                num_requests,
+            ),
+            self._long_output_len,
+        )
+
+        logger.debug(
+            "BimodalDataset: %d short (%d%% target), %d long (%d%% target); "
+            "short input [%d, %d] output [%d, %d], "
+            "long input [%d, %d] output %d",
+            short_count, int(self._short_ratio * 100),
+            long_count, int((1 - self._short_ratio) * 100),
+            self._short_input_range[0], self._short_input_range[1],
+            self._short_output_range[0], self._short_output_range[1],
+            self._long_input_range[0], self._long_input_range[1],
+            self._long_output_len,
+        )
+
+        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
+        return input_lens, output_lens, offsets
+
+
+# -----------------------------------------------------------------------------
+# RandomDataset Subclasses (Reranking, Multimodal)
 # -----------------------------------------------------------------------------
 
 
@@ -1331,6 +1516,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "burstgpt",
             "sonnet",
             "random",
+            "bimodal",
             "random-mm",
             "random-rerank",
             "hf",
@@ -1445,6 +1631,9 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
 
     random_group = parser.add_argument_group("random dataset options")
     add_random_dataset_base_args(random_group)
+
+    bimodal_group = parser.add_argument_group("bimodal dataset options")
+    add_bimodal_dataset_args(bimodal_group)
 
     random_mm_group = parser.add_argument_group(
         "random multimodal dataset options extended from random dataset"
@@ -1569,6 +1758,69 @@ def add_random_dataset_base_args(
             "Whether the model supports reranking natively."
             " Only used for reranker benchmark."
         ),
+    )
+
+
+def add_bimodal_dataset_args(
+    parser_or_group: FlexibleArgumentParser | argparse._ArgumentGroup,
+) -> None:
+    """Add CLI arguments for the bimodal dataset.
+
+    This function adds arguments needed for:
+    - bimodal (mixed short chat + long RAG workload)
+
+    Args:
+        parser_or_group: Either a parser or an argument group to add arguments to.
+    """
+    parser_or_group.add_argument(
+        "--bimodal-short-ratio",
+        type=float,
+        default=BimodalDataset.DEFAULT_SHORT_RATIO,
+        help="Fraction of short (chat-style) requests. Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-short-input-min",
+        type=int,
+        default=BimodalDataset.DEFAULT_SHORT_INPUT_MIN,
+        help="Min input tokens for short requests. Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-short-input-max",
+        type=int,
+        default=BimodalDataset.DEFAULT_SHORT_INPUT_MAX,
+        help="Max input tokens for short requests. Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-short-output-min",
+        type=int,
+        default=BimodalDataset.DEFAULT_SHORT_OUTPUT_MIN,
+        help="Min output tokens for short requests. Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-short-output-max",
+        type=int,
+        default=BimodalDataset.DEFAULT_SHORT_OUTPUT_MAX,
+        help="Max output tokens for short requests. Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-long-input-min",
+        type=int,
+        default=BimodalDataset.DEFAULT_LONG_INPUT_MIN,
+        help="Min input tokens for long (RAG-style) requests. "
+        "Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-long-input-max",
+        type=int,
+        default=BimodalDataset.DEFAULT_LONG_INPUT_MAX,
+        help="Max input tokens for long (RAG-style) requests. "
+        "Default: %(default)s.",
+    )
+    parser_or_group.add_argument(
+        "--bimodal-long-output-len",
+        type=int,
+        default=BimodalDataset.DEFAULT_LONG_OUTPUT_LEN,
+        help="Output tokens for long requests. Default: %(default)s.",
     )
 
 
@@ -1909,6 +2161,31 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
+            ),
+            "bimodal": lambda: BimodalDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
+                short_ratio=args.bimodal_short_ratio,
+                short_input_range=(
+                    args.bimodal_short_input_min,
+                    args.bimodal_short_input_max,
+                ),
+                short_output_range=(
+                    args.bimodal_short_output_min,
+                    args.bimodal_short_output_max,
+                ),
+                long_input_range=(
+                    args.bimodal_long_input_min,
+                    args.bimodal_long_input_max,
+                ),
+                long_output_len=args.bimodal_long_output_len,
+                max_model_len=getattr(args, "max_model_len", None),
             ),
             "random-mm": lambda: RandomMultiModalDataset(
                 random_seed=args.seed,
