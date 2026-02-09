@@ -1727,6 +1727,13 @@ class FusedMoE(CustomOp):
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
+            # Launch shared experts before routed experts, as when
+            # no separate stream is used, the routed_expert kernel
+            # may inplace mutate the hidden_states input.
+            if has_separate_shared_experts:
+                assert self.shared_experts is not None
+                shared_output = self.shared_experts(staged_hidden_states)
+
             # Matrix multiply.
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
@@ -1749,10 +1756,6 @@ class FusedMoE(CustomOp):
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
-                assert self.shared_experts is not None
-
-                shared_output = self.shared_experts(staged_hidden_states)
-
                 final_hidden_states = (
                     shared_output,
                     final_hidden_states,
@@ -1914,6 +1917,25 @@ class FusedMoE(CustomOp):
                     dim=0,
                 )
 
+            # Launch shared experts before routed experts, as when no separate stream
+            # is used, the hidden_states won't be copied, and the routed_expert kernel
+            # may inplace mutate the hidden_states input.
+            if has_separate_shared_experts:
+                assert self.shared_experts is not None
+
+                if use_shared_experts_stream:
+                    # Run shared experts in parallel on a separate stream
+                    # NOTE: We start the separate stream here and mark the
+                    # sync end point immediately after it is done. This is
+                    # important to avoid excessive stream allocations by the cuda
+                    # graph replay later.
+                    with torch.cuda.stream(self.shared_experts_stream):
+                        # Note that hidden_states clone() is necessary here to avoid
+                        # conflict with the main stream
+                        shared_output = self.shared_experts(hidden_states_clone)
+                else:
+                    shared_output = self.shared_experts(hidden_states)
+
             # Matrix multiply.
             x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
 
@@ -1944,15 +1966,6 @@ class FusedMoE(CustomOp):
                 assert self.shared_experts is not None
 
                 if use_shared_experts_stream:
-                    # Run shared experts in parallel on a separate stream
-                    # NOTE: We start the separate stream here and mark the
-                    # sync end point immediately after it is done. This is
-                    # important to avoid excessive stream allocations by the cuda
-                    # graph replay later.
-                    with torch.cuda.stream(self.shared_experts_stream):
-                        # Note that hidden_states clone() is necessary here to avoid
-                        # conflict with the main stream
-                        shared_output = self.shared_experts(hidden_states_clone)
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (
