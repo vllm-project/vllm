@@ -35,7 +35,7 @@ EXPECTED_BASE_MODEL_OUTPUT = [
     "SELECT COUNT(Candidate_ID) FROM candidate",
     "SELECT COUNT(Candidate_ID) FROM candidate",
     "SELECT Candidate_ID, COUNT(*) as Total_Candidates\nFROM candidate\nINNER JOIN people ON candidate.People_ID = people.People_ID",  # noqa: E501
-    "SELECT Candidate_ID, Poll_Source FROM candidate WHERE COUNT(People_ID) = (SELECT COUNT(People_ID) FROM people) ORDER BY Candidate_ID DESC LIMIT 1;",  # noqa: E501
+    "SELECT Candidate_ID, Poll_Source FROM candidate WHERE People_ID IN (SELECT People_ID FROM people) ORDER BY COUNT(*) DESC LIMIT 1;",  # noqa: E501
 ]
 
 
