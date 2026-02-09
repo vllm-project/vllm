@@ -5,12 +5,12 @@ Replace ``slice_scatter`` and ``split_with_sizes`` nodes with a single
 assignment if there are no users for the inplace tensor written to by
 the slice_scatter call.
 
-The inplace rotary_embedding custom op takes in mutable query and key inputs 
+The inplace rotary_embedding custom op takes in mutable query and key inputs
 that are split+getitem outputs of a single qkv tensor.
 When functionalized, we fetch the rotated query and key from the functionalized op
-using `getitem` calls. However, we also write to the qkv tensor inplace using a 
+using `getitem` calls. However, we also write to the qkv tensor inplace using a
 `slice_scatter`, then split the inplace tensor to get the output tensors again.
-Instead, if the inplace tensor has no subsequent users, we can just replace the 
+Instead, if the inplace tensor has no subsequent users, we can just replace the
 `slice_scatter` and `split_with_sizes` nodes with the `getitem` calls.
 
 This is already done in fin_functionalization::FixFunctionalizationPass, but
@@ -41,7 +41,6 @@ class ScatterSplitReplacementPass(VllmInductorPass):
         count = 0
 
         for node in graph.nodes:
-            
             if not is_func(node, auto_functionalized):
                 continue
 
@@ -74,12 +73,16 @@ class ScatterSplitReplacementPass(VllmInductorPass):
                     # the slice_scatter+split nodes with the original results.
                     for user in getitem_nodes[1].users:
                         slice_scatter_1_node = user
-                    if not is_func(slice_scatter_1_node, torch.ops.aten.slice_scatter.default):
+                    if not is_func(
+                        slice_scatter_1_node, torch.ops.aten.slice_scatter.default
+                    ):
                         continue
 
                     for user in getitem_nodes[2].users:
                         slice_scatter_2_node = user
-                    if not is_func(slice_scatter_2_node, torch.ops.aten.slice_scatter.default):
+                    if not is_func(
+                        slice_scatter_2_node, torch.ops.aten.slice_scatter.default
+                    ):
                         continue
 
                     for user in slice_scatter_2_node.users:
@@ -99,11 +102,8 @@ class ScatterSplitReplacementPass(VllmInductorPass):
                     split_getitem_users[1].replace_all_uses_with(getitem_nodes[2])
                     graph.erase_node(split_getitem_users[1])
                     # Redirect value node to original qkv tensor
-                    split_getitem_users[2].replace_input_with(
-                        split_node,
-                        query.args[0]
-                    )
-                    
+                    split_getitem_users[2].replace_input_with(split_node, query.args[0])
+
                     # Erase unused nodes
                     graph.erase_node(split_node)
                     graph.erase_node(slice_scatter_2_node)
