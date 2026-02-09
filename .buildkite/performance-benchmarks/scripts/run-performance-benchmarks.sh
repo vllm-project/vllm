@@ -1,6 +1,3 @@
-#!/bin/bash
-
-# This script should be run inside the CI process
 # This script assumes that we are already inside the vllm/ directory
 # Benchmarking results will be available inside vllm/benchmarks/results/
 
@@ -8,6 +5,71 @@
 # and we still want to see other benchmarking results even when mixtral crashes.
 set -x
 set -o pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  run-performance-benchmarks.sh [--dry-run [--model <hf_model_id>] [--dtype <dtype>]]
+
+Notes:
+  - Default CI behavior is unchanged (ON_CPU default remains whatever your environment sets; CPU CI uses ON_CPU=1).
+  - --dry-run is debugging only: emit commands and write *.commands files, but do not execute vLLM.
+  - --model/--dtype are ONLY allowed with --dry-run and act as filters (no JSON override).
+  - Serving JSON selection follows existing logic:
+      * if SERVING_JSON env is set, it will be used
+      * otherwise serving-tests$ARCH.json is used (ARCH derived from existing ON_CPU detection)
+
+Options (dry-run only):
+  --dry-run Print commands and write *.commands files, but do not execute vLLM.
+  --model   Filter: only emit serving tests whose model matches this id in the selected JSON file.
+  --dtype   Filter: only emit serving tests whose dtype matches this value in the selected JSON file.
+EOF
+}
+
+# Parsed CLI filters (dry-run only)
+MODEL_FILTER=""
+DTYPE_FILTER=""
+
+parse_args() {
+  local dry_run_seen=0
+  local model_seen=0
+  local dtype_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run_seen=1
+        export DRY_RUN=1
+        shift 1
+        ;;
+      --model)
+        MODEL_FILTER="${2:-}"
+        model_seen=1
+        shift 2
+        ;;
+      --dtype)
+        DTYPE_FILTER="${2:-}"
+        dtype_seen=1
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "ERROR: Unknown argument: $1" >&2
+        usage
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ $dry_run_seen -eq 0 && ( $model_seen -eq 1 || $dtype_seen -eq 1 ) ]]; then
+    echo "ERROR: --model/--dtype are only supported with --dry-run." >&2
+    usage
+    exit 2
+  fi
+}
 
 check_gpus() {
   if command -v nvidia-smi; then
@@ -81,9 +143,6 @@ ensure_sharegpt_downloaded() {
 
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
-  # example:
-  # input: { "model": "meta-llama/Llama-2-7b-chat-hf", "tensor_parallel_size": 1 }
-  # output: --model meta-llama/Llama-2-7b-chat-hf --tensor-parallel-size 1
   local json_string=$1
   local args=$(
     echo "$json_string" | jq -r '
@@ -97,9 +156,6 @@ json2args() {
 
 json2envs() {
   # transforms the JSON string to environment variables.
-  # example:
-  # input: { "VLLM_CPU_KVCACHE_SPACE": 5 }
-  # output: VLLM_CPU_KVCACHE_SPACE=5
   local json_string=$1
   local args=$(
     echo "$json_string" | jq -r '
@@ -252,37 +308,16 @@ run_benchmark_tests() {
   done
 }
 
-run_latency_tests() {
-  run_benchmark_tests "latency" "$1"
-}
+run_latency_tests() { run_benchmark_tests "latency" "$1"; }
+run_startup_tests() { run_benchmark_tests "startup" "$1"; }
+run_throughput_tests() { run_benchmark_tests "throughput" "$1"; }
 
-run_startup_tests() {
-  run_benchmark_tests "startup" "$1"
-}
+serving_tests_stream() {
+  # Emit merged serving test objects, optionally filtered by MODEL_FILTER/DTYPE_FILTER in DRY_RUN mode.
+  # This helper does NOT modify JSON; it only filters the stream in dry-run mode.
+  local serving_test_file="$1"
 
-run_throughput_tests() {
-  run_benchmark_tests "throughput" "$1"
-}
-
-run_serving_tests() {
-  # run serving tests using `vllm bench serve` command
-  # $1: a json file specifying serving test cases
-  #
-  # Supported JSON formats:
-  # 1) Plain format: top-level array
-  #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
-  #
-  # 2) Default parameters field + plain format tests
-  #    {
-  #      "defaults": { ... },
-  #      "tests": [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
-  #    }
-
-  local serving_test_file
-  serving_test_file=$1
-
-  # Iterate over serving tests
-  jq -c '
+  local merged='
     if type == "array" then
       # Plain format: test cases array
       .[]
@@ -304,7 +339,50 @@ run_serving_tests() {
     else
       error("Unsupported serving test file format: must be array or object with .tests")
     end
-  ' "$serving_test_file" | while read -r params; do
+  '
+
+  jq -c "$merged" "$serving_test_file" | \
+  if [[ "${DRY_RUN:-0}" == "1" && ( "${MODEL_FILTER}${DTYPE_FILTER}" != "" ) ]]; then
+    jq -c --arg model "$MODEL_FILTER" --arg dtype "$DTYPE_FILTER" '
+      select((($model|length)==0)
+             or ((.server_parameters.model // "") == $model)
+             or ((.client_parameters.model // "") == $model))
+      | select((($dtype|length)==0) or ((.server_parameters.dtype // "") == $dtype))
+    '
+  else
+    cat
+  fi
+}
+
+run_serving_tests() {
+  # run serving tests using `vllm bench serve` command
+  # $1: a json file specifying serving test cases
+  #
+  # Supported JSON formats:
+  # 1) Plain format: top-level array
+  #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #
+  # 2) Default parameters field + plain format tests
+  #    {
+  #      "defaults": { ... },
+  #      "tests": [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #    }
+
+  local serving_test_file
+  serving_test_file=$1
+
+  # In dry-run mode, if filters are provided but no tests match, fail fast.
+  if [[ "${DRY_RUN:-0}" == "1" && ( "${MODEL_FILTER}${DTYPE_FILTER}" != "" ) ]]; then
+    local count
+    count=$(serving_tests_stream "$serving_test_file" | wc -l | tr -d ' ')
+    if [[ "$count" -eq 0 ]]; then
+      echo "No matching serving tests found in $serving_test_file for model='$MODEL_FILTER' dtype='$DTYPE_FILTER'." >&2
+      return 3
+    fi
+  fi
+
+  # Iterate over serving tests (merged + optional filtered stream)
+  serving_tests_stream "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -374,15 +452,20 @@ run_serving_tests() {
     # support remote vllm server
     client_remote_args=""
     if [[ -z "${REMOTE_HOST}" ]]; then
-      bash -c "$server_command" &
-      server_pid=$!
-      # wait until the server is alive
-      if wait_for_server; then
-        echo ""
-        echo "vLLM server is up and running."
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        # don't start server in dry-run
+        :
       else
-        echo ""
-        echo "vLLM failed to start within the timeout period."
+        bash -c "$server_command" &
+        server_pid=$!
+        # wait until the server is alive
+        if wait_for_server; then
+          echo ""
+          echo "vLLM server is up and running."
+        else
+          echo ""
+          echo "vLLM failed to start within the timeout period."
+        fi
       fi
     else
       server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"
@@ -402,9 +485,7 @@ run_serving_tests() {
     for qps in $qps_list; do
       # remove the surrounding single quote from qps
       if [[ "$qps" == *"inf"* ]]; then
-        echo "qps was $qps"
         qps="inf"
-        echo "now qps is $qps"
       fi
 
       # iterate over different max_concurrency
@@ -425,7 +506,9 @@ run_serving_tests() {
         echo "Running test case $test_name with qps $qps"
         echo "Client command: $client_command"
 
-        bash -c "$client_command"
+        if [[ "${DRY_RUN:-0}" != "1" ]]; then
+          bash -c "$client_command"
+        fi
 
         # record the benchmarking commands
         jq_output=$(jq -n \
@@ -443,12 +526,16 @@ run_serving_tests() {
     done
 
     # clean up
-    kill -9 $server_pid
-    kill_gpu_processes
+    if [[ "${DRY_RUN:-0}" != "1" ]]; then
+      kill -9 $server_pid
+      kill_gpu_processes
+    fi
   done
 }
 
 main() {
+  parse_args "$@"
+
   local ARCH
   ARCH=''
   if [[ "$ON_CPU" == "1" ]]; then
@@ -458,7 +545,13 @@ main() {
      check_gpus
      ARCH="$arch_suffix"
   fi
-  check_hf_token
+
+  # DRY_RUN does not execute vLLM; do not require HF_TOKEN.
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    check_hf_token
+  else
+    echo "DRY_RUN=1 -> skip HF_TOKEN validation"
+  fi
 
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
@@ -479,11 +572,16 @@ main() {
 
   # dump vllm info via vllm collect-env
   env_output=$(vllm collect-env)
-
   echo "$env_output" >"$RESULTS_FOLDER/vllm_env.txt"
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}" || exit $?
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "DRY_RUN=1 -> skip latency/startup/throughput suites"
+    exit 0
+  fi
+
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
   run_startup_tests $QUICK_BENCHMARK_ROOT/tests/"${STARTUP_JSON:-startup-tests$ARCH.json}"
   run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
