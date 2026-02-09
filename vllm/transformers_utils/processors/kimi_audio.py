@@ -101,11 +101,23 @@ def mel_filters(device: str | torch.device, n_mels: int = 128) -> torch.Tensor:
             mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
         )
     """
-    with np.load(
-        os.path.join(os.path.dirname(__file__), "mel_filters.npz")  # todo
-        # os.path.join("assets", "mel_filters.npz")
-    ) as f:
-        return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
+    try:
+        with np.load(
+            os.path.join(os.path.dirname(__file__), "mel_filters.npz")
+        ) as f:
+            return torch.from_numpy(f[f"mel_{n_mels}"]).to(device).to(torch.float32)
+    except FileNotFoundError:
+        # Fallback to creating filters on the fly if file is missing (e.g. in CI/CD)
+        # This requires librosa, but handles the missing file case gracefully
+        try:
+            import librosa
+            filters = librosa.filters.mel(sr=16000, n_fft=400, n_mels=n_mels)
+            return torch.from_numpy(filters).to(device).to(torch.float32)
+        except ImportError:
+            raise RuntimeError(
+                "mel_filters.npz not found and librosa not installed. "
+                "Please ensure mel_filters.npz exists in vllm/transformers_utils/processors/"
+            )
 
 
 def log_mel_spectrogram(
@@ -151,7 +163,19 @@ def log_mel_spectrogram(
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs() ** 2
 
+    # Force magnitudes to float32 to avoid FP64 operations which might fail on some GPUs
+    # (no kernel image available) and mismatch with filters (float32).
+    if magnitudes.dtype == torch.float64:
+        magnitudes = magnitudes.to(torch.float32)
+
     filters = mel_filters(audio.device, n_mels)
+    
+    # Ensure dtypes match for matrix multiplication
+    if filters.dtype != magnitudes.dtype:
+        # Fallback: if magnitudes is still not float32 for some reason
+        print(f"[DEBUG] dtype mismatch: filters={filters.dtype}, magnitudes={magnitudes.dtype}")
+        filters = filters.to(magnitudes.dtype)
+
     mel_spec = filters @ magnitudes
 
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()

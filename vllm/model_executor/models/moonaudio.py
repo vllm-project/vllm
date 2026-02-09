@@ -48,7 +48,6 @@ import torch.nn as nn
 from transformers.activations import ACT2FN
 from transformers.models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2RMSNorm
 
-from vllm.v1.attention.backend import AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -69,6 +68,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiAudioConfig
+from vllm.v1.attention.backend import AttentionType
 
 
 class MoonshotMLP(nn.Module):
@@ -380,10 +380,12 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
     ) -> torch.Tensor | IntermediateTensors:
         mimo_hidden_states, mimo_residual = None, None
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
+            if inputs_embeds is None:
+                # shape: batch, seq_len, hidden_size
+                input_ids = input_ids.to(torch.cuda.current_device())
                 hidden_states = self.embed_input_ids(input_ids)
+            else:
+                hidden_states = inputs_embeds
             residual = None
         else:
             assert intermediate_tensors is not None

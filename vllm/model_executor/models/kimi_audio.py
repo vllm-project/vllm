@@ -44,6 +44,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
+from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -52,7 +53,6 @@ from vllm.multimodal.processing.processor import (
     PromptInsertion,
     PromptUpdate,
 )
-from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.glm4 import Glm4Tokenizer
@@ -235,7 +235,11 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
                 # Check if data is already in processor_data
                 if "audio" not in processor_data and "audios" not in processor_data:
                     # Force inject using the key expected by KimiAudioProcessor.__call__
-                    processor_data["audio"] = audio_items.get_all_items()
+                    processor_data["audio"] = audio_items.get_all()
+
+                # Also inject audio_waveforms into passthrough_data so it reaches the model
+                passthrough_data = dict(passthrough_data)
+                passthrough_data["audio_waveforms"] = audio_items.get_all()
 
         return processor_data, passthrough_data
 
@@ -342,6 +346,11 @@ class MoonshotKimiaForCausalLM(
         if isinstance(mm_input, torch.Tensor):
             return torch.concat(list(mm_input))
         else:
+            # Ensure elements are tensors (handle list of lists from dummy inputs)
+            mm_input = [
+                torch.tensor(x) if not isinstance(x, torch.Tensor) else x
+                for x in mm_input
+            ]
             return torch.concat(mm_input)
 
     def _replace_audio_placeholders(
@@ -433,7 +442,7 @@ class MoonshotKimiaForCausalLM(
         # if audio_waveforms is None or len(audio_waveforms) == 0:
         #    return None
         if audio_waveforms is None:
-             return None
+            return None
 
         if is_continuous_mask is not None:
             is_continuous_mask = self._validate_and_reshape_mm_tensor(
@@ -456,102 +465,27 @@ class MoonshotKimiaForCausalLM(
             audio_waveforms=audio_waveforms,
         )
 
-    def _process_audio_input(self, audio_input: KimiAudioInputs) -> torch.Tensor:
-        # In this method, we process audio waveforms to extract Whisper input
-        # features and combine them with audio input token.
-        audio_input_ids = audio_input["audio_input_ids"]
-        audio_waveforms = audio_input["audio_waveforms"]
-        is_continuous_mask = audio_input["is_continuous_mask"]
-        is_continuous_mask = torch.tensor([is_continuous_mask], dtype=torch.bool)
-
-        # Audio waveforms are loaded as numpy arrays in main process (in __call__)
-        # Now extract Whisper continuous features in worker process (has GPU and model)
-        if audio_waveforms and isinstance(audio_waveforms[0], np.ndarray):
-            whisper_features = []
-            for audio_data in audio_waveforms:
-                # Convert numpy to tensor
-                audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
-                # Extract whisper continuous features (in worker, has GPU and model)
-                feature = self.audio_tower.tokenize_waveform(audio_tensor)
-                feature = feature.reshape(
-                    feature.shape[0],
-                    int(feature.shape[1] // 4),
-                    feature.shape[2] * 4,
-                )
-                whisper_features.append(feature)
-        else:
-            # Legacy path: features already provided as tensors
-            whisper_features = self.audio_tower.tokenize_waveform(audio_waveforms)
-            whisper_features = whisper_features.reshape(
-                whisper_features.shape[0],
-                int(whisper_features.shape[1] // 4),
-                whisper_features.shape[2] * 4,
-            )
-
-        # shape: batch, seq_len, hidden_size
-        device = self.model.embed_tokens.weight.device
-        audio_input_ids = audio_input_ids.to(device)
-        # text_input_ids = text_input_ids.to(device)
-        audio_emb = self.model.get_input_embeddings(audio_input_ids)
-        if self.config.use_whisper_feature:
-            assert isinstance(whisper_features, list)
-
-            media_start_idx = (audio_input_ids == self.kimia_media_begin).nonzero()
-            media_end_idx = (audio_input_ids == self.kimia_media_end).nonzero()
-            # shape: batch, seq_len, hidden_size
-            whisper_input_dim = whisper_features[0].shape[-1]
-            whisper_dtype = whisper_features[0].dtype
-            projector_device = self.multi_modal_projector.layers[0].weight.device
-            expanded_whisper = torch.zeros(
-                audio_emb.shape[1],
-                whisper_input_dim,
-                dtype=whisper_dtype,
-                device=projector_device,
-            )
-            for (seg_idx, start_idx), (_, end_idx) in zip(
-                media_start_idx, media_end_idx
-            ):
-                feat_len = end_idx - (start_idx + 1)
-                whisper_feature_i = whisper_features[seg_idx].squeeze(0)
-                assert feat_len == is_continuous_mask[seg_idx].sum()
-                expanded_whisper[start_idx + 1 : end_idx, :] = whisper_feature_i[
-                    :feat_len, :
-                ]
-
-            expanded_whisper = expanded_whisper.unsqueeze(0)
-            whisper_emb = self.multi_modal_projector(expanded_whisper)
-            whisper_emb = whisper_emb.to(device)
-            is_continuous_mask = is_continuous_mask.to(device)
-            whisper_emb = whisper_emb * is_continuous_mask[:, :, None]
-
-            encoder_input_addwith_discrete_token = (
-                audio_emb + whisper_emb
-            ) * torch.sqrt(
-                torch.tensor(2.0, dtype=whisper_emb.dtype, device=whisper_emb.device)
-            )
-            audio_emb = (
-                audio_emb * (~is_continuous_mask[:, :, None])
-                + encoder_input_addwith_discrete_token * is_continuous_mask[:, :, None]
-            )
-        return audio_emb
-
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        print(f"[DEBUG] embed_multimodal called with kwargs keys: {kwargs.keys()}")
         # Validate the multimodal input keyword arguments
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
+            print("[DEBUG] _parse_and_validate_audio_input returned None")
             return []
 
         audio_waveforms = audio_input["audio_waveforms"]
-        # if not audio_waveforms:
-        #    return []
+        print(f"[DEBUG] audio_waveforms type: {type(audio_waveforms)}")
+        if isinstance(audio_waveforms, list):
+             print(f"[DEBUG] audio_waveforms len: {len(audio_waveforms)}")
+             if len(audio_waveforms) > 0:
+                  print(f"[DEBUG] first item type: {type(audio_waveforms[0])}")
 
         whisper_features_list = []
 
-        for audio_data in audio_waveforms:
-            # 1. Convert to tensor
+        for i, audio_data in enumerate(audio_waveforms):
             if isinstance(audio_data, np.ndarray):
                 audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
             elif isinstance(audio_data, list):
@@ -561,6 +495,10 @@ class MoonshotKimiaForCausalLM(
                 audio_tensor = (
                     audio_data.unsqueeze(0) if audio_data.dim() == 1 else audio_data
                 )
+
+            # Ensure tensor is on the correct device and dtype (float32) to avoid FP64 issues
+            # This is critical for STFT on consumer GPUs
+            audio_tensor = audio_tensor.to(device=next(self.audio_tower.parameters()).device, dtype=torch.float32)
 
             feature = self.audio_tower.tokenize_waveform(audio_tensor)
 
@@ -588,8 +526,12 @@ class MoonshotKimiaForCausalLM(
         multimodal_embeddings: list[torch.Tensor],
     ) -> torch.Tensor:
         """
-        Merge audio embeddings into text embeddings using Kimi-Audio's dual-stream logic.
+        This method indicates the specialized logic in Kimi-Audio. And it merge 
+        audio embeddings into text embeddings using Kimi-Audio's dual-stream logic.
         """
+        target_dtype = inputs_embeds.dtype
+        print(f"[DEBUG] _merge_audio_embeddings start: inputs_embeds.dtype={inputs_embeds.dtype}, inputs_embeds.device={inputs_embeds.device}")
+
         if not multimodal_embeddings:
             return inputs_embeds
 
@@ -598,6 +540,7 @@ class MoonshotKimiaForCausalLM(
         media_end_idx = (input_ids == self.kimia_media_end).nonzero()
 
         if media_start_idx.shape[0] != len(multimodal_embeddings):
+            print(f"[DEBUG] Segment count mismatch: media_start={media_start_idx.shape[0]}, multimodal_embeddings={len(multimodal_embeddings)}")
             return inputs_embeds
 
         device = inputs_embeds.device
@@ -605,11 +548,12 @@ class MoonshotKimiaForCausalLM(
 
         whisper_input_dim = multimodal_embeddings[0].shape[-1]
         whisper_dtype = multimodal_embeddings[0].dtype
+        print(f"[DEBUG] multimodal_embeddings[0]: dtype={whisper_dtype}, shape={multimodal_embeddings[0].shape}, device={multimodal_embeddings[0].device}")
 
         # expanded_whisper will hold the audio features expanded to match sequence length
         expanded_whisper = torch.zeros(
-            inputs_embeds.shape[0], # batch
-            inputs_embeds.shape[1], # seq_len
+            inputs_embeds.shape[0],  # batch
+            inputs_embeds.shape[1],  # seq_len
             whisper_input_dim,
             dtype=whisper_dtype,
             device=projector_device,
@@ -622,9 +566,7 @@ class MoonshotKimiaForCausalLM(
             device=device,
         )
 
-        for i, (start_pos, end_pos) in enumerate(
-            zip(media_start_idx, media_end_idx)
-        ):
+        for i, (start_pos, end_pos) in enumerate(zip(media_start_idx, media_end_idx)):
             batch_idx, start_col = start_pos
             _, end_col = end_pos
 
@@ -636,39 +578,38 @@ class MoonshotKimiaForCausalLM(
             copy_len = min(feat_len, feat.shape[0])
 
             # Copy features to the correct position
-            expanded_whisper[
-                batch_idx, start_col + 1 : start_col + 1 + copy_len, :
-            ] = feat[:copy_len, :]
-            
-            # Set mask for continuous area
+            expanded_whisper[batch_idx, start_col + 1 : start_col + 1 + copy_len, :] = (
+                feat[:copy_len, :]
+            )
+
+            # Set mask for continuous area(Derived on-site)
             is_continuous_mask[batch_idx, start_col + 1 : end_col] = True
 
         # Project audio features
-        whisper_emb = self.multi_modal_projector(expanded_whisper)
+        # NOTE: Projection is already done in embed_multimodal
+        whisper_emb = expanded_whisper
         whisper_emb = whisper_emb.to(device)
+        print(f"[DEBUG] whisper_emb after move: dtype={whisper_emb.dtype}, device={whisper_emb.device}")
 
         # Apply mask
         whisper_emb = whisper_emb * is_continuous_mask[:, :, None]
 
         # Dual-stream merge: (text + audio) * sqrt(2)
+        scale_factor = torch.tensor(2.0, dtype=whisper_emb.dtype, device=device)
+        print(f"[DEBUG] scale_factor dtype={scale_factor.dtype}")
+
         encoder_input_addwith_discrete_token = (
             inputs_embeds + whisper_emb
-        ) * torch.sqrt(torch.tensor(2.0, dtype=whisper_emb.dtype, device=device))
+        ) * torch.sqrt(scale_factor)
 
         # Final merge: apply merged embeddings only where mask is True
         inputs_embeds = (
             inputs_embeds * (~is_continuous_mask[:, :, None])
             + encoder_input_addwith_discrete_token * is_continuous_mask[:, :, None]
         )
+        print(f"[DEBUG] merged inputs_embeds dtype={inputs_embeds.dtype}")
 
-        return inputs_embeds
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-    ) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        return inputs_embeds.to(target_dtype)
 
     def forward(
         self,
@@ -678,35 +619,28 @@ class MoonshotKimiaForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> tuple[torch.Tensor] | IntermediateTensors:
+        import sys
+        print(f"[DEBUG] KimiAudio forward called. kwargs keys: {list(kwargs.keys())}")
+        if inputs_embeds is not None:
+             print(f"[DEBUG] inputs_embeds provided. shape={inputs_embeds.shape}, dtype={inputs_embeds.dtype}")
+             if torch.isnan(inputs_embeds).any() or torch.isinf(inputs_embeds).any():
+                 print("[DEBUG] WARNING: inputs_embeds contains NaN or Inf!")
+        sys.stdout.flush()
         
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings(input_ids)
+            print(f"[DEBUG] inputs_embeds initialized from input_ids. dtype={inputs_embeds.dtype}")
 
-        # Attempt to retrieve multimodal embeddings from kwargs
-        # The key depends on how vLLM passes the output of embed_multimodal
-        # Usually it matches the modality name or is a generic 'multimodal_embeddings' list
-        # But wait, embed_multimodal is called OUTSIDE forward in V1 model runner.
-        # Its output is passed to forward.
-        
-        # Let's inspect what keys are available in kwargs during runtime if possible, 
-        # but for now we implement the logic assuming we can get the features.
-        
-        # In V1, SupportsMultiModal models receiving multimodal inputs in forward 
-        # typically see them as arguments corresponding to the modality, e.g. 'audio' or 'vision_chunk'.
-        # Since our embed_multimodal returns a list of tensors, we expect a list of tensors here.
-        
-        multimodal_embeddings = kwargs.get("audio") # Assuming 'audio' is the key based on registry
-        
+        multimodal_embeddings = kwargs.get("audio")  # Assuming 'audio' is the key based on registry
+
+        # merge audio embeddings(whisper features) into text embeddings
         if multimodal_embeddings is not None:
-            # We also need 'is_continuous_mask' which is metadata.
-            # This should have been passed through from the batch/processor.
-            # But vLLM might not pass arbitrary tensor attributes from BatchFeature to forward unless configured.
             inputs_embeds = self._merge_audio_embeddings(
                 inputs_embeds, input_ids, multimodal_embeddings
             )
 
         hidden_states = self.model(
-            input_ids=input_ids,
+            input_ids=None,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
