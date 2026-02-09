@@ -167,8 +167,7 @@ class Request:
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[["Request"], list[BlockHash]] | None = block_hasher
-        if self._block_hasher is not None:
-            self.block_hashes = self._block_hasher(self)
+        self.recompute_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
@@ -213,8 +212,17 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
+        self.extend_block_hashes()
+
+    def extend_block_hashes(self) -> None:
+        """Compute block hashes for any new full blocks and append them."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
+
+    def recompute_block_hashes(self) -> None:
+        """Recompute all block hashes from scratch."""
+        if self._block_hasher is not None:
+            self.block_hashes = self._block_hasher(self)
 
     @property
     def use_structured_output(self) -> bool:

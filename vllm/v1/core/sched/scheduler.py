@@ -982,10 +982,8 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
-        # Update block hashes for the new tokens
-        # (mirrors Request.append_output_token_ids)
-        if session._block_hasher is not None:
-            session.block_hashes.extend(session._block_hasher(session))
+        # Update block hashes for the new tokens.
+        session.extend_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
