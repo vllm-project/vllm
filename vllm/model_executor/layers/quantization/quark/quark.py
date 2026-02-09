@@ -109,12 +109,12 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            if prefix == "lm_head" or not self.dynamic_mxfp4_quant:
+            if prefix == "lm_head" or not getattr(self, "dynamic_mxfp4_quant", False):
                 return UnquantizedLinearMethod()
             scheme = self.get_scheme(
                 layer=layer,
                 layer_name=prefix,
-                dynamic_mxfp4_quant=self.dynamic_mxfp4_quant,
+                dynamic_mxfp4_quant=True,
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
