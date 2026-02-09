@@ -14,7 +14,13 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    EmbeddingItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -596,6 +602,10 @@ class BaseProcessingInfo:
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
+    @cached_property
+    def data_parser(self) -> MultiModalDataParser:
+        return self.get_data_parser()
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return False
@@ -654,6 +664,42 @@ class BaseProcessingInfo:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
             raise ValueError(msg)
+
+    def parse_mm_data(
+        self,
+        mm_data: MultiModalDataDict,
+        *,
+        validate: bool = True,
+    ) -> MultiModalDataItems:
+        """
+        Normalize
+        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        """
+        mm_items = self.data_parser.parse_mm_data(mm_data)
+
+        if validate:
+            mm_config = self.ctx.get_mm_config()
+
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    if not mm_config.enable_mm_embeds:
+                        raise ValueError(
+                            f"You must set `--enable-mm-embeds` to input "
+                            f"`{modality}_embeds`"
+                        )
+                    if mm_config.get_limit_per_prompt(modality) == 0:
+                        logger.debug(
+                            "Skipping count validation for modality "
+                            "'%s' (embeddings with limit=0)",
+                            modality,
+                        )
+                        continue
+                self.validate_num_items(modality, len(items))
+
+        return mm_items
 
     def get_mm_max_tokens_per_item(
         self,

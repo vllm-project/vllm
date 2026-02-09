@@ -8,11 +8,10 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator
-from pydantic.dataclasses import dataclass
+from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
@@ -96,7 +95,6 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -172,7 +170,9 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
+        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():
@@ -267,7 +267,6 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -311,7 +310,6 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -594,6 +592,30 @@ class CompilationConfig:
 
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
+
+    fast_moe_cold_start: bool | None = None
+    """Optimization for fast MOE cold start.
+
+    This is a bit of a hack that assumes that:
+    1. the only decoder forward pass being run is the current model
+    2. the decoder forward pass runs all of the MOEs in the order in which they
+       are initialized
+
+    When the above two conditions hold, this option greatly decreases cold start
+    time for MOE models.
+
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on usually but off for speculative decoding
+
+    If conditions 1&2 don't hold then this option will lead to silent
+    incorrectness.
+    The only condition in which this doesn't hold is speculative
+    decoding, where there is a draft model that may have MOEs in them.
+
+    NB: We're working on a longer-term solution that doesn't need these assumptions.
+    """
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
@@ -943,6 +965,15 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+
+                # unified_kv_cache_update has a string param that prevents Inductor
+                # from reusing piecewise graphs. Remove it from the compiled graph.
+                # This has the side-effect of excluding cache from cudagraphs but
+                # that doesn't seem to affect performance.
+                # https://github.com/vllm-project/vllm/issues/33267
+                if not self.use_inductor_graph_partition:
+                    self.splitting_ops.append("vllm::unified_kv_cache_update")
+
             elif len(self.splitting_ops) == 0:
                 if (
                     self.cudagraph_mode == CUDAGraphMode.PIECEWISE

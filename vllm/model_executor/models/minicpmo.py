@@ -64,6 +64,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
     MiniCPMV2_6,
+    MiniCPMV4_5,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVMultiModalDataParser,
     MiniCPMVMultiModalProcessor,
@@ -197,7 +198,9 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         )
 
     def get_default_audio_pool_step(self) -> int:
-        return 2
+        hf_config = self.get_hf_config()
+        # MiniCPM-o 4.5 uses pool_step=5, older versions use 2
+        return getattr(hf_config, "audio_pool_step", 2)
 
     def get_default_audio_sampling_rate(self) -> int:
         return 16000
@@ -300,7 +303,8 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if (audios := mm_data.get("audios")) is None:
             return {}
 
-        parsed_audios = self.data_parser.parse_mm_data({"audio": audios}).get_items(
+        mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
+        parsed_audios = mm_items.get_items(
             "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
         )
 
@@ -520,12 +524,9 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    MiniCPMOMultiModalProcessor,
-    info=MiniCPMOProcessingInfo,
-    dummy_inputs=MiniCPMODummyInputsBuilder,
-)
-class MiniCPMO(MiniCPMV2_6):
+class MiniCPMOBaseModel:
+    """Base mixin class for MiniCPM-O models with audio support."""
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -766,3 +767,82 @@ class MiniCPMO(MiniCPMV2_6):
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
+
+
+class MiniCPMO2_6(MiniCPMOBaseModel, MiniCPMV2_6):
+    """MiniCPM-O 2.6 model with Qwen2 backbone."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.apm = self.init_audio_module(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+            )
+
+
+class MiniCPMO4_5(MiniCPMOBaseModel, MiniCPMV4_5):
+    """MiniCPM-O 4.5 model with Qwen3 backbone."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.apm = self.init_audio_module(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+            )
+
+
+_MINICPMO_SUPPORT_VERSION = {
+    (2, 6): MiniCPMO2_6,
+    (4, 5): MiniCPMO4_5,
+}
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMOMultiModalProcessor,
+    info=MiniCPMOProcessingInfo,
+    dummy_inputs=MiniCPMODummyInputsBuilder,
+)
+class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
+    """
+    MiniCPM-O model with audio support.
+    Different versions use different LLM backbones:
+    - Version 2.6: Uses Qwen2
+    - Version 4.5: Uses Qwen3
+    """
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+
+        # Determine version from config
+        if hasattr(config, "version"):
+            try:
+                version_str = str(config.version)
+                version_parts = version_str.split(".")
+                version = tuple(int(x) for x in version_parts[:2])
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid model version format in config: {config.version}. "
+                    "Expected a dot-separated version string like '4.5'."
+                ) from e
+        else:
+            # Default to 2.6 for backward compatibility
+            version = (2, 6)
+
+        # Dispatch class based on version
+        instance_cls = _MINICPMO_SUPPORT_VERSION.get(version)
+        if instance_cls is None:
+            supported_versions = ", ".join(
+                [f"{v[0]}.{v[1]}" for v in sorted(_MINICPMO_SUPPORT_VERSION.keys())]
+            )
+            raise ValueError(
+                f"Currently, MiniCPMO only supports versions "
+                f"{supported_versions}. Got version: {version}"
+            )
+
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # This __init__ won't be called due to __new__ returning a different class
+        pass

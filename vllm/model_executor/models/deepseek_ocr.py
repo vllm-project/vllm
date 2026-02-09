@@ -52,7 +52,6 @@ from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
-    IMAGE_SIZE,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -66,6 +65,7 @@ from .deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
+IMAGE_SIZE = 640
 _IMAGE_TOKEN = "<image>"
 
 
@@ -190,7 +190,15 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(DeepseekOCRProcessor, **kwargs)
+        v1_processor_config = dict(
+            image_size=IMAGE_SIZE,
+            base_size=BASE_SIZE,
+            crop_mode=CROP_MODE,
+            strategy="v1",
+        )
+        return self.ctx.get_hf_processor(
+            DeepseekOCRProcessor, **{**kwargs, **v1_processor_config}
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

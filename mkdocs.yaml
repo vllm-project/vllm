@@ -141,6 +141,7 @@ extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
+  - mkdocs/javascript/reo.js
   - mkdocs/javascript/run_llm_widget.js
   - mkdocs/javascript/mathjax.js
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js

@@ -3,14 +3,39 @@
 
 import asyncio
 import time
+from dataclasses import dataclass
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.config import ModelConfig
+from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
+
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
+class MockModelConfig:
+    runner_type = "generate"
+    model: str = MODEL_NAME
+    tokenizer: str = MODEL_NAME
+    trust_remote_code: bool = False
+    max_model_len: int = 100
+    tokenizer_revision = None
+    tokenizer_mode = "mistral"
+    hf_config = MockHFConfig()
+    encoder_config: dict[str, Any] | None = None
+    enable_prompt_embeds: bool = True
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
 
 @pytest.mark.asyncio
@@ -22,12 +47,13 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
         time.sleep(2)
         return expected_tokens
 
+    mock_model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template = mocked_apply_chat_template
-    mock_renderer = MistralRenderer(Mock(spec=ModelConfig), tokenizer_kwargs={})
+    mock_renderer = MistralRenderer(mock_model_config, tokenizer_kwargs={})
     mock_renderer._tokenizer = mock_tokenizer
 
-    task = mock_renderer.render_messages_async([])
+    task = mock_renderer.render_messages_async([], ChatParams())
 
     # Ensure the event loop is not blocked
     blocked_count = 0

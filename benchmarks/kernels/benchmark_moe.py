@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -110,25 +109,24 @@ def benchmark_config(
     if use_int4_w4a16:
         # Int4 packed weights: 2 int4 values per uint8 byte
         # K dimension is packed (halved)
+        intermediate_size = shard_intermediate_size // 2  # after silu_and_mul
         w1 = torch.randint(
             0,
             255,
             (
                 num_experts,
                 shard_intermediate_size,
-                hidden_size // 2,
+                hidden_size // 2,  # int4 packing
             ),
             dtype=torch.uint8,
         )
-        # shard_intermediate_size // 2: gate+up -> intermediate (silu_and_mul)
-        # // 2: int4 packing (2 values per uint8 byte)
         w2 = torch.randint(
             0,
             255,
             (
                 num_experts,
                 hidden_size,
-                shard_intermediate_size // 2 // 2,
+                intermediate_size // 2,  # int4 packing
             ),
             dtype=torch.uint8,
         )
@@ -167,16 +165,16 @@ def benchmark_config(
     a1_scale = None
     a2_scale = None
     if use_int4_w4a16:
-        assert block_quant_shape is not None
+        if block_quant_shape is None:
+            raise ValueError("block_quant_shape is required for int4_w4a16")
         group_size = block_quant_shape[1]
         # Scales shape: (E, N, K // group_size) in fp16
         w1_scale = torch.rand(
             (num_experts, shard_intermediate_size, hidden_size // group_size),
             dtype=dtype,
         )
-        # shard_intermediate_size // 2: gate+up -> intermediate (silu_and_mul)
         w2_scale = torch.rand(
-            (num_experts, hidden_size, shard_intermediate_size // 2 // group_size),
+            (num_experts, hidden_size, intermediate_size // group_size),
             dtype=dtype,
         )
     elif use_int8_w8a16:
@@ -223,34 +221,23 @@ def benchmark_config(
 
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
-        from vllm.model_executor.layers.fused_moe.config import (
-            int4_w4a16_moe_quant_config,
-        )
 
-        if use_int4_w4a16:
-            quant_config = int4_w4a16_moe_quant_config(
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=None,
-                w2_zp=None,
-                block_shape=block_quant_shape,
-            )
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
         else:
-            if use_fp8_w8a8:
-                quant_dtype = torch.float8_e4m3fn
-            elif use_int8_w8a16:
-                quant_dtype = torch.int8
-            else:
-                quant_dtype = None
+            quant_dtype = None
 
-            quant_config = FusedMoEQuantConfig.make(
-                quant_dtype=quant_dtype,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
-                block_shape=block_quant_shape,
-            )
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+            weight_dtype="int4" if use_int4_w4a16 else None,
+        )
 
         deep_gemm_experts = None
         if use_deep_gemm:
@@ -534,6 +521,8 @@ class BenchmarkWorker:
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
+        # local import to allow serialization by ray
+
         set_random_seed(self.seed)
         dtype_str = _get_config_dtype_str(
             dtype,
@@ -592,10 +581,13 @@ class BenchmarkWorker:
         block_quant_shape: list[int],
         use_deep_gemm: bool,
     ) -> dict[str, int]:
+        # local import to allow serialization by ray
+        from vllm.platforms import current_platform
+
         best_config = None
         best_time = float("inf")
         if current_platform.is_rocm():
-            is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
+            is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
             search_space = prune_rocm_search_space(
                 num_tokens,
                 shard_intermediate_size,
@@ -624,7 +616,7 @@ class BenchmarkWorker:
                         dtype,
                         use_fp8_w8a8,
                         use_int8_w8a16,
-                        use_int4_w4a16=use_int4_w4a16,
+                        use_int4_w4a16,
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
@@ -703,67 +695,34 @@ def save_configs(
     )
     os.makedirs(save_dir, exist_ok=True)
     filename = os.path.join(save_dir, filename)
-
-    # Merge with existing configs so we don't lose previously tuned batch sizes.
-    # If the triton version changed, the old configs are likely invalid, so we
-    # overwrite instead of merging.
-    existing_configs: dict[str, Any] = {}
-    if os.path.exists(filename):
-        with open(filename) as f:
-            existing_configs = json.load(f)
-        old_triton_version = existing_configs.pop("triton_version", None)
-        if old_triton_version != triton.__version__:
-            print(
-                f"Triton version changed ({old_triton_version} -> "
-                f"{triton.__version__}), overwriting existing config."
-            )
-            existing_configs = {}
-
-    # New configs override existing ones for the same batch size
-    merged = {**existing_configs, **{str(k): v for k, v in configs.items()}}
-
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
-        json.dump({"triton_version": triton.__version__, **merged}, f, indent=4)
+        json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
+
+
+def get_compressed_tensors_block_structure(config, default_value=None):
+    config_groups = config.get("config_groups", {})
+    if len(config_groups) != 1:
+        return default_value
+    group = next(iter(config_groups.values()))
+    weights = group.get("weights", {})
+    block_structure = weights.get("block_structure", default_value)
+    return block_structure
 
 
 def get_weight_block_size_safety(config, default_value=None):
     quantization_config = getattr(config, "quantization_config", {})
     if isinstance(quantization_config, dict):
-        return quantization_config.get("weight_block_size", default_value)
+        if "weight_block_size" in quantization_config:
+            return quantization_config["weight_block_size"]
+        return get_compressed_tensors_block_structure(
+            quantization_config, default_value
+        )
     return default_value
 
 
-def get_quantization_group_size(config) -> int | None:
-    """Extract the quantization group size from the model config.
-
-    Supports AWQ-style configs (direct 'group_size' key) and
-    compressed-tensors configs (nested inside 'config_groups').
-    """
-    quantization_config = getattr(config, "quantization_config", {})
-    if not isinstance(quantization_config, dict):
-        return None
-    # AWQ / GPTQ style: group_size is a top-level key
-    gs = quantization_config.get("group_size")
-    if gs is not None:
-        return gs
-    # compressed-tensors style: group_size is nested in config_groups
-    for group_cfg in quantization_config.get("config_groups", {}).values():
-        weights = group_cfg.get("weights", {})
-        gs = weights.get("group_size")
-        if gs is not None:
-            return gs
-    return None
-
-
-def main(args: argparse.Namespace):
-    print(args)
-
-    config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
-    if args.model_prefix:
-        config = getattr(config, args.model_prefix)
-
+def get_model_params(config):
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -781,6 +740,7 @@ def main(args: argparse.Namespace):
         "Glm4MoeForCausalLM",
         "Glm4MoeLiteForCausalLM",
         "NemotronHForCausalLM",
+        "MistralLarge3ForCausalLM",
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
@@ -801,16 +761,20 @@ def main(args: argparse.Namespace):
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
+    elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
         hidden_size = config.hidden_size
-    elif config.architectures[0] in ["Qwen3OmniMoeForConditionalGeneration"]:
+    elif config.architectures[0] == "Qwen3OmniMoeForConditionalGeneration":
         E = config.thinker_config.text_config.num_experts
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
+    elif config.architectures[0] == "PixtralForConditionalGeneration":
+        # Pixtral can contain different LLM architectures,
+        # recurse to get their parameters
+        return get_model_params(config.get_text_config())
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -819,6 +783,48 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
+    return E, topk, intermediate_size, hidden_size
+
+
+def get_quantization_group_size(config) -> int | None:
+    """Extract the quantization group size from the HF model config.
+
+    This reads directly from the HuggingFace config object (as returned by
+    ``get_config()``), not from vLLM's quantization config classes.
+
+    Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
+    compressed-tensors configs (nested inside 'config_groups').
+    """
+    quantization_config = getattr(config, "quantization_config", {})
+    if not isinstance(quantization_config, dict):
+        return None
+    # AWQ / GPTQ style: group_size is a top-level key
+    gs = quantization_config.get("group_size")
+    if gs is not None:
+        return gs
+    # compressed-tensors style: group_size is nested in config_groups
+    config_groups = quantization_config.get("config_groups", {})
+    if not isinstance(config_groups, dict):
+        return None
+    for group_cfg in config_groups.values():
+        if not isinstance(group_cfg, dict):
+            continue
+        weights = group_cfg.get("weights", {})
+        if not isinstance(weights, dict):
+            continue
+        gs = weights.get("group_size")
+        if gs is not None:
+            return gs
+    return None
+
+
+def main(args: argparse.Namespace):
+    print(args)
+
+    config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
+    if args.model_prefix:
+        config = getattr(config, args.model_prefix)
+    E, topk, intermediate_size, hidden_size = get_model_params(config)
     enable_ep = bool(args.enable_expert_parallel)
     if enable_ep:
         ensure_divisibility(E, args.tp_size, "Number of experts")
@@ -897,17 +903,15 @@ def main(args: argparse.Namespace):
         return ray.get(outputs)
 
     if args.tune:
-        is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
+        # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
+        # search space generation (no matrix_instr_nonkdim/kpack exploration).
+        is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
         search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
         if use_int4_w4a16:
-            # Add SPLIT_K=1 to all configs (required by gptq_awq kernel)
+            # SPLIT_K is a required kernel constexpr for gptq_awq kernel;
+            # only SPLIT_K=1 is used at runtime, so fix it during tuning.
             for cfg in search_space:
                 cfg["SPLIT_K"] = 1
-        if args.max_configs and len(search_space) > args.max_configs:
-            import random
-
-            random.seed(args.seed)
-            search_space = random.sample(search_space, args.max_configs)
         print(f"Start tuning over {len(search_space)} configurations...")
         if use_deep_gemm:
             raise ValueError(
@@ -1001,12 +1005,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
-    parser.add_argument(
-        "--max-configs",
-        type=int,
-        default=None,
-        help="Max configs to sample from the search space (for faster tuning)",
-    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)
     args = parser.parse_args()

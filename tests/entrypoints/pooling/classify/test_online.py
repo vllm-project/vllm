@@ -128,12 +128,10 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
         server.url_for("classify"),
         json={"model": model_name, "input": []},
     )
-    classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(classification_response.json())
 
-    assert output.object == "list"
-    assert isinstance(output.data, list)
-    assert len(output.data) == 0
+    error = classification_response.json()
+    assert classification_response.status_code == 400
+    assert "error" in error
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -471,6 +469,4 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")

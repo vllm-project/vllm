@@ -98,18 +98,15 @@ class ConchLinearKernel(MPLinearKernel):
             # Permute to [K//G, N//pack_factor, pack_factor] then reshape to [K//G, N]
             unpacked = unpacked.permute(1, 0, 2).reshape(k_groups, n_full)
 
-            # Convert to int8 to save memory (kernel accepts any dtype)
-            x.data = unpacked.to(torch.int8).contiguous()
+            x.data = unpacked.to(torch.uint8).contiguous()
 
             # Update metadata - zeros are no longer packed
             if hasattr(x, "_input_dim"):
                 x._input_dim = 0
             if hasattr(x, "_output_dim"):
                 x._output_dim = 1
-            if hasattr(x, "_packed_dim"):
-                delattr(x, "_packed_dim")
-            if hasattr(x, "packed_dim"):
-                delattr(x, "packed_dim")
+            if hasattr(x, "_packed_factor"):
+                x._packed_factor = 1
             return x
 
         self._transform_param(layer, self.w_q_name, transform_w_q)

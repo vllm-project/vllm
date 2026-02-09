@@ -125,6 +125,7 @@ class OpenPanguVisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
@@ -842,20 +843,24 @@ class OpenPanguVLForConditionalGeneration(
         self.config = config
         self.vllm_config = vllm_config
         quant_config = vllm_config.quant_config
-        self.visual = OpenPanguVisionTransformer(
-            vision_config=config.vision_config,
-            out_hidden_size=config.vision_config.out_hidden_size,
-            hidden_size=config.hidden_size,
-            norm_eps=getattr(config.vision_config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix("openpangu", "language_model"),
-            architectures=["PanguEmbeddedForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = OpenPanguVisionTransformer(
+                vision_config=config.vision_config,
+                out_hidden_size=config.vision_config.out_hidden_size,
+                hidden_size=config.hidden_size,
+                norm_eps=getattr(config.vision_config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix("openpangu", "language_model"),
+                architectures=["PanguEmbeddedForCausalLM"],
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -1006,9 +1011,6 @@ class OpenPanguVLForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)

@@ -5,8 +5,10 @@ import pytest
 import torch
 
 from tests.conftest import VllmRunner
+from tests.utils import create_new_process_for_each_test
 
 
+@create_new_process_for_each_test()  # Memory is not cleaned up properly otherwise
 @pytest.mark.parametrize(
     "model",
     [
@@ -22,10 +24,14 @@ def test_inference(
     location_coords = torch.full((1, 2), 1.0, dtype=torch.float16)
     prompt = dict(
         prompt_token_ids=[1],
-        multi_modal_data=dict(
-            pixel_values=pixel_values, location_coords=location_coords
-        ),
+        multi_modal_data={
+            "image": {
+                "pixel_values": pixel_values,
+                "location_coords": location_coords,
+            }
+        },
     )
+
     with vllm_runner(
         model,
         runner="pooling",

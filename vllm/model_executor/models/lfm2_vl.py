@@ -357,9 +357,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             tok_kwargs,
         )
 
-        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
-            "image", ImageProcessorItems
-        )
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]

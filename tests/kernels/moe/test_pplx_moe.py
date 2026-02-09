@@ -592,6 +592,7 @@ def pplx_moe(
         prepare_finalize,
         experts,
         shared_experts,
+        inplace=False,
     )
 
     # Note: for now use_compile will error out if the problem size is

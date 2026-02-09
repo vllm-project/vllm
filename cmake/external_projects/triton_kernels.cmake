@@ -1,9 +1,9 @@
 # Install OpenAI triton_kernels from https://github.com/triton-lang/triton/tree/main/python/triton_kernels
 
-set(DEFAULT_TRITON_KERNELS_TAG "v3.5.0")
+set(DEFAULT_TRITON_KERNELS_TAG "v3.6.0")
 
 # Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM. We expect TRITON_KERNELS_SRC_DIR to
-# be directly set to the triton_kernels python directory. 
+# be directly set to the triton_kernels python directory.
 if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
   message(STATUS "[triton_kernels] Fetch from $ENV{TRITON_KERNELS_SRC_DIR}")
   FetchContent_Declare(
@@ -24,7 +24,7 @@ else()
   )
 endif()
 
-# Fetch content 
+# Fetch content
 FetchContent_MakeAvailable(triton_kernels)
 
 if (NOT triton_kernels_SOURCE_DIR)
@@ -47,7 +47,7 @@ install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/third_party/tr
 ## Copy .py files to install directory.
 install(DIRECTORY
         ${TRITON_KERNELS_PYTHON_DIR}
-        DESTINATION 
+        DESTINATION
         vllm/third_party/triton_kernels/
         COMPONENT triton_kernels
         FILES_MATCHING PATTERN "*.py")

@@ -924,4 +924,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             workspace=layer.workspace,
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
+            inplace=not self.moe.disable_inplace,
         )
