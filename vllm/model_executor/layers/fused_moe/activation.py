@@ -21,6 +21,7 @@ class MoEActivation(Enum):
 
     # Non-gated activations (no mul with gate) expect input of shape [..., d]
     # and produce output of shape [..., d].
+    # NOTE: Non-gated activations require the "_no_mul" suffix to be present.
     SILU_NO_MUL = "silu_no_mul"
     GELU_NO_MUL = "gelu_no_mul"
     RELU2_NO_MUL = "relu2_no_mul"
@@ -38,17 +39,7 @@ class MoEActivation(Enum):
     def custom_op_name(self) -> str:
         """Maps to the CustomOp name of activations
         in vllm/model_executor/layers/activation.py."""
-        mapping: dict[MoEActivation, str] = {
-            MoEActivation.SILU: "silu_and_mul",
-            MoEActivation.GELU: "gelu_and_mul",
-            MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
-            MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
-            MoEActivation.RELU2: "relu2",
-            MoEActivation.SILU_NO_MUL: "silu_and_mul",
-            MoEActivation.GELU_NO_MUL: "gelu_and_mul",
-            MoEActivation.RELU2_NO_MUL: "relu2",
-        }
-        return mapping[self]
+        return _CUSTOM_OP_NAMES[self]
 
     def without_mul(self) -> "MoEActivation":
         """Get the non-gated variant of this activation.
@@ -57,12 +48,7 @@ class MoEActivation(Enum):
         For activations without a _no_mul variant (or already _no_mul),
         returns self.
         """
-        mapping = {
-            MoEActivation.SILU: MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU: MoEActivation.GELU_NO_MUL,
-            MoEActivation.RELU2: MoEActivation.RELU2_NO_MUL,
-        }
-        return mapping.get(self, self)
+        return _WITHOUT_MUL.get(self, self)
 
     @classmethod
     def from_str(cls, s: str) -> "MoEActivation":
@@ -72,6 +58,25 @@ class MoEActivation(Enum):
                 return member
         valid = [m.value for m in cls]
         raise ValueError(f"Unknown MoE activation: {s!r}. Valid activations: {valid}")
+
+
+# Module-level lookup tables used by MoEActivation functions.
+_CUSTOM_OP_NAMES: dict[MoEActivation, str] = {
+    MoEActivation.SILU: "silu_and_mul",
+    MoEActivation.GELU: "gelu_and_mul",
+    MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
+    MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
+    MoEActivation.RELU2: "relu2",
+    MoEActivation.SILU_NO_MUL: "silu_and_mul",
+    MoEActivation.GELU_NO_MUL: "gelu_and_mul",
+    MoEActivation.RELU2_NO_MUL: "relu2",
+}
+
+_WITHOUT_MUL: dict[MoEActivation, MoEActivation] = {
+    MoEActivation.SILU: MoEActivation.SILU_NO_MUL,
+    MoEActivation.GELU: MoEActivation.GELU_NO_MUL,
+    MoEActivation.RELU2: MoEActivation.RELU2_NO_MUL,
+}
 
 
 def activation_without_mul(activation: str) -> str:
@@ -92,6 +97,8 @@ def apply_moe_activation(
     input: torch.Tensor,
 ) -> torch.Tensor:
     """Apply MoE activation function."""
+    assert input.dim() == 2, "Input must be 2D"
+    assert output.dim() == 2, "Output must be 2D"
     if activation.is_gated:
         assert output.size(-1) * 2 == input.size(-1), (
             f"{activation.value} expects 2x ratio: "
