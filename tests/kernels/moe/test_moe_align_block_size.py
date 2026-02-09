@@ -334,7 +334,7 @@ def test_batched_moe_align_block_size(
         ref_expert_ids = torch.empty((Msum // block_size,), dtype=torch.int32)
         ref_num_tokens_post_pad = torch.empty((1,), dtype=torch.int32)
 
-        # Intialize
+        # Initialize
         sentinel = E * max_tokens_per_batch
         ref_sorted_ids.fill_(sentinel)
         ref_expert_ids.fill_(-1)
