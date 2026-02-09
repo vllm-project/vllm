@@ -1,6 +1,7 @@
 # vLLM-Project/Speculators
 
-![Disaggregated prefilling workflow](../../assets/features/speculative_decoding/speculators-user-flow-dark.svg)
+![User Flow Light](../../assets/features/speculative_decoding/speculators-user-flow-light.svg#only-light)
+![User Flow Dark](../../assets/features/speculative_decoding/speculators-user-flow-dark.svg#only-dark)
 
 [Speculators](https://docs.vllm.ai/projects/speculators/en/latest/) is a library for accelerating LLM inference through speculative decoding, providing efficient draft model training that integrates seamlessly with vLLM to reduce latency and improve throughput.
 
