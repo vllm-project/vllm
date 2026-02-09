@@ -169,7 +169,20 @@ class TestEngineRegistry:
 
     def test_create_engine_invalid_backend(self):
         """Test factory raises for invalid backend."""
-        config = WeightTransferConfig(backend="invalid")
+        # Pydantic validates Literal types at construction, so we can't create
+        # a config with an invalid backend. Instead, we test by directly
+        # accessing the registry or using model_construct to bypass validation.
+        from pydantic import ValidationError
+
+        # Test that Pydantic prevents invalid backend at construction
+        with pytest.raises(ValidationError):
+            WeightTransferConfig(backend="invalid")
+
+        # Test factory error by creating a config with valid backend but
+        # then manually modifying the backend attribute (bypassing validation)
+        config = WeightTransferConfig(backend="nccl")
+        # Use object.__setattr__ to bypass Pydantic validation
+        object.__setattr__(config, "backend", "invalid")
         parallel_config = create_mock_parallel_config()
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
             WeightTransferEngineFactory.create_engine(config, parallel_config)

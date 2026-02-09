@@ -21,17 +21,18 @@ but can be extended to multiple GPUs.
 """
 
 import os
-from dataclasses import asdict
 
 import ray
-import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferUpdateInfo
+from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCTrainerSendWeightsArgs,
+    IPCWeightTransferEngine,
+)
 
 
 class MyLLM(LLM):
@@ -47,12 +48,6 @@ class MyLLM(LLM):
         # needed for ipc handle serialization
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         super().__init__(*args, **kwargs)
-
-
-def get_physical_gpu_id():
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
-    return str(props.uuid)
 
 
 # Load the OPT-125M model onto GPU 0 for the training workload.
@@ -74,34 +69,12 @@ class TrainModel:
         self.llm_handle.init_weight_transfer_engine.remote(dict(init_info=dict()))
 
     def broadcast_weights(self, llm_handle: ray.ObjectRef):
+        """Broadcast weights to the inference engine using IPC."""
         self.llm_handle = llm_handle
-        names, dtypes, shapes, ipc_handles = [], [], [], []
-
-        for name, p in self.train_model.named_parameters():
-            names.append(name)
-            dtypes.append(str(p.dtype).split(".")[-1])
-            shapes.append(p.shape)
-
-            from torch.multiprocessing.reductions import reduce_tensor
-
-            weight = p.detach().contiguous()
-            ipc_handle = reduce_tensor(weight)
-            ipc_handle = {get_physical_gpu_id(): ipc_handle}
-            ipc_handles.append(ipc_handle)
-
-        ray.get(
-            self.llm_handle.update_weights.remote(
-                dict(
-                    update_info=asdict(
-                        IPCWeightTransferUpdateInfo(
-                            names=names,
-                            dtype_names=dtypes,
-                            shapes=shapes,
-                            ipc_handles=ipc_handles,
-                        )
-                    )
-                )
-            )
+        trainer_args = IPCTrainerSendWeightsArgs(mode="ray", llm_handle=llm_handle)
+        IPCWeightTransferEngine.trainer_send_weights(
+            iterator=self.train_model.named_parameters(),
+            trainer_args=trainer_args,
         )
 
 
