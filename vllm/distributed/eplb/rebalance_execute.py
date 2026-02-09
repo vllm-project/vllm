@@ -39,6 +39,22 @@ class RecvMetadata:
     """Target expert indices (num_local_experts,) in local tensors to send."""
 
 
+@dataclass
+class CommunicationPlan:
+    """Communication plan for P2P operations during EPLB rebalancing."""
+
+    send_ops_per_round: list[list[P2POp]]
+    """List of send operations for each communication round."""
+    recv_ops_per_round: list[list[P2POp]]
+    """List of receive operations for each communication round."""
+    rank_to_global: dict[int, int]
+    """Mapping from local EP rank to global rank."""
+    num_rounds: int
+    """Total number of communication rounds."""
+    ops_per_expert: int
+    """Number of P2P operations per expert (equals number of weight tensors)."""
+
+
 # Type alias for the result of move_to_buffer or transfer_layer
 MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 
@@ -166,6 +182,155 @@ def _get_communication_round(rank1: int, rank2: int, group_size: int) -> int:
     return group1 ^ group2
 
 
+def _build_communication_plan(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    expert_weights: Sequence[torch.Tensor],
+    ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
+    send_expert_ids: np.ndarray,
+    send_src_rows: np.ndarray,
+    send_count: int,
+    recv_expert_ids: np.ndarray,
+    recv_dst_rows: np.ndarray,
+    recv_count: int,
+    expert_weights_buffers: Sequence[torch.Tensor],
+) -> CommunicationPlan:
+    """
+    Build a communication plan for P2P operations during EPLB rebalancing.
+
+    Args:
+        num_local_experts: Number of local experts.
+        old_indices: (num_experts_total,) ndarray of current expert assignments.
+        new_indices: (num_experts_total,) ndarray of desired expert assignments.
+        expert_weights: Original expert weights for the layer.
+        ep_group: Distributed process group for expert parallel comms.
+        communication_config: Communication configuration for P2P operations.
+        send_expert_ids: Expert IDs to send (num_local_experts,).
+        send_src_rows: Source rows for sends (num_local_experts,).
+        send_count: Number of valid send entries.
+        recv_expert_ids: Expert IDs to receive (num_local_experts,).
+        recv_dst_rows: Destination rows for receives (num_local_experts,).
+        recv_count: Number of valid receive entries.
+        expert_weights_buffers: Intermediate buffers (one per tensor).
+
+    Returns:
+        CommunicationPlan containing send/recv operations organized by rounds.
+    """
+    ep_rank = ep_group.rank()
+    ep_size = ep_group.size()
+
+    # Pre-compute global ranks mapping
+    rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
+
+    # Use the already-validated configuration from EPLBConfig
+    num_groups = communication_config.num_groups
+    group_size = ep_size // num_groups
+
+    # Calculate number of communication rounds
+    max_group_id = (ep_size - 1) // group_size
+    num_rounds = 1 << max_group_id.bit_length()
+
+    # Calculate operations per expert (one operation per weight tensor)
+    ops_per_expert = len(expert_weights)
+
+    # Create separate lists for sends and recvs for each round
+    send_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
+    recv_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
+
+    # Build send operations
+    if send_count > 0:
+        experts = send_expert_ids[:send_count]
+        srcs = send_src_rows[:send_count]
+        order = np.argsort(experts, kind="stable")
+        experts = experts[order]
+        srcs = srcs[order]
+
+        send_map, recv_map = get_ep_ranks_with_experts_batch(
+            experts,
+            num_local_experts,
+            old_indices,
+            new_indices,
+        )
+
+        for expert, src in zip(experts.tolist(), srcs.tolist()):
+            ranks_to_send = send_map[expert]
+            ranks_to_recv = recv_map[expert]
+            if not ranks_to_send or not ranks_to_recv:
+                continue
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            sender_pos = ranks_to_send.index(ep_rank)
+            recv_begin = sender_pos * num_dst_per_sender
+            recv_end = recv_begin + num_dst_per_sender
+            recv_ranks = ranks_to_recv[recv_begin:recv_end]
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            recver_pos = remainder_start + sender_pos
+            if recver_pos < len(ranks_to_recv):
+                recv_ranks.append(ranks_to_recv[recver_pos])
+            for dst in recv_ranks:
+                dst_global = rank_to_global[dst]
+                send_ops = [
+                    P2POp(
+                        torch.distributed.isend,
+                        w[src],
+                        dst_global,
+                    )
+                    for w in expert_weights
+                ]
+                # Determine which round based on sender and receiver ranks
+                round_idx = _get_communication_round(ep_rank, dst, group_size)
+                send_ops_per_round[round_idx] += send_ops
+
+    # Build receive operations
+    if recv_count > 0:
+        experts = recv_expert_ids[:recv_count]
+        dsts = recv_dst_rows[:recv_count]
+        order = np.argsort(experts, kind="stable")
+        experts = experts[order]
+        dsts = dsts[order]
+
+        send_map, recv_map = get_ep_ranks_with_experts_batch(
+            experts,
+            num_local_experts,
+            old_indices,
+            new_indices,
+        )
+
+        for expert, dst in zip(experts.tolist(), dsts.tolist()):
+            ranks_to_send = send_map[expert]
+            ranks_to_recv = recv_map[expert]
+            if not ranks_to_send or not ranks_to_recv:
+                continue
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            recver_pos = ranks_to_recv.index(ep_rank)
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            if recver_pos < remainder_start:
+                src = ranks_to_send[recver_pos // num_dst_per_sender]
+            else:
+                src = ranks_to_send[recver_pos - remainder_start]
+            src_global = rank_to_global[src]
+            recv_ops = [
+                P2POp(
+                    torch.distributed.irecv,
+                    b[dst],
+                    src_global,
+                )
+                for b in expert_weights_buffers
+            ]
+            # Determine which round based on sender and receiver ranks
+            round_idx = _get_communication_round(ep_rank, src, group_size)
+            recv_ops_per_round[round_idx] += recv_ops
+
+    return CommunicationPlan(
+        send_ops_per_round=send_ops_per_round,
+        recv_ops_per_round=recv_ops_per_round,
+        rank_to_global=rank_to_global,
+        num_rounds=num_rounds,
+        ops_per_expert=ops_per_expert,
+    )
+
+
 def _execute_batch(ops: list[P2POp], cuda_stream: torch.cuda.Stream | None) -> None:
     """Execute a batch of P2P operations and wait for completion."""
     if cuda_stream is not None:
@@ -183,7 +348,7 @@ def _execute_p2p_ops_round(
     send_ops: list[P2POp],
     recv_ops: list[P2POp],
     *,
-    batch_size: int | None,
+    op_batch_size: int | None,
     ep_rank: int,
     rank_to_global: dict[int, int],
     cuda_stream: torch.cuda.Stream | None,
@@ -191,18 +356,21 @@ def _execute_p2p_ops_round(
     """
     Execute P2P operations for a communication round.
 
-    When batch_size is set, uses rank ordering to avoid deadlocks:
+    When op_batch_size is set, uses rank ordering to avoid deadlocks:
     - Phase 1: lower rank sends (batches if needed), higher rank receives
     - Phase 2: lower rank receives (batches if needed), higher rank sends
     Otherwise, merges sends and recvs and executes them together.
+
+    Args:
+        op_batch_size: Number of P2P operations to process per batch.
     """
     if not send_ops and not recv_ops:
         return
-    if batch_size is None:
+    if op_batch_size is None:
         _execute_batch(send_ops + recv_ops, cuda_stream)
         return
 
-    # When batch_size is set, each rank communicates with only one peer per round.
+    # When op_batch_size is set, each rank communicates with only one peer per round.
     # We need special handling to avoid deadlocks.
     # Validate that all operations are for the same peer.
     peer_ranks = set()
@@ -227,22 +395,22 @@ def _execute_p2p_ops_round(
     # Phase 1: Lower rank sends, higher rank receives.
     if send_first:
         # We are the lower rank - send first.
-        for i in range(0, len(send_ops), batch_size):
-            _execute_batch(send_ops[i : i + batch_size], cuda_stream)
+        for i in range(0, len(send_ops), op_batch_size):
+            _execute_batch(send_ops[i : i + op_batch_size], cuda_stream)
     else:
         # We are the higher rank - receive first.
-        for i in range(0, len(recv_ops), batch_size):
-            _execute_batch(recv_ops[i : i + batch_size], cuda_stream)
+        for i in range(0, len(recv_ops), op_batch_size):
+            _execute_batch(recv_ops[i : i + op_batch_size], cuda_stream)
 
     # Phase 2: Lower rank receives, higher rank sends.
     if send_first:
         # We are the lower rank - receive second.
-        for i in range(0, len(recv_ops), batch_size):
-            _execute_batch(recv_ops[i : i + batch_size], cuda_stream)
+        for i in range(0, len(recv_ops), op_batch_size):
+            _execute_batch(recv_ops[i : i + op_batch_size], cuda_stream)
     else:
         # We are the higher rank - send second.
-        for i in range(0, len(send_ops), batch_size):
-            _execute_batch(send_ops[i : i + batch_size], cuda_stream)
+        for i in range(0, len(send_ops), op_batch_size):
+            _execute_batch(send_ops[i : i + op_batch_size], cuda_stream)
 
 
 def move_to_buffer(
@@ -346,127 +514,44 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
-    # Pre-compute global ranks mapping
-    ep_size = ep_group.size()
-    rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
+    # 2. Build communication plan (routing)
+    comm_plan = _build_communication_plan(
+        num_local_experts=num_local_experts,
+        old_indices=old_indices,
+        new_indices=new_indices,
+        expert_weights=expert_weights,
+        ep_group=ep_group,
+        communication_config=communication_config,
+        send_expert_ids=send_expert_ids,
+        send_src_rows=send_src_rows,
+        send_count=send_count,
+        recv_expert_ids=recv_expert_ids,
+        recv_dst_rows=recv_dst_rows,
+        recv_count=recv_count,
+        expert_weights_buffers=expert_weights_buffers,
+    )
 
-    # Use the already-validated configuration from EPLBConfig
-    # (validation and adjustment is done in EPLBConfig.get_communication_config)
-    num_groups = communication_config.num_groups
-    batch_size = communication_config.batch_size
-
-    # Calculate group size and number of communication rounds
-    group_size = ep_size // num_groups
-    # Number of rounds must accommodate the maximum possible XOR value
-    # If world size is not evenly divisible by num_groups, some ranks will
-    # map to higher group IDs, so we need to allocate enough rounds
-    max_group_id = (ep_size - 1) // group_size
-    # Maximum XOR value is the next power of 2 above max_group_id, minus 1
-    # E.g., max_group_id=4 → max_xor=7 (binary: 100 → 111)
-    num_rounds = 1 << max_group_id.bit_length()
-
-    # Create separate lists for sends and recvs for each round
-    # Round i: Communication between groups where (group1 XOR group2) == i
-    # Round 0: Same group (intra-group)
-    # Round 1+: Different groups with specific XOR values
-    send_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
-    recv_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
-
-    # 2. Post sends
-    if send_count > 0:
-        experts = send_expert_ids[:send_count]
-        srcs = send_src_rows[:send_count]
-        order = np.argsort(experts, kind="stable")
-        experts = experts[order]
-        srcs = srcs[order]
-
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
-
-        for expert, src in zip(experts.tolist(), srcs.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
-                continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            sender_pos = ranks_to_send.index(ep_rank)
-            recv_begin = sender_pos * num_dst_per_sender
-            recv_end = recv_begin + num_dst_per_sender
-            recv_ranks = ranks_to_recv[recv_begin:recv_end]
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            recver_pos = remainder_start + sender_pos
-            if recver_pos < len(ranks_to_recv):
-                recv_ranks.append(ranks_to_recv[recver_pos])
-            for dst in recv_ranks:
-                dst_global = rank_to_global[dst]
-                send_ops = [
-                    P2POp(
-                        torch.distributed.isend,
-                        w[src],
-                        dst_global,
-                    )
-                    for w in expert_weights
-                ]
-                # Determine which round based on sender and receiver ranks
-                round_idx = _get_communication_round(ep_rank, dst, group_size)
-                send_ops_per_round[round_idx] += send_ops
-
-    # 3. Post recvs
-    if recv_count > 0:
-        experts = recv_expert_ids[:recv_count]
-        dsts = recv_dst_rows[:recv_count]
-        order = np.argsort(experts, kind="stable")
-        experts = experts[order]
-        dsts = dsts[order]
-
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
-
-        for expert, dst in zip(experts.tolist(), dsts.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
-                continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            recver_pos = ranks_to_recv.index(ep_rank)
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            if recver_pos < remainder_start:
-                src = ranks_to_send[recver_pos // num_dst_per_sender]
-            else:
-                src = ranks_to_send[recver_pos - remainder_start]
-            src_global = rank_to_global[src]
-            recv_ops = [
-                P2POp(
-                    torch.distributed.irecv,
-                    b[dst],
-                    src_global,
-                )
-                for b in expert_weights_buffers
-            ]
-            # Determine which round based on sender and receiver ranks
-            round_idx = _get_communication_round(ep_rank, src, group_size)
-            recv_ops_per_round[round_idx] += recv_ops
-
-    # 4. Execute the P2P operations in multiple rounds
+    # 3. Execute the P2P operations in multiple rounds
     # Each round handles communication between groups where
     # (group1 XOR group2) == round_idx
     # Round 0: Intra-group (same group)
     # Round i (i>0): Inter-group with XOR = i
-    for round_idx in range(num_rounds):
+
+    # Convert expert batch size to operation batch size
+    experts_batch_size = communication_config.experts_batch_size
+    op_batch_size = (
+        experts_batch_size * comm_plan.ops_per_expert
+        if experts_batch_size is not None
+        else None
+    )
+
+    for round_idx in range(comm_plan.num_rounds):
         _execute_p2p_ops_round(
-            send_ops_per_round[round_idx],
-            recv_ops_per_round[round_idx],
-            batch_size=batch_size,
+            comm_plan.send_ops_per_round[round_idx],
+            comm_plan.recv_ops_per_round[round_idx],
+            op_batch_size=op_batch_size,
             ep_rank=ep_rank,
-            rank_to_global=rank_to_global,
+            rank_to_global=comm_plan.rank_to_global,
             cuda_stream=cuda_stream,
         )
         # Barrier to ensure all ranks complete this round before proceeding

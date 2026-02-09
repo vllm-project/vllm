@@ -295,7 +295,7 @@ def _test_async_transfer_layer_without_mtp_worker(
 
     comm_config = EPLBCommunicationConfig(
         num_groups=1,
-        batch_size=None,
+        experts_batch_size=None,
     )
 
     for layer_idx in range(num_layers):
@@ -387,7 +387,7 @@ def _test_rearrange_expert_weights_with_redundancy(
     # Create default communication config
     comm_config = EPLBCommunicationConfig(
         num_groups=1,
-        batch_size=None,
+        experts_batch_size=None,
     )
 
     # Execute weight rearrangement
@@ -464,7 +464,7 @@ def _test_rearrange_with_communication_config(
     num_local_experts,
     num_logical_experts,
     num_communication_groups,
-    communication_batch_size,
+    communication_experts_batch_size,
 ) -> None:
     """Test rearrangement with different communication configurations."""
     set_env_vars_and_device(env)
@@ -508,7 +508,7 @@ def _test_rearrange_with_communication_config(
     # Create communication config
     comm_config = EPLBCommunicationConfig(
         num_groups=num_communication_groups,
-        batch_size=communication_batch_size,
+        experts_batch_size=communication_experts_batch_size,
     )
 
     # Execute weight rearrangement with communication config
@@ -542,7 +542,7 @@ def _test_rearrange_with_communication_config(
 
 @pytest.mark.parametrize(
     "world_size,num_layers,num_local_experts,num_logical_experts,"
-    "num_communication_groups,communication_batch_size",
+    "num_communication_groups,communication_experts_batch_size",
     [
         # 2 GPUs, 2 experts per GPU
         # 3 logical experts, 4 physical experts, 1 redundant expert
@@ -567,7 +567,7 @@ def test_rearrange_with_communication_config(
     num_local_experts,
     num_logical_experts,
     num_communication_groups,
-    communication_batch_size,
+    communication_experts_batch_size,
 ):
     """Test expert rearrangement with different communication configurations."""
     if torch.cuda.device_count() < world_size:
@@ -580,7 +580,7 @@ def test_rearrange_with_communication_config(
         num_local_experts,
         num_logical_experts,
         num_communication_groups,
-        communication_batch_size,
+        communication_experts_batch_size,
     )
 
 
@@ -623,7 +623,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     # Create default communication config
     comm_config = EPLBCommunicationConfig(
         num_groups=1,
-        batch_size=None,
+        experts_batch_size=None,
     )
 
     # Execute rearrangement (should be no change)
@@ -731,7 +731,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
     # Create default communication config
     comm_config = EPLBCommunicationConfig(
         num_groups=1,
-        batch_size=None,
+        experts_batch_size=None,
     )
 
     # Execute profile mode rearrangement

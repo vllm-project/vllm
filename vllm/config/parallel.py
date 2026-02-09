@@ -55,8 +55,13 @@ class EPLBCommunicationConfig:
     num_groups: int
     """Effective number of communication groups."""
 
-    batch_size: int | None
-    """Effective batch size for P2P operations."""
+    experts_batch_size: int | None
+    """
+    Effective batch size for expert transfers.
+    
+    Represents the number of experts to transfer per batch.
+    The actual number of P2P operations will be experts_batch_size * num_weight_tensors.
+    """
 
 
 @config
@@ -104,11 +109,16 @@ class EPLBConfig:
     - If communication_batch_size is set, this will be overridden to world size
     """
 
-    communication_batch_size: int | None = Field(default=None, ge=1)
+    communication_experts_batch_size: int | None = Field(default=None, ge=1)
     """
-    Maximum number of P2P operations to batch together during rebalancing.
+    Maximum number of experts to transfer per batch during rebalancing.
+    
+    Specifies how many experts are transferred in each batch. The actual number
+    of P2P operations will be experts_batch_size * num_weight_tensors (e.g., for a model
+    with 2 weight tensors per expert, experts_batch_size=4 results in 8 P2P operations).
+    
     - When set, num_communication_groups will be overridden to equal world size
-      (one rank per group), and operations will be split into batches
+      (one rank per group), and expert transfers will be split into batches
     - Helps avoid overwhelming communication system with too many concurrent ops
     - If None (default), no special batching is applied
     """
@@ -125,9 +135,9 @@ class EPLBConfig:
         """
         Get the communication configuration for a given EP size.
 
-        This method adjusts num_communication_groups and communication_batch_size
-        based on runtime constraints:
-        - If batch_size is set, forces num_groups = ep_size
+        This method adjusts num_communication_groups and
+        communication_experts_batch_size based on runtime constraints:
+        - If experts_batch_size is set, forces num_groups = ep_size
         - Caps num_groups at ep_size
 
         Args:
@@ -141,15 +151,15 @@ class EPLBConfig:
         logger = logging.getLogger(__name__)
 
         num_groups = self.num_communication_groups
-        batch_size = self.communication_batch_size
+        experts_batch_size = self.communication_experts_batch_size
 
-        # If batch_size is set, num_groups must equal world size
-        if batch_size is not None and num_groups != ep_size:
+        # If experts_batch_size is set, num_groups must equal world size
+        if experts_batch_size is not None and num_groups != ep_size:
             logger.warning_once(
-                "EPLB: communication_batch_size is set (%d), "
+                "EPLB: communication_experts_batch_size is set (%d), "
                 "overriding num_communication_groups from %d to %d "
-                "(must equal world size when batch size is specified).",
-                batch_size,
+                "(must equal world size when experts batch size is specified).",
+                experts_batch_size,
                 num_groups,
                 ep_size,
             )
@@ -168,7 +178,7 @@ class EPLBConfig:
 
         return EPLBCommunicationConfig(
             num_groups=num_groups,
-            batch_size=batch_size,
+            experts_batch_size=experts_batch_size,
         )
 
 
