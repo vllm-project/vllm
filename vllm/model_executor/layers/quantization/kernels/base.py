@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 import torch
 from typing_extensions import Self
@@ -264,7 +264,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
     # return a covariant type in the subclass
     @abstractmethod
-    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> _ParamsT:
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs: Any) -> _ParamsT:
         """Extract typed parameters from the layer module.
 
         This internal method retrieves the quantized weights and scales from
@@ -304,7 +304,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Apply the quantized weights to the input tensor.
 
@@ -451,8 +451,23 @@ class DynamicMMLinearKernel(
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> bool:
+        """Determine which kernel to use at runtime.
+
+        This method is called during forward pass to decide whether to use
+        the base (optimized) kernel or the fallback kernel based on runtime
+        conditions such as input shape, batch size, or other characteristics.
+
+        Args:
+            layer: The layer module containing the quantized weights
+            x: Input tensor
+            bias: Optional bias tensor
+            **kwargs: Additional kernel-specific arguments
+
+        Returns:
+            True to use the base kernel, False to use the fallback kernel
+        """
         raise NotImplementedError
 
     def apply_weights(
@@ -460,7 +475,7 @@ class DynamicMMLinearKernel(
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         # PyTorch's torch.compile cannot handle input-dependent control flow in standard
         # Python conditionals. torch.cond() explicitly registers both code paths in the
