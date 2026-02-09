@@ -10,8 +10,8 @@ from ..utils import compare_two_settings
 @pytest.mark.parametrize("disable_uva", [False, True])
 def test_cpu_offload(disable_pin_memory, disable_uva):
     env_vars = {
-        "VLLM_OFFLOADING_DISABLE_PIN_MEMORY": str(int(disable_pin_memory)),
-        "VLLM_OFFLOADING_DISABLE_UVA": str(int(disable_uva)),
+        "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": str(int(disable_pin_memory)),
+        "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": str(int(disable_uva)),
     }
 
     args = ["--cpu-offload-gb", "1"]

@@ -146,7 +146,8 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
 
     finally:
         use_pin_memory = (
-            is_pin_memory_available() and not envs.VLLM_OFFLOADING_DISABLE_PIN_MEMORY
+            is_pin_memory_available()
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
         )
         # Restore parameters to their original devices, ignoring new parameters
         for name, p in module.named_parameters():
