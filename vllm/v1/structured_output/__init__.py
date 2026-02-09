@@ -256,77 +256,17 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
-                # Check if reasoning ends within the scheduled spec tokens.
-                # This handles MTP/spec decode where </think> might be a draft
-                # token, and we need to constrain the bonus token that follows.
-                reasoning_ends_at_idx = -1
-                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                if (
-                    not apply_bitmask
-                    and self.reasoner is not None
-                    and req_tokens
-                    and not structured_output_request.reasoning_ended
-                ):
-                    # Check each spec token position to find where reasoning ends
-                    for idx in range(len(req_tokens)):
-                        check_seq = list(request.all_token_ids) + list(
-                            req_tokens[: idx + 1]
-                        )
-                        if self.reasoner.is_reasoning_end(check_seq):
-                            reasoning_ends_at_idx = idx
-                            break
-
                 state_advancements = 0
-                allow_advance = True
-                apply_bitmask_from_reasoning = (
-                    not apply_bitmask and reasoning_ends_at_idx >= 0
-                )
-                if apply_bitmask:
-                    advance_from_idx = 0
-                elif reasoning_ends_at_idx >= 0:
-                    # Start advancing after reasoning ends within spec tokens.
-                    advance_from_idx = reasoning_ends_at_idx + 1
-                else:
-                    advance_from_idx = None
-                for token_idx, token in enumerate(itertools.chain(req_tokens, (-1,))):
-                    # Enable bitmask for positions after reasoning ends in spec
-                    # tokens. token_idx corresponds to spec token positions,
-                    # with -1 being the bonus token position.
-                    if (
-                        not apply_bitmask
-                        and reasoning_ends_at_idx >= 0
-                        and token_idx > reasoning_ends_at_idx
-                    ):
-                        apply_bitmask = True
-
-                    if apply_bitmask_from_reasoning and token == -1:
-                        # Don't constrain the bonus token based on draft-only
-                        # reasoning end predictions.
-                        apply_bitmask = False
-
+                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                for token in itertools.chain(req_tokens, (-1,)):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if (
-                        advance_from_idx is not None
-                        and not grammar.is_terminated()
-                        and allow_advance
-                        and token_idx >= advance_from_idx
-                        and token != -1
-                    ):
-                        if grammar.validate_tokens([token]):
-                            accepted = grammar.accept_tokens(req_id, [token])
-                            assert accepted, (
-                                token,
-                                req_id,
-                                scheduled_spec_decode_tokens,
-                            )
-                            state_advancements += 1
-                        else:
-                            # Draft token is invalid; stop advancing for
-                            # subsequent speculative positions.
-                            allow_advance = False
+                    if apply_bitmask and not grammar.is_terminated():
+                        accepted = grammar.accept_tokens(req_id, [token])
+                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
+                        state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
@@ -356,6 +296,11 @@ class StructuredOutputManager:
                 request.structured_output_request.reasoning_ended = (
                     self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
                 )
+
+            # Check if reasoning has actually ended by looking at tokens
+            # This handles async scheduling where flags might be stale
+            if self.reasoner.is_reasoning_end(request.all_token_ids):
+                request.structured_output_request.reasoning_ended = True
             return request.structured_output_request.reasoning_ended
         return True
 
@@ -379,37 +324,17 @@ class StructuredOutputManager:
 
         structured_req = request.structured_output_request
         if structured_req.reasoning_ended:
-            # Guard against speculative draft tokens that suggested reasoning
-            # ended but were not actually accepted in the output.
-            if (
-                not structured_req.reasoning_ended_by_fallback
-                and not self.reasoner.is_reasoning_end(list(request.all_token_ids))
-            ):
-                structured_req.reasoning_ended = False
-                return False
             return True
 
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
-        delta_ids = list(request.all_token_ids[delta_from:])
-        if self.reasoner.is_reasoning_end_streaming(request.all_token_ids, delta_ids):
+        all_token_ids = request.all_token_ids
+        if self.reasoner.is_reasoning_end_streaming(
+            all_token_ids, all_token_ids[delta_from:]
+        ):
+            # Reasoning just ended, so we shouldn't advance til
+            # next pass
             structured_req.reasoning_ended = True
-            # Try to sync grammar with tokens after </think> that were
-            # generated in this step. Use validate_tokens to only accept
-            # tokens that are actually valid according to the grammar.
-            # This handles MTP/spec decode where tokens after </think>
-            # may have been generated without constraints.
-            content_ids = self.reasoner.extract_content_ids(delta_ids)
-            if content_ids:
-                grammar = structured_req.grammar
-                assert grammar is not None
-                # Only accept the valid prefix of content tokens
-                valid_tokens = grammar.validate_tokens(content_ids)
-                if valid_tokens:
-                    grammar.accept_tokens(request.request_id, valid_tokens)
-            # Return False so caller doesn't try to accept all delta tokens
-            # (which would include </think> and reasoning tokens).
-            return False
 
         return False
 

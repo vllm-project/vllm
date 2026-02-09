@@ -20,7 +20,6 @@ class StructuredOutputRequest:
     params: StructuredOutputsParams
     _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
     reasoning_ended: bool | None = None
-    reasoning_ended_by_fallback: bool = False
 
     @staticmethod
     def from_sampling_params(
