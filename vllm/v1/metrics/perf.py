@@ -82,6 +82,7 @@ class ExecutionContext:
     prefill_num_tokens: int = 0  # sum of num_tokens for prefill requests
     prefill_context_len: int = 0  # sum of context_len for prefill requests
     prefill_token_context_product: int = 0  # sum of (num_tokens * context_len)
+    prefill_causal_token_context_product: int = 0  # causal-adjusted product
 
     # Decode phase statistics
     num_decode_requests: int = 0
@@ -96,6 +97,14 @@ class ExecutionContext:
             self.prefill_num_tokens += num_tokens
             self.prefill_context_len += context_len
             self.prefill_token_context_product += num_tokens * context_len
+            # Causal masking means each new token only attends to tokens at
+            # earlier positions, not the full context. The rectangular region
+            # (new tokens attending to previously-computed tokens) is fully
+            # computed, but the triangular region within the new chunk is only
+            # half: N*C - N*(N-1)/2 instead of N*C.
+            self.prefill_causal_token_context_product += (
+                num_tokens * context_len - num_tokens * (num_tokens - 1) // 2
+            )
         else:
             self.num_decode_requests += 1
             self.decode_num_tokens += num_tokens
@@ -109,6 +118,21 @@ class ExecutionContext:
     def total_token_context_product(self) -> int:
         """Total sum of (num_tokens * context_len) across all requests."""
         return self.prefill_token_context_product + self.decode_token_context_product
+
+    def total_causal_token_context_product(self) -> int:
+        """Total causal-adjusted sum of (num_tokens * context_len).
+
+        For prefill requests with causal attention, the triangular mask means
+        each query token only attends to earlier positions. This reduces the
+        effective token-context product from N*C to N*C - N*(N-1)/2 per
+        request, where N is num_tokens and C is context_len.
+
+        Decode requests are unaffected (N=1, so no causal savings).
+        """
+        return (
+            self.prefill_causal_token_context_product
+            + self.decode_token_context_product
+        )
 
     def num_logits_tokens(self) -> int:
         """Number of tokens that require logits computation (unembedding).
@@ -407,7 +431,9 @@ class AttentionMetrics(ComponentMetrics):
             self.head_dim,
         )
         T = ctx.total_num_tokens()
-        TC = ctx.total_token_context_product()
+        # Use causal-adjusted product: during prefill the triangular causal
+        # mask means HW skips ~half the attention work within each new chunk.
+        TC = ctx.total_causal_token_context_product()
 
         if per_gpu:
             L //= self.pp_size
