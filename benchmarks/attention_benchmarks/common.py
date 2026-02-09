@@ -370,12 +370,14 @@ class ResultsFormatter:
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
         """
-        # Group by batch spec
+        # Group by batch spec, preserving first-occurrence order
         by_spec = {}
+        specs_order = []
         for r in results:
             spec = r.config.batch_spec
             if spec not in by_spec:
                 by_spec[spec] = {}
+                specs_order.append(spec)
             by_spec[spec][r.config.backend] = r
 
         # Sort specs by (batch_size, q_len, kv_len) instead of alphabetically
