@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Final, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
 
@@ -14,13 +14,13 @@ from vllm.entrypoints.openai.engine.serving import ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.classify.protocol import (
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
     ClassificationData,
     ClassificationRequest,
     ClassificationResponse,
 )
 from vllm.logger import init_logger
+
+from .preprocess import ClassifyPreprocess
 
 logger = init_logger(__name__)
 
@@ -48,40 +48,18 @@ class ServingClassification(PoolingServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
-
-        self.chat_template = chat_template
-        self.chat_template_content_format: Final = chat_template_content_format
-        self.trust_request_chat_template = trust_request_chat_template
+        self.preprocess = ClassifyPreprocess(
+            models=models,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            trust_request_chat_template=trust_request_chat_template,
+        )
 
     async def _preprocess(
         self,
-        ctx: ClassificationServeContext,
+        ctx: ServeContext,
     ) -> None:
-        ctx.lora_request = self._maybe_get_adapters(ctx.request)
-
-        if isinstance(ctx.request, ClassificationChatRequest):
-            self._validate_chat_template(
-                request_chat_template=ctx.request.chat_template,
-                chat_template_kwargs=ctx.request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-
-            _, ctx.engine_prompts = await self._preprocess_chat(
-                ctx.request,
-                ctx.request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=None,
-            )
-        elif isinstance(ctx.request, ClassificationCompletionRequest):
-            ctx.engine_prompts = await self._preprocess_completion(
-                ctx.request,
-                prompt_input=ctx.request.input,
-                prompt_embeds=None,
-            )
-        else:
-            raise ValueError("Invalid classification request type")
-        return None
+        ctx.engine_prompts = await self.preprocess(ctx.request)
 
     async def _build_response(
         self,

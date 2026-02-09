@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from http import HTTPStatus
 from typing import (
-    Any,
     ClassVar,
     TypeAlias,
     assert_never,
@@ -18,35 +17,21 @@ from vllm import (
     PoolingRequestOutput,
     PromptType,
     SamplingParams,
-    TokensPrompt,
     envs,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, OpenAIBaseModel
 from vllm.entrypoints.openai.engine.serving import (
     AnyRequest,
     AnyResponse,
-    RendererChatRequest,
-    RendererRequest,
     ServeContext,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.utils import create_error_response
 from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
-from vllm.entrypoints.utils import ChatCompletionRequest, ResponsesRequest
-from vllm.inputs import EmbedsPrompt
-from vllm.inputs.parse import get_prompt_components
 from vllm.lora.request import LoRARequest
-from vllm.renderers import merge_kwargs
 from vllm.sampling_params import BeamSearchParams
-from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -79,7 +64,7 @@ class PoolingServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
-        self.log_error_stack = log_error_stack
+        self.log_error_stack = True
 
         self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
@@ -108,6 +93,8 @@ class PoolingServing:
             )
 
             self._validate_request(ctx)
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
+
             await self._preprocess(ctx)
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
@@ -203,26 +190,6 @@ class PoolingServing:
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-    def _validate_chat_template(
-        self,
-        request_chat_template: str | None,
-        chat_template_kwargs: dict[str, Any] | None,
-        trust_request_chat_template: bool,
-    ) -> ErrorResponse | None:
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
-            raise ValueError(
-                "Chat template is passed with request, but "
-                "--trust-request-chat-template is not set. "
-                "Refused request with untrusted chat template."
-            )
-        return None
-
     async def _preprocess(
         self,
         ctx: ServeContext,
@@ -234,88 +201,6 @@ class PoolingServing:
         ctx: ServeContext,
     ) -> AnyResponse:
         raise NotImplementedError
-
-    async def _preprocess_completion(
-        self,
-        request: RendererRequest,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
-        prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
-        renderer = self.renderer
-        tok_params = request.build_tok_params(self.model_config)
-
-        in_prompts = await renderer.render_completions_async(
-            prompt_input, prompt_embeds
-        )
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        for prompt in engine_prompts:
-            prompt.update(extra_items)  # type: ignore
-
-        return engine_prompts
-
-    async def _preprocess_chat(
-        self,
-        request: RendererChatRequest,
-        messages: list[ChatCompletionMessageParam],
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-        default_template_kwargs: dict[str, Any] | None,
-        tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
-        renderer = self.renderer
-
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
-            ),
-        )
-
-        tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
-
-        conversation, prompt = await renderer.render_messages_async(
-            messages, chat_params
-        )
-        engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        engine_prompt.update(extra_items)  # type: ignore
-
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
-                    msg = (
-                        "Tool usage is only supported for Chat Completions API "
-                        "or Responses API requests."
-                    )
-                    raise NotImplementedError(msg)
-
-                # TODO: Update adjust_request to accept ResponsesRequest
-                tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
-
-        return conversation, [engine_prompt]
 
     #########################################################
     #########################################################
