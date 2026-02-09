@@ -1177,4 +1177,4 @@ def test_resolve_kv_cache_dtype_string():
         "quant_method": "modelopt",
         "kv_cache_quant_algo": "FP8",
     }
-    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "fp8"
+    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "fp8_e4m3"
