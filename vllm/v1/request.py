@@ -166,7 +166,7 @@ class Request:
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
-        self._block_hasher: Callable[["Request"], list[BlockHash]] | None = block_hasher
+        self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
         self.recompute_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
