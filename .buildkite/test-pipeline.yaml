@@ -957,6 +957,15 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
+- label: Model strategy test
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+  - pytest -v -s models/nightly/llama.py
+
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
   optional: true
