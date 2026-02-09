@@ -297,7 +297,7 @@ class ModelConfig:
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
-    language_model_only: InitVar[bool | None] = None
+    language_model_only: InitVar[bool] = False
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
@@ -412,7 +412,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
-        language_model_only: bool | None,
+        language_model_only: bool,
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
