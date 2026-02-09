@@ -109,6 +109,49 @@ def test_prefill_kv_computed_edge_cases():
     assert prefill_kv_computed2 == 0  # All cached, nothing computed
 
 
+def test_extras_passed_through():
+    """Test that **kwargs in update_from_finished_request are
+    available as extras on FinishedRequestStats."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.2
+    req_stats.last_token_ts = 0.5
+    req_stats.num_generation_tokens = 10
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        num_prompt_tokens=50,
+        max_tokens_param=100,
+        req_stats=req_stats,
+        request_id="test-123",
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.extras is not None
+    assert finished_req.extras["request_id"] == "test-123"
+
+
+def test_extras_default_none():
+    """Test that extras is None when no kwargs are passed."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.2
+    req_stats.last_token_ts = 0.5
+    req_stats.num_generation_tokens = 10
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        num_prompt_tokens=50,
+        max_tokens_param=100,
+        req_stats=req_stats,
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.extras is None
+
+
 def test_prompt_token_stats_all_computed():
     """Test all tokens computed locally, no caching."""
     stats = PromptTokenStats()
