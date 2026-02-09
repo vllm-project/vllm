@@ -84,6 +84,7 @@ from .interfaces import (
     IsHybrid,
     MixtureOfExperts,
     SupportsLoRA,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from .utils import (
@@ -528,6 +529,68 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
+        # Full automatic prefix caching (APC) needs special metadata to be tracked
+        state_indices_tensor = attn_metadata.state_indices_tensor
+        block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
+        block_idx_last_computed_token = attn_metadata.block_idx_last_computed_token
+        prefix_caching_enabled = bool(
+            state_indices_tensor is not None
+            and block_idx_last_scheduled_token is not None
+            and block_idx_last_computed_token is not None
+        )
+
+        if prefix_caching_enabled:
+            # Set up APC-specific state
+            block_idx_first_scheduled_token_p = (
+                attn_metadata.block_idx_first_scheduled_token_p
+            )
+            num_computed_tokens_p = attn_metadata.num_computed_tokens_p
+            block_size = attn_metadata.block_size
+            chunk_size = attn_metadata.chunk_size
+            num_decodes = attn_metadata.num_decodes
+            num_prefills = attn_metadata.num_prefills
+            start_non_spec_prefill = num_decodes
+            end_non_spec_prefill = start_non_spec_prefill + num_prefills
+
+            state_indices_tensor_d, state_indices_tensor_p = torch.split(
+                state_indices_tensor,
+                [num_decodes, num_prefills],
+                dim=0,
+            )
+            (
+                block_idx_last_computed_token_d,
+                block_idx_last_computed_token_p,
+            ) = torch.split(
+                block_idx_last_computed_token,
+                [num_decodes, num_prefills],
+                dim=0,
+            )
+            (
+                block_idx_last_scheduled_token_d,
+                block_idx_last_scheduled_token_p,
+            ) = torch.split(
+                block_idx_last_scheduled_token,
+                [num_decodes, num_prefills],
+                dim=0,
+            )
+
+            state_indices_decode = None
+            ssm_state_indices_decode = None
+            state_indices_prefill = None
+
+            if num_decodes > 0:
+                state_indices_decode = state_indices_tensor_d.gather(
+                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                ).squeeze(1)
+                ssm_state_indices_decode = state_indices_tensor_d.gather(
+                    1, block_idx_last_computed_token_d.unsqueeze(1)
+                ).squeeze(1)
+
+            if num_prefills > 0:
+                state_indices_prefill = state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                ).squeeze(1)
+
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -550,6 +613,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            assert spec_state_indices_tensor is not None
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
@@ -566,7 +630,87 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
 
         # 1.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        if prefix_caching_enabled:
+            # When APC is enabled, we must process decode and prefill tokens
+            # using separate kernels and then concatenate them back together.
+            mixed_qkv_decode = None
+            mixed_qkv_prefill = None
+
+            if attn_metadata.num_decodes > 0:
+                assert mixed_qkv_non_spec is not None
+                assert state_indices_tensor_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                assert block_idx_last_computed_token_d is not None
+                # Extract decode tokens (first num_decode_tokens)
+                mixed_qkv_decode = mixed_qkv_non_spec[: attn_metadata.num_decode_tokens]
+                mixed_qkv_decode = causal_conv1d_update(
+                    mixed_qkv_decode,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=state_indices_tensor_d,
+                    block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                    initial_state_idx=block_idx_last_computed_token_d,
+                    validate_data=True,
+                )
+
+            if attn_metadata.num_prefills > 0:
+                assert mixed_qkv_non_spec is not None
+                assert has_initial_state is not None
+                assert non_spec_query_start_loc is not None
+                assert state_indices_tensor_p is not None
+                assert block_size is not None
+
+                mixed_qkv_prefill = mixed_qkv_non_spec[
+                    attn_metadata.num_decode_tokens :
+                ]
+                mixed_qkv_prefill_T = mixed_qkv_prefill.transpose(0, 1)
+
+                # For mixed batches, slice tensors to only include prefills
+                has_initial_state_prefill = has_initial_state[
+                    num_decodes : num_decodes + num_prefills
+                ]
+                query_start_loc_prefill = non_spec_query_start_loc[
+                    num_decodes : num_decodes + num_prefills + 1
+                ]
+                # Adjust to start at 0 since we sliced the mixed_qkv for
+                # prefill-only requests
+                if query_start_loc_prefill[0] != 0:
+                    query_start_loc_prefill = (
+                        query_start_loc_prefill - query_start_loc_prefill[0]
+                    )
+
+                mixed_qkv_prefill = causal_conv1d_fn(
+                    mixed_qkv_prefill_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state_prefill,
+                    cache_indices=state_indices_tensor_p,
+                    query_start_loc=query_start_loc_prefill,
+                    block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                    block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                    initial_state_idx=block_idx_last_computed_token_p,
+                    block_size_to_align=block_size,
+                    num_computed_tokens=num_computed_tokens_p,
+                    metadata=None,
+                ).transpose(0, 1)
+
+            # Concatenate decode and prefill results back together
+            if mixed_qkv_decode is not None and mixed_qkv_prefill is not None:
+                mixed_qkv_non_spec = torch.cat(
+                    [mixed_qkv_decode, mixed_qkv_prefill], dim=0
+                )
+            elif mixed_qkv_decode is not None:
+                mixed_qkv_non_spec = mixed_qkv_decode
+            elif mixed_qkv_prefill is not None:
+                mixed_qkv_non_spec = mixed_qkv_prefill
+            else:
+                mixed_qkv_non_spec = None
+        # Otherwise process using standard non-full mode APC
+        elif attn_metadata.num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
@@ -641,47 +785,299 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
-            )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
-        elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
+        if prefix_caching_enabled:
+            if num_prefills > 0:
+                # Handle mixed batches (decode + prefill) and prefill-only
+                assert state_indices_tensor_p is not None
+                assert block_idx_last_computed_token_p is not None
+                block_state_indices = state_indices_tensor_p.gather(
+                    1, block_idx_last_computed_token_p.unsqueeze(1)
+                ).squeeze(1)
+
+                assert query_non_spec is not None
+                assert key_non_spec is not None
+                assert value_non_spec is not None
+                assert g_non_spec is not None
+                assert beta_non_spec is not None
+                assert non_spec_query_start_loc is not None
+                cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
+                assert num_decodes + num_prefills == len(cu_seqlens) - 1
+
+                # Build initial state for all sequences
+                initial_state = ssm_state.new_zeros(
+                    (num_decodes + num_prefills, *ssm_state.shape[1:])
+                )
+
+                # For decode sequences (if any), copy their existing state
+                if num_decodes > 0:
+                    assert ssm_state_indices_decode is not None
+                    valid_decode_positions = torch.nonzero(
+                        ssm_state_indices_decode >= 0, as_tuple=False
+                    ).squeeze(-1)
+                    if valid_decode_positions.numel() > 0:
+                        decode_state_indices = ssm_state_indices_decode.index_select(
+                            0, valid_decode_positions
+                        ).to(device=ssm_state.device, dtype=torch.long)
+                        decode_states = ssm_state.index_select(0, decode_state_indices)
+                        initial_state.index_copy_(
+                            0,
+                            valid_decode_positions,
+                            decode_states,
+                        )
+
+                # For prefill sequences, copy cached state from block indices
+                if block_state_indices.numel() > 0:
+                    valid_block_positions = torch.nonzero(
+                        block_state_indices >= 0, as_tuple=False
+                    ).squeeze(-1)
+                    if valid_block_positions.numel() > 0:
+                        ssm_state_initials = ssm_state.index_select(
+                            0,
+                            block_state_indices.index_select(
+                                0, valid_block_positions
+                            ).to(device=ssm_state.device, dtype=torch.long),
+                        )
+                        prefill_positions_in_initial_state = (
+                            valid_block_positions + num_decodes
+                        )
+                        initial_state.index_copy_(
+                            0,
+                            prefill_positions_in_initial_state,
+                            ssm_state_initials,
+                        )
+
+                    if has_initial_state is not None:
+                        req_has_initial_state = has_initial_state[
+                            start_non_spec_prefill:end_non_spec_prefill
+                        ]
+                        prefill_indices = torch.arange(
+                            num_decodes,
+                            num_decodes + num_prefills,
+                            device=initial_state.device,
+                        )
+                        initial_state[prefill_indices[~req_has_initial_state], ...] = 0
+
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                    chunk_state_history,
+                ) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=cu_seqlens,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                    return_intermediate_states=True,
+                )
+
+                # Write the last recurrent state for prefill requests
+                assert state_indices_prefill is not None
+                valid_prefill_positions = torch.nonzero(
+                    state_indices_prefill >= 0, as_tuple=False
+                ).squeeze(-1)
+                if valid_prefill_positions.numel() > 0:
+                    dest_slots = state_indices_prefill.index_select(
+                        0, valid_prefill_positions
+                    ).to(device=ssm_state.device, dtype=torch.long)
+                    prefill_positions_in_last_state = (
+                        valid_prefill_positions + num_decodes
+                    )
+                    ssm_state.index_copy_(
+                        0,
+                        dest_slots,
+                        last_recurrent_state.index_select(
+                            0, prefill_positions_in_last_state
+                        ).to(ssm_state.dtype),
+                    )
+
+                # Write the last recurrent state for decode requests (if any)
+                if num_decodes > 0:
+                    assert state_indices_decode is not None
+                    decode_states = last_recurrent_state[:num_decodes]
+                    valid_decode_slots = state_indices_decode >= 0
+                    dest_slots = state_indices_decode.clamp(min=0).to(
+                        device=ssm_state.device, dtype=torch.long
+                    )
+                    valid_decode_slots_broadcast = valid_decode_slots.view(
+                        -1,
+                        *([1] * (last_recurrent_state.dim() - 1)),
+                    )
+                    prior_state = ssm_state.index_select(0, dest_slots).to(
+                        last_recurrent_state.dtype
+                    )
+                    decode_states = torch.where(
+                        valid_decode_slots_broadcast,
+                        decode_states,
+                        prior_state,
+                    )
+                    ssm_state.index_copy_(
+                        0,
+                        dest_slots,
+                        decode_states.to(ssm_state.dtype),
+                    )
+
+                # Write intermediate states (one per block) to the ssm state
+                assert chunk_state_history is not None
+                assert chunk_state_history.numel() > 0
+                assert block_idx_first_scheduled_token_p is not None
+                assert block_idx_last_scheduled_token_p is not None
+                assert state_indices_tensor_p is not None
+                assert attn_metadata.last_chunk_indices_p is not None
+                assert num_computed_tokens_p is not None
+                assert chunk_size is not None
+                assert block_size is not None
+
+                chunk_history = chunk_state_history.to(ssm_state.dtype)
+                total_chunks = chunk_history.shape[0]
+                last_chunk_indices = attn_metadata.last_chunk_indices_p
+                prefill_chunk_count = (
+                    int(last_chunk_indices[-1].item()) + 1
+                    if (
+                        last_chunk_indices is not None
+                        and last_chunk_indices.numel() > 0
+                    )
+                    else 0
+                )
+                decode_chunk_count = max(total_chunks - prefill_chunk_count, 0)
+                chunk_history_prefill = chunk_history[decode_chunk_count:]
+                if chunk_history_prefill.shape[0] > 0:
+                    chunks_per_block = block_size // chunk_size
+                    for seq_idx in range(num_prefills):
+                        block_first = int(
+                            block_idx_first_scheduled_token_p[seq_idx].item()
+                        )
+                        block_last = int(
+                            block_idx_last_scheduled_token_p[seq_idx].item()
+                        )
+                        n_blocks_to_fill = block_last - block_first
+                        if n_blocks_to_fill <= 0:
+                            continue
+
+                        cache_blocks = state_indices_tensor_p[
+                            seq_idx, block_first:block_last
+                        ].to(torch.long)
+
+                        first_chunk = (
+                            0
+                            if seq_idx == 0
+                            else int(last_chunk_indices[seq_idx - 1].item()) + 1
+                        )
+                        first_aligned_chunk = first_chunk + chunks_per_block - 1
+                        num_unaligned_tokens = int(
+                            num_computed_tokens_p[seq_idx].item() % block_size
+                        )
+                        if num_unaligned_tokens > 0:
+                            first_aligned_chunk -= num_unaligned_tokens // chunk_size
+                        chunk_stop = (
+                            first_aligned_chunk + n_blocks_to_fill * chunks_per_block
+                        )
+                        cached_states = chunk_history_prefill[
+                            first_aligned_chunk:chunk_stop:chunks_per_block
+                        ]
+                        ssm_state[cache_blocks] = cached_states
+
+            elif num_decodes > 0:
+                # APC decode-only path
+                assert non_spec_query_start_loc is not None
+                assert ssm_state_indices_decode is not None
+                valid_src_decode_slots = ssm_state_indices_decode >= 0
+                ssm_state_indices_decode_clamped = ssm_state_indices_decode.clamp(min=0)
+                initial_state_decode = ssm_state.index_select(
+                    0,
+                    ssm_state_indices_decode_clamped.to(torch.long),
+                )
+                initial_state_decode[~valid_src_decode_slots] = 0
+
+                core_attn_out_non_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state_decode,
+                        inplace_final_state=False,
+                        cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
+                        ssm_state_indices=None,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
+
+                # Store the final recurrent state manually
+                assert state_indices_decode is not None
+                valid_decode_slots = state_indices_decode >= 0
+                dest_slots = state_indices_decode.clamp(min=0).to(
+                    device=ssm_state.device, dtype=torch.long
+                )
+                valid_decode_slots_broadcast = valid_decode_slots.view(
+                    -1,
+                    *([1] * (last_recurrent_state.dim() - 1)),
+                )
+                prior_state = ssm_state.index_select(0, dest_slots).to(
+                    last_recurrent_state.dtype
+                )
+                last_recurrent_state = torch.where(
+                    valid_decode_slots_broadcast,
+                    last_recurrent_state,
+                    prior_state,
+                )
+                ssm_state.index_copy_(
+                    0,
+                    dest_slots,
+                    last_recurrent_state.to(ssm_state.dtype),
+                )
+            else:
+                core_attn_out_non_spec, last_recurrent_state = None, None
+
+        # Otherwise process using standard non-full mode APC
+        else:
+            if attn_metadata.num_prefills > 0:
+                initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                    _,
+                ) = chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-            )
-        else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+                # Init cache
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
+            elif attn_metadata.num_decodes > 0:
+                core_attn_out_non_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=non_spec_query_start_loc[
+                            : attn_metadata.num_decodes + 1
+                        ],
+                        ssm_state_indices=non_spec_state_indices_tensor,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
+            else:
+                core_attn_out_non_spec, last_recurrent_state = None, None
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
@@ -767,12 +1163,14 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": self.dual_chunk_attention_config,
-            }
-            if self.dual_chunk_attention_config
-            else {},
+            **(
+                {
+                    "layer_idx": extract_layer_index(prefix),
+                    "dual_chunk_attention_config": self.dual_chunk_attention_config,
+                }
+                if self.dual_chunk_attention_config
+                else {}
+            ),
         )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -1190,6 +1588,7 @@ class Qwen3NextForCausalLM(
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
+    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1204,14 +1603,8 @@ class Qwen3NextForCausalLM(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3Next currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
