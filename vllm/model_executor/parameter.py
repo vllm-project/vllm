@@ -522,8 +522,7 @@ class SharedWeightParameter(BasevLLMParameter):
     @property
     def data(self):
         raise ValueError(
-            "Accessing `data` of a "
-            "`PartitionedModelWeightParameter` is not allowed. "
+            "Accessing `data` of a `SharedWeightParameter` is not allowed. "
             "Instead, use `get_partition` to get the weight of "
             "the particular partition you want to access"
         )

@@ -29,11 +29,10 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
-    DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
     get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
@@ -426,15 +425,8 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
-            q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
-                input_2d,
-                group_size=self.act_quant_group_shape.col,
-                use_ue8m0=True,
-            )
-        else:
-            assert self.deepgemm_input_quant_op is not None
-            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
+        assert self.deepgemm_input_quant_op is not None
+        q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,
@@ -497,15 +489,8 @@ class W8A8BlockFp8LinearOp:
 
         if input_scale is not None:
             q_input = input_2d
-        elif use_triton:
-            q_input, input_scale = torch.ops.vllm.triton_per_token_group_quant_fp8(
-                input_2d,
-                self.act_quant_group_shape.col,
-            )
         else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
-                input_2d, self.act_quant_group_shape.col
-            )
+            q_input, input_scale = self.input_quant_op(input_2d, use_triton=use_triton)
 
         return gemm_a8w8_blockscale_op(
             q_input,
@@ -572,7 +557,7 @@ class W8A8BlockFp8LinearOp:
             ],
             torch.Tensor,
         ],
-        QuantFP8 | None,
+        QuantFP8,
     ]:
         if use_cutlass:
             return self._run_cutlass, (
@@ -584,7 +569,12 @@ class W8A8BlockFp8LinearOp:
                 )
             )
         if use_aiter_and_is_supported:
-            return self._run_aiter, None
+            return self._run_aiter, QuantFP8(
+                False,
+                self.act_quant_group_shape,
+                column_major_scales=False,
+                use_ue8m0=False,
+            )
         return self._run_triton, (
             QuantFP8(
                 False,
@@ -1520,6 +1510,7 @@ def create_fp8_scale_parameter(
         raise ValueError(f"Unknown parameter type: {parameter_type}")
 
     scale[:] = torch.finfo(torch.float32).min
+    set_weight_attrs(scale, {"scale_type": "weight_scale"})
     return scale
 
 
