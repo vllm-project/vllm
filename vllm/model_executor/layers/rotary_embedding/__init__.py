@@ -11,10 +11,12 @@ from .deepseek_scaling_rope import DeepseekScalingRotaryEmbedding
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
+from .fope import FourierRotaryEmbedding
 from .linear_scaling_rope import LinearScalingRotaryEmbedding
 from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
 from .mrope import MRotaryEmbedding
+from .mrope_interleaved import MRotaryEmbeddingInterleaved
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .xdrope import XDRotaryEmbedding
@@ -100,6 +102,28 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+            )
+        elif "use_fope" in rope_parameters and rope_parameters["use_fope"]:
+            extra_kwargs = {
+                k: v
+                for k, v in rope_parameters.items()
+                if k
+                in (
+                    "num_key_value_heads",
+                    "num_inv_freq",
+                    "fope_sep_head",
+                    "fope_init_factor",
+                )
+            }
+            extra_kwargs["init_cache"] = False
+            rotary_emb = FourierRotaryEmbedding(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
+                **extra_kwargs,
             )
         else:
             rotary_emb = RotaryEmbedding(
@@ -283,6 +307,21 @@ def get_rope(
             long_factor,
             **extra_kwargs,
         )
+    elif scaling_type == "openpangu":
+        mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
+        if "mrope_section" in rope_parameters and mrope_interleaved:
+            rotary_emb = MRotaryEmbeddingInterleaved(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
+                mrope_section=rope_parameters["mrope_section"],
+                mrope_interleaved=mrope_interleaved,
+            )
+        else:
+            raise ValueError("Pangu mrope lacks necessary parameters.")
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb

@@ -9,23 +9,25 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
 
-from .protocol import RendererLike
+from .inputs import DictPrompt
+from .inputs.preprocess import parse_dec_only_prompt
+from .params import ChatParams
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
 
-class Grok2Renderer(RendererLike):
+class Grok2Renderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -33,9 +35,7 @@ class Grok2Renderer(RendererLike):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
 
         if config.skip_tokenizer_init:
             tokenizer = None
@@ -61,8 +61,8 @@ class Grok2Renderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -73,26 +73,22 @@ class Grok2Renderer(RendererLike):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
@@ -103,17 +99,13 @@ class Grok2Renderer(RendererLike):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt

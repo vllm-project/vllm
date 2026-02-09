@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
-from transformers.tokenization_utils import TensorType
+from transformers.utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
 from vllm.config import VllmConfig
@@ -759,6 +759,7 @@ class IsaacProcessor:
                 # Regular text message
                 processed_messages.append(message)
 
+        kwargs["return_dict"] = False
         return self.tokenizer.apply_chat_template(
             processed_messages,
             tokenize=tokenize,

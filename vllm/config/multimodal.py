@@ -51,12 +51,15 @@ DummyOptions: TypeAlias = (
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
+    language_model_only: bool = False
+    """If True, disables all multimodal inputs by setting all modality limits
+    to 0. Equivalent to setting --limit-mm-per-prompt to 0 for every
+    modality."""
     limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
-    """The maximum number of input items and options allowed per 
+    """The maximum number of input items and options allowed per
         prompt for each modality.
     Defaults to 999 for each modality.
 
@@ -64,11 +67,11 @@ class MultiModalConfig:
         {"image": 16, "video": 2}
 
     Configurable format (with options):
-        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512}, 
+        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512},
         "image": {"count": 5, "width": 512, "height": 512}}
 
     Mixed format (combining both):
-        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
+        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
     """
     enable_mm_embeds: bool = False
@@ -76,6 +79,11 @@ class MultiModalConfig:
     for `LLM` class, this refers to tensor inputs under `multi_modal_data`;
     for the OpenAI-compatible server, this refers to chat messages with content
     `"type": "*_embeds"`.
+
+    When enabled with `--limit-mm-per-prompt` set to 0 for a modality,
+    precomputed embeddings skip count validation for that modality, 
+    saving memory by not loading encoder modules while still enabling 
+    embeddings as an input. Limits greater than 0 still apply to embeddings.
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
@@ -211,6 +219,7 @@ class MultiModalConfig:
         the final hidden states.
         """
         factors: list[Any] = [
+            self.language_model_only,
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
             else None,
@@ -224,6 +233,9 @@ class MultiModalConfig:
         Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
+        if self.language_model_only:
+            return 0
+
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:

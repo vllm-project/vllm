@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 
+from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.openai.run_batch import BatchRequestOutput
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -41,6 +42,27 @@ INPUT_RERANK_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/re
 
 INPUT_REASONING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Solve this math problem: 2+2=?"}]}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "What is the capital of France?"}]}}"""
+
+# This is a valid but minimal audio file for testing
+MINIMAL_WAV_BASE64 = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+INPUT_TRANSCRIPTION_BATCH = (
+    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/transcriptions", '
+    '"body": {{"model": "openai/whisper-large-v3", "file_url": "data:audio/wav;base64,{}", '
+    '"response_format": "json"}}}}\n'
+).format(MINIMAL_WAV_BASE64)
+
+INPUT_TRANSCRIPTION_HTTP_BATCH = (
+    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/transcriptions", '
+    '"body": {{"model": "openai/whisper-large-v3", "file_url": "{}", '
+    '"response_format": "json"}}}}\n'
+).format(AudioAsset("mary_had_lamb").url)
+
+INPUT_TRANSLATION_BATCH = (
+    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/translations", '
+    '"body": {{"model": "openai/whisper-small", "file_url": "{}", '
+    '"response_format": "text", "language": "it", "to_language": "en", '
+    '"temperature": 0.0}}}}\n'
+).format(AudioAsset("mary_had_lamb").url)
 
 
 def test_empty_file():
@@ -238,3 +260,121 @@ def test_reasoning_parser():
             ]
             assert reasoning is not None
             assert len(reasoning) > 0
+
+
+def test_transcription():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_TRANSCRIPTION_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                "openai/whisper-large-v3",
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        print(f"\n\ncontents: {contents}\n\n")
+        for line in contents.strip().split("\n"):
+            BatchRequestOutput.model_validate_json(line)
+
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
+
+            response_body = line_dict["response"]["body"]
+            assert response_body is not None
+            assert "text" in response_body
+            assert "usage" in response_body
+
+
+def test_transcription_http_url():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_TRANSCRIPTION_HTTP_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                "openai/whisper-large-v3",
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            BatchRequestOutput.model_validate_json(line)
+
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
+
+            response_body = line_dict["response"]["body"]
+            assert response_body is not None
+            assert "text" in response_body
+            assert "usage" in response_body
+
+            transcription_text = response_body["text"]
+            assert "Mary had a little lamb" in transcription_text
+
+
+def test_translation():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_TRANSLATION_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                "openai/whisper-small",
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            BatchRequestOutput.model_validate_json(line)
+
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
+
+            response_body = line_dict["response"]["body"]
+            assert response_body is not None
+            assert "text" in response_body
+
+            translation_text = response_body["text"]
+            translation_text_lower = str(translation_text).strip().lower()
+            assert "mary" in translation_text_lower or "lamb" in translation_text_lower

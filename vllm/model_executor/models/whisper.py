@@ -5,7 +5,7 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -644,6 +644,15 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return True  # Because the encoder prompt is padded
@@ -693,17 +702,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
@@ -725,6 +727,14 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
+        # The HF WhisperProcessor passes **kwargs to both the tokenizer
+        # and the feature extractor. Text-tokenizer kwargs like
+        # `truncation` and `max_length` must be removed when audio data
+        # is present, otherwise the feature extractor interprets
+        # `max_length` as raw audio samples and truncates the audio.
+        tok_kwargs = {
+            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
+        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -813,21 +823,18 @@ class WhisperForConditionalGeneration(
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt"
             )
-        prompt = {
-            "encoder_prompt": {
-                # Whisper does not support encoder prompt.
-                "prompt": "",
-                "multi_modal_data": {
-                    "audio": (audio, stt_config.sample_rate),
-                },
-            },
-            "decoder_prompt": (
-                (f"<|prev|>{request_prompt}" if request_prompt else "")
-                + f"<|startoftranscript|><|{language}|>"
-                + f"<|{task_type}|><|notimestamps|>"
+
+        decoder_text = (
+            f"<|prev|>{request_prompt}" if request_prompt else ""
+        ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
+
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",  # Whisper does not support encoder prompt.
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
             ),
-        }
-        return cast(PromptType, prompt)
+            decoder_prompt=TextPrompt(prompt=decoder_text),
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
