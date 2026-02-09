@@ -514,7 +514,7 @@ steps:
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     # for pooling models
-    - python3 pooling/pooling/vision_language_pooling.py --seed 0
+    - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # for features demo
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
