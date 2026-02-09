@@ -262,5 +262,6 @@ def entrypoint():
             f"{expected_acceptance_length}, got {acceptance_length}"
         )
 
+
 if __name__ == "__main__":
     entrypoint()
