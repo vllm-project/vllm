@@ -24,9 +24,10 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
-import os
+
 import torch
 from torch import nn
 from transformers import BatchFeature
@@ -73,21 +74,49 @@ from .minicpmv import (
 )
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
-CPU_DEVICE = torch.device("cpu")
-
 try:
     import flag_gems
 except ImportError:
     flag_gems = None
 
+CPU_DEVICE = torch.device("cpu")
+
 if flag_gems and os.getenv("USE_FLAGOS") == "1":
     FLAG_GEMS_CONFIG = [
-        "sort", "sort_stable", "layer_norm", "clamp_", "cos", "embedding",
-        "exp", "exponential_", "full", "gather", "gelu", "index", "le", "lt",
-        "lt_scalar", "masked_fill_", "max", "ones", "pow_scalar", "prod_dim",
-        "rand_like", "reciprocal", "repeat", "scatter", "scatter_", "sin",
-        "sub", "true_divide", "true_divide_", "uniform_", "where_scalar_self",
-        "where_self_out", "zeros", "zeros_like"
+        "sort",
+        "sort_stable",
+        "layer_norm",
+        "clamp_",
+        "cos",
+        "embedding",
+        "exp",
+        "exponential_",
+        "full",
+        "gather",
+        "gelu",
+        "index",
+        "le",
+        "lt",
+        "lt_scalar",
+        "masked_fill_",
+        "max",
+        "ones",
+        "pow_scalar",
+        "prod_dim",
+        "rand_like",
+        "reciprocal",
+        "repeat",
+        "scatter",
+        "scatter_",
+        "sin",
+        "sub",
+        "true_divide",
+        "true_divide_",
+        "uniform_",
+        "where_scalar_self",
+        "where_self_out",
+        "zeros",
+        "zeros_like",
     ]
     flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
 
