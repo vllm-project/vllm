@@ -11,6 +11,7 @@
   #include <c10/hip/HIPStream.h>
   #include <hip/hip_runtime.h>
   #include <hip/hip_fp16.h>
+  #include <algorithm>
 
   // IMPORTANT: Force assert to be active even with -DNDEBUG
   // The assert() call generates code that prevents the compiler from
@@ -20,12 +21,33 @@
   #include <cassert>
 
 // ============================================================================
+// FP16 bit-trick dequantization helpers
+// Reinterpret a uint32 as a pair of fp16 values (__half2) via union cast.
+// Used to construct half2 values by OR-ing 4-bit nibbles with the fp16
+// encoding of 1024.0 (0x6400), avoiding expensive int-to-float conversions.
+// ============================================================================
+__forceinline__ __device__ __half2 uint32_as_half2(uint32_t val) {
+  union {
+    uint32_t u;
+    __half2 h;
+  } converter;
+  converter.u = val;
+  return converter.h;
+}
+
+// Two copies of fp16(1024.0) packed as half2: 0x6400_6400
+// fp16 bit layout: [sign(1)][exponent(5)][mantissa(10)]
+// 0x6400 = 0_11001_0000000000 = 2^(25-15) * 1.0 = 1024.0
+// OR-ing a 4-bit value into the low nibble gives 1024 + value.
+// OR-ing into bits [7:4] gives 1024 + value*16.
+static constexpr uint32_t FP16_1024_PAIR = 0x64006400u;
+
+// ============================================================================
 // AWQ GEMV Kernel with Split-K parallelism
 // Accumulates in fp32 for precision, supports SPLIT_K = 1, 2, 4, 8, 16
 // ============================================================================
 template <int OUTPUT_PER_THREAD, int SPLIT_K>
-__global__
-__launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
+__global__ __launch_bounds__(SPLIT_K * 32) void awq_gemv_kernel_splitk(
     const __half* __restrict__ activation,  // [K]
     const uint32_t* __restrict__ qweight,   // [K, N/8]
     const __half* __restrict__ scales,      // [K/G, N]
@@ -34,9 +56,8 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
     size_t M, size_t K, size_t N, size_t G) {
   static_assert(OUTPUT_PER_THREAD == 8,
                 "Split-K only supports OUTPUT_PER_THREAD=8");
-  static_assert(SPLIT_K == 1 || SPLIT_K == 2 || SPLIT_K == 4 || SPLIT_K == 8 ||
-                    SPLIT_K == 16,
-                "SPLIT_K must be 1, 2, 4, 8, or 16");
+  static_assert(SPLIT_K >= 1 && SPLIT_K <= 20,
+                "SPLIT_K must be between 1 and 20");
 
   // Thread organization: SPLIT_K splits of 32 threads each
   // SPLIT_K=2: 64 threads/block, SPLIT_K=4: 128 threads/block, SPLIT_K=8: 256
@@ -147,17 +168,24 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
       }                                                                \
     } while (0)
 
+  /* FP16 bit-trick zero extraction: OR nibble pairs with fp16(1024.0)    \
+     to construct half2 values without int-to-float conversion.            \
+     Low-nibble pairs get half2(1024+z0, 1024+z1).                         \
+     High-nibble pairs get half2(1024+z2*16, 1024+z3*16).                  \
+     The 1024 bias cancels when subtracting from weight half2. */
   #define EXTRACT_ZEROS_IN_BUF_SK(buf_idx)                          \
     do {                                                            \
       _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) { \
-        _Pragma("unroll") for (int b = 0; b < 4; b++) {             \
-          uint16_t zero0 = static_cast<uint16_t>(                   \
-              (packed_zeros[buf_idx][j] >> (b * 4)) & 0xF);         \
-          uint16_t zero1 = static_cast<uint16_t>(                   \
-              (packed_zeros[buf_idx][j] >> (b * 4 + 16)) & 0xF);    \
-          zeros2[buf_idx][j * 4 + b] = __halves2half2(              \
-              __ushort2half_rn(zero0), __ushort2half_rn(zero1));    \
-        }                                                           \
+        uint32_t za = packed_zeros[buf_idx][j];                     \
+        zeros2[buf_idx][j * 4 + 0] =                                \
+            uint32_as_half2((za & 0x000f000fu) | FP16_1024_PAIR);   \
+        zeros2[buf_idx][j * 4 + 1] =                                \
+            uint32_as_half2((za & 0x00f000f0u) | FP16_1024_PAIR);   \
+        za >>= 8;                                                   \
+        zeros2[buf_idx][j * 4 + 2] =                                \
+            uint32_as_half2((za & 0x000f000fu) | FP16_1024_PAIR);   \
+        zeros2[buf_idx][j * 4 + 3] =                                \
+            uint32_as_half2((za & 0x00f000f0u) | FP16_1024_PAIR);   \
       }                                                             \
     } while (0)
 
@@ -170,32 +198,65 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
       }                                                                 \
     } while (0)
 
-  #define ACCUMULATE_SLOT_SK(slot)                                            \
-    do {                                                                      \
-      __half2 a2 = act2[(slot) / 2];                                          \
-      __half act_val = ((slot) % 2 == 0) ? __low2half(a2) : __high2half(a2);  \
-      float act_f = __half2float(act_val);                                    \
-      _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) {           \
-        _Pragma("unroll") for (int b = 0; b < 4; b++) {                       \
-          uint16_t w0 = static_cast<uint16_t>((w[slot][j] >> (b * 4)) & 0xF); \
-          uint16_t w1 =                                                       \
-              static_cast<uint16_t>((w[slot][j] >> (b * 4 + 16)) & 0xF);      \
-          __half2 weight2 =                                                   \
-              __halves2half2(__ushort2half_rn(w0), __ushort2half_rn(w1));     \
-          /* dequant = (weight - zero) * scale in fp32 */                     \
-          __half2 z2 = zeros2[curr_buf][j * 4 + b];                           \
-          __half2 s2 = scales2[curr_buf][j * 4 + b];                          \
-          float dequant0 = (__half2float(__low2half(weight2)) -               \
-                            __half2float(__low2half(z2))) *                   \
-                           __half2float(__low2half(s2));                      \
-          float dequant1 = (__half2float(__high2half(weight2)) -              \
-                            __half2float(__high2half(z2))) *                  \
-                           __half2float(__high2half(s2));                     \
-          /* acc += activation * dequant in fp32 */                           \
-          acc[(j * 4 + b) * 2] += act_f * dequant0;                           \
-          acc[(j * 4 + b) * 2 + 1] += act_f * dequant1;                       \
-        }                                                                     \
-      }                                                                       \
+  /* FP16 bit-trick weight dequantization:                                   \
+     Extract 4-bit nibble pairs as half2 by OR-ing with fp16(1024.0).        \
+     Subtract zero half2 (same format) — the +1024 bias cancels exactly.     \
+     Low-nibble pairs: diff = (w-z, w'-z') — exact result.                   \
+     High-nibble pairs: diff = ((w-z)*16, (w'-z')*16) — divide by 16.       \
+     Then multiply by scale and accumulate in fp32. */
+  #define ACCUMULATE_SLOT_SK(slot)                                             \
+    do {                                                                       \
+      __half2 a2 = act2[(slot) / 2];                                           \
+      __half act_val = ((slot) % 2 == 0) ? __low2half(a2) : __high2half(a2);   \
+      float act_f = __half2float(act_val);                                     \
+      _Pragma("unroll") for (int j = 0; j < UINT32_PER_LOAD; j++) {            \
+        uint32_t qa = w[slot][j];                                              \
+        /* Pair 0: low nibble → elements 0,1 */                                \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x000f000fu) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 0]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 0];                           \
+          float d0 = __half2float(__low2half(diff));                           \
+          float d1 = __half2float(__high2half(diff));                          \
+          acc[(j * 4 + 0) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 0) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        /* Pair 1: high nibble → elements 2,3 (has ×16, corrected) */          \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x00f000f0u) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 1]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 1];                           \
+          float d0 = __half2float(__low2half(diff)) * 0.0625f;                 \
+          float d1 = __half2float(__high2half(diff)) * 0.0625f;                \
+          acc[(j * 4 + 1) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 1) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        qa >>= 8;                                                              \
+        /* Pair 2: low nibble → elements 4,5 */                                \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x000f000fu) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 2]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 2];                           \
+          float d0 = __half2float(__low2half(diff));                           \
+          float d1 = __half2float(__high2half(diff));                          \
+          acc[(j * 4 + 2) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 2) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+        /* Pair 3: high nibble → elements 6,7 (has ×16, corrected) */          \
+        {                                                                      \
+          __half2 w_h2 = uint32_as_half2((qa & 0x00f000f0u) | FP16_1024_PAIR); \
+          __half2 diff = __hsub2(w_h2, zeros2[curr_buf][j * 4 + 3]);           \
+          __half2 s2 = scales2[curr_buf][j * 4 + 3];                           \
+          float d0 = __half2float(__low2half(diff)) * 0.0625f;                 \
+          float d1 = __half2float(__high2half(diff)) * 0.0625f;                \
+          acc[(j * 4 + 3) * 2] += act_f * d0 * __half2float(__low2half(s2));   \
+          acc[(j * 4 + 3) * 2 + 1] +=                                          \
+              act_f * d1 * __half2float(__high2half(s2));                      \
+        }                                                                      \
+      }                                                                        \
     } while (0)
 
   // Load zeros and scales for first group of this split
@@ -310,72 +371,101 @@ __launch_bounds__(SPLIT_K <= 8 ? 256 : 512) void awq_gemv_kernel_splitk(
 
   __syncthreads();
 
-  // Tree reduction across splits (in fp32)
-  // For SPLIT_K=2: one reduction step
-  // For SPLIT_K=4: two reduction steps
-  // For SPLIT_K=8: three reduction steps
-  // For SPLIT_K=16: four reduction steps
-  if constexpr (SPLIT_K >= 16) {
-    // Step 0: splits 0-7 add splits 8-15
-    if (split_id < 8) {
-      float* other_smem =
-          &smem_f[(split_id + 8) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+  // Helper: check if SPLIT_K is a power of 2
+  constexpr bool IS_POW2 = (SPLIT_K & (SPLIT_K - 1)) == 0;
+
+  if constexpr (IS_POW2) {
+    // Tree reduction across splits (in fp32)
+    // For SPLIT_K=2: one reduction step
+    // For SPLIT_K=4: two reduction steps
+    // For SPLIT_K=8: three reduction steps
+    // For SPLIT_K=16: four reduction steps
+    if constexpr (SPLIT_K >= 16) {
+      // Step 0: splits 0-7 add splits 8-15
+      if (split_id < 8) {
+        float* other_smem =
+            &smem_f[(split_id + 8) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    if constexpr (SPLIT_K >= 8) {
+      // Step 1: splits 0-3 add splits 4-7
+      if (split_id < 4) {
+        float* other_smem =
+            &smem_f[(split_id + 4) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    if constexpr (SPLIT_K >= 4) {
+      // Step 2: splits 0-1 add splits 2-3
+      if (split_id < 2) {
+        float* other_smem =
+            &smem_f[(split_id + 2) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] = my_smem[i] + other_smem[i];
+          my_smem[i] = acc[i];
+        }
+      }
+      __syncthreads();
+    }
+
+    // Final step: split 0 adds split 1
+    if (split_id == 0) {
+      float* other_smem = &smem_f[1 * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                                  thread_in_split * OUTPUT_PER_THREAD];
+
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
         acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
       }
-    }
-    __syncthreads();
-  }
 
-  if constexpr (SPLIT_K >= 8) {
-    // Step 1: splits 0-3 add splits 4-7
-    if (split_id < 4) {
-      float* other_smem =
-          &smem_f[(split_id + 4) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+      // Write outputs (convert fp32 accumulators to fp16)
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-        acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
+        size_t col = col_start + i;
+        if (col < N) {
+          output[col] = __float2half(acc[i]);
+        }
       }
     }
-    __syncthreads();
-  }
+  } else {
+    // Non-power-of-2 SPLIT_K: serial reduction by split 0
+    // For SPLIT_K=5,10,20: split 0 sums all other splits' partial results.
+    // The reduction cost is negligible (SPLIT_K-1 additions of 8 floats each)
+    // compared to the main compute loop.
+    if (split_id == 0) {
+      for (int s = 1; s < SPLIT_K; s++) {
+        float* other_smem = &smem_f[s * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
+                                    thread_in_split * OUTPUT_PER_THREAD];
+  #pragma unroll
+        for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
+          acc[i] += other_smem[i];
+        }
+      }
 
-  if constexpr (SPLIT_K >= 4) {
-    // Step 2: splits 0-1 add splits 2-3
-    if (split_id < 2) {
-      float* other_smem =
-          &smem_f[(split_id + 2) * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                  thread_in_split * OUTPUT_PER_THREAD];
+      // Write outputs (convert fp32 accumulators to fp16)
   #pragma unroll
       for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-        acc[i] = my_smem[i] + other_smem[i];
-        my_smem[i] = acc[i];
-      }
-    }
-    __syncthreads();
-  }
-
-  // Final step: split 0 adds split 1
-  if (split_id == 0) {
-    float* other_smem = &smem_f[1 * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
-                                thread_in_split * OUTPUT_PER_THREAD];
-
-  #pragma unroll
-    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-      acc[i] = my_smem[i] + other_smem[i];
-    }
-
-    // Write outputs (convert fp32 accumulators to fp16)
-  #pragma unroll
-    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
-      size_t col = col_start + i;
-      if (col < N) {
-        output[col] = __float2half(acc[i]);
+        size_t col = col_start + i;
+        if (col < N) {
+          output[col] = __float2half(acc[i]);
+        }
       }
     }
   }
@@ -492,23 +582,44 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
     // Explicit split-k from Python config
     effective_splitk = split_k;
   } else {
-    // Fallback heuristic (safety net when no config is available)
-    if ((num_groups % 16 == 0) && N <= 4096) {
-      effective_splitk = 16;
-    } else if ((num_groups % 8 == 0) && N <= 16384) {
-      effective_splitk = 8;
-    } else if (num_groups % 4 == 0) {
-      effective_splitk = 4;
-    } else if (num_groups % 2 == 0) {
-      effective_splitk = 2;
+    // Fallback heuristic: find the largest divisor of num_groups (up to 20)
+    // that provides good parallelism without excessive overhead.
+    // Target: ~4-8 groups per split for good balance of parallelism vs.
+    // reduction overhead, scaled by N (larger N needs less K-parallelism).
+    int64_t target_groups_per_split;
+    if (N <= 4096) {
+      target_groups_per_split = 2;  // small N: maximize K-parallelism
+    } else if (N <= 16384) {
+      target_groups_per_split = 4;
     } else {
-      effective_splitk = 1;
+      target_groups_per_split = 5;  // large N: less K-parallelism needed
+    }
+    int64_t target_sk =
+        std::max(int64_t(1), num_groups / target_groups_per_split);
+    target_sk = std::min(target_sk, int64_t(20));
+
+    // Find the largest divisor of num_groups that is <= target_sk
+    effective_splitk = 1;
+    for (int64_t sk = target_sk; sk >= 1; sk--) {
+      if (num_groups % sk == 0) {
+        effective_splitk = sk;
+        break;
+      }
     }
   }
 
-  // Validate divisibility: fall back to lower split-k if needed
-  while (effective_splitk > 1 && num_groups % effective_splitk != 0) {
-    effective_splitk /= 2;
+  // Validate: effective_splitk must be in [1, 20] and divide num_groups.
+  // If not, find the largest value <= effective_splitk that divides num_groups.
+  effective_splitk = std::min(effective_splitk, int64_t(20));
+  if (effective_splitk < 1 || num_groups % effective_splitk != 0) {
+    int64_t orig = std::max(effective_splitk, int64_t(1));
+    effective_splitk = 1;  // safe default
+    for (int64_t sk = std::min(orig, int64_t(20)); sk >= 1; sk--) {
+      if (num_groups % sk == 0) {
+        effective_splitk = sk;
+        break;
+      }
+    }
   }
 
   // Helper to launch the kernel with a specific SPLIT_K
@@ -531,16 +642,61 @@ torch::Tensor awq_gemv_hip(torch::Tensor activation,  // [M, K] or [K]
             static_cast<size_t>(G));
   };
 
-  // Dispatch to the appropriate template instantiation
+  // Dispatch to the appropriate template instantiation (1-20)
   switch (effective_splitk) {
+    case 20:
+      launch.template operator()<20>();
+      break;
+    case 19:
+      launch.template operator()<19>();
+      break;
+    case 18:
+      launch.template operator()<18>();
+      break;
+    case 17:
+      launch.template operator()<17>();
+      break;
     case 16:
       launch.template operator()<16>();
+      break;
+    case 15:
+      launch.template operator()<15>();
+      break;
+    case 14:
+      launch.template operator()<14>();
+      break;
+    case 13:
+      launch.template operator()<13>();
+      break;
+    case 12:
+      launch.template operator()<12>();
+      break;
+    case 11:
+      launch.template operator()<11>();
+      break;
+    case 10:
+      launch.template operator()<10>();
+      break;
+    case 9:
+      launch.template operator()<9>();
       break;
     case 8:
       launch.template operator()<8>();
       break;
+    case 7:
+      launch.template operator()<7>();
+      break;
+    case 6:
+      launch.template operator()<6>();
+      break;
+    case 5:
+      launch.template operator()<5>();
+      break;
     case 4:
       launch.template operator()<4>();
+      break;
+    case 3:
+      launch.template operator()<3>();
       break;
     case 2:
       launch.template operator()<2>();

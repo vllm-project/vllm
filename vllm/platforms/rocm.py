@@ -162,6 +162,27 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_skinny_gemm_arch() -> bool:
+    """Check if the current GPU supports the wvSplitK skinny GEMM kernels.
+
+    Supported on GFX9 (gfx90a, gfx942, gfx950) and GFX11 (RDNA3/4).
+    """
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(
+        arch in GPU_ARCH
+        for arch in [
+            "gfx90a",
+            "gfx942",
+            "gfx950",
+            "gfx1100",
+            "gfx1101",
+            "gfx1150",
+            "gfx1151",
+        ]
+    )
+
+
+@cache
 def on_gfx942() -> bool:
     GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx942"])

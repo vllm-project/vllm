@@ -326,7 +326,7 @@ def main(args: argparse.Namespace):
         print(f"  K={K}, N={N} (num_groups={num_groups})")
     print()
 
-    split_k_values = [1, 2, 4, 8, 16]
+    split_k_values = list(range(1, 21))  # 1-20, all supported by HIP kernel
 
     # Benchmark all shapes x split_k values
     # Keyed on (K, N) tuples
