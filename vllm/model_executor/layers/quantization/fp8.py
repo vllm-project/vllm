@@ -544,62 +544,16 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # WEIGHT
-        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # track how many elements we have updated
-            if not hasattr(layer, "_loaded_numel"):
-                layer._loaded_numel = 0
-
-                # when the first `loaded_weight` is about to be
-                # loaded to `param`, materialize `param` just-in-time
-                weight = ModelWeightParameter(
-                    data=torch.empty_like(layer.weight, device=layer._load_device),
-                    input_dim=1,
-                    output_dim=0,
-                    weight_loader=patched_weight_loader,
-                )
-                _copy_missing_attrs(layer.weight, weight)
-                layer.register_parameter("weight", weight)
-                del layer._load_device
-
-            # refresh the reference to `param` to reflect just-in-time
-            # materialization
-            param = layer.weight
-
-            # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-            layer._loaded_numel += copy_numel_counter.copied_numel
-
-            # if we have loaded all of the elements, call
-            # process_weights_after_loading
-            target_loaded_numel = layer.weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
-                self.process_weights_after_loading(layer)
-
-                # Prevent the usual `process_weights_after_loading` call from doing
-                # anything
-                layer._already_called_process_weights_after_loading = True
-
-                # Note that we keep `layer._loaded_numel` around just in case
-                # there is logic added to vllm in the future which calls a
-                # weight loader twice - we do not want to re-initialize in
-                # that case.
-
-            return res
-
         weight = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                # materialized just-in-time in `patched_weight_loader`
                 device="meta",
                 dtype=params_dtype,
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=patched_weight_loader,
+            weight_loader=weight_loader,
         )
         # stash the correct device for `patched_weight_loader`
         layer._load_device = torch.get_default_device()
