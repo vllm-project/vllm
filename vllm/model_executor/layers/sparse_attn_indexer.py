@@ -108,6 +108,7 @@ def sparse_attn_indexer(
                 weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
+                clean_logits=False,
             )
             num_rows = logits.shape[0]
 
@@ -157,6 +158,7 @@ def sparse_attn_indexer(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
+            clean_logits=False,
         )
 
         num_rows = logits.shape[0]

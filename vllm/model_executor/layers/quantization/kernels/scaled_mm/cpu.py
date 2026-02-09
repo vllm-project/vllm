@@ -196,6 +196,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x_shape = x.shape
+        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
         params = self._get_layer_params(layer)
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
@@ -211,7 +213,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         ops.onednn_scaled_mm(
             self.dnnl_handler, x_q, out, x_s, x_zp, params.azp_adj, bias
         )
-
+        out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
         return out
 
     def _apply_weights_sgl(

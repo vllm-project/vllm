@@ -169,9 +169,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
-                f"The device compute capability of \
-                {compute_capability} is not supported.",
+                "The device compute capability of"
+                f"{compute_capability} is not supported.",
             )
+        return True, None
 
     @classmethod
     def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
