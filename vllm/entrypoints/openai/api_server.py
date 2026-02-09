@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -156,7 +157,9 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
-    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    vllm_config: VllmConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -168,6 +171,14 @@ def build_app(
         )
         supported_tasks = _FALLBACK_SUPPORTED_TASKS
 
+    if vllm_config is None:
+        warnings.warn(
+            "The 'vllm_config' parameter was not provided to "
+            "build_app and will be required in a future version. ",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
@@ -177,10 +188,6 @@ def build_app(
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
-
-    from vllm.entrypoints.openai.basic.api_router import register_basic_api_routers
-
-    register_basic_api_routers(app)
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -204,6 +211,25 @@ def build_app(
         )
 
         register_generate_api_routers(app)
+
+        from vllm.entrypoints.serve.disagg.api_router import (
+            attach_router as attach_disagg_router,
+        )
+
+        attach_disagg_router(app)
+
+        from vllm.entrypoints.serve.rlhf.api_router import (
+            attach_router as attach_rlhf_router,
+        )
+
+        attach_rlhf_router(app)
+
+        if vllm_config is None or vllm_config.model_config.is_moe:
+            from vllm.entrypoints.serve.elastic_ep.api_router import (
+                attach_router as elastic_ep_attach_router,
+            )
+
+            elastic_ep_attach_router(app)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
@@ -478,9 +504,10 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         supported_tasks = await engine_client.get_supported_tasks()
+        vllm_config = engine_client.vllm_config
         logger.info("Supported tasks: %s", supported_tasks)
 
-        app = build_app(args, supported_tasks)
+        app = build_app(args, supported_tasks, vllm_config)
         await init_app_state(engine_client, app.state, args, supported_tasks)
 
         logger.info(
