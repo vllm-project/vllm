@@ -72,10 +72,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.multimodal_config
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
-        mm_tokens = processor._get_num_multimodal_tokens(
-            image_sizes=([height, width],), **mm_processor_kwargs
-        )
-        image_tokens = mm_tokens["num_image_tokens"][0]
+        try:
+            mm_tokens = processor._get_num_multimodal_tokens(
+                image_sizes=([height, width],), **mm_processor_kwargs
+            )
+            image_tokens = mm_tokens["num_image_tokens"][0]
+        except AttributeError:
+            logger.warning(
+                "Captured AttributeError when calling "
+                "'_get_num_multimodal_tokens'. This is likely a bug in the "
+                "transformers library for processor %s. "
+                "Returning 0 as a fallback.", processor.__class__.__name__)
+            return 0
+
         return image_tokens
 
     def get_max_image_size(self):
@@ -226,9 +235,21 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             image_size = images.get_image_size(item_idx)
             image_sizes.append((image_size.height, image_size.width))
 
-        mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes, **mm_processor_kwargs
-        )
+        try:
+            mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
+                image_sizes=image_sizes, **mm_processor_kwargs
+            )
+        except AttributeError:
+            logger.warning(
+                "Captured AttributeError when calling "
+                "'_get_num_multimodal_tokens'. This is likely a bug in the "
+                "transformers library for processor %s. "
+                "Using an empty dict as a fallback.",
+                hf_processor.__class__.__name__)
+            mm_tokens_per_modality = {
+                "num_image_tokens": [],
+                "num_image_patches": []
+            }
 
         mm_placeholders = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
