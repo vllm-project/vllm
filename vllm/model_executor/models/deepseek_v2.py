@@ -1016,7 +1016,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         }
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
+        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+            print(f"jcz DeepseekV2DecoderLayer begin forward positions:{positions.shape} {positions} layer_idx:{self.layer_idx}", flush=True)
         hidden_states = self.self_attn(**attn_kwargs)
+        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+            print(f"jcz DeepseekV2DecoderLayer end forward positions:{positions.shape} {positions} layer_idx:{self.layer_idx}", flush=True)
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1155,12 +1159,15 @@ class DeepseekV2Model(nn.Module):
         afd_metadata: AFDMetadata,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+            print(f"jcz forward_with_afd positions:{positions.shape} {positions}", flush=True)
         for layer_idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             afd_connector = afd_metadata.afd_connector
 
             if layer_idx > 0:
                 # Pass current hidden_states as ref_tensor to preserve dynamic shapes
                 hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
+            
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1258,6 +1265,8 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+            print(f"jcz DeepseekV2Model forward positions:{positions.shape} {positions}", flush=True)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1453,6 +1462,8 @@ class DeepseekV2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+            print(f"jcz DeepseekV2ForCausalLM forward positions:{positions.shape} {positions}", flush=True)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

@@ -744,8 +744,10 @@ class Worker(WorkerBase):
                         self.model_runner.capture_model(
                             dp_metadata_list=dp_metadata_list,
                         )
-                    self.model_runner.execute_model(scheduler_output=None,
-                                                    dp_metadata_list=dp_metadata_list)
+                    else:
+                        self.model_runner.execute_model(scheduler_output=None,
+                                                        dp_metadata_list=dp_metadata_list)
+                    torch.cuda.synchronize()
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise
