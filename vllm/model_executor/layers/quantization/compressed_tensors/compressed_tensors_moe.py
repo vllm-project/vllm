@@ -120,6 +120,8 @@ __all__ = [
     "CompressedTensorsWNA16MoEMethod",
     "CompressedTensorsW4A4Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
+    "CompressedTensorsW4A8Fp8MoEMethod",
+    "CompressedTensorsW4A16CutlassMoEMethod",
 ]
 
 
@@ -180,7 +182,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f" and bits: {weight_quant.num_bits}",
                 )
 
-            # check if VLLM_USE_FLASHINFER_MOE_INT4 is set
+            # check if VLLM_USE_FLASHINFER_MOE_INT4 is set first
             if CompressedTensorsWNA16MarlinMoEMethod.use_flashinfer_mxint4_moe(
                 weight_quant
             ):
@@ -189,21 +191,21 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
 
             # otherwise, select WNA16 backend according to VLLM_WNA16_MOE_BACKEND
-            backend_ = envs.VLLM_WNA16_MOE_BACKEND
-            if backend_ == "cutlass":  # cutlass has most strict limitations
+            wna16_backend = envs.VLLM_WNA16_MOE_BACKEND
+            if wna16_backend == "cutlass":  # cutlass has most strict limitations
                 if (
                     weight_quant.num_bits == 4
                     and group_size % 64 == 0
                     and current_platform.is_cuda()
-                    and current_platform.get_device_capability()[0] == 9
+                    and current_platform.is_device_capability(90)
                 ):
                     logger.info_once("Using CompressedTensorsW4A16CutlassMoEMethod")
                     return CompressedTensorsW4A16CutlassMoEMethod(
                         weight_quant, input_quant, layer.moe_config
                     )
                 else:
-                    backend_ = "marlin"  # choose marlin over triton
-            if backend_ == "marlin":
+                    wna16_backend = "marlin"  # choose marlin over triton
+            if wna16_backend == "marlin":
                 if (
                     check_moe_marlin_supports_layer(layer, group_size)
                     and current_platform.is_cuda()
@@ -213,8 +215,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         weight_quant, input_quant, layer.moe_config, backend="Marlin"
                     )
                 else:
-                    backend_ = "triton"
-            if backend_ == "triton":
+                    wna16_backend = "triton"
+            if wna16_backend == "triton":
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder

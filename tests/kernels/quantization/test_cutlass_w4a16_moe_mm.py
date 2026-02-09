@@ -11,7 +11,10 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="CUTLASS W4A16 MoE is only supported on SM90 devices.",
+)
 @pytest.mark.parametrize("bs", [1, 64, 128, 384])
 @pytest.mark.parametrize("M", [128, 1024, 2048])
 @pytest.mark.parametrize("N", [128, 1024, 2048, 7168])

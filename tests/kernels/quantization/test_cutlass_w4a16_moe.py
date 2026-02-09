@@ -30,8 +30,8 @@ init_workspace_manager(device=device)
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUTLASS is only supported on CUDA.",
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="CUTLASS W4A16 MoE is only supported on SM90 devices.",
 )
 @pytest.mark.parametrize("bs", [1, 128, 1024])
 @pytest.mark.parametrize(
