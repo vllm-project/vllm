@@ -631,13 +631,13 @@ class GPUModelRunner(
 
         # OPTIMIZATION: Cache the arange tensors rather than creating them
         # every step. Keep in int64 to avoid overflow with long context.
-        # - arange_base: immutable [0, 1, 2, ...] used as source for batched computation
-        # - arange: CpuGpuBuffer for the computed batched arange result
+        # - arange_np: immutable [0, 1, 2, ...] used as source for batched computation
+        # - relative_token_pos: CpuGpuBuffer for the computed batched arange result
         arange_size = max(
             self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens
         )
-        self.arange_base = np.arange(arange_size, dtype=np.int64)
-        self.arange = self._make_buffer(arange_size, dtype=torch.int64)
+        self.arange_np = np.arange(arange_size, dtype=np.int64)
+        self.relative_token_pos = self._make_buffer(arange_size, dtype=torch.int64)
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -1248,7 +1248,7 @@ class GPUModelRunner(
         cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         np.subtract(
-            self.arange_base[:total_num_tokens],
+            self.arange_np[:total_num_tokens],
             cumsums_offsets,
             out=arange_out[:total_num_tokens],
         )
@@ -1434,18 +1434,18 @@ class GPUModelRunner(
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        req_indices = np.repeat(self.arange_base[:num_reqs], num_scheduled_tokens)
+        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
-        # self.arange.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # self.relative_token_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens = self._get_cumsum_and_arange(
-            num_scheduled_tokens, self.arange.np
+            num_scheduled_tokens, self.relative_token_pos.np
         )
 
         # Get positions.
         positions_np = (
             self.input_batch.num_computed_tokens_cpu[req_indices]
-            + self.arange.np[: cu_num_tokens[-1]]
+            + self.relative_token_pos.np[: cu_num_tokens[-1]]
         )
 
         # Calculate M-RoPE positions.
@@ -1601,13 +1601,13 @@ class GPUModelRunner(
         req_indices_gpu = torch.from_numpy(req_indices).to(
             self.device, non_blocking=True
         )
-        self.arange.copy_to_gpu(total_num_scheduled_tokens)
+        self.relative_token_pos.copy_to_gpu(total_num_scheduled_tokens)
         num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
             self.device, non_blocking=True
         )
         self.positions.gpu[:total_num_scheduled_tokens] = (
             self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-            + self.arange.gpu[:total_num_scheduled_tokens]
+            + self.relative_token_pos.gpu[:total_num_scheduled_tokens]
         )
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
@@ -1637,7 +1637,7 @@ class GPUModelRunner(
             mrope_pos = (
                 self.mrope_position_delta.gpu[req_indices_gpu]
                 + self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-                + self.arange.gpu[:total_num_scheduled_tokens]
+                + self.relative_token_pos.gpu[:total_num_scheduled_tokens]
             )
             for dim in range(3):
                 self.mrope_positions.gpu[dim, :total_num_scheduled_tokens] = mrope_pos
@@ -1645,7 +1645,7 @@ class GPUModelRunner(
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             xdrope_pos = (
                 self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-                + self.arange.gpu[:total_num_scheduled_tokens]
+                + self.relative_token_pos.gpu[:total_num_scheduled_tokens]
             )
             for dim in range(self.uses_xdrope_dim):
                 self.xdrope_positions.gpu[dim, :total_num_scheduled_tokens] = xdrope_pos
@@ -2207,32 +2207,32 @@ class GPUModelRunner(
 
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # self.arange.np[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        # self.relative_token_pos.np[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens = self._get_cumsum_and_arange(
-            num_sampled_tokens, self.arange.np, cumsum_dtype=np.int32
+            num_sampled_tokens, self.relative_token_pos.np, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
         )
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += self.arange.np[: cu_num_sampled_tokens[-1]]
+        logits_indices += self.relative_token_pos.np[: cu_num_sampled_tokens[-1]]
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
         # cu_num_draft_tokens: [3, 3, 5, 5, 6]
-        # self.arange.np[:6]: [0, 1, 2, 0, 1, 0]
+        # self.relative_token_pos.np[:6]: [0, 1, 2, 0, 1, 0]
         cu_num_draft_tokens = self._get_cumsum_and_arange(
-            num_draft_tokens, self.arange.np, cumsum_dtype=np.int32
+            num_draft_tokens, self.relative_token_pos.np, cumsum_dtype=np.int32
         )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
         )
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += self.arange.np[: cu_num_draft_tokens[-1]]
+        target_logits_indices += self.relative_token_pos.np[: cu_num_draft_tokens[-1]]
 
         # TODO: Optimize the CPU -> GPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
@@ -4552,7 +4552,7 @@ class GPUModelRunner(
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
             cum_num_tokens = self._get_cumsum_and_arange(
-                num_scheduled_tokens, self.arange.np
+                num_scheduled_tokens, self.relative_token_pos.np
             )
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
