@@ -187,7 +187,7 @@ def apply_nvfp4_linear(
     if backend == NvFp4LinearBackend.MARLIN:
         return apply_fp4_marlin_linear(
             input=x,
-            input_scale_factor=layer.input_scale_factor,
+            stability_scale_factor=layer.stability_scale_factor,
             weight=weight,
             weight_scale=weight_scale,
             weight_global_scale=weight_global_scale,
