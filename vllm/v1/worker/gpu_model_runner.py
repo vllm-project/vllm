@@ -3403,7 +3403,6 @@ class GPUModelRunner(
             if num_input_tokens > num_scheduled_tokens:
                 self.positions[num_scheduled_tokens:num_input_tokens].zero_()
 
-        print(f"jcz _preprocess positions:{positions.shape} {positions}", flush=True)
         if is_first_rank:
             intermediate_tensors = None
         else:
@@ -5740,7 +5739,6 @@ class GPUModelRunner(
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
                     self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)
                 logger.info(f'jcz send dp_metadata_list in prepare input')
-                print(f"jcz _dummy_run 2 positions:{positions.shape} {positions}", flush=True)
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

@@ -156,17 +156,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
         for layer_idx in range(0, self.num_layers):
             for ubatch_idx in range(num_ubatches):
-                print(f"jcz deepseekv2 count:{self._execute_model_count} "
-                      f"begin layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
                 hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
-                print(f"jcz deepseekv2 count:{self._execute_model_count} "
-                    f"end layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx} hidden_states:{hidden_states.shape}",
-                    flush=True)
-                print(f"jcz begin dp_metadata_list:{dp_metadata_list}", flush=True)
                 dp_metadata = dp_metadata_list.get(
                     recv_metadata.stage_idx, None
                 )
-                print(f"jcz end dp_metadata:{dp_metadata}", flush=True)
                 if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
                     for work in recv_metadata.recv_handle_list:
                         work.wait()
@@ -175,17 +168,12 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                     attn_metadata=None, vllm_config=self.vllm_config
                 ):
                     get_forward_context().dp_metadata = dp_metadata
-                    print(f"jcz deepseekv2 begin _execute_eager_mode layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, layer_idx
                     )
-                    print(f"jcz deepseekv2 end _execute_eager_mode layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
 
-                recv_metadata.recv_handle_list = None 
-                print(f"jcz deepseekv2 3 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
+                recv_metadata.recv_handle_list = None
                 self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
-                print(f"jcz deepseekv2 4 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
-        logger.info(f"jcz ffn_forward end")
         self._execute_model_count += 1
         return rank_ffn_output
 

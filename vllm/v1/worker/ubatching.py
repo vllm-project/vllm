@@ -243,14 +243,12 @@ def make_ubatch_contexts(
 from vllm.utils.torch_utils import direct_register_custom_op
 
 def manual_dbo_yield_op(x: torch.Tensor) -> torch.Tensor:
-    print("jcz manual_dbo_yield_op", flush=True)
     if dbo_enabled():
         dbo_yield()
     return x
 
 
 def manual_dbo_yield_fake(x: torch.Tensor) -> torch.Tensor:
-    print("jcz manual_dbo_yield_fake", flush=True)
     return x
 
 direct_register_custom_op(
