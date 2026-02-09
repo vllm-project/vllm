@@ -54,7 +54,7 @@ DummyOptions: TypeAlias = (
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    disable_mm_input: bool = False
+    language_model_only: bool = False
     """If True, disables all multimodal inputs by setting all modality limits
     to 0. Equivalent to setting --limit-mm-per-prompt to 0 for every
     modality."""
@@ -219,7 +219,7 @@ class MultiModalConfig:
         the final hidden states.
         """
         factors: list[Any] = [
-            self.disable_mm_input,
+            self.language_model_only,
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
             else None,
@@ -233,7 +233,7 @@ class MultiModalConfig:
         Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
-        if self.disable_mm_input:
+        if self.language_model_only:
             return 0
 
         limit_data = self.limit_per_prompt.get(modality)
