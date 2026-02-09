@@ -641,47 +641,70 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process the remaining part
+        need_non_spec_out = (attn_metadata.num_decodes > 0) or (
+            attn_metadata.num_prefills > 0
+        )
+
+        if need_non_spec_out:
+            if value_non_spec is None:
+                raise TypeError(
+                    "value_non_spec is None but non-spec outputs are required "
+                    "(num_decodes>0 or num_prefills>0)."
+                )
+            core_attn_out_non_spec = torch.empty_like(value_non_spec)
+        else:
+            core_attn_out_non_spec, last_recurrent_state = None, None
+
+        if attn_metadata.num_decodes > 0:
+            decode_state_indices = non_spec_state_indices_tensor[
+                : attn_metadata.num_decode_tokens
+            ]
+            out_decode, last_recurrent_state = fused_recurrent_gated_delta_rule(
+                q=query_non_spec[:, : attn_metadata.num_decode_tokens, :, :],
+                k=key_non_spec[:, : attn_metadata.num_decode_tokens, :, :],
+                v=value_non_spec[:, : attn_metadata.num_decode_tokens, :, :],
+                g=g_non_spec[:, : attn_metadata.num_decode_tokens, :],
+                beta=beta_non_spec[:, : attn_metadata.num_decode_tokens, :],
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                ssm_state_indices=decode_state_indices,
+                use_qk_l2norm_in_kernel=True,
+            )
+            core_attn_out_non_spec[:, : attn_metadata.num_decode_tokens, :, :] = (
+                out_decode
+            )
+
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
+            prefill_state_indices = non_spec_state_indices_tensor[
+                attn_metadata.num_decode_tokens :
+            ]
+
+            initial_state = ssm_state[prefill_state_indices].contiguous()
+            prefill_has_initial = has_initial_state[attn_metadata.num_decodes :]
+            initial_state[~prefill_has_initial, ...] = 0
+
+            prefill_cu_seqlens = (
+                non_spec_query_start_loc[attn_metadata.num_decodes :]
+                - attn_metadata.num_decode_tokens
+            )
+
+            out_prefill, last_recurrent_state = chunk_gated_delta_rule(
+                q=query_non_spec[:, attn_metadata.num_decode_tokens :, :, :],
+                k=key_non_spec[:, attn_metadata.num_decode_tokens :, :, :],
+                v=value_non_spec[:, attn_metadata.num_decode_tokens :, :, :],
+                g=g_non_spec[:, attn_metadata.num_decode_tokens :, :],
+                beta=beta_non_spec[:, attn_metadata.num_decode_tokens :, :],
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=prefill_cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
+            core_attn_out_non_spec[:, attn_metadata.num_decode_tokens :, :, :] = (
+                out_prefill
             )
-        elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                )
-            )
-        else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
