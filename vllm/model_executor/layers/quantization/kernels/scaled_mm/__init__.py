@@ -214,8 +214,11 @@ def init_fp8_linear_kernel(
                 module_name,
                 scope="global",
             )
-        # Fp8BlockScaledMMLinearKernel doesn't take layer_param_names
-        return kernel_type(scaled_mm_linear_kernel_config)
+
+        return kernel_type(
+            scaled_mm_linear_kernel_config,
+        )
+
     else:
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
@@ -229,9 +232,16 @@ def init_fp8_linear_kernel(
                 module_name,
                 scope="global",
             )
-        # FP8ScaledMMLinearKernel requires layer_param_names
-        layer_param_names = ["weight", "weight_scale", "input_scale", "input_scale_ub"]
-        return kernel_type(scaled_mm_linear_kernel_config, layer_param_names)
+
+        return kernel_type(
+            scaled_mm_linear_kernel_config,
+            layer_param_names=[
+                "weight",
+                "weight_scale",
+                "input_scale",
+                "input_scale_ub",
+            ],
+        )
 
 
 def init_int8_linear_kernel(
