@@ -194,13 +194,31 @@ def test_custom_compile_config(
 )
 @pytest.mark.parametrize(
     "model, backend",
-    [
-        ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            AttentionBackendEnum.FLASHINFER_MLA,
-        ),  # MLA (Multi-head Latent Attention) model
-    ],
+    (
+        [
+            ("Qwen/Qwen2-0.5B", None),  # Standard attention model
+            (
+                "deepseek-ai/DeepSeek-V2-Lite",
+                AttentionBackendEnum.FLASHINFER_MLA,
+            ),  # MLA (Multi-head Latent Attention) model
+        ]
+        if current_platform.is_cuda()
+        else [
+            # ("Qwen/Qwen2-0.5B", None),  # Standard attention model
+            # (
+            #     "deepseek-ai/DeepSeek-V2-Lite",
+            #     AttentionBackendEnum.TRITON_MLA,
+            # ),  # MLA (Multi-head Latent Attention) model
+            (
+                "deepseek-ai/DeepSeek-V2-Lite",
+                AttentionBackendEnum.ROCM_AITER_MLA,
+            ),  # MLA (Multi-head Latent Attention) model
+            (
+                "deepseek-ai/DeepSeek-V2-Lite",
+                AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+            ),  # MLA (Multi-head Latent Attention) model
+        ]
+    ),
 )
 def test_fp8_kv_scale_compile(
     compilation_mode: int,
@@ -209,7 +227,7 @@ def test_fp8_kv_scale_compile(
 ):
     model_kwargs = {
         "quantization": "fp8",
-        "kv_cache_dtype": "fp8_e4m3",
+        "kv_cache_dtype": "fp8_e4m3" if current_platform.is_cuda() else "fp8",
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }

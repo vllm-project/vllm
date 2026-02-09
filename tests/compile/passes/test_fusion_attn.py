@@ -267,7 +267,7 @@ elif current_platform.is_rocm():
     PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
-    BACKENDS = [
+    BACKENDS_FP8 = [
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
