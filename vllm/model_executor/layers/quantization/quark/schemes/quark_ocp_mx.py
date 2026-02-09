@@ -118,7 +118,12 @@ try:
                 )
 
                 gemm_a4w4(
-                    x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
+                    x_q,
+                    weight.view(x_q.dtype),
+                    x_s,
+                    weight_scale.view(x_s.dtype),
+                    y,
+                    bpreshuffle=True,
                 )
             return y[:M]
         else:

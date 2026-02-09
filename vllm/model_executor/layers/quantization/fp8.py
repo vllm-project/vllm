@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -650,6 +649,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             )
             # Activations not quantized for marlin.
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
@@ -852,7 +854,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -909,6 +911,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -954,10 +959,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         return True
 
     @property
-    def allow_inplace(self) -> bool:
-        return True
-
-    @property
     def is_monolithic(self) -> bool:
         return self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
@@ -980,17 +981,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.block_quant:
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-            e_score_correction_bias = (
-                layer.e_score_correction_bias.to(x.dtype)
-                if layer.e_score_correction_bias is not None
-                else None
-            )
-            routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
-                routing_bias=e_score_correction_bias,
+                routing_logits=router_logits,
+                routing_bias=layer.e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
                 w13_weight_scale_inv=layer.w13_weight_scale_inv,
@@ -1004,7 +997,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 block_shape=self.weight_block_size,
-                routing_method_type=routing_method_type,
+                routing_method_type=layer.routing_method_type,
                 routed_scaling=layer.routed_scaling_factor,
             )
         else:
@@ -1035,7 +1028,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1249,6 +1241,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

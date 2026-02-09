@@ -296,19 +296,21 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
-
-        self.audio_tower = Qwen3OmniMoeAudioEncoder(
-            thinker_config.audio_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
         self.quant_config = quant_config
 
-        self.language_model = Qwen3ForCausalLM(
-            vllm_config=vllm_config.with_hf_config(
-                thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = Qwen3OmniMoeAudioEncoder(
+                thinker_config.audio_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3ForCausalLM(
+                vllm_config=vllm_config.with_hf_config(
+                    thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -362,9 +364,6 @@ class Qwen3ASRForConditionalGeneration(
             aftercnn_lens=audio_output_lengths,
         )
         return audio_features.split(audio_output_lengths.tolist())
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
