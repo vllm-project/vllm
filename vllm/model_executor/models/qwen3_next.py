@@ -1042,9 +1042,7 @@ class Qwen3NextModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts
-            if hasattr(self.config, "num_experts")
-            else 0,
+            num_experts=getattr(self.config, "num_experts", 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
