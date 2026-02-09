@@ -73,7 +73,7 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import DictPrompt, SingletonDictPrompt, TokPrompt
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     extract_prompt_components,
@@ -805,7 +805,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPrompt | TokPrompt]:
+    ) -> Sequence[DictPrompt | TokPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -819,22 +819,12 @@ class LLM:
         renderer = self.llm_engine.renderer
         model_config = self.model_config
 
+        parsed_prompts = [
+            parse_model_prompt(model_config, prompt) for prompt in prompts
+        ]
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPrompt | TokPrompt]()
-        for prompt in prompts:
-            parsed_prompt = parse_model_prompt(model_config, prompt)
-            in_prompt = renderer.render_prompt(parsed_prompt)
-
-            # Some MM models have non-default `add_special_tokens`
-            # TODO: Move multi-modal processor into tokenization
-            engine_prompts.append(
-                in_prompt
-                if model_config.is_multimodal_model
-                else renderer.tokenize_prompt(in_prompt, tok_params)
-            )
-
-        return engine_prompts
+        return renderer.render_cmpl(parsed_prompts, tok_params)
 
     def _get_chat_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
         model_config = self.model_config
@@ -857,7 +847,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPrompt | TokPrompt]:
+    ) -> Sequence[TokPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -885,16 +875,12 @@ class LLM:
         )
         tok_params = self._get_chat_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPrompt | TokPrompt]()
-        for conversation in conversations:
-            _, in_prompt = renderer.render_messages(conversation, chat_params)
-            if mm_processor_kwargs is not None:
-                target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-                    "encoder_prompt", in_prompt
-                )
-                target_prompt["mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore
-
-            engine_prompts.append(renderer.tokenize_prompt(in_prompt, tok_params))
+        _, engine_prompts = renderer.render_chat(
+            conversations,
+            chat_params,
+            tok_params,
+            prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
+        )
 
         return engine_prompts
 
@@ -1743,7 +1729,7 @@ class LLM:
             # TODO: Remove this after deprecating `param.truncate_prompt_tokens`
             # Then, move the code from the `else` block to the top and let
             # `self._preprocess_completion` handle prompt normalization
-            engine_prompts = [
+            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
                 for engine_prompt in self._preprocess_completion(
