@@ -353,27 +353,26 @@ class P2PAFDConnector(AFDConnectorBase):
                 torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
             )
 
-        # Pre-allocate fixed recv buffers so each recv writes into the same buffer
-        # (required for CUDA graph capture; also used in eager for consistency).
+        # Pre-allocate fixed recv buffers (FFN side only) so each recv writes into
+        # the same buffer (required for CUDA graph capture; also used in eager).
         # Key is (stage_idx, meta.size) so different shapes get separate buffers.
-        for stage_idx in range(num_of_stages):
-            meta = self._tensor_metadata_list[stage_idx]
-            buffer_key = (stage_idx, tuple(meta.size))
-            existing = self._recv_attn_buffers.get(buffer_key)
-            if (
-                existing is not None
-                and existing.shape == meta.size
-                and existing.dtype == meta.dtype
-                and existing.device == meta.device
-            ):
-                logger.info(f"jcz update_state_from_dp_metadata existing buffer_key:{buffer_key}")
-                continue
-            logger.info(f"jcz update_state_from_dp_metadata not exist buffer_key:{buffer_key}")
-            self._recv_attn_buffers[buffer_key] = torch.empty(
-                tuple(meta.size),
-                dtype=meta.dtype,
-                device=meta.device,
-            )
+        if self.config.afd_config.afd_role == "ffn":
+            for stage_idx in range(num_of_stages):
+                meta = self._tensor_metadata_list[stage_idx]
+                buffer_key = (stage_idx, tuple(meta.size))
+                existing = self._recv_attn_buffers.get(buffer_key)
+                if (
+                    existing is not None
+                    and existing.shape == meta.size
+                    and existing.dtype == meta.dtype
+                    and existing.device == meta.device
+                ):
+                    continue
+                self._recv_attn_buffers[buffer_key] = torch.empty(
+                    tuple(meta.size),
+                    dtype=meta.dtype,
+                    device=meta.device,
+                )
         # We do not clear _recv_attn_buffers so that replayed graphs still have
         # valid buffer addresses to write into.
 
