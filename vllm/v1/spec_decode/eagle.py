@@ -15,7 +15,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -1615,12 +1615,15 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        eager_valid_modes = None if use_cudagraphs else {CUDAGraphMode.NONE}
         dispatch_cudagraph = (
-            lambda num_tokens, disable_full=False: (
-                self.cudagraph_dispatcher.dispatch(num_tokens, disable_full)
+            lambda num_tokens,
+            valid_modes=eager_valid_modes,
+            invalid_modes=None: self.cudagraph_dispatcher.dispatch(
+                num_tokens,
+                valid_modes=valid_modes,
+                invalid_modes=invalid_modes,
             )
-            if use_cudagraphs
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens))
         )
 
         cudagraph_mode, batch_desc = dispatch_cudagraph(num_tokens)
@@ -1646,10 +1649,12 @@ class SpecDecodeBaseProposer:
             if num_tokens_across_dp is not None:
                 dp_rank = self.dp_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # Re-dispatch with DP padding so we have the correct batch size
+                # Re-dispatch with DP padding so we have the correct batch size.
+                # valid_modes is restricted to the synced mode (min across DP
+                # ranks) so all ranks agree on the runtime cudagraph mode.
                 cudagraph_mode, batch_desc = dispatch_cudagraph(
                     num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 num_tokens_padded = batch_desc.num_tokens
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
