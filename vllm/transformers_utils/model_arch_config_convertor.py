@@ -336,6 +336,14 @@ class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
+class MLPSpeculatorModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_head_size(self) -> int:
+        return 0
+
+    def get_total_num_kv_heads(self) -> int:
+        return 0
+
+
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -441,6 +449,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "medusa": MedusaModelArchConfigConvertor,
+    "mlp_speculator": MLPSpeculatorModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
