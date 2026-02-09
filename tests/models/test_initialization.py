@@ -97,7 +97,7 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
-    if model_arch == "DeepseekV32ForCausalLM":
+    if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform
 
         capability = current_platform.get_device_capability()
