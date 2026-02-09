@@ -30,6 +30,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
+from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -42,6 +43,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -108,6 +110,7 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
 
@@ -127,6 +130,9 @@ OPTIMIZATION_LEVEL_00 = {
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": False,
+    },
 }
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
@@ -142,6 +148,9 @@ OPTIMIZATION_LEVEL_01 = {
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -159,6 +168,9 @@ OPTIMIZATION_LEVEL_02 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
+    },
 }
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
@@ -174,6 +186,9 @@ OPTIMIZATION_LEVEL_03 = {
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
     },
 }
 
@@ -209,6 +224,8 @@ class VllmConfig:
     """Load configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    kernel_config: KernelConfig = Field(default_factory=KernelConfig)
+    """Kernel configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -254,6 +271,9 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+
+    weight_transfer_config: WeightTransferConfig | None = None
+    """The configurations for weight transfer during RL training."""
 
     def compute_hash(self) -> str:
         """
@@ -600,10 +620,13 @@ class VllmConfig:
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
+                if (
+                    self.speculative_config.method not in get_args(EagleModelTypes)
+                    and self.speculative_config.method != "draft_model"
+                ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding."
+                        "with EAGLE/MTP/Draft Model kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -748,6 +771,11 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        if self.kernel_config.enable_flashinfer_autotune is None:
+            raise ValueError(
+                "KernelConfig.enable_flashinfer_autotune must be set after applying "
+                "optimization level defaults."
+            )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -777,6 +805,14 @@ class VllmConfig:
                 )
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
+
+        if self.compilation_config.fast_moe_cold_start is None:
+            # resolve default behavior: try to be as safe as possible
+            # this config is unsafe if any spec decoding draft model has a MOE.
+            # We'll conservatively turn it off if we see spec decoding.
+            self.compilation_config.fast_moe_cold_start = (
+                self.speculative_config is None
+            )
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
@@ -1294,16 +1330,21 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding with draft model, the compile range must be extended
-        # by 1 for each sequence.
+        # For speculative decoding, the compile range must be extended
+        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
+        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            do_extend: bool = (
-                self.speculative_config is not None
-                and self.speculative_config.uses_draft_model()
-            )
-            if do_extend:
-                compile_range_end += self.scheduler_config.max_num_seqs
+            if self.speculative_config is not None and (
+                self.speculative_config.uses_draft_model()
+                or self.speculative_config.use_eagle()
+            ):
+                multiplier = (
+                    self.speculative_config.num_speculative_tokens
+                    if self.speculative_config.parallel_drafting
+                    else 1
+                )
+                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
 
             computed_compile_ranges_split_points.append(compile_range_end)
 
