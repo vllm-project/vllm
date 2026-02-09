@@ -6,10 +6,10 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 # --8<-- [start:requirements]
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2025.1
+- OneAPI requirements: oneAPI 2025.3
 - Python: 3.12
 !!! warning
-    The provided IPEX whl is Python3.12 specific so this version is a MUST.
+    The provided vllm-xpu-kernels whl is Python3.12 specific so this version is a MUST.
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
