@@ -2,8 +2,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 import helion
-import logging
-logger = logging.getLogger(__name__)
 from helion._testing import DEVICE
 import helion.language as hl
 
@@ -79,7 +77,6 @@ def copy_engine_all_gather_w_progress(
 
     if symm_mem_group is None:
         raise RuntimeError("No symmetric memory group available")
-    #dist._symmetric_memory.enable_symm_mem_for_group(symm_mem_group)
 
     symm_mem_hdl = dist._symmetric_memory.rendezvous(inp, group=symm_mem_group)
     assert symm_mem_hdl is not None, "Failed to obtain symmetric memory handle"
@@ -128,11 +125,10 @@ def _helion_all_gather_fp8_gemm_runtime(
     """
     Performs an all-gather on a_shared and matrix multiplication using the Helion library.
     """
-    logger.info(f"[Rank {dist.get_rank()}] Starting helion_all_gather_fp8_gemm_runtime")
     configs = {
         "SPLITS_PER_RANK":1,
     }
-    logger.info(f"[Rank {dist.get_rank()}] Creating symmetric memory")
+
     a_shared_symm = dist._symmetric_memory.empty(
         a_shared.shape,
         dtype=a_shared.dtype,
@@ -141,11 +137,9 @@ def _helion_all_gather_fp8_gemm_runtime(
     a_shared_symm.copy_(a_shared)
 
     # Determine group size and rank
-    symm_mem_group = group_name # torch.distributed.group.WORLD
+    symm_mem_group = group_name
     if symm_mem_group is None:
         raise RuntimeError("No symmetric memory group available")
-    #dist._symmetric_memory.enable_symm_mem_for_group(symm_mem_group)
-    logger.info(f"[Rank {dist.get_rank()}] Rendezvous...")
     symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared_symm, group=symm_mem_group)
         
     a_shape = list(a_shared.shape)
@@ -163,11 +157,9 @@ def _helion_all_gather_fp8_gemm_runtime(
         )
     else:
         progress.fill_(0) # Reset progress to 0.
-    logger.info(f"[Rank {dist.get_rank()}] Starting copy engine")
     backend_stream = copy_engine_all_gather_w_progress(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
-    logger.info(f"[Rank {dist.get_rank()}] Calling helion kernel")
     c = helion_matmul_w_progress_fp8(
         a_out,
         a_shared_symm,
@@ -180,7 +172,7 @@ def _helion_all_gather_fp8_gemm_runtime(
     )
     assert type(c) is torch.Tensor
     torch.cuda.current_stream().wait_stream(backend_stream)
-    logger.info(f"[Rank {dist.get_rank()}] Done")
+
     return a_out, c
 
 def helion_all_gather_fp8_gemm_fake(
@@ -188,18 +180,22 @@ def helion_all_gather_fp8_gemm_fake(
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
+    world_size: int,
+    group_name: ProcessGroup,
     a_out: torch.Tensor | None = None,
     progress: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    world_size = dist.get_world_size()
+
     if world_size is None:
         raise RuntimeError("world_size is None")
 
     M_per_rank, K = a_shared.size()
     K_, N = b.size()
     assert K == K_, f"Shape mismatch: {K} != {K_}"
-    empty_tensor = torch.empty((M_per_rank * world_size, K), dtype=a_shared.dtype, device=a_shared.device)
-    return empty_tensor, empty_tensor #todo: shape inccoret fix it.
+    a_out_empty_tensor = torch.empty((M_per_rank * world_size, K), dtype=a_shared.dtype, device=a_shared.device)
+    c_empty_tensor = torch.empty((M_per_rank * world_size, N), dtype=torch.bfloat16, device=a_shared.device)
+
+    return a_out_empty_tensor, c_empty_tensor
 
 def helion_all_gather_fp8_gemm(
     a_shared: torch.Tensor,
@@ -222,3 +218,12 @@ def helion_all_gather_fp8_gemm(
     return group._helion_all_gather_fp8_gemm(
         a_shared, b, scale_a, scale_b, a_out, progress
     )
+
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+)
+direct_register_custom_op(
+    op_name="helion_all_gather_fp8_gemm",
+    op_func=helion_all_gather_fp8_gemm,
+    fake_impl=helion_all_gather_fp8_gemm_fake,
+)

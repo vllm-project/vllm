@@ -272,17 +272,6 @@ direct_register_custom_op(
     fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
 )
 
-if envs.VLLM_USE_HELION_BACKEND:
-    from vllm.kernels.helion.distributed.all_gather_matmul_fp8 import (
-        helion_all_gather_fp8_gemm, 
-        helion_all_gather_fp8_gemm_fake,
-        _helion_all_gather_fp8_gemm_runtime
-    )
-    direct_register_custom_op(
-        op_name="helion_all_gather_fp8_gemm",
-        op_func=helion_all_gather_fp8_gemm,
-        fake_impl=helion_all_gather_fp8_gemm_fake,
-    )
 
 class GroupCoordinator:
     """
@@ -431,7 +420,9 @@ class GroupCoordinator:
             a_out: torch.Tensor | None = None,
             progress: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-
+            from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
+                    _helion_all_gather_fp8_gemm_runtime
+            )
             process_group = self.device_group
             return _helion_all_gather_fp8_gemm_runtime(
                 a_shared, b, scale_a, scale_b, self.world_size, process_group, a_out, progress
