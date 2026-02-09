@@ -605,7 +605,7 @@ class precompiled_wheel_utils:
             if try_default:
                 print("Trying the default variant from remote")
                 wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
+                    "nightly", None
                 )
                 # if this also fails, then we have nothing more to try / cache
             assert wheels is not None and repo_url is not None, (
