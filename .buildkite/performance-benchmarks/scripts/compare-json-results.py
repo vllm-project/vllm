@@ -7,8 +7,10 @@ import argparse
 import html as _html
 import json
 import os
+import re
 from dataclasses import dataclass
 from importlib import util
+from pathlib import Path
 
 import pandas as pd
 
@@ -276,6 +278,53 @@ def _apply_two_decimals(
 
 
 # -----------------------------
+# Export helpers (Excel + CSV)
+# -----------------------------
+def _sanitize_sheet_name(name: str) -> str:
+    """
+    Excel sheet constraints:
+      - max 31 chars
+      - cannot contain: : \ / ? * [ ]
+      - cannot be empty
+    """
+    name = "sheet" if name is None else str(name)
+    name = re.sub(r"[:\\/?*\[\]]", "_", name)
+    name = name.strip().strip("'")
+    name = re.sub(r"\s+", " ", name)
+    if not name:
+        name = "sheet"
+    return name[:31]
+
+
+def _group_to_sheet_base(group_cols: list[str], gkey_tuple) -> str:
+    d = dict(zip(group_cols, gkey_tuple))
+    model = d.get("Model", "model")
+    model_short = str(model).split("/")[-1]
+    ilen = d.get("Input Len", "")
+    olen = d.get("Output Len", "")
+    lens = f"_{ilen}x{olen}" if ilen != "" and olen != "" else ""
+    return _sanitize_sheet_name(f"{model_short}{lens}")
+
+
+def _write_tables_to_excel_sheet(
+    writer: pd.ExcelWriter, sheet: str, blocks: list[tuple[str, pd.DataFrame]]
+):
+    startrow = 0
+    for title, df in blocks:
+        pd.DataFrame([[title]]).to_excel(
+            writer, sheet_name=sheet, index=False, header=False, startrow=startrow
+        )
+        startrow += 1
+        df.to_excel(writer, sheet_name=sheet, index=False, startrow=startrow)
+        startrow += len(df) + 3
+
+
+def _safe_filename(s: str) -> str:
+    s = re.sub(r"[^\w\-.]+", "_", str(s).strip())
+    return s[:180] if len(s) > 180 else s
+
+
+# -----------------------------
 # Valid max concurrency summary helpers
 # -----------------------------
 def _config_value_columns(df: pd.DataFrame, conc_col: str) -> list[str]:
@@ -428,7 +477,6 @@ def build_valid_max_concurrency_summary_html(
 
     summary_df = pd.DataFrame(rows)
 
-    # --- Coerce numeric columns so Styler doesn't miss them due to object dtype ---
     for c in summary_df.columns:
         if c == "Configuration":
             continue
@@ -436,12 +484,10 @@ def build_valid_max_concurrency_summary_html(
 
     both_col = f"Max {conc_col} (Both)"
 
-    # --- Strict 2-decimal formatting for ALL non-Configuration columns ---
     formatters = {}
     for c in summary_df.columns:
         if c == "Configuration":
             continue
-        # default argument binds per-column formatter correctly
         formatters[c] = lambda v: "" if pd.isna(v) else f"{float(v):.2f}"
 
     styler = summary_df.style.format(formatters)
@@ -458,6 +504,95 @@ def build_valid_max_concurrency_summary_html(
         "</div>\n"
     )
     return title + styler.to_html(table_attributes='border="1" class="dataframe"')
+
+
+def build_valid_max_concurrency_summary_df(
+    tput_group_df: pd.DataFrame | None,
+    ttft_group_df: pd.DataFrame | None,
+    tpot_group_df: pd.DataFrame | None,
+    conc_col: str,
+    args,
+) -> pd.DataFrame | None:
+    if ttft_group_df is None and tpot_group_df is None:
+        return None
+
+    ttft_cols = (
+        _config_value_columns(ttft_group_df, conc_col)
+        if ttft_group_df is not None
+        else []
+    )
+    tpot_cols = (
+        _config_value_columns(tpot_group_df, conc_col)
+        if tpot_group_df is not None
+        else []
+    )
+    tput_cols = (
+        _config_value_columns(tput_group_df, conc_col)
+        if tput_group_df is not None
+        else []
+    )
+
+    if ttft_group_df is not None and tpot_group_df is not None:
+        cfg_cols = [c for c in ttft_cols if c in tpot_cols]
+        if tput_group_df is not None:
+            cfg_cols = [c for c in cfg_cols if c in tput_cols] or cfg_cols
+    else:
+        cfg_cols = ttft_cols or tpot_cols
+
+    if not cfg_cols:
+        cfg_cols = sorted(set(ttft_cols) | set(tpot_cols) | set(tput_cols), key=str)
+
+    rows = []
+    for cfg in cfg_cols:
+        ttft_max = (
+            _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms)
+            if ttft_group_df is not None
+            else pd.NA
+        )
+        tpot_max = (
+            _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms)
+            if tpot_group_df is not None
+            else pd.NA
+        )
+        both = (
+            pd.NA
+            if (pd.isna(ttft_max) or pd.isna(tpot_max))
+            else min(ttft_max, tpot_max)
+        )
+
+        tput_at_both = (
+            _value_at_concurrency(tput_group_df, conc_col, cfg, both)
+            if tput_group_df is not None
+            else pd.NA
+        )
+        ttft_at_both = (
+            _value_at_concurrency(ttft_group_df, conc_col, cfg, both)
+            if ttft_group_df is not None
+            else pd.NA
+        )
+        tpot_at_both = (
+            _value_at_concurrency(tpot_group_df, conc_col, cfg, both)
+            if tpot_group_df is not None
+            else pd.NA
+        )
+
+        rows.append(
+            {
+                "Configuration": cfg,
+                f"Max {conc_col} (TTFT ≤ {args.ttft_max_ms:g} ms)": ttft_max,
+                f"Max {conc_col} (TPOT ≤ {args.tpot_max_ms:g} ms)": tpot_max,
+                f"Max {conc_col} (Both)": both,
+                "Output Tput @ Both (tok/s)": tput_at_both,
+                "TTFT @ Both (ms)": ttft_at_both,
+                "TPOT @ Both (ms)": tpot_at_both,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    for c in df.columns:
+        if c != "Configuration":
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 # -----------------------------
@@ -537,6 +672,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=100.0,
         help="Reference limit for TPOT plots (ms)",
     )
+
+    # ---- NEW: export options ----
+    parser.add_argument(
+        "--excel-out",
+        type=str,
+        default="perf_comparison.xlsx",
+        help="Write an Excel workbook with one sheet per (Model, Dataset, Input Len, Output Len).",
+    )
+    parser.add_argument(
+        "--csv-out-dir",
+        type=str,
+        default="",
+        help="If set, write per-group per-metric CSVs into this directory (CSV cannot have sheets).",
+    )
+
     return parser
 
 
@@ -657,7 +807,6 @@ def maybe_write_plot(
         markers=True,
     )
 
-    # Ensure plot hover + y tick labels are also 2 decimals.
     fig.update_traces(hovertemplate="%{y:.2f}<extra></extra>")
     fig.update_yaxes(tickformat=".2f")
 
@@ -730,87 +879,130 @@ def write_report_group_first(
         for metric_label, (df, _) in metric_cache.items()
     }
 
-    with open("perf_comparison.html", "w", encoding="utf-8") as main_fh:
-        main_fh.write('<meta charset="utf-8">\n')
-        for gkey in group_keys:
-            gkey_tuple = normalize_group_key(gkey)
-            suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
-            sub_path = group_filename(gkey_tuple)
-            group_header = (
-                '<div style="font-size: 1.4em; font-weight: 700; '
-                'margin: 18px 0 10px 0;">'
-                f"{_html.escape(suffix)}"
-                "</div>\n"
-            )
+    csv_dir = Path(args.csv_out_dir) if args.csv_out_dir else None
+    if csv_dir:
+        csv_dir.mkdir(parents=True, exist_ok=True)
 
-            main_fh.write(group_header)
-            with open(sub_path, "w", encoding="utf-8") as sub_fh:
-                sub_fh.write('<meta charset="utf-8">\n')
-                sub_fh.write(group_header)
-                tput_group_df = None
-                ttft_group_df = None
-                tpot_group_df = None
-                conc_col = args.xaxis
+    excel_path = args.excel_out or "perf_comparison.xlsx"
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as xw:
+        with open("perf_comparison.html", "w", encoding="utf-8") as main_fh:
+            main_fh.write('<meta charset="utf-8">\n')
+            for gkey in group_keys:
+                gkey_tuple = normalize_group_key(gkey)
+                suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
+                sub_path = group_filename(gkey_tuple)
+                group_header = (
+                    '<div style="font-size: 1.4em; font-weight: 700; '
+                    'margin: 18px 0 10px 0;">'
+                    f"{_html.escape(suffix)}"
+                    "</div>\n"
+                )
 
-                for metric_label in plan.data_cols:
-                    gb = metric_groupbys[metric_label]
-                    df_sorted, raw_data_cols = metric_cache[metric_label]
+                main_fh.write(group_header)
 
-                    try:
-                        group_df = gb.get_group(gkey)
-                    except KeyError:
-                        missing = (
-                            '<div style="font-size: 1.1em; font-weight: 600; '
-                            'margin: 10px 0;">'
-                            f"{_html.escape(metric_label)} — missing for this group"
-                            "</div>\n"
+                sheet = _group_to_sheet_base(group_cols_canonical, gkey_tuple)
+                sheet_base = sheet
+                dedup_i = 1
+                while sheet in xw.sheets:
+                    dedup_i += 1
+                    sheet = _sanitize_sheet_name(f"{sheet_base}_{dedup_i}")
+
+                excel_blocks: list[tuple[str, pd.DataFrame]] = []
+
+                with open(sub_path, "w", encoding="utf-8") as sub_fh:
+                    sub_fh.write('<meta charset="utf-8">\n')
+                    sub_fh.write(group_header)
+                    tput_group_df = None
+                    ttft_group_df = None
+                    tpot_group_df = None
+                    conc_col = args.xaxis
+
+                    for metric_label in plan.data_cols:
+                        gb = metric_groupbys[metric_label]
+                        df_sorted, raw_data_cols = metric_cache[metric_label]
+
+                        try:
+                            group_df = gb.get_group(gkey)
+                        except KeyError:
+                            missing = (
+                                '<div style="font-size: 1.1em; font-weight: 600; '
+                                'margin: 10px 0;">'
+                                f"{_html.escape(metric_label)} — missing for this group"
+                                "</div>\n"
+                            )
+                            main_fh.write(missing)
+                            sub_fh.write(missing)
+                            continue
+
+                        if conc_col not in group_df.columns:
+                            conc_col = _find_concurrency_col(group_df)
+
+                        mn = metric_label.lower().strip()
+                        if "tok/s" in mn:
+                            tput_group_df = group_df
+                        elif "ttft" in mn:
+                            ttft_group_df = group_df
+                        elif mn in ("p99", "median") or "tpot" in mn:
+                            tpot_group_df = group_df
+
+                        display_group = group_df.drop(
+                            columns=group_cols_canonical, errors="ignore"
                         )
 
-                        main_fh.write(missing)
-                        sub_fh.write(missing)
-                        continue
+                        html = render_metric_table_html(
+                            display_group, metric_label, suffix, args
+                        )
+                        main_fh.write(html)
+                        sub_fh.write(html)
 
-                    if conc_col not in group_df.columns:
-                        conc_col = _find_concurrency_col(group_df)
+                        maybe_write_plot(
+                            main_fh,
+                            sub_fh,
+                            group_df=group_df,
+                            raw_data_cols=raw_data_cols,
+                            metric_label=metric_label,
+                            y_axis_col=y_axis_col,
+                            args=args,
+                        )
 
-                    mn = metric_label.lower().strip()
-                    if "tok/s" in mn:
-                        tput_group_df = group_df
-                    elif "ttft" in mn:
-                        ttft_group_df = group_df
-                    elif mn in ("p99", "median") or "tpot" in mn:
-                        tpot_group_df = group_df
+                        excel_blocks.append(
+                            (metric_label, display_group.reset_index(drop=True))
+                        )
+                        if csv_dir:
+                            fn = _safe_filename(
+                                f"{sheet}__{metric_label}".replace(" ", "_").replace("/", "_")
+                            )
+                            display_group.to_csv(csv_dir / f"{fn}.csv", index=False)
 
-                    display_group = group_df.drop(
-                        columns=group_cols_canonical, errors="ignore"
-                    )
-
-                    html = render_metric_table_html(
-                        display_group, metric_label, suffix, args
-                    )
-                    main_fh.write(html)
-                    sub_fh.write(html)
-
-                    maybe_write_plot(
-                        main_fh,
-                        sub_fh,
-                        group_df=group_df,
-                        raw_data_cols=raw_data_cols,
-                        metric_label=metric_label,
-                        y_axis_col=y_axis_col,
+                    summary_html = build_valid_max_concurrency_summary_html(
+                        tput_group_df=tput_group_df,
+                        ttft_group_df=ttft_group_df,
+                        tpot_group_df=tpot_group_df,
+                        conc_col=conc_col,
                         args=args,
                     )
+                    if summary_html:
+                        main_fh.write(summary_html)
+                        sub_fh.write(summary_html)
 
-                summary_html = build_valid_max_concurrency_summary_html(
-                    tput_group_df=tput_group_df,
-                    ttft_group_df=ttft_group_df,
-                    tpot_group_df=tpot_group_df,
-                    conc_col=conc_col,
-                    args=args,
-                )
-                if summary_html:
-                    main_fh.write(summary_html)
-                    sub_fh.write(summary_html)
+                    summary_df = build_valid_max_concurrency_summary_df(
+                        tput_group_df=tput_group_df,
+                        ttft_group_df=ttft_group_df,
+                        tpot_group_df=tpot_group_df,
+                        conc_col=conc_col,
+                        args=args,
+                    )
+                    if summary_df is not None:
+                        excel_blocks.append(("Valid Max Concurrency Summary", summary_df))
+                        if csv_dir:
+                            fn = _safe_filename(f"{sheet}__Valid_Max_Concurrency_Summary")
+                            summary_df.to_csv(csv_dir / f"{fn}.csv", index=False)
+
+                _write_tables_to_excel_sheet(xw, sheet, excel_blocks)
+
+    print(f"Wrote Excel: {excel_path}")
+    if csv_dir:
+        print(f"Wrote CSVs under: {csv_dir}")
 
 
 def main():
