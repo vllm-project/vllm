@@ -1226,17 +1226,20 @@ class GPUModelRunner(
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,
+        arange_out: np.ndarray,
         cumsum_dtype: np.dtype | None = None,
-    ) -> tuple[np.ndarray, int]:
+    ) -> np.ndarray:
         """Get the cumulative sum and batched arange of the given array.
 
-        The arange result is written directly into self.arange.np for efficient
-        GPU transfer. E.g., [2, 5, 3] -> cumsum=[2, 7, 10], arange written to
-        self.arange.np[:10] as [0, 1, 0, 1, 2, 3, 4, 0, 1, 2].
+        The arange result is written into arange_out.
+        E.g., [2, 5, 3] -> cumsum=[2, 7, 10], arange written to
+        arange_out[:10] as [0, 1, 0, 1, 2, 3, 4, 0, 1, 2].
+
+        Equivalent to but faster than:
+        np.concatenate([np.arange(n) for n in num_tokens])
 
         Returns:
-            (cu_num_tokens, arange_len): The cumulative sum array and the length
-            of the arange result (access via self.arange.np[:arange_len]).
+            cu_num_tokens: The cumulative sum array
         """
         # Step 1. [2, 5, 3] -> [2, 7, 10]
         cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
@@ -1247,10 +1250,10 @@ class GPUModelRunner(
         np.subtract(
             self.arange_base[:total_num_tokens],
             cumsums_offsets,
-            out=self.arange.np[:total_num_tokens],
+            out=arange_out[:total_num_tokens],
         )
 
-        return cu_num_tokens, total_num_tokens
+        return cu_num_tokens
 
     def _prepare_input_ids(
         self,
@@ -1434,14 +1437,15 @@ class GPUModelRunner(
         req_indices = np.repeat(self.arange_base[:num_reqs], num_scheduled_tokens)
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
-        # arange_len: 10
         # self.arange.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        cu_num_tokens, arange_len = self._get_cumsum_and_arange(num_scheduled_tokens)
+        cu_num_tokens = self._get_cumsum_and_arange(
+            num_scheduled_tokens, self.arange.np
+        )
 
         # Get positions.
         positions_np = (
             self.input_batch.num_computed_tokens_cpu[req_indices]
-            + self.arange.np[:arange_len]
+            + self.arange.np[: cu_num_tokens[-1]]
         )
 
         # Calculate M-RoPE positions.
@@ -2201,35 +2205,34 @@ class GPUModelRunner(
         # [4, 1, 3, 1, 2]
         num_sampled_tokens = num_draft_tokens + 1
 
-        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # arange_len: 11
+        # Step 1.
+        # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # self.arange.np[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        cu_num_sampled_tokens, arange_len = self._get_cumsum_and_arange(
-            num_sampled_tokens, cumsum_dtype=np.int32
+        cu_num_sampled_tokens = self._get_cumsum_and_arange(
+            num_sampled_tokens, self.arange.np, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
         )
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += self.arange.np[:arange_len]
+        logits_indices += self.arange.np[: cu_num_sampled_tokens[-1]]
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
         # cu_num_draft_tokens: [3, 3, 5, 5, 6]
-        # arange_len: 6
         # self.arange.np[:6]: [0, 1, 2, 0, 1, 0]
-        cu_num_draft_tokens, arange_len = self._get_cumsum_and_arange(
-            num_draft_tokens, cumsum_dtype=np.int32
+        cu_num_draft_tokens = self._get_cumsum_and_arange(
+            num_draft_tokens, self.arange.np, cumsum_dtype=np.int32
         )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
         )
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += self.arange.np[:arange_len]
+        target_logits_indices += self.arange.np[: cu_num_draft_tokens[-1]]
 
         # TODO: Optimize the CPU -> GPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
@@ -4548,7 +4551,9 @@ class GPUModelRunner(
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
-            cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            cum_num_tokens = self._get_cumsum_and_arange(
+                num_scheduled_tokens, self.arange.np
+            )
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
