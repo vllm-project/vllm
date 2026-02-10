@@ -77,6 +77,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
             from vllm.config import get_current_vllm_config
+
             vllm_config = get_current_vllm_config()
             model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
             if model_type == "gpt_oss":
@@ -791,9 +792,11 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
     def process_weights_after_loading(self, layer):
         if self.emulate:
             return
-        from aiter.utility.fp4_utils import e8m0_shuffle
         from aiter.ops.shuffle import shuffle_weight
+        from aiter.utility.fp4_utils import e8m0_shuffle
+
         from vllm.platforms.rocm import on_gfx950
+
         _is_shuffle_moe_mxfp4 = on_gfx950()
 
         # Pre-shuffle weight scales
@@ -807,7 +810,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         w2_weight_scale = e8m0_shuffle(w2_weight_scale)
         layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
         torch.cuda.empty_cache()
-                # Pre-shuffle weight
+        # Pre-shuffle weight
         if _is_shuffle_moe_mxfp4:
             layer.w13_weight.data = shuffle_weight(
                 layer.w13_weight.contiguous(), (16, 16)

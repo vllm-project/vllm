@@ -35,8 +35,8 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
-from .moe import MoeConfig
 from .model import ModelConfig
+from .moe import MoeConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig

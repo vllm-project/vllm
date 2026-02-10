@@ -16,13 +16,13 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.moe import MoeConfig, Mxfp4Backend
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
     str_dtype_to_torch_dtype,
     try_match_architecture_defaults,
 )
+from vllm.config.moe import MoeConfig, Mxfp4Backend
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.parallel import EPLBConfig, ParallelConfig

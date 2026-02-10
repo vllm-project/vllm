@@ -67,7 +67,7 @@ logger = init_logger(__name__)
 
 def _get_user_specified_moe_backend() -> Mxfp4Backend | None:
     """
-    Check if the user has explicitly specified a MoE backend. 
+    Check if the user has explicitly specified a MoE backend.
     Returns None if not specified or if unavailable
     """
     vllm_config = get_current_vllm_config_or_none()
@@ -195,7 +195,7 @@ if (
 ):
     import aiter
     from aiter.fused_moe import fused_topk, moe_sorting
-    from aiter.ops.shuffle import shuffle_weight_a16w4, shuffle_scale_a16w4
+    from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -1134,11 +1134,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             return output
 
-        elif (
-            current_platform.is_rocm()
-            and envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4
-        ):
+        elif self.mxfp4_backend == Mxfp4Backend.CK:
             token_num = x.shape[0]
             BLOCKM = 16 if token_num < 2048 else 32
             topk_weights, topk_ids = fused_topk(x, router_logits, layer.top_k, True)
@@ -1260,9 +1256,9 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert (
-            layer.activation == "swigluoai"
-        ), "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
+        assert layer.activation == "swigluoai", (
+            "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
+        )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
         hidden_states = layer.ipex_fusion(
