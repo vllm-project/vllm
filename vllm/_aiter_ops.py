@@ -476,58 +476,6 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
-def _rocm_aiter_rms_norm_impl(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from aiter import rms_norm
-
-    if x.dim() > 2:
-        x_original_shape = x.shape
-        x = x.reshape(-1, x_original_shape[-1])
-        x = rms_norm(x, weight, variance_epsilon)
-        return x.reshape(x_original_shape)
-
-    return rms_norm(x, weight, variance_epsilon)
-
-
-def _rocm_aiter_rms_norm_fake(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import rmsnorm2d_fwd_with_add
-
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    rmsnorm2d_fwd_with_add(
-        out,  # output
-        x,  # input
-        residual,  # residual input
-        residual_out,  # residual output
-        weight,
-        variance_epsilon,
-    )
-    return out, residual_out
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    return out, residual_out
-
-
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -885,10 +833,9 @@ class rocm_aiter_ops:
 
         # Check if aiter is enabled before using operations
         if rocm_aiter_ops.is_enabled():
-            result = rocm_aiter_ops.rms_norm(x, weight, epsilon)
+            result = rocm_aiter_ops.per_token_quant(x, FP8_DTYPE)
 
     Operations:
-        - RMS normalization: rms_norm, rms_norm2d_with_add
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
         - Routing: topk_softmax, biased_grouped_topk, grouped_topk
@@ -900,7 +847,6 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-    _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -928,7 +874,6 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-        cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -955,11 +900,6 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_linear_fp8_enabled(cls) -> bool:
         return cls.is_linear_enabled()
-
-    @classmethod
-    @if_aiter_supported
-    def is_rmsnorm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -1098,19 +1038,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_rms_norm",
-                op_func=_rocm_aiter_rms_norm_impl,
-                fake_impl=_rocm_aiter_rms_norm_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
-                op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
@@ -1181,14 +1108,6 @@ class rocm_aiter_ops:
             _OPS_REGISTERED = True
 
     @staticmethod
-    def get_rmsnorm_fused_add_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
-
-    @staticmethod
-    def get_rmsnorm_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rms_norm.default
-
-    @staticmethod
     def get_rmsnorm_fused_add_dynamic_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default
 
@@ -1219,23 +1138,6 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
-
-    @staticmethod
-    def rms_norm(
-        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
-
-    @staticmethod
-    def rms_norm2d_with_add(
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        weight: torch.Tensor,
-        variance_epsilon: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            x, residual, weight, variance_epsilon
-        )
 
     @staticmethod
     def gemm_a8w8(
