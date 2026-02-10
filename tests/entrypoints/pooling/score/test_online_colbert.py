@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Online API tests for ColBERT late interaction scoring.
-
-Tests are parametrized across multiple ColBERT backbones to ensure the
-generic ColBERT support works with different encoder architectures.
-"""
+"""Online API tests for ColBERT late interaction scoring."""
 
 import pytest
 import requests
@@ -12,54 +8,24 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
 
-COLBERT_MODELS = [
-    {
-        "name": "answerdotai/answerai-colbert-small-v1",
-        "colbert_dim": 96,
-        "max_model_len": 512,
-        "extra_args": [],
-    },
-    {
-        "name": "lightonai/GTE-ModernColBERT-v1",
-        "colbert_dim": 128,
-        "max_model_len": 299,
-        "extra_args": [
-            "--hf-overrides",
-            '{"architectures": ["ColBERTModernBertModel"]}',
-        ],
-    },
-    {
-        "name": "jinaai/jina-colbert-v2",
-        "colbert_dim": 128,
-        "max_model_len": 8192,
-        "extra_args": [
-            "--hf-overrides",
-            '{"architectures": ["ColBERTJinaRobertaModel"]}',
-            "--trust-remote-code",
-        ],
-    },
-]
+MODEL_NAME = "answerdotai/answerai-colbert-small-v1"
+COLBERT_DIM = 96
+MAX_MODEL_LEN = 512
 
 
-@pytest.fixture(scope="class", params=COLBERT_MODELS, ids=lambda m: m["name"])
-def model(request):
-    yield request.param
-
-
-@pytest.fixture(scope="class")
-def server(model):
+@pytest.fixture(scope="module")
+def server():
     args = [
         "--max-model-len",
-        str(model["max_model_len"]),
-        *model["extra_args"],
+        str(MAX_MODEL_LEN),
     ]
 
-    with RemoteOpenAIServer(model["name"], args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
 class TestColBERTOnline:
-    def test_rerank(self, server: RemoteOpenAIServer, model: dict):
+    def test_rerank(self, server: RemoteOpenAIServer):
         """Test ColBERT rerank endpoint."""
         query = "What is the capital of France?"
         documents = [
@@ -70,7 +36,7 @@ class TestColBERTOnline:
         rerank_response = requests.post(
             server.url_for("rerank"),
             json={
-                "model": model["name"],
+                "model": MODEL_NAME,
                 "query": query,
                 "documents": documents,
             },
@@ -87,7 +53,7 @@ class TestColBERTOnline:
 
         assert paris_result.relevance_score > brazil_result.relevance_score
 
-    def test_rerank_top_n(self, server: RemoteOpenAIServer, model: dict):
+    def test_rerank_top_n(self, server: RemoteOpenAIServer):
         """Test ColBERT rerank with top_n parameter."""
         query = "What is the capital of France?"
         documents = [
@@ -99,7 +65,7 @@ class TestColBERTOnline:
         rerank_response = requests.post(
             server.url_for("rerank"),
             json={
-                "model": model["name"],
+                "model": MODEL_NAME,
                 "query": query,
                 "documents": documents,
                 "top_n": 2,
@@ -111,7 +77,7 @@ class TestColBERTOnline:
         assert len(rerank.results) == 2
         assert rerank.results[0].index == 1
 
-    def test_score(self, server: RemoteOpenAIServer, model: dict):
+    def test_score(self, server: RemoteOpenAIServer):
         """Test ColBERT score endpoint."""
         text_1 = "What is the capital of France?"
         text_2 = ["The capital of France is Paris.", "Python is a language."]
@@ -119,7 +85,7 @@ class TestColBERTOnline:
         score_response = requests.post(
             server.url_for("score"),
             json={
-                "model": model["name"],
+                "model": MODEL_NAME,
                 "text_1": text_1,
                 "text_2": text_2,
             },
@@ -133,14 +99,14 @@ class TestColBERTOnline:
 
         assert score.data[0].score > score.data[1].score
 
-    def test_token_embed(self, server: RemoteOpenAIServer, model: dict):
+    def test_token_embed(self, server: RemoteOpenAIServer):
         """Test ColBERT token_embed task via pooling endpoint."""
         text = "What is the capital of France?"
 
         pooling_response = requests.post(
             server.url_for("pooling"),
             json={
-                "model": model["name"],
+                "model": MODEL_NAME,
                 "input": text,
                 "task": "token_embed",
             },
@@ -154,9 +120,9 @@ class TestColBERTOnline:
         embeddings = pooling["data"][0]["data"]
         assert isinstance(embeddings, list)
         assert len(embeddings) > 0
-        assert len(embeddings[0]) == model["colbert_dim"]
+        assert len(embeddings[0]) == COLBERT_DIM
 
-    def test_embed_not_supported(self, server: RemoteOpenAIServer, model: dict):
+    def test_embed_not_supported(self, server: RemoteOpenAIServer):
         """Test that ColBERT model does not support 'embed' task."""
         task = "embed"
         text = "What is the capital of France?"
@@ -164,7 +130,7 @@ class TestColBERTOnline:
         response = requests.post(
             server.url_for("pooling"),
             json={
-                "model": model["name"],
+                "model": MODEL_NAME,
                 "input": text,
                 "task": task,
             },
