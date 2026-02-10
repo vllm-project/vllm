@@ -123,6 +123,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -187,6 +188,8 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 class OpenAIServingResponses(OpenAIServing):
+    reasoning_parser: Callable[[TokenizerLike], ReasoningParser] | None
+
     def __init__(
         self,
         engine_client: EngineClient,
