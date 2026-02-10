@@ -9,7 +9,7 @@ build:
     python: "3.12"
   jobs:
     post_checkout:
-      - git fetch --unshallow --no-tags --jobs=8 origin main || true
+      - git fetch origin main --unshallow --no-tags --filter=blob:none || true
     pre_create_environment:
       - pip install uv
     create_environment:
