@@ -74,9 +74,13 @@ class InputProcessor:
 
         self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
         self.mm_encoder_cache_size = 0
+        self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
             self.mm_encoder_cache_size = mm_budget.encoder_cache_size
+            self.skip_prompt_length_check = (
+                mm_budget.processor.info.skip_prompt_length_check
+            )
             mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
@@ -673,24 +677,13 @@ class InputProcessor:
         prompt_len: int,
         prompt_type: Literal["encoder", "decoder"],
     ):
-        model_config = self.model_config
-        tokenizer = self.tokenizer
-
-        # NOTE: We don't use `self.supports_mm_inputs` here because
-        # `skip_prompt_length_check` should apply even in LM-only mode
-        if model_config.is_multimodal_model:
-            mm_registry = self.input_preprocessor.mm_registry
-            mm_info = mm_registry._create_processing_info(
-                model_config,
-                tokenizer=tokenizer,
-            )
-
-            if mm_info.skip_prompt_length_check:
-                return
+        if self.skip_prompt_length_check:
+            return
 
         if prompt_len == 0 and prompt_type == "decoder":
             raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
+        model_config = self.model_config
         max_prompt_len = (
             model_config.max_model_len
             if prompt_type == "decoder"
