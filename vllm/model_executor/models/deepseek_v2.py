@@ -295,14 +295,6 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        n_group = getattr(config, "n_group", 1)
-        topk_group = getattr(config, "topk_group", 1)
-        use_grouped_topk = True
-        if (n_group, topk_group) == (1, 1):
-            n_group = None
-            topk_group = None
-            use_grouped_topk = False
-
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
@@ -313,9 +305,9 @@ class DeepseekV2MoE(nn.Module):
             reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            use_grouped_topk=use_grouped_topk,
-            num_expert_group=n_group,
-            topk_group=topk_group,
+            use_grouped_topk=True,
+            num_expert_group=getattr(config, "n_group", 1),
+            topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # we do scaling outside, set factor to 1.0 to avoid double mul
@@ -844,7 +836,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                is_neox_style=True,
+                is_neox_style=not getattr(config, "indexer_rope_interleave", True),
             )
             self.indexer = Indexer(
                 vllm_config,
@@ -1493,7 +1485,7 @@ class DeepseekV2ForCausalLM(
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
+            if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
         return loaded_params
@@ -1504,6 +1496,10 @@ class DeepseekForCausalLM(DeepseekV2ForCausalLM):
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
+    pass
+
+
+class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
 
 
