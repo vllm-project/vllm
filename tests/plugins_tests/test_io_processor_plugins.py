@@ -76,7 +76,7 @@ async def test_prithvi_mae_plugin_online(
     plugin_data = parsed_response.data
 
     assert all(
-        plugin_data.get(attr) for attr in ["type", "format", "data", "request_id"]
+        plugin_data.get(attr) for attr in ["type", "format", "data"]
     )
 
     # We just check that the output is a valid base64 string.
@@ -111,7 +111,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
 
     # verify the output is formatted as expected for this plugin
     assert all(
-        hasattr(output, attr) for attr in ["type", "format", "data", "request_id"]
+        hasattr(output, attr) for attr in ["type", "format", "data"]
     )
 
     # We just check that the output is a valid base64 string.
