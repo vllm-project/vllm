@@ -620,7 +620,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - "pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'"
     # # Limit to no custom ops to reduce running time
     # # Wrap with quotes to escape yaml and avoid starting -k string with a -
     # - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
@@ -1689,7 +1689,7 @@ steps:
   - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+  - "pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py"
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: AsyncTP Correctness Tests  (2xMI325 GPUs)
@@ -1701,7 +1701,7 @@ steps:
   num_devices: 2
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+  - "pytest -v -s tests/compile/correctness_e2e/test_async_tp.py"
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion and Compile Unit Tests (2xMI325 GPUs)
@@ -1724,8 +1724,8 @@ steps:
   commands:
     - rocm-smi
     # we run all backend tests on ROCm
-    - pytest -v -s tests/compile/passes/test_fusion_attn.py
-    - pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py
+    - "pytest -v -s tests/compile/passes/test_fusion_attn.py"
+    - "pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py"
     # TODO: this test is not supported on ROCm, there are aiter kernels for this.
     # - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
@@ -1748,7 +1748,7 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
+    - 'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"'
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
     # TODO: Qwen uses group quantizatio which the pattern matcher on ROCm is not supported yet.
     # - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
@@ -1772,8 +1772,8 @@ steps:
   commands:
     - rocm-smi
     # Run just llama3 (fp8) for all config combinations
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8" -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3" -k "llama-3"
+    - 'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"'
+    - 'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8" -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3" -k "llama-3"'
 
 - label: Fusion E2E TP2 Quick (MI325)
   timeout_in_minutes: 40
@@ -1790,7 +1790,7 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
+    - 'pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"'
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
@@ -1811,7 +1811,7 @@ steps:
   commands:
     - rocm-smi
     # Run just llama3 (fp8 & bf16) for all config combinations
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
+    - 'pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"'
 
 - label: Fusion E2E TP2 (MI325)
   mirror_hardwares: [amdexperimental, amdproduction, tj]
@@ -1828,4 +1828,4 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s vllm/tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
+    - 'pytest -v -s vllm/tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"'
