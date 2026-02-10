@@ -6,15 +6,16 @@
 Goal:
 - Enable vLLM OpenAI-compatible endpoint: POST /v1/audio/transcriptions
 - Use vLLM engine for attention + decoding
-- Do *audio feature + token construction* natively within vLLM (using KimiAudioTower)
+- Use kimia_infer prompt manager to build multimodal tensors
+  (whisper features + token streams)
 - Do *whisper feature -> hidden adaptor* and *embedding-time mixing* inside the
   vLLM model forward, using the model's own parameters.
 
 Notes
 -----
 This is a native integration:
-- Audio preprocessing happens natively within vLLM via KimiAudioTower
-- No external dependencies for audio processing
+- Audio preprocessing relies on kimia_infer prompt manager at request time
+- No HuggingFace ProcessorMixin dependency
 - Full integration with vLLM's multimodal pipeline
 """
 
@@ -62,9 +63,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 
-# Import the native Kimi Audio Tower for integrated audio processing
-from .kimi_audio_tower import KimiAudioTower
-
 logger = init_logger(__name__)
 
 __all__ = ["KimiAudioForConditionalGeneration"]
@@ -85,12 +83,6 @@ def _write_wav_tmp(audio: np.ndarray, sample_rate: int) -> str:
         tmp_name = tmp.name
     wavfile.write(tmp_name, sample_rate, pcm16)
     return tmp_name
-
-
-def _get_kimi_audio_tower(vllm_config):
-    """Get the Kimi Audio Tower for native processing."""
-    config = vllm_config.model_config.hf_config
-    return KimiAudioTower(config)
 
 
 def _get_kimia_prompt_manager(
@@ -445,13 +437,13 @@ class KimiAudioForConditionalGeneration(
     def __init__(self, *, vllm_config, prefix: str = "", **kwargs):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        # NOTE: Do NOT register KimiAudioTower as a model submodule.
-        # The tower contains parameters that may not exist in the HF checkpoint;
-        # registering it would cause V1 multiprocessing strict weight loading to
-        # fail ("Following weights were not initialized from checkpoint").
-        # Instead, instantiate the tower at runtime in the processor/request path.
+        # NOTE: Do NOT register external audio tower submodules.
+        # External components may carry parameters not present in the HF
+        # checkpoint; registering them would cause V1 multiprocessing strict
+        # weight loading to fail ("Following weights were not initialized from
+        # checkpoint").
 
-        # Manually add audio_tower if not present (vLLM may not load it)
+        # Manually add vq_adaptor if not present (vLLM may not load it)
 
         config = vllm_config.model_config.hf_config
 
