@@ -505,8 +505,16 @@ class Hermes2ProToolParser(ToolParser):
                     # corresponds to the arguments.
                     start_idx = consume_space(0, tool_call_portion)
                     dec = JSONDecoder()
-                    _, end_idx = dec.raw_decode(tool_call_portion[start_idx:])
-                    stripped_tc_portion = tool_call_portion[start_idx:end_idx]
+                    tc, end_idx = dec.raw_decode(tool_call_portion[start_idx:])
+                    assert isinstance(tc["arguments"], dict)
+                    stripped_tc_portion = tool_call_portion[start_idx : end_idx + 1]
+                    closing_args_pos = (
+                        stripped_tc_portion.rindex(
+                            "}", 0, stripped_tc_portion.rindex("}")
+                        )
+                        + 1
+                    )
+                    stripped_tc_portion = stripped_tc_portion[:closing_args_pos]
 
                     while delta_text:
                         if stripped_tc_portion.find(delta_text) != -1:
