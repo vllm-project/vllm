@@ -49,12 +49,10 @@ def get_cudagraph_and_dp_padding(
     elif cudagraph_size is None:
         cudagraph_size = -1
 
-    (
-        num_tokens_across_dp,
-        cudagraph_size_across_dp,
-        cudagraph_mode_across_dp,
-    ) = get_batch_metadata_across_dp(
-        num_tokens, cudagraph_size, cudagraph_runtime_mode, dp_size, dp_rank
+    num_tokens_across_dp, cudagraph_size_across_dp, cudagraph_mode_across_dp = (
+        get_batch_metadata_across_dp(
+            num_tokens, cudagraph_size, cudagraph_runtime_mode, dp_size, dp_rank
+        )
     )
     if torch.all(num_tokens_across_dp == 0).item():
         # All ranks have zero tokens to run.

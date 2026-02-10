@@ -54,22 +54,20 @@ class EagleCudaGraphManager:
     def capture_graph(
         self,
         num_tokens: int,
-        capture_cudagraph_mode: CUDAGraphMode,
+        capture_cg_mode: CUDAGraphMode,
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
-        uniform_decode: bool = True,
     ) -> None:
-        if capture_cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        assert capture_cg_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
+            f"Invalid capture_cudagraph_mode for capture: {capture_cg_mode}"
+        )
+        if capture_cg_mode == CUDAGraphMode.PIECEWISE:
             capture_fn = self._capture_piecewise_graph
-        elif capture_cudagraph_mode == CUDAGraphMode.FULL:
-            capture_fn = self._capture_full_graph
         else:
-            raise ValueError(
-                f"Unexpected cudagraph_mode for capture: {capture_cudagraph_mode}"
-            )
+            capture_fn = self._capture_full_graph
 
         num_reqs = min(num_tokens, self.max_num_reqs)
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
@@ -167,9 +165,8 @@ class EagleCudaGraphManager:
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
-            uniform_decode=True,
         )
 
-    def run(self, num_tokens: int) -> None:
+    def run_fullgraph(self, num_tokens: int) -> None:
         assert num_tokens in self.graphs
         self.graphs[num_tokens].replay()

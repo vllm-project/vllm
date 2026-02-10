@@ -299,15 +299,10 @@ class EagleSpeculator:
         )
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
-        cudagraph_mode = (
-            self.cudagraph_manager.cudagraph_mode
-            if cudagraph_size is not None
-            else CUDAGraphMode.NONE
-        )
-        if cudagraph_mode == CUDAGraphMode.FULL:
+        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
+        if cudagraph_size is not None and cudagraph_mode == CUDAGraphMode.FULL:
             # Run full CUDA graph.
-            assert cudagraph_size is not None
-            self.cudagraph_manager.run(cudagraph_size)
+            self.cudagraph_manager.run_fullgraph(cudagraph_size)
             return self.draft_tokens[:num_reqs]
 
         # Run eager or piecewise CUDA graph.

@@ -133,8 +133,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.do_spec_decode = False
             self.num_speculative_steps = 0
             self.speculator = None
-        self.uniform_decode_query_len = 1 + self.num_speculative_steps
-
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -355,36 +353,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
         return num_scheduled_tokens
-
-    def _get_cudagraph_runtime_mode(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> tuple[CUDAGraphMode, int | None]:
-        # Determine if this is a uniform decode batch
-        num_reqs = len(scheduler_output.num_scheduled_tokens)
-        max_num_scheduled_tokens = max(scheduler_output.num_scheduled_tokens.values())
-        is_uniform_decode = (
-            max_num_scheduled_tokens == self.uniform_decode_query_len
-        ) and (
-            scheduler_output.total_num_scheduled_tokens
-            == max_num_scheduled_tokens * num_reqs
-        )
-
-        # Get local_cudagraph_size using the local token count
-        local_cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-            scheduler_output.total_num_scheduled_tokens,
-            uniform_decode=is_uniform_decode,
-        )
-
-        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
-        if local_cudagraph_size is None:
-            local_cudagraph_runtime_mode = CUDAGraphMode.NONE
-        elif is_uniform_decode:
-            local_cudagraph_runtime_mode = cudagraph_mode.decode_mode()
-        else:
-            local_cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-
-        return local_cudagraph_runtime_mode, local_cudagraph_size
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -824,21 +792,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return empty_output
 
         # Get local cudagraph mode and size.
-        local_cudagraph_mode, local_cudagraph_size = self._get_cudagraph_runtime_mode(
-            scheduler_output
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        local_cudagraph_mode, local_cudagraph_size = (
+            self.cudagraph_manager.get_cudagraph_runtime_mode(
+                num_reqs=num_reqs,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                max_query_len=max_query_len,
+            )
         )
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
-        (
-            num_tokens_after_padding,
-            num_tokens_across_dp,
-            synced_cudagraph_mode,
-        ) = get_cudagraph_and_dp_padding(
-            scheduler_output.total_num_scheduled_tokens,
-            local_cudagraph_size,
-            local_cudagraph_mode.value,
-            self.parallel_config.data_parallel_size,
-            self.parallel_config.data_parallel_rank,
+        num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
+            get_cudagraph_and_dp_padding(
+                scheduler_output.total_num_scheduled_tokens,
+                local_cudagraph_size,
+                local_cudagraph_mode.value,
+                self.parallel_config.data_parallel_size,
+                self.parallel_config.data_parallel_rank,
+            )
         )
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
@@ -907,8 +879,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
-                num_reqs=None,
-                uniform=False,
                 has_lora=self.lora_config is not None,
             )
 

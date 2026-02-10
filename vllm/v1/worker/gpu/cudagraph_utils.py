@@ -36,16 +36,16 @@ class CudaGraphManager:
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
 
-        spec_config = vllm_config.speculative_config
         self.uniform_decode_query_len = 1
+        spec_config = vllm_config.speculative_config
         if spec_config is not None:
-            self.uniform_decode_query_len = 1 + spec_config.num_speculative_tokens
+            self.uniform_decode_query_len += spec_config.num_speculative_tokens
 
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
 
-        self.use_uniform_decode_cudagraph = (
+        use_uniform_decode_cudagraph = (
             self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and self.cudagraph_mode.separate_routine()
         )
@@ -55,7 +55,7 @@ class CudaGraphManager:
             self.max_num_tokens,
             self.cudagraph_mode,
             self.uniform_decode_query_len,
-            self.use_uniform_decode_cudagraph,
+            use_uniform_decode_cudagraph,
         )
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
@@ -70,14 +70,14 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_decode: bool = False,
     ) -> int | None:
-        if uniform_decode and self.use_uniform_decode_cudagraph:
+        if uniform_decode and self.uniform_decode_cudagraph_sizes:
             return self.uniform_decode_cudagraph_sizes.get(num_tokens)
         return self.cudagraph_sizes.get(num_tokens)
 
     def capture_graph(
         self,
         num_tokens: int,
-        capture_cudagraph_mode: CUDAGraphMode,
+        capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
@@ -89,14 +89,13 @@ class CudaGraphManager:
         uniform_decode: bool = False,
     ) -> None:
         # select and check capture function
-        if capture_cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        assert capture_cg_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
+            f"Invalid capture_cudagraph_mode for capture: {capture_cg_mode}"
+        )
+        if capture_cg_mode == CUDAGraphMode.PIECEWISE:
             capture_fn = self._capture_piecewise_graph
-        elif capture_cudagraph_mode == CUDAGraphMode.FULL:
-            capture_fn = self._capture_full_graph
         else:
-            raise ValueError(
-                f"Invalid capture_cudagraph_mode for capture: {capture_cudagraph_mode}"
-            )
+            capture_fn = self._capture_full_graph
         # prepare inputs
         if uniform_decode:
             num_reqs = min(
@@ -209,8 +208,6 @@ class CudaGraphManager:
         # create batch descriptor for piecewise cudagraph dispatch key
         batch_descriptor = BatchDescriptor(
             num_tokens=num_tokens,
-            num_reqs=None,
-            uniform=False,
             has_lora=has_lora,
         )
 
@@ -245,6 +242,8 @@ class CudaGraphManager:
         has_lora: bool = False,
     ) -> None:
         common_kwargs = dict(
+            device=self.device,
+            capture_fn=self.capture_graph,
             model=model,
             input_buffers=input_buffers,
             mrope_positions=mrope_positions,
@@ -260,8 +259,6 @@ class CudaGraphManager:
         if mixed_mode != CUDAGraphMode.NONE:
             capture_graphs(
                 cudagraph_sizes=self.cudagraph_sizes,
-                device=self.device,
-                capture_fn=self.capture_graph,
                 capture_cudagraph_mode=mixed_mode,
                 desc=f"Capturing CUDA graphs (mixed, {mixed_mode.name})",
                 uniform_decode=False,
@@ -271,16 +268,36 @@ class CudaGraphManager:
         # Phase 2: Capture FULL graphs for uniform decode batches if needed.
         # This is only needed if we use a separate routine for decode batches
         # and the decode_mode is FULL.
-        if self.use_uniform_decode_cudagraph:
+        if self.uniform_decode_cudagraph_sizes:
             capture_graphs(
                 cudagraph_sizes=self.uniform_decode_cudagraph_sizes,
-                device=self.device,
-                capture_fn=self.capture_graph,
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
                 desc="Capturing CUDA graphs (decode, FULL)",
                 uniform_decode=True,
                 **common_kwargs,
             )
+
+    def get_cudagraph_runtime_mode(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+    ) -> tuple[CUDAGraphMode, int | None]:
+        is_uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            num_tokens == max_query_len * num_reqs
+        )
+
+        cudagraph_size = self.get_cudagraph_size(
+            num_tokens,
+            uniform_decode=is_uniform_decode,
+        )
+        if cudagraph_size is None:
+            cudagraph_mode = CUDAGraphMode.NONE
+        elif is_uniform_decode:
+            cudagraph_mode = self.cudagraph_mode.decode_mode()
+        else:
+            cudagraph_mode = self.cudagraph_mode.mixed_mode()
+        return cudagraph_mode, cudagraph_size
 
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor:
         assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
@@ -331,7 +348,6 @@ def capture_graphs(
     capture_fn: Callable,
     capture_cudagraph_mode: CUDAGraphMode,
     desc: str = "Capturing CUDA graphs",
-    uniform_decode: bool = False,
     **capture_kwargs,
 ) -> None:
     # Capture larger graphs first.
@@ -344,7 +360,6 @@ def capture_graphs(
             capture_fn(
                 size,
                 capture_cudagraph_mode,
-                uniform_decode=uniform_decode,
                 **capture_kwargs,
             )
 
