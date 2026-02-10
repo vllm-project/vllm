@@ -3,14 +3,64 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vllm.config.multimodal import MultiModalConfig
+from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
+from vllm.renderers.hf import HfRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 from vllm.v1.engine.output_processor import RequestOutputCollector
+
+MODEL_NAME = "openai-community/gpt2"
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
+class MockModelConfig:
+    task = "generate"
+    runner_type = "generate"
+    model = MODEL_NAME
+    tokenizer = MODEL_NAME
+    trust_remote_code = False
+    tokenizer_mode = "auto"
+    max_model_len = 2048
+    tokenizer_revision = None
+    multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
+    hf_text_config = MockHFConfig()
+    logits_processors: list[str] | None = None
+    logits_processor_pattern = None
+    diff_sampling_param: dict | None = None
+    allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
+    encoder_config = None
+    generation_config: str = "auto"
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
+
+
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer(
+        model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
 
 
 @pytest.fixture
@@ -22,8 +72,10 @@ def mock_async_llm():
     # Mock the essential attributes
     llm.vllm_config = MagicMock()
     llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
-    llm.model_config = MagicMock()
-    llm.model_config.max_model_len = 2048
+    llm.model_config = MockModelConfig()
+    llm.input_processor = MagicMock()
+    llm.io_processor = MagicMock()
+    llm.renderer = _build_renderer(llm.model_config)
     llm.log_requests = False
     llm.errored = False
     llm._pause_cond = asyncio.Condition()
@@ -37,6 +89,15 @@ def mock_async_llm():
     llm.generate = AsyncLLM.generate.__get__(llm, AsyncLLM)
 
     return llm
+
+
+def streaming_input_from_text(
+    engine: AsyncLLM, text: str, sampling_params: SamplingParams
+):
+    prompt = TextPrompt(prompt=text)
+    (tok_prompt,) = engine.renderer.render_cmpl([prompt])
+
+    return StreamingInput(prompt=tok_prompt, sampling_params=sampling_params)
 
 
 @pytest.mark.asyncio
@@ -155,8 +216,8 @@ async def test_generate_with_async_generator():
     llm.add_request = mock_add_request
 
     async def input_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="Hello", sampling_params=sampling_params)
-        yield StreamingInput(prompt=" world", sampling_params=sampling_params)
+        yield streaming_input_from_text(llm, "Hello", sampling_params=sampling_params)
+        yield streaming_input_from_text(llm, " world", sampling_params=sampling_params)
 
     outputs = []
     async for output in llm.generate(input_generator(), sampling_params, request_id):
