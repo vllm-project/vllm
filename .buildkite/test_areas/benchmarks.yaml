@@ -22,6 +22,7 @@ steps:
   device: b200
   num_gpus: 2
   optional: true
+  working_dir: "/vllm-workspace/"
   timeout_in_minutes: 10
   source_file_dependencies:
   - benchmarks/attention_benchmarks/
