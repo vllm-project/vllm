@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_pcp_group
 from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
@@ -47,12 +47,14 @@ class PCPManager:
         # Cached values from partition_inputs
         self.local_num_scheduled: np.ndarray = np.array([], dtype=np.int32)
         self.local_total: int = 0
+        self.padded_total: int = 0
 
     def partition_inputs(
         self,
         positions_np: np.ndarray,
         req_indices: np.ndarray,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         arange_np: np.ndarray,
         reorder_batch_threshold: int | None,
     ) -> tuple[int, np.ndarray, np.ndarray]:
@@ -64,8 +66,9 @@ class PCPManager:
         then split into head/tail chunks assigned to ranks in an interleaved
         pattern to balance computation across the sequence.
 
-        For decode requests (tokens <= reorder_batch_threshold), tokens are
-        duplicated across all ranks instead of split.
+        For decode requests (tokens <= reorder_batch_threshold AND has context),
+        tokens are duplicated across all ranks instead of split. This matches
+        the reorder_batch_to_split_decodes_and_prefills definition.
 
         This method:
         1. Computes which tokens this rank processes
@@ -77,6 +80,7 @@ class PCPManager:
             positions_np: Global position values, modified in-place to local
             req_indices: Global request indices, modified in-place to local
             num_scheduled_tokens: Per-request token counts
+            num_computed_tokens: Per-request computed token counts (0 = prefill)
             arange_np: Pre-allocated arange buffer
             reorder_batch_threshold: Threshold distinguishing decode vs prefill
 
@@ -85,7 +89,12 @@ class PCPManager:
         """
         assert reorder_batch_threshold is not None
         num_reqs = len(num_scheduled_tokens)
-        num_decode_reqs = int((num_scheduled_tokens <= reorder_batch_threshold).sum())
+        # Decode = tokens <= threshold AND has computed context (not a new prefill)
+        # This matches reorder_batch_to_split_decodes_and_prefills definition
+        is_decode = (num_scheduled_tokens <= reorder_batch_threshold) & (
+            num_computed_tokens > 0
+        )
+        num_decode_reqs = int(is_decode.sum())
         num_decode_tokens = int(num_scheduled_tokens[:num_decode_reqs].sum())
         ws = self.pcp_world_size
 
@@ -153,43 +162,59 @@ class PCPManager:
         pcp_total = int(pcp_tokens.sum())
         orig_lens = np.repeat(num_scheduled_tokens, pcp_tokens)
         orig_starts = np.repeat(orig_start, pcp_tokens)
+        # For padding positions (position >= seq_len), clamp to request's first token
+        # to avoid indexing into other requests' positions
         local_indices = np.where(
             positions[:pcp_total] >= orig_lens,
-            0,  # Clamp padding to 0
+            orig_starts,  # Clamp to request's start, not global 0
             orig_starts + positions[:pcp_total],
         ).astype(np.int64)
 
         # Gather local values
-        local_total = pcp_total
-        positions_np[:local_total] = positions_np[local_indices]
-        req_indices[:local_total] = req_indices[local_indices]
+        positions_np[:pcp_total] = positions_np[local_indices]
+        req_indices[:pcp_total] = req_indices[local_indices]
 
         self.local_num_scheduled = pcp_tokens[:num_reqs]
-        self.local_total = local_total
-        return local_total, positions_np[:local_total], req_indices[:local_total]
+        self.local_total = pcp_total
+        self.padded_total = int(padded_total)
+        return pcp_total, positions_np[:pcp_total], req_indices[:pcp_total]
 
     def restore_hidden_states(
         self, hidden_states: torch.Tensor, num_tokens: int
     ) -> torch.Tensor:
         """All-gather hidden states, restore order, and remove padding."""
         hidden_states = get_pcp_group().all_gather(hidden_states[:num_tokens], 0)
-        restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+        # Use padded_total for correct restore index size
+        restore_size = (
+            self.padded_total if self.padded_total > 0 else hidden_states.shape[0]
+        )
+        restore_idx = self.pcp_allgather_restore_idx.gpu[:restore_size]
         hidden_states = hidden_states.index_select(0, restore_idx)
-        return hidden_states[self._pcp_unpad_mask_tensor[: hidden_states.shape[0]]]
+        mask = self._pcp_unpad_mask_tensor[:restore_size].to(
+            hidden_states.device, non_blocking=True
+        )
+        return hidden_states[mask]
 
     def pad_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
         """
         Expand slot_mapping for the all-gathered KV cache.
 
-        After KV all-gather, slot_mapping needs to account for padding.
-        This places real slot values at unpadded positions and -1 at padding.
+        After KV all-gather, slot_mapping needs to account for per-request
+        PCP padding. This places real slot values at unpadded positions
+        and -1 at padding positions.
+
+        Args:
+            slot_mapping: Unpadded slot mapping (global real tokens only)
         """
-        padded_size = slot_mapping.shape[0] * self.pcp_world_size
-        out = self.pcp_padded_slot_mapping[:padded_size]
+        if self.padded_total == 0:
+            return slot_mapping
+
+        out = self.pcp_padded_slot_mapping[: self.padded_total]
         out.fill_(-1)
-        mask = self._pcp_unpad_mask_tensor[:padded_size]
-        if mask.sum().item() > 0:
-            out[mask] = slot_mapping
+        mask = self._pcp_unpad_mask_tensor[: self.padded_total].to(
+            slot_mapping.device, non_blocking=True
+        )
+        out[mask] = slot_mapping
         return out
 
 
@@ -219,15 +244,3 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"PCP requires attention impl support, but "
                     f"{layer_impl.__class__.__name__} does not support PCP."
                 )
-
-
-def get_total_cp_world_size():
-    """Get total context parallelism world size for KV cache sharding.
-
-    Only DCP shards the KV cache. With PCP, K/V are gathered after prefill
-    so each rank has the full sequence - no KV sharding.
-    """
-    try:
-        return get_dcp_group().world_size
-    except AssertionError:
-        return 1

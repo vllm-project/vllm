@@ -641,9 +641,6 @@ class AttentionImplBase(ABC, Generic[T]):
     pcp_world_size: int
     pcp_rank: int
 
-    total_cp_world_size: int
-    total_cp_rank: int
-
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
@@ -664,10 +661,6 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        # Only DCP shards KV cache. PCP gathers K/V after prefill,
-        # so DCP is the effective total CP for KV sharding purposes.
-        self.total_cp_world_size = self.dcp_world_size
-        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode

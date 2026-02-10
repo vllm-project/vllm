@@ -8,7 +8,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
 
@@ -278,9 +277,9 @@ class MultiGroupBlockTable:
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
             # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
+            dcp_world_size = get_dcp_group().world_size
             max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
+                cdiv(max_model_len, block_size * dcp_world_size)
                 for block_size in block_sizes
             ]
 

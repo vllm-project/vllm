@@ -164,7 +164,6 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     PCPManager,
     check_attention_cp_compatibility,
-    get_total_cp_world_size,
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
@@ -1528,6 +1527,7 @@ class GPUModelRunner(
                     positions_np,
                     req_indices,
                     num_scheduled_tokens,
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs],
                     self.arange_np,
                     self.reorder_batch_threshold,
                 )
@@ -1818,9 +1818,10 @@ class GPUModelRunner(
             ]
 
         if self.pcp_world_size > 1:
+            # pcp_allgather_restore_idx was built for padded_total elements
             cm_base.pcp_allgather_restore_idx = (
                 self.pcp_manager.pcp_allgather_restore_idx.gpu[
-                    : num_tokens * self.pcp_world_size
+                    : self.pcp_manager.padded_total
                 ]
             )
 
@@ -3334,10 +3335,6 @@ class GPUModelRunner(
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
             slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
-
-            if self.pcp_world_size > 1:
-                slot_mapping = self.pcp_manager.pad_slot_mapping(slot_mapping)
-
             return slot_mapping
 
         slot_mappings_by_gid = {
@@ -3361,6 +3358,19 @@ class GPUModelRunner(
             return slot_mappings_by_gid, result
 
         return slot_mappings_by_gid, slot_mappings_by_layer
+
+    def _pad_slot_mappings_for_pcp(
+        self,
+        slot_mappings_by_gid: dict[int, torch.Tensor],
+        num_tokens_unpadded: int,
+    ) -> dict[int, torch.Tensor]:
+        """Pad slot mappings for PCP all-gather alignment."""
+        if self.pcp_world_size <= 1:
+            return slot_mappings_by_gid
+        return {
+            gid: self.pcp_manager.pad_slot_mapping(slot_mapping[:num_tokens_unpadded])
+            for gid, slot_mapping in slot_mappings_by_gid.items()
+        }
 
     @torch.inference_mode()
     def execute_model(
@@ -3455,6 +3465,13 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            # For PCP, use local token count for batch execution decisions
+            effective_num_tokens = (
+                local_total_num_tokens
+                if self.pcp_world_size > 1
+                else num_tokens_unpadded
+            )
+
             (
                 cudagraph_mode,
                 batch_desc,
@@ -3462,7 +3479,7 @@ class GPUModelRunner(
                 num_tokens_across_dp,
                 cudagraph_stats,
             ) = self._determine_batch_execution_and_padding(
-                num_tokens=num_tokens_unpadded,
+                num_tokens=effective_num_tokens,
                 num_reqs=num_reqs,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
@@ -3535,11 +3552,20 @@ class GPUModelRunner(
                 num_tokens_unpadded=num_tokens_unpadded,
                 ubatch_slices=ubatch_slices_padded,
             )
+            if slot_mappings_by_group is not None:
+                slot_mappings_by_group = self._pad_slot_mappings_for_pcp(
+                    slot_mappings_by_group, num_tokens_unpadded
+                )
 
+            # For PCP, always pass num_tokens_padded (which is local_total) even
+            # without pad_attn, so num_actual_tokens is set correctly
+            attn_num_tokens_padded = (
+                num_tokens_padded if pad_attn or self.pcp_world_size > 1 else None
+            )
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
-                    num_tokens_padded=num_tokens_padded if pad_attn else None,
+                    num_tokens_padded=attn_num_tokens_padded,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded if pad_attn else None,
                     max_query_len=max_num_scheduled_tokens,
@@ -4829,6 +4855,10 @@ class GPUModelRunner(
             num_tokens_unpadded=num_tokens_unpadded,
             ubatch_slices=ubatch_slices_padded,
         )
+        if slot_mappings_by_group is not None:
+            slot_mappings_by_group = self._pad_slot_mappings_for_pcp(
+                slot_mappings_by_group, num_tokens_unpadded
+            )
 
         # If force_attention is True, we always capture attention. Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
@@ -5761,7 +5791,7 @@ class GPUModelRunner(
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             max_num_blocks_per_req = cdiv(
-                max_model_len, block_sizes[i] * get_total_cp_world_size()
+                max_model_len, block_sizes[i] * self.dcp_world_size
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
