@@ -374,10 +374,9 @@ def main():
     # Format: (N, K, group_size) where input is [1, K] and output is [1, N]
     SHAPES = [
         # Qwen2.5-0.5B-Instruct (hidden=896, intermediate=4864)
-        (896, 896, 128),  # q/k/v/o proj
-        (1152, 896, 128),  # qkv fused (896 + 128 + 128)
+        # (896, 896) and (1152, 896) removed: hit GEMM kernel (K<=1024, N<=2000)
+        # (896, 4864) removed: hits Triton GEMV (N<1500)
         (9728, 896, 128),  # gate_up_proj (4864 * 2)
-        (896, 4864, 128),  # down_proj
         # Gemma-2B (hidden=2048, intermediate=16384, vocab=256000)
         (2048, 2048, 128),  # q/o proj
         (2560, 2048, 128),  # qkv fused (2048 + 256 + 256 for MQA)
@@ -426,59 +425,58 @@ def main():
     PERF_TOLERANCE = 0.05  # 5% tolerance for measurement noise
 
     # Radeon 8060S (gfx1151): Strix Halo, 16 CUs, LPDDR5X-8000
-    # Updated: 2026-01-12 with hybrid pointer optimization
-    # NOTE: values established with return_mode="min", need re-baselining with "median"
+    # Updated: 2026-02-10, triton.testing.do_bench median, max of 2 runs
     BEST_KNOWN_PERF_8060S = {
         # (N, K, group_size): best_known_gibs
-        # NOTE: values converted from GB/s, need re-baselining on 8060S
         #
         # Qwen2.5-0.5B-Instruct
-        (896, 896, 128): 20.1,
-        (1152, 896, 128): 23.9,
-        (9728, 896, 128): 138.8,
-        (896, 4864, 128): 55.9,
+        (9728, 896, 128): 142.9,
         # Gemma-2B
-        (2048, 2048, 128): 116.4,
-        (2560, 2048, 128): 131.3,
-        (32768, 2048, 128): 184.4,
-        (2048, 16384, 128): 185.3,
+        (2048, 2048, 128): 111.5,
+        (2560, 2048, 128): 132.6,
+        (32768, 2048, 128): 178.6,
+        (2048, 16384, 128): 159.4,
         # Qwen3-1.7B / Qwen3-VL-2B / Cosmos-Reason2-2B
-        (4096, 2048, 128): 155.5,
-        (12288, 2048, 128): 186.3,
-        (2048, 6144, 128): 162.0,
+        (4096, 2048, 128): 148.7,
+        (12288, 2048, 128): 188.3,
+        (2048, 6144, 128): 158.6,
         # Qwen3-4B
-        (2560, 2560, 128): 80.1,
-        (6144, 2560, 128): 175.1,
-        (19456, 2560, 128): 203.0,
-        (2560, 9728, 128): 176.9,
-        # Qwen2.5-7B
-        (3584, 3584, 128): 151.8,
-        (4608, 3584, 128): 150.9,
-        (37888, 3584, 128): 203.0,
-        (3584, 18944, 128): 190.0,
+        (2560, 2560, 128): 143.8,
+        (6144, 2560, 128): 175.4,
+        (19456, 2560, 128): 188.7,
+        (2560, 9728, 128): 159.4,
+        # Qwen2.5-VL-3B
+        (22016, 2048, 128): 186.0,
+        (2048, 11008, 128): 144.1,
+        # Qwen2.5-7B / Qwen2.5-VL-7B
+        (3584, 3584, 128): 145.4,
+        (4608, 3584, 128): 152.5,
+        (37888, 3584, 128): 195.8,
+        (3584, 18944, 128): 185.4,
+        (152064, 3584, 128): 199.3,
+        # LLaMA-3.1-8B
+        (4096, 4096, 128): 176.2,
+        (6144, 4096, 128): 184.2,
+        (28672, 4096, 128): 200.5,
+        (4096, 14336, 128): 188.4,
         # LLaMA2-7B
-        (4096, 4096, 128): 174.2,
-        (6144, 4096, 128): 194.6,
-        (11008, 4096, 128): 194.6,
-        (12288, 4096, 128): 200.2,
-        (22016, 4096, 128): 205.8,
-        (4096, 11008, 128): 180.7,
+        (11008, 4096, 128): 170.5,
+        (12288, 4096, 128): 183.3,
+        (22016, 4096, 128): 194.7,
+        (4096, 11008, 128): 165.5,
         # Additional
-        (2560, 4096, 128): 157.4,
-        (19456, 9728, 128): 212.3,
+        (2560, 4096, 128): 157.3,
+        (19456, 9728, 128): 199.0,
     }
     PEAK_BW_8060S = 215.1  # GiB/s measured via copy benchmark (231 GB/s)
 
     # Radeon 890M (gfx1150): Strix Point, 8 CUs, LPDDR5X-5600
-    # Updated: 2026-02-09, bench_cuda_events timing, min of 2 runs
+    # Updated: 2026-02-09, triton.testing.do_bench timing, min of 2 runs
     BEST_KNOWN_PERF_890M = {
         # (N, K, group_size): best_known_gibs
         #
         # Qwen2.5-0.5B-Instruct
-        (896, 896, 128): 6.7,
-        (1152, 896, 128): 8.4,
         (9728, 896, 128): 44.3,
-        (896, 4864, 128): 26.2,
         # Gemma-2B
         (2048, 2048, 128): 45.9,
         (2560, 2048, 128): 41.5,
@@ -856,40 +854,9 @@ def main():
 
         return qweight_padded, qzeros_padded, scales_padded, padded_K
 
-    # L2 cache flush buffer (64 MB > L2 size to ensure full flush)
-    flush_buf = torch.empty(64 * 1024 * 1024 // 4, dtype=torch.float32, device="cuda")
-
-    def bench_cuda_events(fn, warmup=50, rep=200):
-        """Benchmark using CUDA events for precise GPU-side timing.
-
-        Unlike triton.testing.do_bench which measures wall time (including
-        Python overhead), this measures only GPU kernel execution time.
-        Uses L2 cache flushing + trimmed mean (drop top/bottom 5%).
-        """
-        # Warmup
-        for _ in range(warmup):
-            flush_buf.zero_()
-            fn()
-        torch.cuda.synchronize()
-
-        # Benchmark
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        latencies = []
-        for _ in range(rep):
-            flush_buf.zero_()
-            torch.cuda.synchronize()
-            start_event.record()
-            fn()
-            end_event.record()
-            end_event.synchronize()
-            latencies.append(start_event.elapsed_time(end_event))  # ms
-
-        # Trimmed mean: drop top/bottom 5%
-        latencies.sort()
-        trim = max(1, len(latencies) // 20)
-        trimmed = latencies[trim:-trim]
-        return sum(trimmed) / len(trimmed)
+    def bench(fn, warmup=50, rep=200):
+        """Benchmark using triton.testing.do_bench with median return mode."""
+        return triton.testing.do_bench(fn, warmup=warmup, rep=rep, return_mode="median")
 
     def run_benchmark(shapes, include_autoawq=False, autoawq_module=None):
         """Run benchmarks for all shapes."""
@@ -966,7 +933,7 @@ def main():
                     input_for_bench, qweight, scales, qzeros, split_k_iters=8
                 )
 
-            ms_triton = bench_cuda_events(run_triton, warmup=args.warmup, rep=args.rep)
+            ms_triton = bench(run_triton, warmup=args.warmup, rep=args.rep)
             bw_triton = bytes_moved / (ms_triton * GIB_DIVISOR)
             pct_peak = bw_triton / PEAK_BW * 100
 
@@ -981,9 +948,7 @@ def main():
                         input_tensor, kernel_awq, scales_awq, zeros_awq, group_size
                     )
 
-                ms_autoawq = bench_cuda_events(
-                    run_autoawq, warmup=args.warmup, rep=args.rep
-                )
+                ms_autoawq = bench(run_autoawq, warmup=args.warmup, rep=args.rep)
                 bw_autoawq = bytes_moved / (ms_autoawq * GIB_DIVISOR)
                 speedup = ms_autoawq / ms_triton  # >1 means Triton is faster
 
@@ -1129,9 +1094,7 @@ def main():
                             out = run()
                             diff = (out[0, :N] - output_ref[0, :N]).abs().max().item()
                             if diff < 0.1:
-                                ms = bench_cuda_events(
-                                    run, warmup=args.warmup, rep=args.rep
-                                )
+                                ms = bench(run, warmup=args.warmup, rep=args.rep)
                                 bw = bytes_moved / (ms * GIB_DIVISOR)
                                 if bw > best_bw:
                                     best_bw = bw
@@ -1304,7 +1267,7 @@ Strix Halo differences:
                                                 continue
 
                                             # Benchmark
-                                            ms = bench_cuda_events(
+                                            ms = bench(
                                                 run,
                                                 warmup=args.warmup,
                                                 rep=args.rep,
