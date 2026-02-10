@@ -477,6 +477,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    offsets_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     # profile run
     # NOTE(Chen): create the max possible flattened_kv. So that
@@ -504,6 +505,7 @@ def rocm_aiter_sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    offsets_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -524,6 +526,7 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            offsets_buffer,
         )
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
