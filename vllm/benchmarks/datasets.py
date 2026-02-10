@@ -1374,6 +1374,11 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         action="store_true",
         help="Disable shuffling of dataset samples for deterministic ordering.",
     )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code from HuggingFace.",
+    )
 
     # group for dataset specific arguments
     custom_group = parser.add_argument_group("custom dataset options")

@@ -55,12 +55,12 @@ class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
     language_model_only: bool = False
-    """If True, disables all multimodal inputs by setting all modality limits
-    to 0. Equivalent to setting --limit-mm-per-prompt to 0 for every
-    modality."""
+    """If True, disables all multimodal inputs by setting all modality limits to 0.
+    Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
     limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
     """The maximum number of input items and options allowed per
-        prompt for each modality.
+    prompt for each modality.
+
     Defaults to 999 for each modality.
 
     Legacy format (count only):
