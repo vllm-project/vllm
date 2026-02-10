@@ -154,11 +154,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
-            return (
-                self.output_text[:-buffer_length]
-                if buffer_length
-                else (self.output_text)
-            )
+            if not buffer_length:
+                return self.output_text
+            return self.output_text[:-buffer_length]
+
         length = len(self.output_text) - buffer_length
         last_offset = self._last_output_text_offset
         if last_offset < length:
@@ -193,9 +192,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         if not self.spaces_between_special_tokens:
             # Store dict of added token ids so that we can suppress
             # the spaces between them.
-            if (
-                added_token_ids := getattr(self.tokenizer, "added_token_ids", None)
-            ) is None:
+            added_token_ids = getattr(self.tokenizer, "added_token_ids", None)
+            if added_token_ids is None:
                 self.tokenizer.added_token_ids = added_token_ids = {
                     tid: tok.content
                     for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
@@ -280,11 +278,9 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     @property
     def output_token_ids(self) -> list[int]:
-        return (
-            self.token_ids
-            if not self.prompt_len
-            else (self.token_ids[self.prompt_len :])
-        )
+        if self.prompt_len:
+            return self.token_ids[self.prompt_len :]
+        return self.token_ids
 
     def num_output_tokens(self) -> int:
         return len(self.token_ids) - self.prompt_len
