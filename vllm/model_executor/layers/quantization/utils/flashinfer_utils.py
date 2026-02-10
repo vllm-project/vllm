@@ -341,7 +341,6 @@ def prepare_fp8_moe_layer_for_fi(
             layer.moe_config.is_act_and_mul,
             min_alignment,
         )
-        layer.intermediate_size_per_partition = new_intermediate
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
