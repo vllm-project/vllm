@@ -118,11 +118,14 @@ def get_flash_attn_version(
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
         # supported head dimensions.
         # See: https://github.com/Dao-AILab/flash-attention/issues/1959
+        # Exception: hdim 192 is supported for MLA's diff-headdim case
+        # (qk=192, v=128), added upstream in commits 1a15733e/1b36ab19.
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
+            and head_size != 192
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -167,12 +170,16 @@ def flash_attn_supports_mla():
                 is_fa_version_supported,
             )
 
-            return is_fa_version_supported(
+            # FA3 on Hopper (SM90) supports MLA via headdim_v parameter.
+            # FA4 CuteDSL supports MLA's diff headdims (192/128) natively
+            # by inferring head_dim_v from the V tensor shape.
+            if is_fa_version_supported(
                 3
-            ) and current_platform.is_device_capability_family(90)
+            ) and current_platform.is_device_capability_family(90):
+                return True
 
-            # NOTE(Lucas): FA4 CuteDSL does NOT currently support MLA's non-standard
-            # head dimensions (576 for qk, 512 for v) due to TMEM capacity limits.
+            if is_fa_version_supported(4):
+                return True
 
         except (ImportError, AssertionError):
             pass
