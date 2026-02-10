@@ -526,6 +526,7 @@ class OpenAISpeechToText(OpenAIServing):
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
             text = "".join(text_parts)
+            text = self.model_cls.post_process_output(text)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.

@@ -160,6 +160,10 @@ _AUDIO_LABEL_PATTERN = re.compile(r"\baudio\s*[:：]", flags=re.IGNORECASE)
 _PLEASE_PATTERN = re.compile(r"\bplease\b", flags=re.IGNORECASE)
 _TRAILING_A_PATTERN = re.compile(r"(?:\s*[AＡ]+[\s,，。]*){3,}\s*$")
 _TRAILING_PUNCT_PATTERN = re.compile(r"(?:\s*[,.，。]){3,}\s*$")
+_CHINESE_INSTRUCTION_PATTERN = re.compile(
+    r"请?只?\s*输出\s*转写\s*文本[，,。\.\s]*不要\s*其他\s*内容[，,。\.\s]*"
+)
+_GA_NOISE_PATTERN = re.compile(r"(?:^|[\s，。,.])噶(?=[\s，。,.]|$)")
 
 
 def _is_chinese_language(language: str | None) -> bool:
@@ -184,12 +188,56 @@ def _cjk_ratio(text: str) -> float:
     return cjk / non_space
 
 
+def _truncate_repeated_substring(text: str, min_len: int) -> str:
+    if min_len <= 0:
+        return text
+    n = len(text)
+    if n < min_len * 2:
+        return text
+    for i in range(0, n - min_len + 1):
+        substr = text[i : i + min_len]
+        idx = text.find(substr, i + min_len)
+        if idx != -1:
+            return text[:idx]
+    return text
+
+
+def _dedupe_repeated_cjk(text: str) -> str:
+    compact = re.sub(r"[\s，。！？；：,.]", "", text)
+    if len(compact) < 8:
+        return text
+
+    for offset in (0, 1):
+        part = compact[offset:]
+        if len(part) % 2 == 0:
+            half = len(part) // 2
+            if part[:half] == part[half:]:
+                return part[:half]
+
+    min_len = max(6, min(12, len(compact) // 4))
+    truncated = _truncate_repeated_substring(compact, min_len)
+    if truncated != compact:
+        return truncated
+
+    if len(compact) > 10:
+        lead_char = compact[0]
+        if _CJK_PATTERN.match(lead_char):
+            remainder = compact[1:]
+            if len(remainder) % 2 == 0:
+                half = len(remainder) // 2
+                if remainder[:half] == remainder[half:]:
+                    return remainder[:half]
+
+    return text
+
+
 def _cleanup_kimia_output(text: str) -> str:
     text = text.strip()
     if not text:
         return ""
 
     cjk_ratio = _cjk_ratio(text)
+    had_instruction = False
     if cjk_ratio >= 0.3:
         text = _INSTRUCTION_PATTERN.sub(" ", text)
         text = _FOLLOWING_AUDIO_PATTERN.sub(" ", text)
@@ -197,6 +245,9 @@ def _cleanup_kimia_output(text: str) -> str:
         text = _CRIBE_TOKEN_PATTERN.sub(" ", text)
         text = _AUDIO_LABEL_PATTERN.sub(" ", text)
         text = _PLEASE_PATTERN.sub(" ", text)
+        text, instruction_hits = _CHINESE_INSTRUCTION_PATTERN.subn(" ", text)
+        had_instruction = instruction_hits > 0
+        text = _GA_NOISE_PATTERN.sub(" ", text)
 
     text = _TRAILING_A_PATTERN.sub("", text)
     text = _TRAILING_PUNCT_PATTERN.sub("", text)
@@ -206,6 +257,24 @@ def _cleanup_kimia_output(text: str) -> str:
         text = re.sub(r"\s+([，。！？；：])", r"\1", text)
 
     text = re.sub(r"\s{2,}", " ", text).strip()
+
+    if had_instruction and _cjk_ratio(text) >= 0.3:
+        compact = re.sub(r"[\s，。！？；：,.]", "", text)
+        if (
+            len(compact) >= 6
+            and _CJK_PATTERN.match(compact[0])
+            and compact.count(compact[0]) == 1
+        ):
+            for idx, char in enumerate(text):
+                if _CJK_PATTERN.match(char):
+                    text = (text[:idx] + text[idx + 1 :]).strip()
+                    break
+
+    if _cjk_ratio(text) >= 0.3:
+        deduped = _dedupe_repeated_cjk(text)
+        if deduped != text:
+            text = deduped.strip()
+
     return text
 
 
