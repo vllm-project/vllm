@@ -86,10 +86,25 @@ class P2pNcclEngine:
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
 
-        # Use nccl4py by default, fall back to legacy if requested
-        self._use_legacy = envs.VLLM_USE_LEGACY_NCCL
+        # Use nccl4py by default, fall back to legacy if requested or unavailable
+        self._use_legacy = envs.VLLM_DISABLE_NCCL4PY
+        if not self._use_legacy:
+            try:
+                import nccl.bindings as nccl_bindings
+                import nccl.core as nccl
+
+                self._nccl = nccl
+                self._nccl_bindings = nccl_bindings
+                self.nccl = None  # type: ignore[assignment]  # Not used in nccl4py mode
+            except ImportError:
+                logger.warning(
+                    "nccl4py is not installed. Falling back to legacy NCCL "
+                    "bindings. Install with: pip install nccl4py[cu12]"
+                )
+                self._use_legacy = True
+
         if self._use_legacy:
-            from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
+            from vllm.distributed.device_communicators.pynccl_wrapper import (
                 NCCLLibrary,
                 buffer_type,
                 cudaStream_t,
@@ -101,13 +116,6 @@ class P2pNcclEngine:
             self._cudaStream_t = cudaStream_t
             self._ncclDataTypeEnum = ncclDataTypeEnum
             self.nccl = NCCLLibrary(library_path)
-        else:
-            import nccl.bindings as nccl_bindings
-            import nccl.core as nccl
-
-            self._nccl = nccl
-            self._nccl_bindings = nccl_bindings
-            self.nccl = None  # type: ignore[assignment]  # Not used in nccl4py mode
 
         if not hostname:
             hostname = get_ip()
@@ -226,14 +234,14 @@ class P2pNcclEngine:
     def _get_unique_id(self):
         """Get a new NCCL unique ID."""
         if self._use_legacy:
-            return self.nccl.ncclGetUniqueId()
+            return self.nccl.ncclGetUniqueId()  # type: ignore[union-attr]
         else:
             return self._nccl.get_unique_id()
 
     def _unique_id_from_bytes(self, data: bytes):
         """Create unique ID from bytes."""
         if self._use_legacy:
-            return self.nccl.unique_id_from_bytes(data)
+            return self.nccl.unique_id_from_bytes(data)  # type: ignore[union-attr]
         else:
             return self._nccl.UniqueId.from_bytes(data)
 
@@ -247,7 +255,7 @@ class P2pNcclEngine:
     def _comm_init_rank(self, nranks: int, unique_id, rank: int):
         """Initialize NCCL communicator."""
         if self._use_legacy:
-            return self.nccl.ncclCommInitRank(nranks, unique_id, rank)
+            return self.nccl.ncclCommInitRank(nranks, unique_id, rank)  # type: ignore[union-attr]
         else:
             return self._nccl.Communicator.init(
                 nranks=nranks,
@@ -650,7 +658,7 @@ class P2pNcclEngine:
 
         with torch.cuda.stream(stream):
             if self._use_legacy:
-                self.nccl.ncclSend(
+                self.nccl.ncclSend(  # type: ignore[union-attr]
                     self._buffer_type(tensor.data_ptr()),
                     tensor.numel(),
                     self._ncclDataTypeEnum.from_torch(tensor.dtype),
@@ -673,7 +681,7 @@ class P2pNcclEngine:
 
         with torch.cuda.stream(stream):
             if self._use_legacy:
-                self.nccl.ncclRecv(
+                self.nccl.ncclRecv(  # type: ignore[union-attr]
                     self._buffer_type(tensor.data_ptr()),
                     tensor.numel(),
                     self._ncclDataTypeEnum.from_torch(tensor.dtype),
