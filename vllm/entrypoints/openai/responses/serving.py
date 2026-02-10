@@ -498,7 +498,7 @@ class OpenAIServingResponses(OpenAIServing):
                             structural_tag=reasoning_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
                             ),
-                        )  # type: ignore[type-var]
+                        )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
