@@ -19,9 +19,9 @@ from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
-# Only tokenizers >= 0.21.1 supports DecodeStream used for
-# FastIncrementalDetokenizer.
-USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0.21.1")
+# Only tokenizers >= 0.22.0 supports DecodeStream with native prefill
+# (ids parameter) used for FastIncrementalDetokenizer.
+USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0.22.0")
 
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
@@ -176,24 +176,14 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.request_id = request.request_id
         self.skip_special_tokens = sampling_params.skip_special_tokens
-        self.stream = DecodeStream(skip_special_tokens=self.skip_special_tokens)
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
-        # Find a safe place to start.
-        prompt_token_ids = request.prompt_token_ids or []
-        prompt_suffix = prompt_token_ids
-        prompt_len = len(prompt_suffix)
-        if prompt_len > 4:
-            for i in range(4, min(prompt_len + 1, 24)):
-                suffix = prompt_token_ids[-i:]
-                if "�" not in self.tokenizer.decode(suffix):
-                    prompt_suffix = suffix
-                    break
-
-        # Prime the stream.
-        for tid in prompt_suffix:
-            self._protected_step(tid)
+        # Use native prefill to prime the decode stream with prompt tokens.
+        self.stream = DecodeStream(
+            ids=request.prompt_token_ids,
+            skip_special_tokens=self.skip_special_tokens,
+        )
 
         self.spaces_between_special_tokens = (
             sampling_params.skip_special_tokens
