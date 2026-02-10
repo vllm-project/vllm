@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -132,19 +133,19 @@ class TestCudagraphDispatcher:
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
-        desc_full_exact = BatchDescriptor(
-            num_tokens=8,
-            uniform=False,
-        )
+        # FULL mode uses exact keys with num_reqs set
+        desc_full_with_reqs = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
+        # PIECEWISE mode uses relaxed keys with num_reqs=None
+        desc_piecewise = BatchDescriptor(num_tokens=8, num_reqs=None, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=False, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_full_exact
+            assert key == desc_full_with_reqs
         elif cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact
+            assert key == desc_piecewise
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
@@ -164,7 +165,7 @@ class TestCudagraphDispatcher:
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.relax_for_piecewise_cudagraphs()
+            assert key == replace(desc_uniform_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
@@ -183,7 +184,7 @@ class TestCudagraphDispatcher:
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.relax_for_piecewise_cudagraphs()
+            assert key == replace(desc_full_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
 

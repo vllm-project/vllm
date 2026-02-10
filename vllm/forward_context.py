@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 
@@ -26,7 +26,8 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
-class BatchDescriptor(NamedTuple):
+@dataclass(frozen=True)
+class BatchDescriptor:
     """
     Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
@@ -55,20 +56,6 @@ class BatchDescriptor(NamedTuple):
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
-
-    def relax_for_piecewise_cudagraphs(self) -> "BatchDescriptor":
-        """
-        Return a relaxed version of current batch descriptor that is compatible
-        with PIECEWISE cudagraphs. FULL cudagraphs require exact num_reqs match
-        because FA3's scheduler_metadata computation depends on it.
-        """
-        return BatchDescriptor(
-            self.num_tokens,
-            num_reqs=None,
-            uniform=False,
-            has_lora=self.has_lora,
-            num_active_loras=self.num_active_loras,
-        )
 
 
 def _compute_sp_num_tokens(
