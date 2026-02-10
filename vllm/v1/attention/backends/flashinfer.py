@@ -58,7 +58,10 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    dcp_prepare_query,
+    dcp_reduce_output,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -239,22 +242,18 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
-        )
+        prefill_query_all_heads = dcp_prepare_query(prefill_query.contiguous())
         output_context_tmp, lse_context_tmp = self._context.run(
-            prefill_query_across_dcp,
+            prefill_query_all_heads,
             kv_cache_permute,
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
-        output_context, lse_context = cp_lse_ag_out_rs(
+        output_context, lse_context = dcp_reduce_output(
             output_context_tmp,
             lse_context_tmp,
-            get_dcp_group(),
             return_lse=True,
-            is_lse_base_on_e=False,
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
@@ -1473,17 +1472,20 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    decode_query_all_heads = dcp_prepare_query(
+                        decode_query.contiguous()
                     )
-                    output_tmp = torch.empty_like(decode_query)
+                    output_tmp = torch.empty_like(decode_query_all_heads)
                     lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
+                        (
+                            decode_query_all_heads.size(0),
+                            decode_query_all_heads.size(1),
+                        ),
                         dtype=torch.float32,
-                        device=decode_query.device,
+                        device=decode_query_all_heads.device,
                     )
                     decode_wrapper.run(
-                        decode_query,
+                        decode_query_all_heads,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
@@ -1491,11 +1493,9 @@ class FlashInferImpl(AttentionImpl):
                         lse=lse,
                         return_lse=True,
                     )
-                    output[:num_decode_tokens] = cp_lse_ag_out_rs(
+                    output[:num_decode_tokens] = dcp_reduce_output(
                         output_tmp,
                         lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=False,
                     )
                 else:
                     decode_wrapper.run(

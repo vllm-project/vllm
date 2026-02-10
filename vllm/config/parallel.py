@@ -343,23 +343,19 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         dcp = self.decode_context_parallel_size
         pcp = self.prefill_context_parallel_size
-        if pcp > 1 and dcp > 1:
-            # With PCP: dcp must divide evenly across PCP halves
-            if dcp % pcp != 0:
+        total_dcp_world_size = tp * pcp
+        if dcp > 1:
+            if total_dcp_world_size % dcp != 0:
+                raise ValueError(
+                    f"total_dcp_world_size={total_dcp_world_size} (tp * pcp) "
+                    f"must be divisible by dcp_size={dcp}."
+                )
+            # When DCP spans TP (dcp > pcp), must fully span PCP first
+            if dcp > pcp and dcp % pcp != 0:
                 raise ValueError(
                     f"dcp_size={dcp} must be divisible by pcp_size={pcp} "
-                    "when both are enabled."
+                    "when DCP spans the TP dimension."
                 )
-            dcp_per_pcp = dcp // pcp
-            if tp % dcp_per_pcp != 0:
-                raise ValueError(
-                    f"tp_size={tp} must be divisible by dcp_per_pcp={dcp_per_pcp} "
-                    f"(dcp_size={dcp} / pcp_size={pcp})."
-                )
-        elif dcp > 1:
-            # Without PCP: tp must be divisible by dcp
-            if tp % dcp != 0:
-                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
 
         return self
 

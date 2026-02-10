@@ -1374,20 +1374,17 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    pcp = prefill_context_model_parallel_size
     dcp = decode_context_model_parallel_size or 1
-    tp = tensor_model_parallel_size
-    if pcp > 1 and dcp > 1:
-        # DCP groups span PCP halves so one all-to-all handles both.
-        # E.g. tp=6, dcp=6, pcp=2: groups are [0,1,2,6,7,8], [3,4,5,9,10,11]
-        dcp_per_pcp = dcp // pcp
-        # all_ranks: (num_pp, pcp, tp) -> (num_pp, pcp, num_dcp_groups, dcp_per_pcp)
-        r = all_ranks.reshape(-1, pcp, tp // dcp_per_pcp, dcp_per_pcp)
-        # transpose to (num_pp, num_dcp_groups, pcp, dcp_per_pcp)
-        # then reshape to (num_pp * num_dcp_groups, dcp)
-        group_ranks = r.transpose(1, 2).reshape(-1, dcp).unbind(0)
+    if dcp > 1:
+        # DCP spans PCP dimension first, then TP dimension.
+        # E.g. tp=2, pcp=2: layout is [[0,1], [2,3]] (pcp x tp)
+        #      dcp=2: groups [0,2], [1,3] (same TP, span PCP)
+        #      dcp=4: group [0,2,1,3] (span both)
+        # Transpose to (tp, pcp) so PCP is innermost, then reshape.
+        r = all_ranks.transpose(-1, -2)
+        group_ranks = r.reshape(-1, dcp).unbind(0)
     else:
-        group_ranks = all_ranks.reshape(-1, dcp).unbind(0)
+        group_ranks = all_ranks.reshape(-1, 1).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,

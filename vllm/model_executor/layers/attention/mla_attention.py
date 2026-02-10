@@ -259,7 +259,10 @@ from vllm.v1.attention.backends.utils import (
     pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    dcp_prepare_query,
+    dcp_reduce_output,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -655,8 +658,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                # mqa_q do allgather in head dim across TP.
+                mqa_q = dcp_prepare_query(mqa_q)
 
             # call decode attn
             if not is_sparse_impl:
@@ -667,13 +670,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # full KV cache during decode (gathered after prefill), so no
             # collective needed.
             if self.impl.dcp_world_size > 1:
-                attn_out = cp_lse_ag_out_rs(
-                    attn_out,
-                    lse,
-                    get_dcp_group(),
-                    return_lse=False,
-                    is_lse_base_on_e=not getattr(self.impl, "_use_fi_prefill", False),
-                )
+                attn_out = dcp_reduce_output(attn_out, lse)
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)

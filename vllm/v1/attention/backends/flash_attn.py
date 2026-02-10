@@ -22,7 +22,10 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    dcp_prepare_query,
+    dcp_reduce_output,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
@@ -34,7 +37,6 @@ if is_flash_attn_varlen_func_available():
     )
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -291,14 +293,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.aot_schedule = get_flash_attn_version() == 3
 
         try:
-            from vllm.distributed.parallel_state import get_dcp_group
+            from vllm.distributed.parallel_state import get_dcp_group, get_tp_group
 
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
+            self.tp_world_size = get_tp_group().world_size
         except AssertionError:
-            # DCP might not be initialized in testing
+            # DCP/TP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+            self.tp_world_size = 1
 
         self.dcp_kv_cache_interleave_size = (
             self.parallel_config.dcp_kv_cache_interleave_size
@@ -400,7 +404,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
+                    num_heads_q=self.num_heads_q * self.tp_world_size,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -828,12 +832,12 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        query_all_heads = dcp_prepare_query(query)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
         context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
+            q=query_all_heads,
             k=key_cache,
             v=value_cache,
             out=None,
@@ -854,11 +858,10 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+        # FA returns LSE in shape [ H, B ] but dcp_reduce_output wants [ B, H ]
+        context_attn_out_cor, context_lse_cor = dcp_reduce_output(
             context_attn_out,
             context_lse.transpose(0, 1),
-            get_dcp_group(),
             return_lse=True,
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()

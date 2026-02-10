@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_dcp_group,
+    get_tp_group,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -190,7 +194,7 @@ def _cp_lse_common(
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
-        return cp_attn_out
+        return cp_attn_out, cp_attn_lse
 
     if ctx is None:
         ctx = CPTritonContext()
@@ -254,6 +258,43 @@ def cp_lse_ag_out_ar(
     if return_lse:
         return out, lse
     return out
+
+
+def dcp_prepare_query(query: torch.Tensor) -> torch.Tensor:
+    """
+    Prepare query for DCP decode attention by all-gathering across TP.
+    """
+    return get_tp_group().all_gather(query, dim=1)
+
+
+def dcp_reduce_output(
+    attn_output: torch.Tensor,
+    attn_lse: torch.Tensor,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """
+    Reduce output for DCP decode attention by reducing across DCP group and
+       scattering across TP.
+    """
+    tp_group = get_tp_group()
+    dcp_group = get_dcp_group()
+
+    # DCP all-reduce with LSE to combine KV shard results
+    output, lse = cp_lse_ag_out_ar(
+        attn_output, attn_lse, dcp_group, ctx=ctx, return_lse=True
+    )
+
+    # Reduce-scatter across TP to get back to local heads
+    output = get_tp_group().reduce_scatter(output, dim=1)
+
+    if return_lse:
+        # Scatter LSE across TP to match local heads
+        tp_num_heads = lse.shape[1] // tp_group.world_size
+        tp_rank = tp_group.rank_in_group
+        lse = lse[:, tp_num_heads * tp_rank : tp_num_heads * (tp_rank + 1)]
+        return output, lse
+    return output
 
 
 @triton.jit
