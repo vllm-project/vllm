@@ -121,6 +121,7 @@ class LlavaImageEmbeddingInputs(TensorSchema):
 LlavaImageInputs: TypeAlias = (
     LlavaImagePixelInputs | PixtralHFImagePixelInputs | LlavaImageEmbeddingInputs
 )
+"""Alias for supported LLaVA image input types."""
 
 
 class LlavaMultiModalProjector(nn.Module):

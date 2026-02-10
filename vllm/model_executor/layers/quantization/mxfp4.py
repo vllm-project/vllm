@@ -231,6 +231,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MXFP4 MoE quantization method."""
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)

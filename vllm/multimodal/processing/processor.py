@@ -1110,6 +1110,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """Extract processor and passthrough data from multi-modal items."""
         processor_data = dict[str, object]()
         passthrough_data = dict[str, object]()
 
@@ -1616,6 +1617,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(

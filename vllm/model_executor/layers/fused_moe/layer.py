@@ -1811,6 +1811,7 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass implementation for the fused MoE layer."""
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config_init()

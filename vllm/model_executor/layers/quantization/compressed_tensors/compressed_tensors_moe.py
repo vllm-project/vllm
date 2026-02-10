@@ -678,6 +678,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
+    """W8A8 FP8 MoE quantization using compressed tensors."""
+
     def __init__(
         self,
         weight_quant: QuantizationArgs,

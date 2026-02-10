@@ -376,6 +376,8 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class CutlassExpertsFp8(CutlassExpertsFp8Base):
+    """CUTLASS FP8 fused MoE expert implementation."""
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -423,6 +425,8 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
 
 class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
+    """Batched CUTLASS FP8 fused MoE expert implementation."""
+
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # BATCHED activation format works with EP because
@@ -651,6 +655,8 @@ def run_cutlass_moe_fp4(
 
 
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
+    """CUTLASS FP4 fused MoE expert implementation."""
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

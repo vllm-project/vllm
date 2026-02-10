@@ -35,6 +35,8 @@ def in_wsl() -> bool:
 
 
 class PlatformEnum(enum.Enum):
+    """Enumeration of supported hardware platforms."""
+
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
