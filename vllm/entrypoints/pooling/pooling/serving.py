@@ -142,7 +142,11 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             if use_io_processor:
                 assert self.io_processor is not None
+
                 pooling_params = self.io_processor.merge_pooling_params()
+                if pooling_params.task is None:
+                    pooling_params.task = "plugin"
+
                 tokenization_kwargs: dict[str, Any] = {}
             else:
                 pooling_params = request.to_pooling_params()  # type: ignore

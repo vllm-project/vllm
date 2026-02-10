@@ -1075,6 +1075,9 @@ class LLM:
                 self.io_processor.merge_pooling_params(param)
                 for param in as_iter(pooling_params)
             ]
+            for p in pooling_params:
+                if p.task is None:
+                    p.task = "plugin"
 
         if pooling_params is None:
             # Use default pooling params.

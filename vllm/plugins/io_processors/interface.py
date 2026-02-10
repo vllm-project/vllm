@@ -77,7 +77,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
             return validate_or_generate_params(params)  # type: ignore
 
-        return params or PoolingParams()
+        return params or PoolingParams(task="plugin")
 
     @abstractmethod
     def pre_process(
