@@ -519,6 +519,10 @@ class GPUModelRunner(
         # Encoder CUDA graph manager (initialized after model load if enabled)
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
+        # True only during cudagraph warmup _dummy_run(s); False during
+        # capture and normal runs. Used for AFD send_dp_metadata_list.
+        self._is_warmup = False
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -4210,7 +4214,9 @@ class GPUModelRunner(
             if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                self.afd_connector.send_dp_metadata_list(dp_metadata_list)
+                self.afd_connector.send_dp_metadata_list(
+                    dp_metadata_list, is_warmup=self._is_warmup
+                )
             logger.info(f'jcz send dp_metadata_list in prepare input')
 
             model_output = self._model_forward(
@@ -5737,7 +5743,11 @@ class GPUModelRunner(
                 if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                    self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)
+                    self.afd_connector.send_dp_metadata_list(
+                        dp_metadata_list,
+                        is_graph_capturing=is_graph_capturing,
+                        is_warmup=self._is_warmup,
+                    )
                 logger.info(f'jcz send dp_metadata_list in prepare input')
                 outputs = self.model(
                     input_ids=input_ids,
@@ -6383,6 +6393,7 @@ class GPUModelRunner(
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
         for _ in range(num_warmups):
+            self._is_warmup = True
             self._dummy_run(
                 desc.num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
@@ -6394,6 +6405,7 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
+        self._is_warmup = False
         self._dummy_run(
             desc.num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
