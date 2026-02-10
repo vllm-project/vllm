@@ -2258,14 +2258,39 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             )
 
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
+            # Allocate k and v together in layout: [k_nope | k_pe | v]
+            kv = torch.empty(
+                (
+                    toks,
+                    self.num_heads,
+                    self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
+                ),
+                dtype=kv_c_normed.dtype,
+                device=kv_c_normed.device,
+            )
+
+            # kv_b_proj returns [k_nope, v] concatenated - split and write
+            # to correct positions
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            kv[..., : self.qk_nope_head_dim] = kv_nope[
+                ..., : self.qk_nope_head_dim
+            ]  # k_nope
+            kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :] = kv_nope[
+                ..., self.qk_nope_head_dim :
+            ]  # v
 
-            k = self._concat_k_nope_k_pe(k_nope, k_pe)
+            # Write k_pe directly from workspace to kv buffer
+            kv[
+                ...,
+                self.qk_nope_head_dim : self.qk_nope_head_dim + self.qk_rope_head_dim,
+            ] = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
+
+            # Create views for k and v
+            k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
+            v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
                 prefill=prefill_metadata,
@@ -2365,11 +2390,39 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 toks=toks,
             )
 
+            # Allocate k and v together in layout: [k_nope | k_pe | v]
+            num_tokens = kv_c_normed.shape[0]
+            kv = torch.empty(
+                (
+                    num_tokens,
+                    self.num_heads,
+                    self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
+                ),
+                dtype=kv_c_normed.dtype,
+                device=kv_c_normed.device,
+            )
+
+            # kv_b_proj returns [k_nope, v] concatenated - split and write
+            # to correct positions
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k = self._concat_k_nope_k_pe(k_nope, k_pe)
+            kv[..., : self.qk_nope_head_dim] = kv_nope[
+                ..., : self.qk_nope_head_dim
+            ]  # k_nope
+            kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :] = kv_nope[
+                ..., self.qk_nope_head_dim :
+            ]  # v
+
+            # Write k_pe to kv buffer
+            kv[
+                ...,
+                self.qk_nope_head_dim : self.qk_nope_head_dim + self.qk_rope_head_dim,
+            ] = k_pe
+
+            # Create views for k and v
+            k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
+            v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
                 prefill=prefill_metadata,
@@ -2413,12 +2466,39 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert self.dcp_world_size != -1
 
         has_context = attn_metadata.prefill.chunked_context is not None
+
+        # Allocate k and v together in layout: [k_nope | k_pe | v]
+        num_tokens = kv_c_normed.shape[0]
+        kv = torch.empty(
+            (
+                num_tokens,
+                self.num_heads,
+                self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
+            ),
+            dtype=kv_c_normed.dtype,
+            device=kv_c_normed.device,
+        )
+
+        # kv_b_proj returns [k_nope, v] concatenated - split and write
+        # to correct positions
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        kv[..., : self.qk_nope_head_dim] = kv_nope[
+            ..., : self.qk_nope_head_dim
+        ]  # k_nope
+        kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :] = kv_nope[
+            ..., self.qk_nope_head_dim :
+        ]  # v
 
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        # Write k_pe to kv buffer
+        kv[
+            ..., self.qk_nope_head_dim : self.qk_nope_head_dim + self.qk_rope_head_dim
+        ] = k_pe
+
+        # Create views for k and v
+        k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
+        v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
 
         output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
