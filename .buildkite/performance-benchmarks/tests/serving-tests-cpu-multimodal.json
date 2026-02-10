@@ -1,0 +1,85 @@
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "max_concurrency_list": [
+      12,
+      16,
+      24,
+      32,
+      64,
+      128,
+      200
+    ],
+    "server_environment_variables": {
+      "VLLM_RPC_TIMEOUT": 100000,
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+      "VLLM_CPU_SGL_KERNEL": 1,
+      "VLLM_CPU_KVCACHE_SPACE": 40
+    },
+    "server_parameters": {
+      "dtype": "bfloat16",
+      "max_model_len": 16384,
+      "limit_mm_per_prompt": "'{\"image\": 3, \"video\": 0}'",
+      "mm_processor_kwargs": "max_pixels=1003520"
+    },
+    "client_parameters": {
+      "backend": "openai-chat",
+      "endpoint": "/v1/chat/completions",
+      "dataset_name": "random-mm",
+      "ignore-eos": "",
+      "seed": 42,
+      "num_prompts": 200,
+      "random-prefix-len": 25,
+      "random-input-len": 300,
+      "random-output-len": 40,
+      "random-range-ratio": 0.2,
+      "random-mm-base-items-per-request": 2,
+      "random-mm-limit-mm-per-prompt": "'{\"image\": 3, \"video\": 0}'",
+      "random-mm-bucket-config": "'{(224, 224, 1): 1.0}'"
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_qwen3b_tp1_random_mm_2x224_224",
+      "server_parameters": {
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct"
+      }
+    },
+    {
+      "test_name": "serving_qwen3b_tp1_random_mm_var_256_256_720_1280",
+      "server_parameters": {
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "tensor_parallel_size": 1,
+        "limit_mm_per_prompt": "'{\"image\": 4, \"video\": 0}'"
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "random-mm-base-items-per-request": 2,
+        "random-mm-num-mm-items-range-ratio": 0.5,
+        "random-mm-limit-mm-per-prompt": "'{\"image\": 4, \"video\": 0}'",
+        "random-mm-bucket-config": "'{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'"
+      }
+    },
+    {
+      "test_name": "serving_qwen7b_tp1_random_mm_1x448_448",
+      "server_parameters": {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "tensor_parallel_size": 1,
+        "limit_mm_per_prompt": "'{\"image\": 2, \"video\": 0}'"
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "random-mm-base-items-per-request": 1,
+        "random-mm-limit-mm-per-prompt": "'{\"image\": 2, \"video\": 0}'",
+        "random-mm-bucket-config": "'{(448, 448, 1): 1.0}'"
+      }
+    }
+  ]
+}
