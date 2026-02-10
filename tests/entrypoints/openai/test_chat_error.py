@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
@@ -14,7 +15,6 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -243,9 +243,9 @@ async def test_chat_error_stream():
         [{"image_url": {"url": "https://example.com/image.jpg"}}],
     ],
 )
-def test_system_message_rejects_image(image_content):
-    """Test that system messages cannot contain image content."""
-    with pytest.raises(VLLMValidationError) as exc_info:
+def test_system_message_warns_on_image(image_content, caplog):
+    """Test that system messages with image content trigger a warning."""
+    with caplog.at_level(logging.WARNING):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -256,8 +256,10 @@ def test_system_message_rejects_image(image_content):
             ],
         )
 
-    assert "System messages can only contain text content" in str(exc_info.value)
-    assert "image_url" in str(exc_info.value)
+    assert any(
+        "System messages should only contain text" in msg and "image_url" in msg
+        for msg in caplog.messages
+    )
 
 
 def test_system_message_accepts_text():
@@ -320,9 +322,9 @@ def test_user_message_accepts_image():
         [{"input_audio": {"data": "base64data", "format": "wav"}}],
     ],
 )
-def test_system_message_rejects_audio(audio_content):
-    """Test that system messages cannot contain audio content."""
-    with pytest.raises(VLLMValidationError) as exc_info:
+def test_system_message_warns_on_audio(audio_content, caplog):
+    """Test that system messages with audio content trigger a warning."""
+    with caplog.at_level(logging.WARNING):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -333,8 +335,10 @@ def test_system_message_rejects_audio(audio_content):
             ],
         )
 
-    assert "System messages can only contain text content" in str(exc_info.value)
-    assert "input_audio" in str(exc_info.value)
+    assert any(
+        "System messages should only contain text" in msg and "input_audio" in msg
+        for msg in caplog.messages
+    )
 
 
 @pytest.mark.parametrize(
@@ -344,9 +348,9 @@ def test_system_message_rejects_audio(audio_content):
         [{"video_url": {"url": "https://example.com/video.mp4"}}],
     ],
 )
-def test_system_message_rejects_video(video_content):
-    """Test that system messages cannot contain video content."""
-    with pytest.raises(VLLMValidationError) as exc_info:
+def test_system_message_warns_on_video(video_content, caplog):
+    """Test that system messages with video content trigger a warning."""
+    with caplog.at_level(logging.WARNING):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -357,5 +361,7 @@ def test_system_message_rejects_video(video_content):
             ],
         )
 
-    assert "System messages can only contain text content" in str(exc_info.value)
-    assert "video_url" in str(exc_info.value)
+    assert any(
+        "System messages should only contain text" in msg and "video_url" in msg
+        for msg in caplog.messages
+    )

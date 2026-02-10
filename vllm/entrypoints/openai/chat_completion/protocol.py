@@ -678,9 +678,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_system_message_content_type(cls, data):
-        """Validate that system messages only contain text content.
+        """Warn if system messages contain non-text content.
 
-        According to OpenAI API spec, system messages can only be of type 'text'.
+        According to OpenAI API spec, system messages can only be of type
+        'text'. We log a warning instead of rejecting to avoid breaking
+        users who intentionally send multimodal system messages.
         See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
         """
         messages = data.get("messages", [])
@@ -709,12 +711,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 elif "video_url" in part:
                                     part_type = "video_url"
 
-                            # Reject any content type that is not text
+                            # Warn about non-text content in system messages
                             if part_type and part_type != "text":
-                                raise VLLMValidationError(
-                                    f"System messages can only contain text content. "
-                                    f"Found content type: '{part_type}'.",
-                                    parameter="messages",
+                                logger.warning(
+                                    "System messages should only contain text "
+                                    "content according to the OpenAI API spec. "
+                                    "Found content type: '%s'.",
+                                    part_type,
                                 )
 
         return data
