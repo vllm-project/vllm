@@ -984,10 +984,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             strategy = self.quant_config.kv_cache_scheme["strategy"]
 
         if strategy == "attn_head":
-            assert layer.impl.supports_per_head_quant_scales, (
-                f"Layer {layer.__class__.__name__} with implementation "
-                f"{layer.impl.__class__.__name__} does not support per-head scales."
-            )
+            # Backend selection ensures a compatible backend is chosen when
+            # per-head quant scales are required (via requires_per_head_quant_scales).
             n_scales = int(layer.num_kv_heads)
         else:
             n_scales = 1

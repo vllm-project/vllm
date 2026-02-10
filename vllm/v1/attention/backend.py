@@ -188,6 +188,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -225,6 +229,7 @@ class AttentionBackend(ABC):
         has_sink: bool,
         use_sparse: bool,
         use_mm_prefix: bool,
+        requires_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -253,6 +258,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("sparse not supported")
             else:
                 invalid_reasons.append("non-sparse not supported")
+        if requires_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+            invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
@@ -635,7 +642,6 @@ class AttentionImplBase(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
-    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int

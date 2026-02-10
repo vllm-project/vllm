@@ -229,12 +229,19 @@ class Attention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
-        if getattr(quant_config, "kv_cache_scheme", None) is not None:
+        kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
+        if kv_cache_scheme is not None:
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8"
                 cache_config.calculate_kv_scales = False
+
+        # Check if per-head quant scales are required based on kv_cache_scheme
+        requires_per_head_quant_scales = (
+            kv_cache_scheme is not None
+            and kv_cache_scheme.get("strategy") == "attn_head"
+        )
 
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
@@ -272,6 +279,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
+                requires_per_head_quant_scales=requires_per_head_quant_scales,
                 attn_type=attn_type,
             )
         else:
