@@ -82,7 +82,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
                 "Captured AttributeError, KeyError, or IndexError when calling "
                 "'_get_num_multimodal_tokens'. This is likely a bug in the "
                 "transformers library for processor %s. "
-                "Returning 0 as a fallback.", processor.__class__.__name__)
+                "Returning 0 as a fallback.",
+                processor.__class__.__name__,
+            )
             return 0
 
         return image_tokens
@@ -240,7 +242,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 image_sizes=image_sizes, **mm_processor_kwargs
             )
             # Ensure required keys are present before proceeding.
-            if not all(k in mm_tokens_per_modality for k in ("num_image_tokens", "num_image_patches")):
+            if not all(
+                k in mm_tokens_per_modality
+                for k in ("num_image_tokens", "num_image_patches")
+            ):
                 raise KeyError("Missing required keys from _get_num_multimodal_tokens")
         except (AttributeError, KeyError):
             logger.warning(
@@ -248,11 +253,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 "'_get_num_multimodal_tokens'. This is likely a bug in the "
                 "transformers library for processor %s. "
                 "Using an empty dict as a fallback.",
-                hf_processor.__class__.__name__)
-            mm_tokens_per_modality = {
-                "num_image_tokens": [],
-                "num_image_patches": []
-            }
+                hf_processor.__class__.__name__,
+            )
+            mm_tokens_per_modality = {"num_image_tokens": [], "num_image_patches": []}
 
         mm_placeholders = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
