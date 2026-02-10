@@ -1127,11 +1127,6 @@ class TTModelRunner:
                 None if s == SEED_NONE_SENTINEL else s
                 for s in sampling_param_dict["seed"]
             ]
-            # Cap top_k values to MAX_K for on-device sampling due to
-            # https://github.com/tenstorrent/tt-metal/issues/35661
-            sampling_param_dict["top_k"] = [
-                min(k, MAX_K) for k in sampling_param_dict["top_k"]
-            ]
             kwargs["sampling_params"] = TTSamplingParams(**sampling_param_dict)
 
             # Pass prompt and output tokens for decode with sampling penalties
