@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 
 
 def test_gpu_memory_utilization():
@@ -15,13 +16,17 @@ def test_gpu_memory_utilization():
 
     # makes sure gpu_memory_utilization is per-instance limit,
     # not a global limit
-    llms = [
-        LLM(model="facebook/opt-125m", gpu_memory_utilization=0.3, enforce_eager=True)
-        for i in range(3)
-    ]
-    for llm in llms:
-        outputs = llm.generate(prompts, sampling_params)
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    try:
+        llms = [
+            LLM(model="facebook/opt-125m",
+                gpu_memory_utilization=0.3,
+                enforce_eager=True) for i in range(3)
+        ]
+        for llm in llms:
+            outputs = llm.generate(prompts, sampling_params)
+            for output in outputs:
+                prompt = output.prompt
+                generated_text = output.outputs[0].text
+                print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    finally:
+        cleanup_dist_env_and_memory()

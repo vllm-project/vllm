@@ -9,7 +9,7 @@ steps:
       docker build
       --build-arg max_jobs=16
       --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
+      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
       --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
       --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
       -f docker/Dockerfile.rocm
