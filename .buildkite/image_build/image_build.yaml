@@ -3,6 +3,7 @@ steps:
   - label: ":docker: Build image"
     key: image-build
     depends_on: []
+    timeout_in_minutes: 600
     commands:
     - if [[ "$BUILDKITE_BRANCH" != "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG; fi
     - if [[ "$BUILDKITE_BRANCH" == "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG $IMAGE_TAG_LATEST; fi
@@ -41,7 +42,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  
+
   - label: ":docker: Build CPU arm64 image"
     key: cpu-arm64-image-build
     depends_on: []
