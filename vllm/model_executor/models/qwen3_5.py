@@ -99,6 +99,7 @@ from .interfaces import (
 )
 from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from .qwen3_next import (
+    ChunkGatedDeltaRule,
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextGatedDeltaNet,
@@ -267,6 +268,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
