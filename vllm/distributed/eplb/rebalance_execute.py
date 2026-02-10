@@ -587,11 +587,10 @@ async def transfer_layer(
             For example, a linear layer may have up and down projection,
             so weight_count = 2. Each weight's hidden size can be different.
         ep_group: The device process group for expert parallelism.
+        communicator: EplbCommunicator instance for P2P communication.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
-        communicator_backend: Backend for EPLB communication ("torch" or "pynccl").
-            Defaults to "torch".
 
     Returns:
         is_unchanged (np.ndarray): (1, num_local_experts), True where expert
@@ -663,12 +662,11 @@ def rearrange_expert_weights_inplace(
             For example, a linear layer may have up and down projection,
             so weight_count = 2. Each weight's hidden size can be different.
         ep_group: The device process group for expert parallelism.
+        communicator: EplbCommunicator instance for P2P communication.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
-        communicator_backend: Backend for EPLB communication ("torch" or "pynccl").
-            Defaults to "torch".
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
