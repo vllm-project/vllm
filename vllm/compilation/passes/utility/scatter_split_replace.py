@@ -13,7 +13,7 @@ using `getitem` calls. However, we also write to the qkv tensor inplace using a
 Instead, if the inplace tensor has no subsequent users, we can just replace the
 `slice_scatter` and `split_with_sizes` nodes with the `getitem` calls.
 
-This is already done in fin_functionalization::FixFunctionalizationPass, but
+This is already done in fix_functionalization::FixFunctionalizationPass, but
 writing a custom pass for it before defunctionalization allows matching against the
 qkv split+rotary_embedding subpattern as part of e.g. the RoPE+KVCache fusion pass.
 """
