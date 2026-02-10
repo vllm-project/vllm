@@ -52,8 +52,9 @@ def _strip_internal_id_suffix(request_id: str) -> str:
     NCCL send/recv key ensures both sides agree on the same key.
     """
     if (
-        len(request_id) > _INTERNAL_ID_SUFFIX_LEN
+        len(request_id) >= _INTERNAL_ID_SUFFIX_LEN
         and request_id[-_INTERNAL_ID_SUFFIX_LEN] == "-"
+        and all(c in "0123456789abcdef" for c in request_id[-8:])
     ):
         return request_id[:-_INTERNAL_ID_SUFFIX_LEN]
     # Fallback: if the format doesn't match, return as-is.
