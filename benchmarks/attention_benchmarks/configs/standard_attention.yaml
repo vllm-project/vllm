@@ -1,0 +1,48 @@
+# Standard attention backend benchmark configuration
+
+model:
+  num_layers: 32
+  num_q_heads: 32
+  num_kv_heads: 8  # GQA with 4:1 ratio
+  head_dim: 128
+  block_size: 16
+
+batch_specs:
+  # Pure prefill
+  - "q512"      # Small prefill (512 tokens)
+  - "q2k"       # Medium prefill (2048 tokens)
+  - "q4k"       # Large prefill (4096 tokens)
+  - "q8k"       # Very large prefill (8192 tokens)
+
+  # Pure decode
+  - "8q1s1k"      # 8 requests, 1k KV cache each
+  - "16q1s2k"     # 16 requests, 2k KV cache each
+  - "32q1s1k"     # 32 requests, 1k KV cache each
+  - "64q1s4k"     # 64 requests, 4k KV cache each
+
+  # Mixed prefill/decode
+  - "2q2k_8q1s1k"      # 2 prefill + 8 decode
+  - "4q1k_16q1s2k"     # 4 prefill + 16 decode
+  - "2q4k_32q1s1k"     # 2 large prefill + 32 decode
+
+  # Speculative decode (q <= 8)
+  - "16q2s1k"         # 16 requests, 2 spec tokens, 1k KV cache
+  - "16q4s1k"         # 16 requests, 4 spec tokens, 1k KV cache
+  - "16q8s1k"         # 16 requests, 8 spec tokens, 1k KV cache
+  - "32q4s2k"         # 32 requests, 4 spec tokens, 2k KV cache
+  - "8q8s4k"          # 8 requests, 8 spec tokens, 4k KV cache
+
+  # Context extension (chunked prefill)
+  - "q1ks2k"          # 1k query, 2k sequence
+  - "2q1ks4k"         # 2 requests: 1k query, 4k sequence
+
+# Available backends: flash, triton, flashinfer
+backends:
+  - flash
+  - triton
+  - flashinfer
+
+device: "cuda:0"
+repeats: 5
+warmup_iters: 3
+profile_memory: false

@@ -10,7 +10,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -29,10 +28,15 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule,
+    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+)
+from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
+from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -48,6 +52,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -99,11 +105,120 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def fi_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.LongTensor | None = None,
+    head_first: bool = False,
+    use_qk_l2norm_in_kernel: bool = True,
+):
+    from flashinfer.gdn_prefill import (
+        chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
+    )
+
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
+    # use flashinfer implementation
+    q = q.squeeze(0).contiguous()
+    k = k.squeeze(0).contiguous()
+    v = v.squeeze(0).contiguous()
+
+    g = g.squeeze(0).contiguous()
+    beta = beta.squeeze(0).contiguous()
+    fi_state = initial_state.to(torch.float32)
+    fi_g = g.to(torch.float32)
+    fi_beta = beta.to(torch.float32)
+    output, final_state = chunk_gated_delta_rule_fi(
+        q=q,
+        k=k,
+        v=v,
+        g=torch.exp(fi_g),
+        beta=fi_beta,
+        initial_state=fi_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+    )
+    # Unsqueeze back to 4D (1, L, H, D) to match fla output format
+    return output.unsqueeze(0), final_state
+
+
+@CustomOp.register("chunk_gated_delta_rule")
+class ChunkGatedDeltaRule(CustomOp):
+    def __init__(self) -> None:
+        super().__init__()
+        if current_platform.is_cuda() and current_platform.is_device_capability(90):
+            logger.info_once(
+                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+            )
+            self._forward_method = self.forward_cuda
+        else:
+            self._forward_method = self.forward_native
+
+    def forward_cuda(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.LongTensor | None = None,
+        head_first: bool = False,
+        use_qk_l2norm_in_kernel: bool = True,
+    ):
+        return fi_chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            head_first=head_first,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    def forward_native(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.LongTensor | None = None,
+        head_first: bool = False,
+        use_qk_l2norm_in_kernel: bool = True,
+    ):
+        return fla_chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            head_first=head_first,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
@@ -174,7 +289,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
-            renormalize=config.norm_topk_prob,
+            renormalize=getattr(config, "norm_topk_prob", True),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
@@ -359,6 +474,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -645,7 +762,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = chunk_gated_delta_rule(
+            ) = self.chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -963,7 +1080,7 @@ class Qwen3NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config: Qwen3NextConfig = vllm_config.model_config.hf_config
+        config: Qwen3NextConfig = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
 
         eplb_config = parallel_config.eplb_config
@@ -1002,7 +1119,7 @@ class Qwen3NextModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1040,7 +1157,7 @@ class Qwen3NextModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=getattr(self.config, "num_experts", 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1199,15 +1316,17 @@ class Qwen3NextForCausalLM(
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3Next currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -1235,7 +1354,7 @@ class Qwen3NextForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1261,7 +1380,7 @@ class Qwen3NextForCausalLM(
         cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
@@ -1277,6 +1396,10 @@ class Qwen3NextForCausalLM(
             hf_config.linear_conv_kernel_dim,
             num_spec,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def compute_logits(
         self,
