@@ -271,7 +271,7 @@ def use_aot_compile() -> bool:
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.11.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
         else "0"
     )
 
@@ -1604,6 +1604,15 @@ def is_set(name: str):
     if name in environment_variables:
         return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def validate_environ(hard_fail: bool) -> None:
+    for env in os.environ:
+        if env.startswith("VLLM_") and env not in environment_variables:
+            if hard_fail:
+                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
+            else:
+                logger.warning("Unknown vLLM environment variable detected: %s", env)
 
 
 def compile_factors() -> dict[str, object]:
