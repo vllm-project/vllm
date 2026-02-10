@@ -144,9 +144,8 @@ def _penalties_kernel(
     pos = 0
     for i in tl.static_range(MAX_SPEC_LEN):
         check_idx = token_idx - i - 1
-        if check_idx >= 0:
-            prev_req = tl.load(idx_mapping_ptr + check_idx)
-            pos += (prev_req == req_state_idx).to(tl.int32)
+        prev_req = tl.load(idx_mapping_ptr + check_idx, mask=check_idx >= 0, other=-1)
+        pos += (prev_req == req_state_idx).to(tl.int32)
     start_idx = token_idx - pos
     draft_counts = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
     for prev_pos in tl.static_range(MAX_SPEC_LEN):
