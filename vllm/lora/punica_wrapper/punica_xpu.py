@@ -7,7 +7,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Optional, Union, final
+from typing import final
 
 import torch
 
@@ -29,7 +29,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
@@ -40,16 +40,13 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     def update_metadata(
         self,
         mapping: LoRAMapping,
-        lora_index_to_id: list[Optional[int]],
+        lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(
-            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
-        )
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
@@ -180,7 +177,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         scale: float,
         output_slices: tuple[int, ...],
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -247,7 +244,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """

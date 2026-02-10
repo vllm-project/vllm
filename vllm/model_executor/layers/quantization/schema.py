@@ -13,8 +13,6 @@ possible on ROCm), the model can be optionally augmented with KV cache
 scaling factors.
 """
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 
 
@@ -75,7 +73,7 @@ class QuantParamSchema(BaseModel):
     # TODO: Generalize and extend with more fields
     # (e.g. weights/activations params) once functionality is enabled
     model_config = ConfigDict(protected_namespaces=())
-    model_type: Optional[str]
+    model_type: str | None
     kv_cache: KVCacheQuantSchema
 
     @model_validator(mode="after")

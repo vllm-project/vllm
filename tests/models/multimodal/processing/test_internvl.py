@@ -3,7 +3,6 @@
 """Tests for InternVL's multimodal preprocessing kwargs."""
 
 from collections.abc import Mapping
-from typing import Optional
 
 import pytest
 from PIL import Image
@@ -67,7 +66,11 @@ def _run_check(
         for image in images
     )
 
-    processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=mm_processor_kwargs,
+    )
 
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
@@ -103,7 +106,7 @@ def test_processor_override(
     size_factors: list[int],
     min_dynamic_patch: int,
     max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
+    dynamic_image_size: bool | None,
     kwargs_on_init: bool,
 ):
     mm_processor_kwargs = {

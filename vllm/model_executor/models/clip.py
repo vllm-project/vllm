@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -14,18 +14,18 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention import Attention
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -40,13 +40,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -58,6 +58,7 @@ from .vision import (
     VisionFeatureSelectStrategy,
     VisionFeatureSelectStrategyStr,
     get_num_selected_vision_tokens,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -125,7 +126,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(CLIPProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_num_image_tokens(
@@ -144,7 +145,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -169,7 +170,7 @@ class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -199,21 +200,21 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
 
     def apply(
         self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
+        prompt: str | list[int],
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
+        if prompt and mm_items:
             raise ValueError(
                 "CLIP accepts text-only or image-only inputs, not both! "
                 "Image-only inputs means passing an image with an empty text "
                 "prompt."
             )
 
-        if mm_data:
+        if mm_items:
             # For multi-modal data, the prompt after processing should
             # only contain the dummy image tokens
             tokenization_kwargs = {
@@ -223,7 +224,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
 
         return super().apply(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -286,9 +287,9 @@ class CLIPTextEmbeddings(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             if input_ids is None:
@@ -315,7 +316,7 @@ class CLIPVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -350,11 +351,11 @@ class CLIPVisionEmbeddings(nn.Module):
 class CLIPAttention(nn.Module):
     def __init__(
         self,
-        config: Union[CLIPTextConfig, CLIPVisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
+        config: CLIPTextConfig | CLIPVisionConfig,
+        quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -364,18 +365,20 @@ class CLIPAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                "embed_dim must be divisible by num_heads "
-                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and "
+                f"`num_heads`: {self.num_heads})."
             )
         self.scale = self.head_dim**-0.5
 
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
         )
 
         self.out_proj = RowParallelLinear(
@@ -383,17 +386,28 @@ class CLIPAttention(nn.Module):
             output_size=self.embed_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=use_data_parallel,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = attn_cls(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale,
-            prefix=f"{prefix}.attn",
-        )
+        if attn_cls == MMEncoderAttention:
+            self.attn = attn_cls(
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                prefix=f"{prefix}.attn",
+            )
+        else:
+            self.attn = attn_cls(
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -412,19 +426,23 @@ class CLIPAttention(nn.Module):
 class CLIPMLP(nn.Module):
     def __init__(
         self,
-        config: Union[CLIPTextConfig, CLIPVisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
+        config: CLIPTextConfig | CLIPVisionConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
         self.config = config
+        use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
+
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
@@ -432,6 +450,7 @@ class CLIPMLP(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -445,13 +464,14 @@ class CLIPMLP(nn.Module):
 class CLIPEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: Union[CLIPTextConfig, CLIPVisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
+        config: CLIPTextConfig | CLIPVisionConfig,
+        quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
+
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
@@ -459,7 +479,11 @@ class CLIPEncoderLayer(nn.Module):
             attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = CLIPMLP(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -488,12 +512,12 @@ class CLIPEncoder(nn.Module):
 
     def __init__(
         self,
-        config: Union[CLIPTextConfig, CLIPVisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
-        num_hidden_layers_override: Optional[int] = None,
+        config: CLIPTextConfig | CLIPVisionConfig,
+        quant_config: QuantizationConfig | None = None,
+        num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
-        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -503,6 +527,7 @@ class CLIPEncoder(nn.Module):
             num_hidden_layers = config.num_hidden_layers
         else:
             num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList(
             [
                 CLIPEncoderLayer(
@@ -519,7 +544,7 @@ class CLIPEncoder(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         return_all_hidden_states: bool,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
 
@@ -538,7 +563,7 @@ class CLIPTextTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPTextConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -561,14 +586,14 @@ class CLIPTextTransformer(nn.Module):
             eps=config.layer_norm_eps,
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.token_embedding(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
             input_ids=input_ids,
@@ -616,10 +641,10 @@ class CLIPVisionTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -638,7 +663,7 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
+            attn_cls=MMEncoderAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -669,8 +694,8 @@ class CLIPVisionTransformer(nn.Module):
         self,
         pixel_values: torch.Tensor,
         *,
-        select_layers: Optional[list[int]] = None,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        select_layers: list[int] | None = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
@@ -736,10 +761,10 @@ class CLIPVisionModel(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -755,8 +780,8 @@ class CLIPVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        select_layers: Optional[list[int]] = None,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        select_layers: list[int] | None = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         return self.vision_model(
             pixel_values,
@@ -774,7 +799,7 @@ class CLIPVisionModel(nn.Module):
 
 
 # Assume EOS token corresponds to LAST token in text model
-@default_pooling_type("LAST")
+@default_pooling_type(seq_pooling_type="LAST")
 @MULTIMODAL_REGISTRY.register_processor(
     CLIPMultiModalProcessor,
     info=CLIPProcessingInfo,
@@ -784,10 +809,9 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    merge_by_field_config = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -809,47 +833,44 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
 
-        self.text_model = CLIPTextTransformer(
-            text_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
-        self.vision_model = CLIPVisionTransformer(
-            vision_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.text_model = CLIPTextTransformer(
+                text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text_model"),
+            )
+            self.text_projection = nn.Linear(
+                self.text_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
-        self.visual_projection = nn.Linear(
-            self.vision_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
-        self.text_projection = nn.Linear(
-            self.text_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = CLIPVisionTransformer(
+                vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.visual_projection = nn.Linear(
+                self.vision_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "encode": Pooler.for_encode(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
-        # Assumes that self.forward is called after self.get_input_embeddings
+        # Assumes that self.forward is called after self.embed_input_ids
         self._is_text_input = True
 
     def get_text_features(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         pooled_output = self.text_model(
             input_ids=input_ids,
@@ -864,11 +885,11 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_image_features(
         self,
         pixel_values: torch.Tensor,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
@@ -883,7 +904,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[CLIPImagePixelInputs]:
+    ) -> CLIPImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
@@ -900,15 +921,47 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         return self.get_image_features(pixel_values)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.text_model
-
-    def get_input_embeddings(
+    def _embed_text_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None,
+        handle_oov_mm_token: bool,
+    ) -> torch.Tensor:
+        inputs_embeds = super()._embed_text_input_ids(
+            input_ids,
+            embed_input_ids,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        inputs_embeds_size = self.projection_dim
+        if inputs_embeds.shape[1] < inputs_embeds_size:
+            inputs_embeds = torch.cat(
+                [
+                    inputs_embeds,
+                    inputs_embeds.new_empty(
+                        inputs_embeds.shape[0],
+                        inputs_embeds_size - inputs_embeds.shape[1],
+                    ),
+                ],
+                dim=1,
+            )
+        elif inputs_embeds.shape[1] > inputs_embeds_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return inputs_embeds
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         self._is_text_input = (
@@ -917,16 +970,16 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -936,10 +989,10 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
@@ -949,10 +1002,16 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # Text inputs
-        return self.get_text_features(
-            input_ids=input_ids, position_ids=positions, inputs_embeds=inputs_embeds
-        )
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        hidden_size = self.text_embed_dim
+        if inputs_embeds.shape[1] > hidden_size:
+            inputs_embeds = inputs_embeds[:, :hidden_size]
+        elif inputs_embeds.shape[1] < hidden_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return self.get_text_features(input_ids, positions, inputs_embeds)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from itertools import chain
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.v1.sample.logits_processor.interface import (
     AddedRequest,
@@ -43,9 +43,9 @@ class BatchUpdateBuilder:
 
     def __init__(
         self,
-        removed: Optional[list[RemovedRequest]] = None,
-        added: Optional[list[AddedRequest]] = None,
-        moved: Optional[list[MovedRequest]] = None,
+        removed: list[RemovedRequest] | None = None,
+        added: list[AddedRequest] | None = None,
+        moved: list[MovedRequest] | None = None,
     ) -> None:
         self._removed = removed or []
         self.added = added or []
@@ -92,14 +92,14 @@ class BatchUpdateBuilder:
     def has_removed(self) -> bool:
         return bool(self._removed)
 
-    def peek_removed(self) -> Optional[int]:
+    def peek_removed(self) -> int | None:
         """Return lowest removed request index"""
         if self.has_removed():
             self._ensure_removed_sorted()
             return self._removed[-1]
         return None
 
-    def pop_removed(self) -> Optional[int]:
+    def pop_removed(self) -> int | None:
         """Pop lowest removed request index"""
         if self.has_removed():
             self._ensure_removed_sorted()
@@ -116,7 +116,7 @@ class BatchUpdateBuilder:
         self.batch_changed = False
         return batch_changed
 
-    def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
+    def get_and_reset(self, batch_size: int) -> BatchUpdate | None:
         """Generate a logitsprocs batch update data structure and reset
         internal batch update builder state.
 
@@ -148,9 +148,7 @@ class BatchUpdateBuilder:
 class LogitsProcessors:
     """Encapsulates initialized logitsproc objects."""
 
-    def __init__(
-        self, logitsprocs: Optional[Iterator["LogitsProcessor"]] = None
-    ) -> None:
+    def __init__(self, logitsprocs: Iterator["LogitsProcessor"] | None = None) -> None:
         self.argmax_invariant: list[LogitsProcessor] = []
         self.non_argmax_invariant: list[LogitsProcessor] = []
         if logitsprocs:

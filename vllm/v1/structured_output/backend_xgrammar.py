@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -12,8 +10,8 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import LazyLoader
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -93,18 +91,19 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_regex(grammar_spec)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            ctx = self.compiler.compile_structural_tag(structural_tag)
+            if "structures" in s_tag:
+                # Falling back to deprecated method of compiling structural tag
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+            else:
+                ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -200,6 +199,25 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.reset()
 
 
+# cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
+STRING_SUPPORTED_FORMATS = {
+    "email",
+    "date",
+    "time",
+    "date-time",
+    "duration",
+    "ipv4",
+    "ipv6",
+    "hostname",
+    "uuid",
+    "uri",
+    "uri-reference",
+    "uri-template",
+    "json-pointer",
+    "relative-json-pointer",
+}
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -219,18 +237,16 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Unsupported keywords for strings
-        if obj.get("type") == "string" and "format" in obj:
+        if (
+            obj.get("type") == "string"
+            and "format" in obj
+            and obj["format"] not in STRING_SUPPORTED_FORMATS
+        ):
             return True
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 
@@ -288,17 +304,17 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         else:
             schema = so_params.json
 
+        if has_xgrammar_unsupported_json_features(schema):
+            raise ValueError(
+                "The provided JSON schema contains features not supported by xgrammar."
+            )
+
         try:
             xgr.Grammar.from_json_schema(schema)
         except Exception as err:
             raise ValueError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
-
-        if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
         return
 
     if so_params.grammar:
@@ -322,17 +338,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            xgr.Grammar.from_structural_tag(structural_tag)
+
+            # Using the deprecated method of compiling structural tag
+            if "structures" in s_tag:
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+            else:
+                xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e

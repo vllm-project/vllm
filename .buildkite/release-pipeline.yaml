@@ -1,171 +1,713 @@
 steps:
-  # aarch64 + CUDA builds. PyTorch 2.8 aarch64 + CUDA wheel is only available on CUDA 12.9
-  - label: "Build arm64 wheel - CUDA 12.9"
-    depends_on: ~
-    id: build-wheel-arm64-cuda-12-9
-    agents:
-      queue: arm64_cpu_queue_postmerge
-    commands:
-      # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
-      # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg VLLM_MAIN_CUDA_VERSION=12.9 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
-      - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build wheel - CUDA 12.8"
-    depends_on: ~
-    id: build-wheel-cuda-12-8
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
-      - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build wheel - CUDA 12.6"
-    depends_on: ~
-    id: build-wheel-cuda-12-6
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.6.3 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
-      - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  # x86 + CUDA builds
-  - label: "Build wheel - CUDA 12.9"
-    depends_on: ~
-    id: build-wheel-cuda-12-9
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
-      - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build release image (x86)"
-    depends_on: ~
-    id: build-release-image-x86
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
-      # re-tag to default image tag and push, just in case arm64 build fails
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
-
-  # PyTorch 2.8 aarch64 + CUDA wheel is only available on CUDA 12.9
-  - label: "Build release image (arm64)"
-    depends_on: ~
-    id: build-release-image-arm64
-    agents:
-      queue: arm64_cpu_queue_postmerge
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
-
-  # Add job to create multi-arch manifest
-  - label: "Create multi-arch manifest"
-    depends_on:
-      - build-release-image-x86
-      - build-release-image-arm64
-    id: create-multi-arch-manifest
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
-      - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
-
-  - label: "Annotate release workflow"
-    depends_on:
-      - create-multi-arch-manifest
-      - build-wheel-cuda-12-8
-    id: annotate-release-workflow
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "bash .buildkite/scripts/annotate-release.sh"
-
-  - label: "Build and publish TPU release image"
-    depends_on: ~
-    if: build.env("NIGHTLY") == "1"
-    agents:
-      queue: tpu_queue_postmerge
-    commands:
-      - "yes | docker system prune -a"
-      - "git fetch --all"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f docker/Dockerfile.tpu ."
-      - "docker push vllm/vllm-tpu:nightly"
-      - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
-    env:
-      DOCKER_BUILDKIT: "1"
-
   - input: "Provide Release version here"
     id: input-release-version
     fields:
       - text: "What is the release version?"
         key: release-version
 
-  - block: "Build CPU release image"
-    key: block-cpu-release-image-build
+  - group: "Build Python wheels"
+    key: "build-wheels"
+    steps:
+      - label: "Build wheel - aarch64 - CUDA 12.9"
+        depends_on: ~
+        id: build-wheel-arm64-cuda-12-9
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
+          # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - aarch64 - CUDA 13.0"
+        depends_on: ~
+        id: build-wheel-arm64-cuda-13-0
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
+          # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04  --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - aarch64 - CPU"
+        depends_on: ~
+        id: build-wheel-arm64-cpu
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_BUILD_ACL=ON --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - x86_64 - CUDA 12.9"
+        depends_on: ~
+        id: build-wheel-x86-cuda-12-9
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_31"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - x86_64 - CUDA 13.0"
+        depends_on: ~
+        id: build-wheel-x86-cuda-13-0
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - x86_64 - CPU"
+        depends_on: ~
+        id: build-wheel-x86-cpu
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+  - group: "Build release Docker images"
+    key: "build-release-images"
+    steps:
+      - label: "Build release image - x86_64 - CUDA 12.9"
+        depends_on: ~
+        id: build-release-image-x86
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
+          # re-tag to default image tag and push, just in case arm64 build fails
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+      - label: "Build release image - aarch64 - CUDA 12.9"
+        depends_on: ~
+        id: build-release-image-arm64
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
+
+      - label: "Build release image - x86_64 - CUDA 13.0"
+        depends_on: ~
+        id: build-release-image-x86-cuda-13-0
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+          # re-tag to default image tag and push, just in case arm64 build fails
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+
+      - label: "Build release image - aarch64 - CUDA 13.0"
+        depends_on: ~
+        id: build-release-image-arm64-cuda-13-0
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          # compute capability 12.0 for RTX-50 series / RTX PRO 6000 Blackwell, 12.1 for DGX Spark
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0 12.1' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+
+      - block: "Build release image for x86_64 CPU"
+        key: block-cpu-release-image-build
+        depends_on: ~
+
+      - label: "Build release image - x86_64 - CPU"
+        depends_on:
+          - block-cpu-release-image-build
+          - input-release-version
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - block: "Build release image for arm64 CPU"
+        key: block-arm64-cpu-release-image-build
+        depends_on: ~
+
+      - label: "Build release image - arm64 - CPU"
+        depends_on: 
+          - block-arm64-cpu-release-image-build
+          - input-release-version
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+  - group: "Publish release images"
+    key: "publish-release-images"
+    steps:
+      - label: "Create multi-arch manifest - CUDA 12.9"
+        depends_on:
+          - build-release-image-x86
+          - build-release-image-arm64
+        id: create-multi-arch-manifest
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+      - label: "Annotate release workflow - CUDA 12.9"
+        depends_on:
+          - create-multi-arch-manifest
+        id: annotate-release-workflow
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/annotate-release.sh"
+
+      - label: "Create multi-arch manifest - CUDA 13.0"
+        depends_on:
+          - build-release-image-x86-cuda-13-0
+          - build-release-image-arm64-cuda-13-0
+        id: create-multi-arch-manifest-cuda-13-0
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu130 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+
+      - label: "Publish nightly multi-arch image to DockerHub"
+        depends_on:
+          - create-multi-arch-manifest
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds.sh"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - label: "Publish nightly multi-arch image to DockerHub - CUDA 13.0"
+        depends_on:
+          - create-multi-arch-manifest-cuda-13-0
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds.sh cu130"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu130-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+  - group: "Publish wheels"
+    key: "publish-wheels"
+    steps:
+      - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
+        key: block-upload-release-wheels
+        depends_on:
+          - input-release-version
+          - build-wheels
+
+      - label: "Upload release wheels to PyPI"
+        depends_on:
+          - block-upload-release-wheels
+        id: upload-release-wheels
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
+
+  # =============================================================================
+  # ROCm Release Pipeline (x86_64 only)
+  # =============================================================================
+  #
+  # vLLM version is determined by the Buildkite checkout (like CUDA pipeline).
+  # To build a specific version, trigger the build from that branch/tag.
+  #
+  # Environment variables for ROCm builds (set via Buildkite UI or schedule):
+  #   ROCM_PYTHON_VERSION: Python version (default: 3.12)
+  #   PYTORCH_ROCM_ARCH: GPU architectures (default: gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151)
+  #   ROCM_UPLOAD_WHEELS: Upload to S3 (default: false for nightly, true for releases)
+  #   ROCM_FORCE_REBUILD: Force rebuild base wheels, ignore S3 cache (default: false)
+  #
+  # Note: ROCm version is determined by BASE_IMAGE in docker/Dockerfile.rocm_base
+  #       (currently rocm/dev-ubuntu-22.04:7.1-complete)
+  #
+  # =============================================================================
+
+  # ROCm Input Step - Collect build configuration (manual trigger only)
+  - input: "ROCm Wheel Release Build Configuration"
+    key: input-rocm-config
     depends_on: ~
+    if: build.source == "ui"
+    fields:
+      - text: "Python Version"
+        key: "rocm-python-version"
+        default: "3.12"
+        hint: "Python version (e.g., 3.12)"
+      - text: "GPU Architectures"
+        key: "rocm-pytorch-rocm-arch"
+        default: "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+        hint: "Semicolon-separated GPU architectures"
+      - select: "Upload Wheels to S3"
+        key: "rocm-upload-wheels"
+        default: "true"
+        options:
+          - label: "No - Build only (nightly/dev)"
+            value: "false"
+          - label: "Yes - Upload to S3 (release)"
+            value: "true"
+      - select: "Force Rebuild Base Wheels"
+        key: "rocm-force-rebuild"
+        default: "false"
+        hint: "Ignore S3 cache and rebuild base wheels from scratch"
+        options:
+          - label: "No - Use cached wheels if available"
+            value: "false"
+          - label: "Yes - Rebuild even if cache exists"
+            value: "true"
 
-  - label: "Build and publish CPU release image"
-    depends_on: block-cpu-release-image-build
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build and publish nightly multi-arch image to DockerHub"
+  # ROCm Job 1: Build ROCm Base Wheels (with S3 caching)
+  - label: ":rocm: Build ROCm Base Wheels"
+    id: build-rocm-base-wheels
     depends_on:
-      - create-multi-arch-manifest
-    if: build.env("NIGHTLY") == "1"
+      - step: input-rocm-config
+        allow_failure: true  # Allow failure so non-UI builds can proceed (input step is skipped)
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:nightly-x86_64"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:nightly-aarch64"
-      - "docker push vllm/vllm-openai:nightly-x86_64"
-      - "docker push vllm/vllm-openai:nightly-aarch64"
-      - "docker manifest create vllm/vllm-openai:nightly vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
-      - "docker manifest create vllm/vllm-openai:nightly-$BUILDKITE_COMMIT vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
-      - "docker manifest push vllm/vllm-openai:nightly"
-      - "docker manifest push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
-      # Clean up old nightly builds (keep only last 14)
-      - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
+      # Set configuration and check cache
+      - |
+        set -euo pipefail
+
+        # Get values from meta-data (set by input step) or use defaults
+        PYTHON_VERSION="$$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo '')"
+        export PYTHON_VERSION="$${PYTHON_VERSION:-3.12}"
+
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        export PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+
+        # Check for force rebuild flag
+        ROCM_FORCE_REBUILD="$${ROCM_FORCE_REBUILD:-}"
+        if [ -z "$${ROCM_FORCE_REBUILD}" ]; then
+          ROCM_FORCE_REBUILD="$$(buildkite-agent meta-data get rocm-force-rebuild 2>/dev/null || echo '')"
+        fi
+
+        echo "========================================"
+        echo "ROCm Base Wheels Build Configuration"
+        echo "========================================"
+        echo "  PYTHON_VERSION: $${PYTHON_VERSION}"
+        echo "  PYTORCH_ROCM_ARCH: $${PYTORCH_ROCM_ARCH}"
+        echo "  ROCM_FORCE_REBUILD: $${ROCM_FORCE_REBUILD:-false}"
+        echo "========================================"
+
+        # Save resolved config for later jobs
+        buildkite-agent meta-data set "rocm-python-version" "$${PYTHON_VERSION}"
+        buildkite-agent meta-data set "rocm-pytorch-rocm-arch" "$${PYTORCH_ROCM_ARCH}"
+
+        # Check S3 cache for pre-built wheels
+        CACHE_KEY=$$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
+        CACHE_PATH=$$(.buildkite/scripts/cache-rocm-base-wheels.sh path)
+        echo ""
+        echo "Cache key: $${CACHE_KEY}"
+        echo "Cache path: $${CACHE_PATH}"
+
+        # Save cache key for downstream jobs
+        buildkite-agent meta-data set "rocm-cache-key" "$${CACHE_KEY}"
+
+        CACHE_STATUS="miss"
+        if [ "$${ROCM_FORCE_REBUILD}" != "true" ]; then
+          CACHE_STATUS=$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
+        else
+          echo "Force rebuild requested, skipping cache check"
+        fi
+
+        if [ "$${CACHE_STATUS}" = "hit" ]; then
+          echo ""
+          echo "CACHE HIT! Downloading pre-built wheels..."
+          echo ""
+          .buildkite/scripts/cache-rocm-base-wheels.sh download
+
+          # Set the S3 path for the cached Docker image (for Job 2 to download)
+          S3_ARTIFACT_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
+          buildkite-agent meta-data set "rocm-docker-image-s3-path" "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
+
+          # Mark that we used cache (for Docker image handling)
+          buildkite-agent meta-data set "rocm-used-cache" "true"
+
+          echo ""
+          echo "Cache download complete. Skipping Docker build."
+          echo "Docker image will be downloaded from: $${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
+        else
+          echo ""
+          echo "CACHE MISS. Building from scratch..."
+          echo ""
+
+          # Build full base image (for later vLLM build)
+          DOCKER_BUILDKIT=1 docker buildx build \
+            --file docker/Dockerfile.rocm_base \
+            --tag rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER} \
+            --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+            --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+            --build-arg USE_SCCACHE=1 \
+            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+            --build-arg SCCACHE_REGION_NAME=us-west-2 \
+            --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+            --load \
+            .
+
+          # Build debs_wheel_release stage for wheel extraction
+          DOCKER_BUILDKIT=1 docker buildx build \
+            --file docker/Dockerfile.rocm_base \
+            --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
+            --target debs_wheel_release \
+            --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+            --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+            --build-arg USE_SCCACHE=1 \
+            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+            --build-arg SCCACHE_REGION_NAME=us-west-2 \
+            --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+            --load \
+            .
+
+          # Extract wheels from Docker image
+          mkdir -p artifacts/rocm-base-wheels
+          container_id=$$(docker create rocm-base-debs:$${BUILDKITE_BUILD_NUMBER})
+          docker cp $${container_id}:/app/debs/. artifacts/rocm-base-wheels/
+          docker rm $${container_id}
+          echo "Extracted base wheels:"
+          ls -lh artifacts/rocm-base-wheels/
+
+          # Upload wheels to S3 cache for future builds
+          echo ""
+          echo "Uploading wheels to S3 cache..."
+          .buildkite/scripts/cache-rocm-base-wheels.sh upload
+
+          # Export base Docker image for reuse in vLLM build
+          mkdir -p artifacts/rocm-docker-image
+          docker save rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER} | gzip > artifacts/rocm-docker-image/rocm-base-image.tar.gz
+          echo "Docker image size:"
+          ls -lh artifacts/rocm-docker-image/
+
+          # Upload large Docker image to S3 (also cached by cache key)
+          S3_ARTIFACT_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
+          echo "Uploading Docker image to $${S3_ARTIFACT_PATH}/"
+          aws s3 cp artifacts/rocm-docker-image/rocm-base-image.tar.gz "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
+
+          # Save the S3 path for downstream jobs
+          buildkite-agent meta-data set "rocm-docker-image-s3-path" "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
+
+          # Mark that we did NOT use cache
+          buildkite-agent meta-data set "rocm-used-cache" "false"
+
+          echo ""
+          echo "Build complete. Wheels cached for future builds."
+        fi
+    artifact_paths:
+      - "artifacts/rocm-base-wheels/*.whl"
     env:
       DOCKER_BUILDKIT: "1"
-      DOCKERHUB_USERNAME: "vllmbot"
+      S3_BUCKET: "vllm-wheels"
+
+  # ROCm Job 2: Build vLLM ROCm Wheel
+  - label: ":python: Build vLLM ROCm Wheel - x86_64"
+    id: build-rocm-vllm-wheel
+    depends_on:
+      - step: build-rocm-base-wheels
+        allow_failure: false
+    agents:
+      queue: cpu_queue_postmerge
+    timeout_in_minutes: 180
+    commands:
+      # Download artifacts and prepare Docker image
+      - |
+        set -euo pipefail
+
+        # Ensure git tags are up-to-date (Buildkite's default fetch doesn't update tags)
+        # This fixes version detection when tags are moved/force-pushed
+        echo "Fetching latest tags from origin..."
+        git fetch --tags --force origin
+        
+        # Log tag information for debugging version detection
+        echo "========================================"
+        echo "Git Tag Verification"
+        echo "========================================"
+        echo "Current HEAD: $(git rev-parse HEAD)"
+        echo "git describe --tags: $(git describe --tags 2>/dev/null || echo 'No tags found')"
+        echo ""
+        echo "Recent tags (pointing to commits near HEAD):"
+        git tag -l --sort=-creatordate | head -5
+        echo "setuptools_scm version detection:"
+        pip install -q setuptools_scm 2>/dev/null || true
+        python3 -c "import setuptools_scm; print('  Detected version:', setuptools_scm.get_version())" 2>/dev/null || echo "  (setuptools_scm not available in this environment)"
+        echo "========================================"
+
+        # Download wheel artifacts from current build
+        echo "Downloading wheel artifacts from current build"
+        buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
+
+        # Download Docker image from S3 (too large for Buildkite artifacts)
+        DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
+        if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
+          echo "ERROR: rocm-docker-image-s3-path metadata not found"
+          echo "This should have been set by the build-rocm-base-wheels job"
+          exit 1
+        fi
+        echo "Downloading Docker image from $${DOCKER_IMAGE_S3_PATH}"
+        mkdir -p artifacts/rocm-docker-image
+        aws s3 cp "$${DOCKER_IMAGE_S3_PATH}" artifacts/rocm-docker-image/rocm-base-image.tar.gz
+
+        # Load base Docker image and capture the tag
+        echo "Loading base Docker image..."
+        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
+        echo "$${LOAD_OUTPUT}"
+        # Extract the actual loaded image tag from "Loaded image: <tag>" output
+        # This avoids picking up stale images (like rocm/vllm-dev:nightly) already on the agent
+        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
+        if [ -z "$${BASE_IMAGE_TAG}" ]; then
+          echo "ERROR: Failed to extract image tag from docker load output"
+          echo "Load output was: $${LOAD_OUTPUT}"
+          exit 1
+        fi
+        echo "Loaded base image: $${BASE_IMAGE_TAG}"
+
+        # Prepare base wheels for Docker build context
+        mkdir -p docker/context/base-wheels
+        touch docker/context/base-wheels/.keep
+        cp artifacts/rocm-base-wheels/*.whl docker/context/base-wheels/
+        echo "Base wheels for vLLM build:"
+        ls -lh docker/context/base-wheels/
+
+        # Get GPU architectures from meta-data
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+
+        echo "========================================"
+        echo "Building vLLM wheel with:"
+        echo "  BUILDKITE_COMMIT: $${BUILDKITE_COMMIT}"
+        echo "  BUILDKITE_BRANCH: $${BUILDKITE_BRANCH}"
+        echo "  PYTORCH_ROCM_ARCH: $${PYTORCH_ROCM_ARCH}"
+        echo "  BASE_IMAGE: $${BASE_IMAGE_TAG}"
+        echo "========================================"
+
+        # Build vLLM wheel using local checkout (REMOTE_VLLM=0)
+        DOCKER_BUILDKIT=1 docker build \
+          --file docker/Dockerfile.rocm \
+          --target export_vllm_wheel_release \
+          --output type=local,dest=rocm-dist \
+          --build-arg BASE_IMAGE="$${BASE_IMAGE_TAG}" \
+          --build-arg ARG_PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+          --build-arg REMOTE_VLLM=0 \
+          --build-arg GIT_REPO_CHECK=1 \
+          --build-arg USE_SCCACHE=1 \
+          --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+          --build-arg SCCACHE_REGION_NAME=us-west-2 \
+          --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+          .
+
+        echo "Built vLLM wheel:"
+        ls -lh rocm-dist/*.whl
+
+        # Copy wheel to artifacts directory
+        mkdir -p artifacts/rocm-vllm-wheel
+        cp rocm-dist/*.whl artifacts/rocm-vllm-wheel/
+        echo "Final vLLM wheel:"
+        ls -lh artifacts/rocm-vllm-wheel/
+    artifact_paths:
+      - "artifacts/rocm-vllm-wheel/*.whl"
+    env:
+      DOCKER_BUILDKIT: "1"
+      S3_BUCKET: "vllm-wheels"
+
+  # ROCm Job 3: Upload Wheels to S3
+  - label: ":s3: Upload ROCm Wheels to S3"
+    id: upload-rocm-wheels
+    depends_on:
+      - step: build-rocm-vllm-wheel
+        allow_failure: false
+    agents:
+      queue: cpu_queue_postmerge
+    timeout_in_minutes: 60
+    commands:
+      # Download all wheel artifacts and run upload
+      - |
+        set -euo pipefail
+
+        # Check if upload is enabled (from env var, meta-data, or release branch)
+        ROCM_UPLOAD_WHEELS="$${ROCM_UPLOAD_WHEELS:-}"
+        if [ -z "$${ROCM_UPLOAD_WHEELS}" ]; then
+          # Try to get from meta-data (input form)
+          ROCM_UPLOAD_WHEELS="$$(buildkite-agent meta-data get rocm-upload-wheels 2>/dev/null || echo '')"
+        fi
+
+        echo "========================================"
+        echo "Upload check:"
+        echo "  ROCM_UPLOAD_WHEELS: $${ROCM_UPLOAD_WHEELS}"
+        echo "  BUILDKITE_BRANCH: $${BUILDKITE_BRANCH}"
+        echo "========================================"
+
+        # Skip upload if not enabled
+        if [ "$${ROCM_UPLOAD_WHEELS}" != "true" ]; then
+          echo "Skipping S3 upload (ROCM_UPLOAD_WHEELS != true, NIGHTLY != 1, not a release branch)"
+          echo "To enable upload, set 'Upload Wheels to S3' to 'Yes' in the build configuration"
+          exit 0
+        fi
+
+        echo "Upload enabled, proceeding..."
+
+        # Download artifacts from current build
+        echo "Downloading artifacts from current build"
+        buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
+        buildkite-agent artifact download "artifacts/rocm-vllm-wheel/*.whl" .
+
+        # Run upload script
+        bash .buildkite/scripts/upload-rocm-wheels.sh
+    env:
+      DOCKER_BUILDKIT: "1"
+      S3_BUCKET: "vllm-wheels"
+
+  # ROCm Job 4: Annotate ROCm Wheel Release
+  - label: ":memo: Annotate ROCm wheel release"
+    id: annotate-rocm-release
+    depends_on:
+      - step: upload-rocm-wheels
+        allow_failure: true
+      - step: input-release-version
+        allow_failure: true
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "bash .buildkite/scripts/annotate-rocm-release.sh"
+    env:
+      S3_BUCKET: "vllm-wheels"
+
+  # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
+  # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
+  # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`
+  - block: "Generate Root Index for ROCm Wheels for Release"
+    key: block-generate-root-index-rocm-wheels
+    depends_on: upload-rocm-wheels
+
+  - label: ":package: Generate Root Index for ROCm Wheels for Release"
+    depends_on: block-generate-root-index-rocm-wheels
+    id: generate-root-index-rocm-wheels
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
+    env:
+      S3_BUCKET: "vllm-wheels"
+      VARIANT: "rocm700"
+
+  # ROCm Job 5: Build ROCm Release Docker Image
+  - label: ":docker: Build release image - x86_64 - ROCm"
+    id: build-rocm-release-image
+    depends_on:
+      - step: build-rocm-base-wheels
+        allow_failure: false
+    agents:
+      queue: cpu_queue_postmerge
+    timeout_in_minutes: 60
+    commands:
+      - |
+        set -euo pipefail
+
+        # Login to ECR
+        aws ecr-public get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+
+        # Download Docker image from S3 (set by build-rocm-base-wheels)
+        DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
+        if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
+          echo "ERROR: rocm-docker-image-s3-path metadata not found"
+          exit 1
+        fi
+
+        echo "Downloading base image from $${DOCKER_IMAGE_S3_PATH}"
+        mkdir -p artifacts/rocm-docker-image
+        aws s3 cp "$${DOCKER_IMAGE_S3_PATH}" artifacts/rocm-docker-image/rocm-base-image.tar.gz
+
+        # Load base Docker image
+        echo "Loading base Docker image..."
+        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
+        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
+        echo "Loaded base image: $${BASE_IMAGE_TAG}"
+
+        # Tag and push the base image to ECR
+        docker tag "$${BASE_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        echo "Pushed base image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base"
+
+        # Get GPU architectures from meta-data
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+
+        # Build vLLM ROCm release image using cached base
+        DOCKER_BUILDKIT=1 docker build \
+          --build-arg max_jobs=16 \
+          --build-arg BASE_IMAGE="$${BASE_IMAGE_TAG}" \
+          --build-arg ARG_PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+          --build-arg USE_SCCACHE=1 \
+          --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+          --build-arg SCCACHE_REGION_NAME=us-west-2 \
+          --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+          --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm \
+          --target vllm-openai \
+          --progress plain \
+          -f docker/Dockerfile.rocm .
+
+        # Push to ECR
+        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm
+        echo "Pushed: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm"
+    env:
+      DOCKER_BUILDKIT: "1"
+      S3_BUCKET: "vllm-wheels"

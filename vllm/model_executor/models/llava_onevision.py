@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Optional, Protocol, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -69,7 +69,7 @@ class LlavaOnevisionVideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
 
     pixel_values_videos: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "f", 3, "h", "w", dynamic_dims={"f"}),
     ]
 
@@ -90,11 +90,11 @@ class LlavaOnevisionImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
 
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", 3, "h", "w", dynamic_dims={"np"}),
     ]
 
-    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
+    image_sizes: Annotated[torch.Tensor | None, TensorShape("bn", 2)]
 
 
 class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
@@ -113,13 +113,13 @@ class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
     ]
 
 
-LlavaOnevisionImageInputs = Union[
-    LlavaOnevisionImagePixelInputs, LlavaOnevisionImageEmbeddingInputs
-]
+LlavaOnevisionImageInputs: TypeAlias = (
+    LlavaOnevisionImagePixelInputs | LlavaOnevisionImageEmbeddingInputs
+)
 
-LlavaOnevisionMultiInputs = Union[
-    LlavaOnevisionImageInputs, LlavaOnevisionVideoPixelInputs
-]
+LlavaOnevisionMultiInputs: TypeAlias = (
+    LlavaOnevisionImageInputs | LlavaOnevisionVideoPixelInputs
+)
 
 
 class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
@@ -133,7 +133,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(LlavaOnevisionProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
@@ -276,7 +276,7 @@ class LlavaOnevisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -479,8 +479,6 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -493,7 +491,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
         if modality.startswith("video"):
@@ -510,20 +508,25 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        self.image_newline = nn.Parameter(torch.empty(config.text_config.hidden_size))
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            # Initialize the vision tower only up to the required feature layer
+            self.vision_tower = init_vision_tower_for_llava(
+                config,
+                quant_config=quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.image_newline = nn.Parameter(
+                torch.empty(config.text_config.hidden_size)
+            )
+            self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors
@@ -531,7 +534,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[LlavaOnevisionImageInputs]:
+    ) -> LlavaOnevisionImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -560,7 +563,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[LlavaOnevisionVideoPixelInputs]:
+    ) -> LlavaOnevisionVideoPixelInputs | None:
         """
         A legal video input should have the following dimensions:
         {
@@ -606,7 +609,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
+        vision_tower: CLIPVisionModel | SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
@@ -726,9 +729,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _process_image_pixels(
         self,
         inputs: LlavaOnevisionImagePixelInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-        assert self.vision_tower is not None
-
+    ) -> torch.Tensor | list[torch.Tensor]:
         pixel_values = inputs["pixel_values"]
 
         if isinstance(pixel_values, torch.Tensor):
@@ -761,9 +762,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _process_image_input(
         self,
         image_input: LlavaOnevisionImageInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
+            return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)
 
@@ -788,7 +789,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def _video_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
+        vision_tower: CLIPVisionModel | SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
@@ -802,8 +803,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         return video_features
 
     def _process_video_pixels(self, inputs: LlavaOnevisionVideoPixelInputs):
-        assert self.vision_tower is not None
-
         video_pixels = inputs["pixel_values_videos"]
 
         if isinstance(video_pixels, torch.Tensor):
@@ -863,10 +862,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
@@ -881,8 +877,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += tuple(vision_embeddings)
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_pixels(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
@@ -891,12 +887,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for LlaVA-Onevision.
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
@@ -915,7 +911,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

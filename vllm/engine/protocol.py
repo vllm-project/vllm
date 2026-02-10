@@ -3,23 +3,27 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.input_processor import InputProcessor
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.v1.engine import PauseMode
 
 
 class EngineClient(ABC):
@@ -27,8 +31,12 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    processor: Processor
-    io_processor: Optional[IOProcessor]
+    input_processor: InputProcessor
+    io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> BaseRenderer: ...
 
     @property
     @abstractmethod
@@ -49,16 +57,20 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: Union[EngineCoreRequest, PromptType],
+        prompt: EngineCoreRequest
+        | PromptType
+        | DictPrompt
+        | TokPrompt
+        | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
-        prompt_text: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_text: str | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -66,30 +78,25 @@ class EngineClient(ABC):
     @abstractmethod
     def encode(
         self,
-        prompt: PromptType,
+        prompt: PromptType | DictPrompt | TokPrompt,
         pooling_params: PoolingParams,
         request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
-    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
+    async def abort(self, request_id: str | Iterable[str]) -> None:
         """Abort a request.
 
         Args:
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def get_tokenizer(self) -> AnyTokenizer:
-        """Get the tokenizer"""
         ...
 
     @abstractmethod
@@ -110,7 +117,7 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def stop_profile(self) -> None:
-        """Start profiling the engine"""
+        """Stop profiling the engine"""
         ...
 
     @abstractmethod
@@ -119,8 +126,15 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
-        """Reset the prefix cache"""
+    async def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache"""
+        ...
+
+    @abstractmethod
+    async def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        """Reset the prefix cache and optionally any configured connector cache"""
         ...
 
     @abstractmethod
@@ -129,7 +143,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    async def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the engine"""
         ...
 
@@ -143,6 +157,39 @@ class EngineClient(ABC):
         """Load a new LoRA adapter into the engine for future requests."""
         ...
 
+    @abstractmethod
+    async def pause_generation(
+        self,
+        *,
+        mode: "PauseMode" = "abort",
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """Pause new generation/encoding requests.
+
+        Args:
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately
+                  and return partial results with "abort" reason (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
+            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
+            clear_cache: DEPRECATED. Whether to clear KV and prefix caches
+                after draining.
+        """
+        ...
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume accepting generation/encoding requests."""
+        ...
+
+    @abstractmethod
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
+        ...
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
@@ -152,13 +199,23 @@ class EngineClient(ABC):
     async def collective_rpc(
         self,
         method: str,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
+        raise NotImplementedError
+
+    async def init_weight_transfer_engine(
+        self, init_request: WeightTransferInitRequest
+    ) -> None:
+        """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """Batched weight update for RL training."""
         raise NotImplementedError

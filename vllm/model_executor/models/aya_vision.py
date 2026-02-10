@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 from torch import nn
@@ -18,17 +18,20 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalFieldConfig,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -37,6 +40,7 @@ from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_layer_index,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -139,7 +143,7 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -187,7 +191,7 @@ class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -223,11 +227,8 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
@@ -297,19 +298,13 @@ def _get_num_hidden_layers(hf_config: AyaVisionConfig) -> int:
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
     # If we have one feature layer, initialize up to that layer
     if isinstance(feature_layers, int):
-        return _get_layer_index(feature_layers, num_hidden_layers)
+        return get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest m
     elif isinstance(feature_layers, (list, tuple)):
-        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(
         f"vision_layer_feature type: {type(feature_layers)} is not supported"
     )
-
-
-def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    if feature_layer_index < 0:
-        return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -318,8 +313,6 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     dummy_inputs=AyaVisionDummyInputsBuilder,
 )
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -331,7 +324,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -347,21 +340,23 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
-        self.vocab_size = config.text_config.vocab_size
-        self.multi_modal_projector = AyaVisionMultiModalProjector(config)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "model"),
-            # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
-            architectures=["Cohere2ForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                num_hidden_layers_override=num_hidden_layers,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.multi_modal_projector = AyaVisionMultiModalProjector(config)
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "model"),
+                # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
+                architectures=["Cohere2ForCausalLM"],
+            )
 
     @property
     def dtype(self):
@@ -375,7 +370,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         self,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         return vision_tower(
             pixel_values.to(dtype=vision_tower.dtype),
             feature_select_strategy=self.config.vision_feature_select_strategy,
@@ -384,7 +379,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def _process_image_input(
         self, image_input: AyaVisionImagePixelInputs, **kwargs
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
         image_features = self._image_pixels_to_features(
@@ -395,7 +389,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[AyaVisionImagePixelInputs]:
+    ) -> AyaVisionImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -414,10 +408,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             },
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -426,12 +417,12 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -446,5 +437,5 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)

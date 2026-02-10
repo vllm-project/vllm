@@ -36,7 +36,6 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -47,7 +46,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, ZeroExpertFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -109,18 +108,17 @@ class FlashConfig(PretrainedConfig):
         eos_token_id=100001,
         pretraining_tp=1,
         tie_word_embeddings=False,
-        rope_theta=1000000.0,
-        rope_scaling=None,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         mla_scale_q_lora=False,
         mla_scale_kv_lora=False,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         params_dtype="bfloat16",
         router_dtype="float32",
         router_bias=False,
         topk_method=None,
-        routed_scaling_factor=None,
+        routed_scaling_factor=1.0,
         zero_expert_num=0,
         zero_expert_type=None,
         nextn_use_scmoe=False,
@@ -131,7 +129,7 @@ class FlashConfig(PretrainedConfig):
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             params_dtype=params_dtype,
             router_dtype=router_dtype,
             topk_method=topk_method,
@@ -163,8 +161,13 @@ class FlashConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.pretraining_tp = pretraining_tp
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
+        rope_theta = kwargs.pop("rope_theta", 1000000.0)
+        if "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
+        self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mla_scale_q_lora = mla_scale_q_lora
@@ -176,7 +179,7 @@ class FlashConfig(PretrainedConfig):
         self.intermediate_size = (
             self.ffn_hidden_size
             if hasattr(self, "ffn_hidden_size")
-            else self.intermediate_size
+            else intermediate_size
         )
         if hasattr(self, "moe_intermediate_size"):
             self.moe_intermediate_size = self.moe_intermediate_size
@@ -194,7 +197,7 @@ class FlashMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -233,9 +236,9 @@ class FlashMLP(nn.Module):
 class LongcatRouter(nn.Module):
     def __init__(
         self,
-        config,
-        zero_expert_num=0,
-        rounter_params_dtype=torch.bfloat16,
+        config: FlashConfig,
+        zero_expert_num: int,
+        rounter_params_dtype: torch.dtype,
         prefix: str = "",
     ):
         super().__init__()
@@ -270,17 +273,13 @@ class LongcatMoe(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.zero_expert_num = config.zero_expert_num
-        self.zero_expert_type = config.zero_expert_type
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.enable_eplb = enable_eplb
         # Gate always runs at half / full precision for now.
         self.rounter_params_dtype = params_dtype
         if config.router_dtype == "float32":
@@ -288,36 +287,62 @@ class LongcatMoe(nn.Module):
 
         self.router = LongcatRouter(
             config=config,
-            zero_expert_num=self.zero_expert_num,
+            zero_expert_num=config.zero_expert_num,
             rounter_params_dtype=self.rounter_params_dtype,
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        assert config.zero_expert_num is not None
+        assert config.zero_expert_type is not None
+        self.experts = ZeroExpertFusedMoE(
+            zero_expert_num=config.zero_expert_num,
+            zero_expert_type=config.zero_expert_type,
+            router=self.router,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             reduce_results=True,
             params_dtype=params_dtype,
-            e_score_correction_bias=self.router.e_score_correction_bias,
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            zero_expert_num=self.zero_expert_num,
-            zero_expert_type=self.zero_expert_type,
-            enable_eplb=self.enable_eplb,
+            enable_eplb=enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
+            router_logits_dtype=self.rounter_params_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.router(hidden_states.to(self.rounter_params_dtype))
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+        # Align to FusedMoE padded hidden size to avoid dim mismatch
+        padded_hidden = self.experts.hidden_size
+        if hidden_dim < padded_hidden:
+            hidden_states_padded = torch.nn.functional.pad(
+                hidden_states,
+                (0, padded_hidden - hidden_dim),
+                mode="constant",
+                value=0.0,
+            )
+        else:
+            hidden_states_padded = hidden_states
+
+        router_logits_full = self.router(
+            hidden_states_padded.to(self.rounter_params_dtype)
         )
+
+        # ZeroExpertFusedMoE handles routing memoization and zero expert computation
+        # internally. Pass full router_logits (including zero experts) so that
+        # zero experts can be properly identified in routing.
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states_padded,
+            router_logits=router_logits_full,  # Full logits (includes zero experts)
+        )
+
+        # Crop back to original hidden dimension if padded earlier
+        if padded_hidden != hidden_dim:
+            final_hidden_states = final_hidden_states[..., :hidden_dim]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -329,23 +354,15 @@ class FlashDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         config: FlashConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = int(prefix.split(sep=".")[-1])
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
 
         # Dual attention structure
         self.self_attn = nn.ModuleList(
@@ -362,8 +379,6 @@ class FlashDecoderLayer(nn.Module):
                         config.q_lora_rank if hasattr(config, "q_lora_rank") else None
                     ),
                     kv_lora_rank=config.kv_lora_rank,
-                    rope_theta=rope_theta,
-                    rope_scaling=rope_scaling,
                     max_position_embeddings=max_position_embeddings,
                     cache_config=cache_config,
                     quant_config=None
@@ -415,7 +430,7 @@ class FlashDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -426,6 +441,7 @@ class FlashDecoderLayer(nn.Module):
         hidden_states = self.self_attn[0](
             positions=positions,
             hidden_states=hidden_states,
+            llama_4_scaling=None,
         )
 
         hidden_states, residual = self.post_attention_layernorm[0](
@@ -445,6 +461,7 @@ class FlashDecoderLayer(nn.Module):
         hidden_states = self.self_attn[1](
             positions=positions,
             hidden_states=hidden_states,
+            llama_4_scaling=None,
         )
         hidden_states, residual = self.post_attention_layernorm[1](
             hidden_states, residual
@@ -499,21 +516,21 @@ class FlashModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -555,7 +572,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         config.intermediate_size = (
@@ -563,7 +579,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if hasattr(config, "ffn_hidden_size")
             else config.intermediate_size
         )
-        self.lora_config = lora_config
+
         self.quant_config = quant_config
 
         self.model = FlashModel(
@@ -585,16 +601,16 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -603,7 +619,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -611,6 +627,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

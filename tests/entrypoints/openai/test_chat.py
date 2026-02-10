@@ -3,7 +3,6 @@
 
 # imports for structured outputs tests
 import json
-from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -21,7 +20,15 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files):  # noqa: F811
+def zephyr_lora_files():
+    """Download zephyr LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+
+
+@pytest.fixture(scope="module")
+def server(zephyr_lora_files):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -176,7 +183,7 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: st
     [(MODEL_NAME, 1), (MODEL_NAME, 0), (MODEL_NAME, -1), (MODEL_NAME, None)],
 )
 async def test_prompt_logprobs_chat(
-    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: Optional[int]
+    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: int | None
 ):
     params: dict = {
         "messages": [
@@ -247,12 +254,11 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
         {"role": "system", "content": "you are a helpful assistant"},
         {"role": "user", "content": "what is 1+1?"},
     ]
-
     # test single completion
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=5,
         logprobs=True,
         top_logprobs=5,
     )
@@ -260,13 +266,14 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
+
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=37, total_tokens=47
+        completion_tokens=5, prompt_tokens=37, total_tokens=42
     )
 
     message = choice.message
-    assert message.content is not None and len(message.content) >= 10
+    assert message.content is not None and len(message.content) >= 5
     assert message.role == "assistant"
     messages.append({"role": "assistant", "content": message.content})
 
@@ -275,7 +282,7 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=5,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -601,145 +608,6 @@ async def test_structured_outputs_choice_chat_logprobs(
 
 
 @pytest.mark.asyncio
-async def test_named_tool_use(
-    client: openai.AsyncOpenAI,
-    sample_json_schema,
-):
-    messages = [
-        {"role": "system", "content": "you are a helpful assistant"},
-        {
-            "role": "user",
-            "content": (
-                "Give an example JSON for an employee profile using the specified tool."
-            ),
-        },
-    ]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema,
-            },
-        }
-    ]
-    tool_choice = {"type": "function", "function": {"name": "dummy_function_name"}}
-
-    # non-streaming
-
-    chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=tools,
-        tool_choice=tool_choice,
-    )
-    message = chat_completion.choices[0].message
-    assert len(message.content) == 0
-    json_string = message.tool_calls[0].function.arguments
-    json1 = json.loads(json_string)
-    jsonschema.validate(instance=json1, schema=sample_json_schema)
-
-    messages.append({"role": "assistant", "content": json_string})
-    messages.append(
-        {"role": "user", "content": "Give me another one with a different name and age"}
-    )
-
-    # streaming
-
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=tools,
-        tool_choice=tool_choice,
-        stream=True,
-    )
-
-    output = []
-    finish_reason_count = 0
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta.role:
-            assert delta.role == "assistant"
-        assert delta.content is None or len(delta.content) == 0
-        if delta.tool_calls:
-            output.append(delta.tool_calls[0].function.arguments)
-        if chunk.choices[0].finish_reason is not None:
-            finish_reason_count += 1
-    # finish reason should only return in last block
-    assert finish_reason_count == 1
-    json2 = json.loads("".join(output))
-    jsonschema.validate(instance=json2, schema=sample_json_schema)
-    assert json1["name"] != json2["name"]
-    assert json1["age"] != json2["age"]
-
-
-@pytest.mark.asyncio
-async def test_inconsistent_tool_choice_and_tools(
-    client: openai.AsyncOpenAI, sample_json_schema
-):
-    messages = [
-        {"role": "system", "content": "you are a helpful assistant"},
-        {
-            "role": "user",
-            "content": f"Give an example JSON for an employee profile that "
-            f"fits this schema: {sample_json_schema}",
-        },
-    ]
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tool_choice={
-                "type": "function",
-                "function": {"name": "dummy_function_name"},
-            },
-        )
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "dummy_function_name",
-                        "description": "This is a dummy function",
-                        "parameters": sample_json_schema,
-                    },
-                }
-            ],
-            tool_choice={
-                "type": "function",
-                "function": {"name": "nondefined_function_name"},
-            },
-        )
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "dummy_function_name",
-                        "description": "This is a dummy function",
-                        "parameters": sample_json_schema,
-                    },
-                }
-            ],
-            tool_choice={},
-        )
-
-
-@pytest.mark.asyncio
 async def test_response_format_json_object(client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
@@ -801,6 +669,25 @@ async def test_response_format_json_schema(client: openai.AsyncOpenAI):
 
         loaded = json.loads(content)
         assert loaded == {"result": 2}, loaded
+
+
+@pytest.mark.asyncio
+async def test_response_format_text(client: openai.AsyncOpenAI):
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "what is 1+1?",
+                }
+            ],
+            max_completion_tokens=10,
+            response_format={"type": "text"},
+        )
+
+        content = resp.choices[0].message.content
+        assert content is not None
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -29,7 +28,7 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
+        output: torch.Tensor | None,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -52,7 +51,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
+        output: torch.Tensor | None,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -84,7 +83,7 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
+        output: torch.Tensor | None,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -133,7 +132,7 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
+        output: torch.Tensor | None,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,

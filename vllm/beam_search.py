@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
@@ -22,13 +22,13 @@ class BeamSearchSequence:
     # The tokens include the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
-    lora_request: Optional[LoRARequest] = None
+    lora_request: LoRARequest | None = None
     cum_logprob: float = 0.0
-    text: Optional[str] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
+    text: str | None = None
+    finish_reason: str | None = None
+    stop_reason: int | str | None = None
+    multi_modal_data: "MultiModalDataDict | None" = None
+    mm_processor_kwargs: dict[str, Any] | None = None
 
 
 @dataclass
@@ -45,8 +45,8 @@ class BeamSearchInstance:
     def __init__(
         self,
         prompt_tokens: list[int],
-        lora_request: Optional[LoRARequest] = None,
-        logprobs: Optional[list[dict[int, Logprob]]] = None,
+        lora_request: LoRARequest | None = None,
+        logprobs: list[dict[int, Logprob]] | None = None,
         **kwargs,
     ):
         self.beams: list[BeamSearchSequence] = [

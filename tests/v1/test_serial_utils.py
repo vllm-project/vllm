@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from dataclasses import dataclass
-from typing import Optional
 
 import msgspec
 import numpy as np
@@ -100,32 +99,36 @@ def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
 
 
 class MyRequest(msgspec.Struct):
-    mm: Optional[list[MultiModalKwargsItems]]
+    mm: list[MultiModalKwargsItems] | None
 
 
 def test_multimodal_kwargs():
     e1 = MultiModalFieldElem(
-        "audio", "a0", torch.zeros(1000, dtype=torch.bfloat16), MultiModalBatchedField()
+        torch.zeros(1000, dtype=torch.bfloat16),
+        MultiModalBatchedField(),
     )
     e2 = MultiModalFieldElem(
-        "video",
-        "v0",
         [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
-        MultiModalFlatField([[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]], 0),
+        MultiModalFlatField(
+            slices=[[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]],
+            dim=0,
+        ),
     )
     e3 = MultiModalFieldElem(
-        "image", "i0", torch.zeros(1000, dtype=torch.int32), MultiModalSharedField(4)
+        torch.zeros(1000, dtype=torch.int32),
+        MultiModalSharedField(batch_size=4),
     )
     e4 = MultiModalFieldElem(
-        "image",
-        "i1",
         torch.zeros(1000, dtype=torch.int32),
-        MultiModalFlatField([slice(1, 2, 3), slice(4, 5, 6)], 2),
+        MultiModalFlatField(slices=[slice(1, 2, 3), slice(4, 5, 6)], dim=2),
     )
-    audio = MultiModalKwargsItem.from_elems([e1])
-    video = MultiModalKwargsItem.from_elems([e2])
-    image = MultiModalKwargsItem.from_elems([e3, e4])
-    mm = MultiModalKwargsItems.from_seq([audio, video, image])
+    mm = MultiModalKwargsItems(
+        {
+            "audio": [MultiModalKwargsItem({"a0": e1})],
+            "video": [MultiModalKwargsItem({"v0": e2})],
+            "image": [MultiModalKwargsItem({"i0": e3, "i1": e4})],
+        }
+    )
 
     # pack mm kwargs into a mock request so that it can be decoded properly
     req = MyRequest([mm])
@@ -139,8 +142,8 @@ def test_multimodal_kwargs():
 
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
-    # expected total encoding length, should be 14306, +-20 for minor changes
-    assert 14275 <= total_len <= 14325
+    # expected total encoding length, should be 14319, +-20 for minor changes
+    assert 14300 <= total_len <= 14340
     decoded = decoder.decode(encoded).mm[0]
     assert isinstance(decoded, MultiModalKwargsItems)
 

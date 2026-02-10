@@ -47,9 +47,9 @@ Here is a sample of `LLM` class usage:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
 
-More API details can be found in the [Offline Inference](#offline-inference-api) section of the API docs.
+More API details can be found in the [Offline Inference](../api/README.md#offline-inference) section of the API docs.
 
-The code for the `LLM` class can be found in <gh-file:vllm/entrypoints/llm.py>.
+The code for the `LLM` class can be found in [vllm/entrypoints/llm.py](../../vllm/entrypoints/llm.py).
 
 ### OpenAI-Compatible API Server
 
@@ -60,7 +60,7 @@ This server can be started using the `vllm serve` command.
 vllm serve <model>
 ```
 
-The code for the `vllm` CLI can be found in <gh-file:vllm/entrypoints/cli/main.py>.
+The code for the `vllm` CLI can be found in [vllm/entrypoints/cli/main.py](../../vllm/entrypoints/cli/main.py).
 
 Sometimes you may see the API server entrypoint used directly instead of via the
 `vllm` CLI command. For example:
@@ -74,9 +74,76 @@ python -m vllm.entrypoints.openai.api_server --model <model>
     `python -m vllm.entrypoints.openai.api_server` is deprecated
     and may become unsupported in a future release.
 
-That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
+That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
 
 More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
+
+## V1 Process Architecture
+
+vLLM V1 uses a multi-process architecture to separate concerns and maximize throughput. Understanding this architecture is important for properly sizing CPU resources in your deployment. The key processes are:
+
+### API Server Process
+
+The API server process handles HTTP requests (e.g., the OpenAI-compatible API), performs input processing (tokenization, multi-modal data loading), and streams results back to clients. It communicates with the engine core process(es) via ZMQ sockets.
+
+By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
+
+The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
+
+### Engine Core Process
+
+The engine core process runs the scheduler, manages KV cache, and coordinates model execution across GPU workers. It runs a busy loop that continuously schedules requests and dispatches work to the GPU workers.
+
+There is **1 engine core process per data parallel rank**. For example, with `--data-parallel-size 4`, there are 4 engine core processes.
+
+The code can be found in [vllm/v1/engine/core.py](../../vllm/v1/engine/core.py) and [vllm/v1/engine/utils.py](../../vllm/v1/engine/utils.py).
+
+### GPU Worker Processes
+
+Each GPU is managed by a dedicated worker process. The worker process loads model weights, executes forward passes, and manages GPU memory. Workers communicate with the engine core process that owns them.
+
+There is **1 worker process per GPU**. The total number of GPU worker processes equals `tensor_parallel_size x pipeline_parallel_size` per engine core.
+
+The code can be found in [vllm/v1/executor/multiproc_executor.py](../../vllm/v1/executor/multiproc_executor.py) and [vllm/v1/worker/gpu_worker.py](../../vllm/v1/worker/gpu_worker.py).
+
+### DP Coordinator Process (conditional)
+
+When using data parallelism (`--data-parallel-size > 1`), an additional coordinator process manages load balancing across DP ranks and coordinates synchronized forward passes for MoE models.
+
+There is **1 DP coordinator process** (only when data parallelism is enabled).
+
+The code can be found in [vllm/v1/engine/coordinator.py](../../vllm/v1/engine/coordinator.py).
+
+### Process Count Summary
+
+For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel size, and `A` API server count:
+
+| Process Type | Count | Notes |
+|---|---|---|
+| API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
+| Engine Core | `DP` (default 1) | Scheduler and KV cache management |
+| GPU Worker | `N` (= `DP x TP`) | One per GPU, executes model forward passes |
+| DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
+| **Total** | **`A + DP + N` (+ 1 if DP > 1)** | |
+
+For example, a typical single-node deployment with 4 GPUs (`vllm serve -tp=4`) has:
+
+- 1 API server + 1 engine core + 4 GPU workers = **6 processes**
+
+<figure markdown="1">
+![V1 Process Architecture - TP=4](../assets/design/arch_overview/v1_process_architecture_tp4.png)
+</figure>
+
+A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
+
+- 4 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = **17 processes**
+
+<figure markdown="1">
+![V1 Process Architecture - TP=2, DP=4](../assets/design/arch_overview/v1_process_architecture_tp2_dp4.png)
+</figure>
+
+For CPU resource sizing recommendations, see
+[CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
 
 ## LLM Engine
 
@@ -101,7 +168,7 @@ processing.
 - **Output Processing**: Processes the outputs generated by the model, decoding the
   token IDs from a language model into human-readable text.
 
-The code for `LLMEngine` can be found in <gh-file:vllm/engine/llm_engine.py>.
+The code for `LLMEngine` can be found in [vllm/engine/llm_engine.py](../../vllm/engine/llm_engine.py).
 
 ### AsyncLLMEngine
 
@@ -111,9 +178,9 @@ incoming requests. The `AsyncLLMEngine` is designed for online serving, where it
 can handle multiple concurrent requests and stream outputs to clients.
 
 The OpenAI-compatible API server uses the `AsyncLLMEngine`. There is also a demo
-API server that serves as a simpler example in <gh-file:vllm/entrypoints/api_server.py>.
+API server that serves as a simpler example in [vllm/entrypoints/api_server.py](../../vllm/entrypoints/api_server.py).
 
-The code for `AsyncLLMEngine` can be found in <gh-file:vllm/engine/async_llm_engine.py>.
+The code for `AsyncLLMEngine` can be found in [vllm/engine/async_llm_engine.py](../../vllm/engine/async_llm_engine.py).
 
 ## Worker
 

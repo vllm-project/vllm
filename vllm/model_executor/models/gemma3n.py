@@ -16,13 +16,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -33,6 +31,7 @@ from vllm.model_executor.layers.activation import (
     GeluAndMul,
     GeluAndMulSparse,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -196,7 +195,7 @@ class Gemma3nLaurelBlock(nn.Module):
         laurel_rank: int,
         rms_norm_eps: float,
         *,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -236,7 +235,7 @@ class Gemma3nMLP(nn.Module):
         intermediate_size: int,
         hidden_activation: str,
         activation_sparsity: float = 0.0,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -285,8 +284,8 @@ class Gemma3nAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -333,18 +332,21 @@ class Gemma3nAttention(nn.Module):
         )
 
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        layer_type = config.layer_types[layer_idx]
+        is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
         # Initialize the rotary embedding.
-        if is_sliding:
-            # Local attention. Override the values in config.json.
-            rope_theta = config.rope_local_base_freq
-            rope_scaling = {"rope_type": "default"}
+        if layer_type in config.rope_parameters:
+            # Transformers v5 rope config.
+            rope_parameters = config.rope_parameters[layer_type]
         else:
+            # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            rope_theta = config.rope_theta
-            rope_scaling = config.rope_scaling
+            rope_parameters = config.rope_parameters.copy()
+            # Local attention. Override the values in config.json.
+            if is_sliding:
+                rope_parameters["rope_theta"] = config.rope_local_base_freq
 
         first_kv_shared_layer_idx = (
             config.num_hidden_layers - config.num_kv_shared_layers
@@ -358,16 +360,33 @@ class Gemma3nAttention(nn.Module):
             offset = 2 if self.sliding_window is not None else 1
             kv_shared_layer_index = first_kv_shared_layer_idx - offset
             if kv_shared_layer_index >= 0:
+                # Different model wrappers expose layer parameters under
+                # different parent attributes.
+                # For example:
+                #   - Gemma3nForCausalLM → parameters live under "model.layers"
+                #   - Gemma3nForConditionalGeneration →
+                #     under "language_model.model.layers"
+                # This logic extracts the portion of the parameter name
+                # *before* ".layers."
+                # so downstream code can consistently reference the correct
+                # model root regardless of which wrapper class was used.
+                if ".layers." in prefix:
+                    param_name_before_layers = prefix.split(".layers.")[0]
+                else:
+                    raise ValueError(
+                        "Unexpected prefix format for Gemma3nAttention: "
+                        f"'{prefix}'. The prefix is expected to contain "
+                        "'.layers.' to correctly determine the KV sharing "
+                        "target layer."
+                    )
                 # Only the greater layer is required to specify sharing.
-                kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
+                kv_sharing_target_layer_name = f"{param_name_before_layers}.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=rope_scaling,
         )
 
         self.attn = Attention(
@@ -412,8 +431,8 @@ class Gemma3nDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Gemma3nTextConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -650,7 +669,7 @@ class Gemma3nSelfDecoder(nn.Module):
     def get_per_layer_inputs(
         self,
         hidden_states_0: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor],
+        per_layer_inputs: torch.Tensor | None,
     ) -> torch.Tensor:
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
@@ -667,7 +686,7 @@ class Gemma3nSelfDecoder(nn.Module):
             per_layer_inputs = per_layer_projection
         return per_layer_inputs
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.embed_scale
 
     def altup_embed(self, hidden_states_0: torch.Tensor) -> torch.Tensor:
@@ -685,16 +704,16 @@ class Gemma3nSelfDecoder(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
             hidden_states_0 = inputs_embeds
         else:
-            hidden_states_0 = self.get_input_embeddings(input_ids)
+            hidden_states_0 = self.embed_input_ids(input_ids)
 
         adjusted_per_layer_inputs = self.get_per_layer_inputs(
             hidden_states_0, per_layer_inputs
@@ -863,15 +882,15 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
     def get_per_layer_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.get_per_layer_input_embeddings(input_ids)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.self_decoder.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.self_decoder.embed_input_ids(input_ids)
 
     def fast_prefill_forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         logits_indices_padded, num_logits_indices = None, None
@@ -945,10 +964,10 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
     def normal_forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states, per_layer_inputs = self.self_decoder(
@@ -990,13 +1009,13 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
                 input_ids,
@@ -1096,8 +1115,7 @@ class Gemma3nForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+
         super().__init__()
         self.config = config
         self.cache_config = vllm_config.cache_config
@@ -1108,19 +1126,19 @@ class Gemma3nForCausalLM(nn.Module):
             config.vocab_size, soft_cap=config.final_logit_softcapping
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         *,
-        per_layer_inputs: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids,
             positions,
@@ -1134,7 +1152,7 @@ class Gemma3nForCausalLM(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 

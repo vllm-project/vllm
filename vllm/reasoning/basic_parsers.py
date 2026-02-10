@@ -3,15 +3,22 @@
 
 from abc import abstractmethod
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    DeltaMessage,
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponsesRequest,
+    )
+else:
+    ChatCompletionRequest = Any
+    ResponsesRequest = Any
 
 
 class BaseThinkingReasoningParser(ReasoningParser):
@@ -38,7 +45,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:
@@ -58,9 +65,22 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        start_token_id = self.start_token_id
         end_token_id = self.end_token_id
-        return any(input_id == end_token_id for input_id in reversed(input_ids))
+
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == start_token_id:
+                return False
+            if input_ids[i] == end_token_id:
+                return True
+        return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        end_token_id = self.end_token_id
+        return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -71,7 +91,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -79,7 +99,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
@@ -98,11 +118,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # start token in previous, end token in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
-                reasoning_content = delta_text[:end_index]
+                reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
-                    reasoning_content=reasoning_content,
-                    content=content if content else None,
+                    reasoning=reasoning, content=content if content else None
                 )
             elif self.end_token_id in previous_token_ids:
                 # start token in previous, end token in previous,
@@ -111,32 +130,29 @@ class BaseThinkingReasoningParser(ReasoningParser):
             else:
                 # start token in previous, no end token in previous or delta,
                 # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+                return DeltaMessage(reasoning=delta_text)
         elif self.start_token_id in delta_token_ids:
             if self.end_token_id in delta_token_ids:
                 # start token in delta, end token in delta,
                 # extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
-                reasoning_content = delta_text[
-                    start_index + len(self.start_token) : end_index
-                ]
+                reasoning = delta_text[start_index + len(self.start_token) : end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
-                    reasoning_content=reasoning_content,
-                    content=content if content else None,
+                    reasoning=reasoning, content=content if content else None
                 )
             else:
                 # start token in delta, no end token in delta,
                 # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+                return DeltaMessage(reasoning=delta_text)
         else:
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning_content(
-        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
-    ) -> tuple[Optional[str], Optional[str]]:
+    def extract_reasoning(
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 
@@ -155,7 +171,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if self.end_token not in model_output:
             return model_output, None
         else:
-            reasoning_content, _, content = model_output.partition(self.end_token)
+            reasoning, _, content = model_output.partition(self.end_token)
             # If generation stops right after end-of-think, return null content
             final_content = content or None
-            return reasoning_content, final_content
+            return reasoning, final_content

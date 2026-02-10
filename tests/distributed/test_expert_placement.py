@@ -85,7 +85,7 @@ def test_expert_placement_various_sizes(expert_placement_strategy, world_size):
             else:
                 expected_test_local = base_experts
 
-            test_local_experts, test_expert_map = determine_expert_map(
+            test_local_experts, test_expert_map, _ = determine_expert_map(
                 ep_size=test_ep_size,
                 ep_rank=ep_rank,
                 global_num_experts=test_global_experts,
@@ -116,7 +116,7 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
     """Test edge cases for round_robin expert placement."""
 
     # Test case 1: ep_size = 1 (should return None for expert_map)
-    local_num_experts, expert_map = determine_expert_map(
+    local_num_experts, expert_map, _ = determine_expert_map(
         ep_size=1,
         ep_rank=0,
         global_num_experts=8,
@@ -217,7 +217,7 @@ def test_determine_expert_map_comprehensive():
         expected_local,
         expected_map_pattern,
     ) in test_cases:
-        local_num_experts, expert_map = determine_expert_map(
+        local_num_experts, expert_map, _ = determine_expert_map(
             ep_size=ep_size,
             ep_rank=ep_rank,
             global_num_experts=global_num_experts,

@@ -34,15 +34,20 @@ def test_stop_by_max_tokens(max_tokens: int):
     requests = create_requests(num_requests=2, max_tokens=max_tokens)
     req0, req1 = requests
 
+    expected_total_num_scheduled_tokens = 0
     sched_outputs: deque[SchedulerOutput] = deque()
     scheduler.add_request(req0)
     sched_outputs.append(scheduler.schedule())
+    expected_total_num_scheduled_tokens += req0.num_prompt_tokens + max_tokens - 1
 
     scheduler.add_request(req1)
     sched_outputs.append(scheduler.schedule())
+    expected_total_num_scheduled_tokens += req1.num_prompt_tokens + max_tokens - 1
 
+    total_num_scheduled_tokens = 0
     while sched_outputs:
         sched_output = sched_outputs.popleft()
+        total_num_scheduled_tokens += sched_output.total_num_scheduled_tokens
         model_runner_output = _make_model_runner_output(sched_output)
         scheduler.update_from_output(sched_output, model_runner_output)
 
@@ -53,6 +58,8 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert scheduler.get_num_unfinished_requests() == 0
     assert req0.num_output_tokens == max_tokens
     assert req1.num_output_tokens == max_tokens
+    # Ensure we aren't scheduling more tokens than necessary.
+    assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
 def test_abort():
@@ -229,7 +236,7 @@ def test_prefix_caching_for_multi_turn():
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
-        req.block_hashes = req.get_hash_new_full_blocks()
+        req.update_block_hashes()
 
     # Schedule the next-turn requests.
     for req in next_turn_requests:

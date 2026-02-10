@@ -2,10 +2,12 @@
 cmake>=3.26.1
 ninja
 packaging>=24.2
-setuptools>=77.0.3,<80.0.0
+setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
-torch==2.8.0
+torch==2.10.0
 wheel
 jinja2>=3.1.6
 regex
 build
+protobuf
+grpcio-tools==1.78.0 # Required for grpc entrypoints

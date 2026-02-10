@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Union
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser
 
 
 class StreamingToolReconstructor:
@@ -84,10 +84,10 @@ class StreamingToolReconstructor:
 def run_tool_extraction(
     tool_parser: ToolParser,
     model_output: str,
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
     assert_one_tool_per_delta: bool = True,
-) -> tuple[Union[str, None], list[ToolCall]]:
+) -> tuple[str | None, list[ToolCall]]:
     if streaming:
         reconstructor = run_tool_extraction_streaming(
             tool_parser,
@@ -105,18 +105,38 @@ def run_tool_extraction(
 def run_tool_extraction_nonstreaming(
     tool_parser: ToolParser,
     model_output: str,
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
 ) -> ExtractedToolCallInformation:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return tool_parser.extract_tool_calls(model_output, request)
 
 
+def split_string_into_token_deltas(tokenizer: TokenizerLike, text: str) -> list[str]:
+    # Split a string into a series of deltas using the provided tokenizer. Each
+    # delta will be the string equivalent of a single token.
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    previously_decoded_text = ""
+    deltas = []
+    for i in range(1, len(token_ids) + 1):
+        current_tokens = token_ids[:i]
+        current_text = tokenizer.decode(current_tokens)
+        new_text = current_text[len(previously_decoded_text) :]
+        previously_decoded_text = current_text
+        deltas.append(new_text)
+    return deltas
+
+
 def run_tool_extraction_streaming(
     tool_parser: ToolParser,
     model_deltas: Iterable[str],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     assert_one_tool_per_delta: bool = True,
 ) -> StreamingToolReconstructor:
+    if isinstance(model_deltas, str):
+        model_deltas = split_string_into_token_deltas(
+            tool_parser.model_tokenizer, model_deltas
+        )
+
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingToolReconstructor(
         assert_one_tool_per_delta=assert_one_tool_per_delta

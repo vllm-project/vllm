@@ -4,7 +4,6 @@
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -25,7 +24,6 @@ from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -35,7 +33,7 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -55,7 +53,7 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
@@ -78,7 +76,7 @@ class LongCatMultiTokenPredictor(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -110,7 +108,7 @@ class LongCatMultiTokenPredictor(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
@@ -125,7 +123,7 @@ class LongCatMultiTokenPredictor(nn.Module):
         )
 
 
-class LongCatFlashMTP(nn.Module, SupportsPP):
+class LongCatFlashMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         # LongCat MTP without MoE layers
@@ -152,11 +150,11 @@ class LongCatFlashMTP(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(
@@ -168,7 +166,7 @@ class LongCatFlashMTP(nn.Module, SupportsPP):
         self,
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -344,7 +342,7 @@ class LongCatFlashMTP(nn.Module, SupportsPP):
 
     def get_spec_layer_idx_from_weight_name(
         self, config: PretrainedConfig, weight_name: str
-    ) -> Optional[int]:
+    ) -> int | None:
         if "model.mtp" in weight_name:
             return config.num_hidden_layers * 2
         return None

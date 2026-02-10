@@ -9,7 +9,10 @@ import threading
 import time
 import traceback
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cached_property, partial
@@ -17,7 +20,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, cast
 
 import cloudpickle
 import torch
@@ -26,23 +29,31 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_dp_group,
     get_ep_group,
+    get_inner_dp_world_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.utils import (
-    _maybe_force_spawn,
-    decorate_logs,
+from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
-    get_mp_context,
     get_open_port,
+)
+from vllm.utils.system_utils import (
+    _maybe_force_spawn,
+    decorate_logs,
+    get_mp_context,
     set_process_title,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -50,8 +61,41 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+class FutureWrapper(Future):
+    def __init__(
+        self,
+        futures_queue: deque[tuple["FutureWrapper", Callable]],
+        aggregate: Callable = lambda x: x,
+    ):
+        self.futures_queue = futures_queue
+        self.aggregate = aggregate
+        super().__init__()
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise RuntimeError("timeout not implemented")
+        # Drain any futures ahead of us in the queue.
+        while not self.done():
+            future, get_response = self.futures_queue.pop()
+            future.wait_for_response(get_response)
+        return super().result()
+
+    def wait_for_response(self, get_response: Callable):
+        try:
+            response = self.aggregate(get_response())
+            with suppress(InvalidStateError):
+                self.set_result(response)
+        except Exception as e:
+            with suppress(InvalidStateError):
+                self.set_exception(e)
+
+
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
+
+    def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
+        self.monitor_workers = monitor_workers
+        super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -59,65 +103,101 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
-        self.failure_callback: Optional[FailureCallback] = None
-        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
+        self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
+        tp_size, pp_size, pcp_size = self._get_parallel_sizes()
+        assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}). "
+            f"tensor_parallel_size ({tp_size}) x pipeline"
+            f"_parallel_size ({pp_size}) x prefill_context"
+            f"_parallel_size ({pcp_size}). "
         )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # get_loopback_ip() for communication.
+        # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
-
+        self.rpc_broadcast_mq: MessageQueue | None = None
+        scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        self.rpc_broadcast_mq = MessageQueue(
-            self.world_size, self.world_size, max_chunk_bytes=max_chunk_bytes
-        )
-        scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
-
+        if self.parallel_config.node_rank_within_dp == 0:
+            # For leader node within each dp rank,
+            # each dp will have its own leader multiproc executor.
+            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            self.rpc_broadcast_mq = MessageQueue(
+                self.world_size,
+                self.local_world_size,
+                max_chunk_bytes=max_chunk_bytes,
+                connect_ip=self.parallel_config.master_addr,
+            )
+            scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            for rank in range(self.world_size):
+            global_start_rank = (
+                self.local_world_size * self.parallel_config.node_rank_within_dp
+            )
+            for local_rank in range(self.local_world_size):
+                global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
-                        local_rank=rank,
-                        rank=rank,
+                        local_rank=local_rank,
+                        rank=global_rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
                     )
                 )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
+
+            # Wait for all local workers to be ready.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+            # Start background thread to monitor worker health if not in headless mode.
+            if self.monitor_workers:
+                self.start_worker_monitor()
+
+            self.response_mqs = []
+            # Only leader node have remote response mqs
+            if self.parallel_config.node_rank_within_dp == 0:
+                for rank in range(self.world_size):
+                    if rank < self.local_world_size:
+                        local_message_queue = self.workers[rank].worker_response_mq
+                        assert local_message_queue is not None
+                        self.response_mqs.append(local_message_queue)
+                    else:
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
+                            rank
+                        ]
+                        assert remote_message_queue is not None
+                        self.response_mqs.append(remote_message_queue)
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
-            self.rpc_broadcast_mq.wait_until_ready()
-            for w in self.workers:
-                w.worker_response_mq.wait_until_ready()
 
-            self.start_worker_monitor()
+            # Wait for all input mqs to be ready.
+            if self.rpc_broadcast_mq is not None:
+                self.rpc_broadcast_mq.wait_until_ready()
+            # Wait for all remote response mqs to be ready.
+            for response_mq in self.response_mqs:
+                response_mq.wait_until_ready()
+
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            self._post_init_executor()
+
             success = True
         finally:
             if not success:
@@ -128,20 +208,28 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        # For pipeline parallel, we use a thread pool for asynchronous
-        # execute_model.
-        if self.max_concurrent_batches > 1:
-            # Note: must use only 1 IO thread to keep dequeue sequence
-            # from the response queue
-            # _async_aggregate_workers_output also assumes a single IO thread
-            self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io"
-            )
-
         self.output_rank = self._get_output_rank()
-        self.has_connector = self.vllm_config.kv_transfer_config is not None
 
-    def start_worker_monitor(self):
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
         self_ref = weakref.ref(self)
 
@@ -165,9 +253,13 @@ class MultiprocExecutor(Executor):
                 _self.failure_callback = None
                 callback()
 
-        Thread(
-            target=monitor_workers, daemon=True, name="MultiprocWorkerMonitor"
-        ).start()
+        if not inline:
+            Thread(
+                target=monitor_workers, daemon=True, name="MultiprocWorkerMonitor"
+            ).start()
+            return
+
+        monitor_workers()
 
     def register_failure_callback(self, callback: FailureCallback):
         if self.is_failed:
@@ -175,120 +267,112 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: bool = False,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        if not self.has_connector:
-            # get output only from a single worker (output_rank)
-            (output,) = self.collective_rpc(
-                "execute_model",
-                args=(scheduler_output,),
-                unique_reply_rank=self.output_rank,
-                non_block=non_block,
-                timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-            )
-            return output
-
-        # get output from all workers
-        outputs = self.collective_rpc(
+    def execute_model(  # type: ignore[override]
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
+            unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
         )
 
-        # aggregate all workers output to a single output
-        if non_block:
-            return self.kv_output_aggregator.async_aggregate(outputs, self.output_rank)
-        return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
+    def sample_tokens(  # type: ignore[override]
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        return self.collective_rpc(
+            "sample_tokens",
+            args=(grammar_output,),
+            unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
+        )
 
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
-        outputs = self.collective_rpc(
+        return self.collective_rpc(
             "take_draft_token_ids", unique_reply_rank=self.output_rank
         )
-        return outputs[0]
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
-        unique_reply_rank: Optional[int] = None,
-    ) -> list[Any]:
+        unique_reply_rank: int | None = None,
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
+        """Returns single result if unique_reply_rank and/or kv_output_aggregator
+        is provided, otherwise list."""
+        assert self.rpc_broadcast_mq is not None, (
+            "collective_rpc should not be called on follower node"
+        )
         if self.is_failed:
             raise RuntimeError("Executor failed.")
 
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
 
-        # NOTE: If the args are heterogeneous, then we pack them into a list,
-        # and unpack them in the method of every worker, because every worker
-        # knows their own rank.
-        try:
-            if isinstance(method, str):
-                send_method = method
-            else:
-                send_method = cloudpickle.dumps(
-                    method, protocol=pickle.HIGHEST_PROTOCOL
-                )
-            self.rpc_broadcast_mq.enqueue(
-                (send_method, args, kwargs, unique_reply_rank)
+        if kv_output_aggregator is not None:
+            output_rank = None
+            aggregate: Callable[[Any], Any] = partial(
+                kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
             )
+        else:
+            output_rank = unique_reply_rank
+            aggregate = lambda x: x
 
-            workers = (
-                (self.workers[unique_reply_rank],)
-                if unique_reply_rank is not None
-                else self.workers
-            )
+        if isinstance(method, str):
+            send_method = method
+        else:
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+
+        response_mqs: Sequence[MessageQueue] = self.response_mqs
+        if output_rank is not None:
+            response_mqs = (response_mqs[output_rank],)
+
+        shutdown_event = self.shutdown_event
+
+        def get_response():
             responses = []
-
-            def get_response(
-                w: WorkerProcHandle,
-                dequeue_timeout: Optional[float] = None,
-                cancel_event: Optional[threading.Event] = None,
-            ):
-                status, result = w.worker_response_mq.dequeue(
-                    timeout=dequeue_timeout, cancel=cancel_event
+            for mq in response_mqs:
+                dequeue_timeout = (
+                    None if deadline is None else (deadline - time.monotonic())
                 )
-
+                try:
+                    status, result = mq.dequeue(
+                        timeout=dequeue_timeout, cancel=shutdown_event
+                    )
+                except TimeoutError as e:
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
-                return result
-
-            for w in workers:
-                dequeue_timeout = (
-                    None if deadline is None else (deadline - time.monotonic())
-                )
-
-                if self.io_thread_pool is not None:
-                    # We must consume worker_response_mq from a single thread.
-                    result = self.io_thread_pool.submit(  # type: ignore
-                        get_response, w, dequeue_timeout, self.shutdown_event
-                    )
-                    if not non_block:
-                        result = result.result()
-                elif not non_block:
-                    result = get_response(w, dequeue_timeout, self.shutdown_event)
-                else:
-                    raise RuntimeError(
-                        "non_block can only be used when max_concurrent_batches > 1"
-                    )
                 responses.append(result)
+            return responses[0] if output_rank is not None else responses
 
-            return responses
-        except TimeoutError as e:
-            raise TimeoutError(f"RPC call to {method} timed out.") from e
+        if non_block:
+            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
+            self.futures_queue.appendleft((future, get_response))
+            return future
+
+        # First drain any pending futures in the queue.
+        while self.futures_queue:
+            future, get_fut_response = self.futures_queue.pop()
+            future.wait_for_response(get_fut_response)
+
+        return aggregate(get_response())
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -308,14 +392,17 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
+        active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        # Give processes time to clean themselves up properly first
+        if wait_for_termination(active_procs(), 4):
+            return
+
         # Send SIGTERM if still running
-        active_procs = [proc for proc in worker_procs if proc.is_alive()]
-        for p in active_procs:
+        for p in active_procs():
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            active_procs = [p for p in active_procs if p.is_alive()]
-            for p in active_procs:
+            for p in active_procs():
                 p.kill()
 
     def shutdown(self):
@@ -334,9 +421,6 @@ class MultiprocExecutor(Executor):
                 self._ensure_worker_termination([w.proc for w in workers])
 
             self.shutdown_event.set()
-            if self.io_thread_pool is not None:
-                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
-                del self.io_thread_pool
 
         self.rpc_broadcast_mq = None
 
@@ -346,9 +430,9 @@ class MultiprocExecutor(Executor):
 
     @cached_property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
@@ -360,7 +444,11 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
-        return self.world_size - self.parallel_config.tensor_parallel_size
+        return (
+            self.world_size
+            - self.parallel_config.tensor_parallel_size
+            * self.parallel_config.prefill_context_parallel_size
+        )
 
 
 @dataclass
@@ -370,24 +458,33 @@ class UnreadyWorkerProcHandle:
     proc: BaseProcess
     rank: int
     ready_pipe: Connection
-    death_writer: Optional[Connection] = None
+    death_writer: Connection | None = None
 
 
 @dataclass
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
-    worker_response_mq: MessageQueue  # The worker process writes to this MQ
-    death_writer: Optional[Connection] = None
+    # The worker process writes to this MQ in single-node mode
+    worker_response_mq: MessageQueue | None
+    # This is only non empty on driver node,
+    # the peer worker process i writes to MQ
+    # `peer_worker_response_mqs[i]`
+    peer_worker_response_mqs: list[MessageQueue | None]
+    death_writer: Connection | None = None
 
     @classmethod
     def from_unready_handle(
-        cls, unready_handle: UnreadyWorkerProcHandle, worker_response_mq: MessageQueue
+        cls,
+        unready_handle: UnreadyWorkerProcHandle,
+        worker_response_mq: MessageQueue | None,
+        peer_worker_response_mqs: list[MessageQueue | None],
     ) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
+            peer_worker_response_mqs=peer_worker_response_mqs,
             death_writer=unready_handle.death_writer,
         )
 
@@ -396,7 +493,42 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    rpc_broadcast_mq: MessageQueue | None
+    worker_response_mq: MessageQueue | None
 
+    def _init_message_queues(
+        self, input_shm_handle: Handle, vllm_config: VllmConfig
+    ) -> None:
+        if vllm_config.parallel_config.nnodes_within_dp == 1:
+            # Initialize MessageQueue for receiving SchedulerOutput
+            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.worker.rank
+            )
+
+            # Initializes a message queue for sending the model output
+            self.worker_response_mq = MessageQueue(1, 1)
+            self.peer_response_handles = []
+        else:
+            # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
+            self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
+                external_writer_handle=input_shm_handle,
+                # Since there is external_writer_handle from executor proc,
+                # where the ready signal from actual writer is sent out of the
+                # create_mq_broadcaster method and after this setup, we make it
+                # non blocking. The handshake will be triggered when
+                # worker.rpc_broadcast_mq.wait_until_ready() is called
+                blocking=False,
+            )
+            # Initializes remote message queue for sending the model output to the
+            # driver worker, exposing peer_response_handles for driver worker
+            # that include handles for all ranks
+            self.worker_response_mq, self.peer_response_handles = (
+                get_inner_dp_world_group().create_single_reader_mq_broadcasters(
+                    reader_rank_in_group=0
+                )
+            )
+
+    @instrument(span_name="Worker init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -405,15 +537,15 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+        wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
-        all_kwargs[rank] = {
+        all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
             "rank": rank,
@@ -423,14 +555,6 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-
-        # Initialize MessageQueue for receiving SchedulerOutput
-        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank
-        )
-
-        # Initializes a message queue for sending the model output
-        self.worker_response_mq = MessageQueue(1, 1)
 
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
@@ -452,7 +576,12 @@ class WorkerProc:
         )
 
         # Load model
+        self._init_message_queues(input_shm_handle, vllm_config)
         self.worker.load_model()
+
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     @staticmethod
     def make_worker_process(
@@ -462,6 +591,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -479,6 +609,7 @@ class WorkerProc:
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -495,6 +626,27 @@ class WorkerProc:
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
     @staticmethod
+    def wait_for_response_handle_ready(
+        handles: dict[str, Any], proc_handle: UnreadyWorkerProcHandle
+    ) -> WorkerProcHandle:
+        response_handle = handles["handle"]
+        worker_response_mq: MessageQueue | None = None
+        if len(response_handle.local_reader_ranks) > 0:
+            worker_response_mq = MessageQueue.create_from_handle(response_handle, 0)
+        peer_response_handles = handles["peer_response_handles"]
+        peer_worker_response_mqs = [
+            MessageQueue.create_from_handle(handle, -1)
+            if handle.remote_subscribe_addr is not None
+            else None
+            for handle in peer_response_handles
+        ]
+        return WorkerProcHandle.from_unready_handle(
+            proc_handle,
+            worker_response_mq,
+            peer_worker_response_mqs=peer_worker_response_mqs,
+        )
+
+    @staticmethod
     def wait_for_ready(
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
@@ -505,7 +657,7 @@ class WorkerProc:
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
-        ready_proc_handles: list[Optional[WorkerProcHandle]] = [None] * len(
+        ready_proc_handles: list[WorkerProcHandle | None] = [None] * len(
             unready_proc_handles
         )
         while pipes:
@@ -519,16 +671,10 @@ class WorkerProc:
                     if response["status"] != "READY":
                         raise e
 
-                    # Extract the message queue handle.
-                    worker_response_mq = MessageQueue.create_from_handle(
-                        response["handle"], 0
+                    idx = unready_proc_handle.rank % len(ready_proc_handles)
+                    ready_proc_handles[idx] = WorkerProc.wait_for_response_handle_ready(
+                        response, unready_proc_handle
                     )
-                    ready_proc_handles[unready_proc_handle.rank] = (
-                        WorkerProcHandle.from_unready_handle(
-                            unready_proc_handle, worker_response_mq
-                        )
-                    )
-
                 except EOFError:
                     e.__suppress_context__ = True
                     raise e from None
@@ -560,6 +706,9 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
+                logger.debug(
+                    "WorkerProc handling signal %d, raising SystemExit", signum
+                )
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -569,7 +718,7 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe = kwargs.pop("death_pipe", None)
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
         shutdown_event = threading.Event()
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
@@ -580,7 +729,7 @@ class WorkerProc:
                     death_pipe.recv()
                 except EOFError:
                     # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
+                    logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
                 except Exception as e:
@@ -593,19 +742,31 @@ class WorkerProc:
 
         try:
             reader.close()
+
+            # Initialize tracer
+            rank = kwargs.get("rank", 0)
+            maybe_init_worker_tracer(
+                instrumenting_module_name="vllm.worker",
+                process_kind="worker",
+                process_name=f"Worker_{rank}",
+            )
+
             worker = WorkerProc(*args, **kwargs)
+            assert worker.worker_response_mq is not None
 
             # Send READY once we know everything is loaded
             ready_writer.send(
                 {
                     "status": WorkerProc.READY_STR,
                     "handle": worker.worker_response_mq.export_handle(),
+                    "peer_response_handles": worker.peer_response_handles,
                 }
             )
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
             # Must be kept consistent with the Executor
-            worker.rpc_broadcast_mq.wait_until_ready()
+            if worker.rpc_broadcast_mq is not None:
+                worker.rpc_broadcast_mq.wait_until_ready()
             worker.worker_response_mq.wait_until_ready()
             ready_writer.close()
             ready_writer = None
@@ -629,6 +790,13 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
+
+        except SystemExit as e:
+            # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
+            # the graceful shutdown process did not succeed
+            logger.warning("WorkerProc was terminated")
+            # SystemExit must never be ignored
+            raise e
 
         finally:
             if ready_writer is not None:
@@ -674,8 +842,9 @@ class WorkerProc:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
 
-    def worker_busy_loop(self, cancel: Optional[threading.Event] = None):
+    def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
+        assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True
@@ -707,15 +876,23 @@ class WorkerProc:
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
         pp_rank = get_pp_group().rank_in_group
+        pcp_size = get_pcp_group().world_size
+        pcp_rank = get_pcp_group().rank_in_group
         tp_size = get_tp_group().world_size
         tp_rank = get_tp_group().rank_in_group
+        dcp_size = get_dcp_group().world_size
+        dcp_rank = get_dcp_group().rank_in_group
         process_name = "Worker"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"
         if pp_size > 1:
             process_name += f"_PP{pp_rank}"
+        if pcp_size > 1:
+            process_name += f"_PCP{pcp_rank}"
         if tp_size > 1:
             process_name += f"_TP{tp_rank}"
+        if dcp_size > 1:
+            process_name += f"_DCP{dcp_rank}"
         if enable_ep:
             ep_rank = get_ep_group().rank_in_group
             process_name += f"_EP{ep_rank}"

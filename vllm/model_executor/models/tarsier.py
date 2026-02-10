@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Optional, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -34,20 +34,25 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    get_layer_index,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .vision import (
     VisionEncoderInfo,
     get_num_selected_vision_tokens,
@@ -81,7 +86,7 @@ class TarsierImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-TarsierImageInputs = Union[TarsierImagePixelInputs, TarsierImageEmbeddingInputs]
+TarsierImageInputs: TypeAlias = TarsierImagePixelInputs | TarsierImageEmbeddingInputs
 
 
 class TarsierHfConfig(Protocol):  # Based on the Tarsier's LlavaConfig
@@ -89,7 +94,7 @@ class TarsierHfConfig(Protocol):  # Based on the Tarsier's LlavaConfig
     text_config: Final[PretrainedConfig]  # Added from Tarsier's LlavaConfig
     image_token_index: Final[int]
     vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[Union[int, list[int]]]
+    vision_feature_layer: Final[int | list[int]]
     projector_hidden_act: Final[str]
     image_newline_idx: Final[int]
     image_new_idx: Final[int]
@@ -109,9 +114,10 @@ class TarsierProcessor(LlavaProcessor):
     def __call__(
         self,
         images: ImageInput = None,
-        text: Union[
-            TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]
-        ] = None,
+        text: TextInput
+        | PreTokenizedInput
+        | list[TextInput]
+        | list[PreTokenizedInput] = None,
         audio=None,
         videos=None,
         **kwargs: Unpack[TarsierProcessorKwargs],
@@ -173,7 +179,7 @@ class TarsierMultiModalProjector(nn.Module):
         text_hidden_size: int,
         projector_hidden_act: str,
         multimodal_projector_bias: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -215,7 +221,7 @@ class TarsierProcessingInfo(BaseProcessingInfo):
 
         return self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -331,7 +337,7 @@ def _build_tarsier_hf_processor(
     info: _I_Tarsier,
     dummy_inputs: BaseDummyInputsBuilder[_I_Tarsier],
     *,
-    cache: Optional[BaseMultiModalProcessorCache] = None,
+    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, TarsierProcessingInfo):
         return TarsierMultiModalProcessor(
@@ -344,28 +350,23 @@ def _build_tarsier_hf_processor(
 
 def init_vision_tower_for_tarsier(
     hf_config: TarsierHfConfig,  # Use the Tarsier specific config protocol
-    quant_config: Optional[QuantizationConfig],
+    quant_config: QuantizationConfig | None,
     *,
-    require_post_norm: Optional[bool] = None,
+    require_post_norm: bool | None = None,
     prefix: str = "",
-) -> Union[CLIPVisionModel, SiglipVisionModel]:
+) -> CLIPVisionModel | SiglipVisionModel:
     vision_config = hf_config.vision_config
 
     feature_layers = hf_config.vision_feature_layer
     base_num_hidden_layers = vision_config.num_hidden_layers
 
-    def _get_layer_index(feature_layer_index: int, num_hidden_layers_total: int) -> int:
-        if feature_layer_index < 0:
-            return num_hidden_layers_total + feature_layer_index + 1
-        return feature_layer_index
-
     if isinstance(feature_layers, int):
-        num_hidden_layers_to_init = _get_layer_index(
+        num_hidden_layers_to_init = get_layer_index(
             feature_layers, base_num_hidden_layers
         )
     elif isinstance(feature_layers, (list, tuple)):
         num_hidden_layers_to_init = max(
-            _get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
+            get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
         )
     else:
         raise TypeError(
@@ -399,15 +400,13 @@ def init_vision_tower_for_tarsier(
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -415,40 +414,47 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
         config: TarsierHfConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        self.config = config  # Storing the Tarsier-specific HF config
-        self.vision_tower = init_vision_tower_for_tarsier(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        projector_bias = getattr(config, "multimodal_projector_bias", True)
 
-        self.multi_modal_projector = TarsierMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=projector_bias,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,  # Use text_config from Tarsier's main config
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        self.register_buffer(
-            "image_newline_idx_tensor",
-            torch.tensor([config.image_newline_idx], dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "image_new_idx_tensor",
-            torch.tensor([config.image_new_idx], dtype=torch.long),
-            persistent=False,
-        )
+        self.config = config  # Storing the Tarsier-specific HF config
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = init_vision_tower_for_tarsier(
+                config,
+                quant_config=quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            projector_bias = getattr(config, "multimodal_projector_bias", True)
+
+            self.multi_modal_projector = TarsierMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.text_config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+            self.register_buffer(
+                "image_newline_idx_tensor",
+                torch.tensor([config.image_newline_idx], dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "image_new_idx_tensor",
+                torch.tensor([config.image_new_idx], dtype=torch.long),
+                persistent=False,
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                # Use text_config from Tarsier's main config
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -456,7 +462,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[TarsierImageInputs]:
+    ) -> TarsierImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -479,9 +485,9 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
-        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        vision_tower: CLIPVisionModel | SiglipVisionModel,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         # From vLLM LLaVA, vision tower output handling
         return vision_tower(
             pixel_values,
@@ -540,8 +546,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def _process_image_pixels(
         self,
         inputs: TarsierImagePixelInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        assert self.vision_tower is not None
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         pixel_values = inputs["pixel_values"]
         image_features_selected = self._image_pixels_to_features(
             self.vision_tower, pixel_values
@@ -559,7 +564,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def _process_image_input(
         self,
         image_input: TarsierImageInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             projected_features = image_input["data"]
             if isinstance(projected_features, torch.Tensor):
@@ -569,13 +574,10 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                     "Incorrect type of image_embeds. "
                     f"Got type: {type(projected_features)}. "
                 )
-        assert self.vision_tower is not None
+
         return self._process_image_pixels(image_input)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -583,22 +585,15 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
+
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
@@ -610,7 +605,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

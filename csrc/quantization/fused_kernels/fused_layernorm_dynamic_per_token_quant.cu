@@ -31,14 +31,15 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+    token_scale = 1.0f / token_scale;
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
                                      has_residual>(
-        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   } else {
     // FP8 - Do not invert token_scale for exact match with FBGemm
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
                                      has_residual>(
-        out, input, weight, rms, token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   }
 }
 
@@ -75,14 +76,52 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+    token_scale = 1.0f / token_scale;
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
     vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, rms, token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   }
 }
+
+// RMS norm + quant kernel
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_scale_transposed = false, int32_t group_size = 0>
+__global__ void rms_norm_per_block_quant_kernel(
+    scalar_out_t* __restrict__ out,  // [..., hidden_size]
+    float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
+                                     // or
+                                     // [hidden_size / group_size, num_tokens]
+    scalar_t const* __restrict__ input,   // [..., hidden_size]
+    scalar_t const* __restrict__ weight,  // [hidden_size]
+    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
+    scalar_t* __restrict__ residual = nullptr) {
+  float rms;
+  // Compute RMS
+  // Always able to vectorize due to constraints on hidden_size
+  vllm::vectorized::compute_rms<scalar_t, has_residual>(
+      &rms, input, hidden_size, var_epsilon, residual);
+
+  // Compute Scale
+  // Always able to vectorize due to constraints on hidden_size and group_size
+  vllm::vectorized::compute_dynamic_per_token_scales<
+      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
+      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual);
+
+  // RMS Norm + Quant
+  // Always able to vectorize due to constraints on hidden_size
+  // For int8, don't invert token_scale here: do it inside the norm_and_quant
+  // kernel. We do it because particular elements of token_scale can be shared
+  // between multiple threads, so this way, we avoid extra synchronization
+  // overhead.
+  vllm::vectorized::norm_and_quant<
+      scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
+      has_residual, is_scale_transposed, group_size>(
+      out, input, weight, rms, scales, hidden_size, residual);
+}
+
 }  // namespace vllm
 
 // Residual add + RMS norm + dynamic per token
@@ -103,30 +142,19 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (residual.has_value()) {
+  VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
           vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        true>
+                                                        has_residual>
               <<<grid, block, 0, stream>>>(
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>());
+                  var_epsilon, hidden_size,
+                  has_residual ? residual->data_ptr<scalar_in_t>() : nullptr);
         });
-
-  } else {
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        false>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, nullptr);
-        });
-  }
+  });
 }
 
 void rms_norm_dynamic_per_token_quant(
@@ -145,11 +173,91 @@ void rms_norm_dynamic_per_token_quant(
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);
   }
+  TORCH_CHECK(weight.dtype() == input.dtype());
   TORCH_CHECK(scales.dtype() == torch::kFloat32);
+  if (residual) {
+    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
         rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
             out, input, weight, scales, var_epsilon, scale_ub, residual);
       });
+}
+
+// Residual add + RMS norm + dynamic per token
+void rms_norm_per_block_quant_dispatch(
+    torch::Tensor& out,           // [..., hidden_size]
+    torch::Tensor const& input,   // [..., hidden_size]
+    torch::Tensor const& weight,  // [hidden_size]
+    torch::Tensor& scales,        // [num_tokens, hidden_size / group_size] or
+                                  // [hidden_size / group_size, num_tokens]
+    int32_t group_size,
+    double const var_epsilon,  // Variance epsilon used in norm calculation
+    std::optional<at::Tensor> const& scale_ub,
+    std::optional<at::Tensor>& residual, bool is_scale_transposed) {
+  int32_t hidden_size = input.size(-1);
+  auto num_tokens = input.numel() / hidden_size;
+
+  dim3 grid(num_tokens);
+  const int max_block_size = (num_tokens <= 256) ? 512 : 256;
+  dim3 block(std::min(hidden_size, max_block_size));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_per_block_quant_fp_dispatch", [&] {
+        using scalar_in_t = scalar_t;
+        VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+          VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+            VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
+              VLLM_DISPATCH_QUANT_TYPES(
+                  out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
+                    vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t,
+                                                          has_residual,
+                                                          transpose_scale, gs>
+                        <<<grid, block, 0, stream>>>(
+                            out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+                            input.data_ptr<scalar_in_t>(),
+                            weight.data_ptr<scalar_in_t>(),
+                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                                 : nullptr,
+                            var_epsilon, hidden_size,
+                            has_residual ? residual->data_ptr<scalar_in_t>()
+                                         : nullptr);
+                  });
+            });
+          });
+        });
+      });
+}
+
+void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor const& weight,
+                              torch::Tensor& scales, double const var_epsilon,
+                              std::optional<torch::Tensor> scale_ub,
+                              std::optional<torch::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed) {
+  static c10::ScalarType kFp8Type = is_fp8_ocp()
+                                        ? c10::ScalarType::Float8_e4m3fn
+                                        : c10::ScalarType::Float8_e4m3fnuz;
+  TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
+  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
+
+  if (scale_ub.has_value()) {
+    TORCH_CHECK(out.dtype() == kFp8Type);
+  }
+  TORCH_CHECK(weight.dtype() == input.dtype());
+  TORCH_CHECK(scales.dtype() == torch::kFloat32);
+  if (residual) {
+    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+  }
+
+  TORCH_CHECK(group_size == 128 || group_size == 64,
+              "Unsupported group size: ", group_size);
+
+  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
+                                    var_epsilon, scale_ub, residual,
+                                    is_scale_transposed);
 }

@@ -3,10 +3,9 @@
 
 import pickle as pkl
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Optional
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -15,6 +14,9 @@ from tqdm import tqdm
 
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 
 
 @dataclass
@@ -23,6 +25,7 @@ class bench_params_t:
     hidden_size: int
     add_residual: bool
     dtype: torch.dtype
+    group_size: list[int]
 
     def description(self):
         return (
@@ -30,6 +33,7 @@ class bench_params_t:
             f"x D {self.hidden_size} "
             f"x R {self.add_residual} "
             f"x DT {self.dtype}"
+            f"x GS {self.group_size}"
         )
 
 
@@ -39,10 +43,11 @@ def get_bench_params() -> list[bench_params_t]:
     HIDDEN_SIZES = list(range(1024, 8129, 1024))
     ADD_RESIDUAL = [True, False]
     DTYPES = [torch.bfloat16, torch.float]
+    GROUP_SIZES = [[1, 64], [1, 128]]
 
-    combinations = product(NUM_TOKENS, HIDDEN_SIZES, ADD_RESIDUAL, DTYPES)
+    combinations = product(NUM_TOKENS, HIDDEN_SIZES, ADD_RESIDUAL, DTYPES, GROUP_SIZES)
     bench_params = list(
-        map(lambda x: bench_params_t(x[0], x[1], x[2], x[3]), combinations)
+        map(lambda x: bench_params_t(x[0], x[1], x[2], x[3], x[4]), combinations)
     )
     return bench_params
 
@@ -51,8 +56,9 @@ def get_bench_params() -> list[bench_params_t]:
 def unfused_int8_impl(
     rms_norm_layer: RMSNorm,
     x: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     quant_dtype: torch.dtype,
+    group_size: list[int],
 ):
     # Norm
     torch_out = None
@@ -68,8 +74,9 @@ def unfused_int8_impl(
 def unfused_fp8_impl(
     rms_norm_layer: RMSNorm,
     x: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     quant_dtype: torch.dtype,
+    group_size: list[int],
 ):
     # Norm
     torch_out = None
@@ -82,14 +89,53 @@ def unfused_fp8_impl(
     torch_out, _ = ops.scaled_fp8_quant(torch_out)
 
 
+def unfused_groupwise_fp8_impl(
+    rms_norm_layer: RMSNorm,
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+):
+    # Norm
+    torch_out = None
+    if residual is None:
+        torch_out = rms_norm_layer.forward_cuda(x, residual)
+    else:
+        torch_out, _ = rms_norm_layer.forward_cuda(x, residual)
+
+    # Quant
+    torch_out, _ = per_token_group_quant_fp8(
+        torch_out, group_size=group_size[1], use_ue8m0=False
+    )
+
+
 def fused_impl(
     rms_norm_layer: RMSNorm,  # this stores the weights
     x: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     quant_dtype: torch.dtype,
+    group_size: list[int],
 ):
     out, _ = ops.rms_norm_dynamic_per_token_quant(
         x, rms_norm_layer.weight, 1e-6, quant_dtype, residual=residual
+    )
+
+
+def fused_groupwise_impl(
+    rms_norm_layer: RMSNorm,  # this stores the weights
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+):
+    out, _ = ops.rms_norm_per_block_quant(
+        x,
+        rms_norm_layer.weight,
+        1e-6,
+        quant_dtype,
+        group_size,
+        residual=residual,
+        is_scale_transposed=True,
     )
 
 
@@ -99,6 +145,7 @@ def bench_fn(
     x: torch.Tensor,
     residual: torch.Tensor,
     quant_dtype: torch.dtype,
+    group_size: list[int],
     label: str,
     sub_label: str,
     fn: Callable,
@@ -111,10 +158,11 @@ def bench_fn(
         "x": x,
         "residual": residual,
         "quant_dtype": quant_dtype,
+        "group_size": group_size,
         "fn": fn,
     }
     return TBenchmark.Timer(
-        stmt="fn(rms_norm_layer, x, residual, quant_dtype)",
+        stmt="fn(rms_norm_layer, x, residual, quant_dtype, group_size)",
         globals=globals,
         label=label,
         sub_label=sub_label,
@@ -148,6 +196,7 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             x,
             residual,
             torch.int8,
+            params.group_size,
             label,
             sub_label,
             unfused_int8_impl,
@@ -162,6 +211,7 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             x,
             residual,
             torch.float8_e4m3fn,
+            params.group_size,
             label,
             sub_label,
             unfused_fp8_impl,
@@ -176,6 +226,7 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             x,
             residual,
             torch.int8,
+            params.group_size,
             label,
             sub_label,
             fused_impl,
@@ -190,10 +241,41 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             x,
             residual,
             torch.float8_e4m3fn,
+            params.group_size,
             label,
             sub_label,
             fused_impl,
             "fused_fp8_impl",
+        )
+    )
+
+    # unfused groupwise fp8 impl.
+    timers.append(
+        bench_fn(
+            layer,
+            x,
+            residual,
+            torch.float8_e4m3fn,
+            params.group_size,
+            label,
+            sub_label,
+            unfused_groupwise_fp8_impl,
+            "unfused_groupwise_fp8_impl",
+        )
+    )
+
+    # fused groupwise fp8 impl.
+    timers.append(
+        bench_fn(
+            layer,
+            x,
+            residual,
+            torch.float8_e4m3fn,
+            params.group_size,
+            label,
+            sub_label,
+            fused_groupwise_impl,
+            "fused_groupwise_fp8_impl",
         )
     )
 

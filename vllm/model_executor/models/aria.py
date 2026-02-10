@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -30,12 +30,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -71,7 +71,7 @@ class AriaImagePixelInputs(TensorSchema):
     ]
 
     pixel_mask: Annotated[
-        Optional[torch.Tensor],
+        torch.Tensor | None,
         TensorShape("bn", "h", "w"),
     ]
 
@@ -82,7 +82,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(config, quant_config=quant_config, prefix=prefix)
@@ -127,11 +127,16 @@ class AriaProjectorMLP(nn.Module):
         in_features: int,
         hidden_features: int,
         output_dim: int,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
-        self.linear_in = ColumnParallelLinear(in_features, hidden_features, bias=False)
-        self.linear_out = RowParallelLinear(hidden_features, output_dim, bias=False)
+        self.linear_in = ColumnParallelLinear(
+            in_features, hidden_features, bias=False, prefix=f"{prefix}.linear_in"
+        )
+        self.linear_out = RowParallelLinear(
+            hidden_features, output_dim, bias=False, prefix=f"{prefix}.linear_out"
+        )
         self.act = get_act_fn("gelu_new")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -154,7 +159,7 @@ class AriaProjector(nn.Module):
         A tensor with the shape of (batch_size, query_number, output_dim)
     """
 
-    def __init__(self, config: AriaConfig) -> None:
+    def __init__(self, config: AriaConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.patch_to_query_dict = config.projector_patch_to_query_dict
@@ -174,13 +179,16 @@ class AriaProjector(nn.Module):
 
         self.layer_norm = nn.LayerNorm(self.in_features)
         self.feed_forward = AriaProjectorMLP(
-            self.in_features, self.hidden_features, self.output_dim
+            self.in_features,
+            self.hidden_features,
+            self.output_dim,
+            prefix=f"{prefix}.feed_forward",
         )
 
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, num_patches = x.shape[0], x.shape[1]
 
@@ -250,7 +258,7 @@ class AriaTextMoELayer(nn.Module):
     def __init__(
         self,
         config: AriaTextConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -415,7 +423,7 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(AriaProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(self) -> int:
@@ -436,7 +444,7 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         vision_config = self.info.get_vision_config()
 
@@ -499,8 +507,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     model to perform tasks that involve both image and text inputs.
     """
 
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -517,7 +523,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|fim_prefix|><|img|><|fim_suffix|>"
 
@@ -533,36 +539,38 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.vision_tower = AriaVisionTransformer(
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.vision_tower",
-        )
-        self.multi_modal_projector = AriaProjector(config)
-        self.vocab_size = config.text_config.vocab_size
-        self.language_model = AriaTextModel(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "language_model.model"),
-        )
-        self.pad_token_id = (
-            self.config.pad_token_id if self.config.pad_token_id is not None else -1
-        )
-        self.unpadded_vocab_size = config.text_config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.text_config.hidden_size,
-            org_num_embeddings=self.language_model.org_vocab_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.vocab_size, logit_scale
-        )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = AriaVisionTransformer(
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.vision_tower",
+            )
+            self.multi_modal_projector = AriaProjector(
+                config, prefix=maybe_prefix(prefix, "multi_modal_projector")
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = AriaTextModel(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "language_model.model"),
+            )
+
+            self.lm_head = ParallelLMHead(
+                config.text_config.vocab_size,
+                config.text_config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(
+                config.text_config.vocab_size, scale=logit_scale
+            )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[AriaImagePixelInputs]:
+    ) -> AriaImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_mask = kwargs.pop("pixel_mask", None)
 
@@ -577,8 +585,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _create_patch_attention_mask(
         self,
-        pixel_mask: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
+        pixel_mask: torch.Tensor | None,
+    ) -> torch.Tensor | None:
         if pixel_mask is None:
             return None
 
@@ -596,8 +604,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         pixel_mask = image_input["pixel_mask"]
 
@@ -614,10 +620,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return self.multi_modal_projector(image_outputs, image_attn_mask)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -626,20 +629,14 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        if inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
+    ) -> torch.Tensor | IntermediateTensors:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
         hidden_states = self.language_model(
             input_ids,
@@ -650,7 +647,10 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

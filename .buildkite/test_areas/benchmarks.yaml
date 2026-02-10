@@ -1,0 +1,30 @@
+group: Benchmarks
+depends_on: 
+  - image-build
+steps:
+- label: Benchmarks
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/.buildkite"
+  source_file_dependencies:
+  - benchmarks/
+  commands:
+  - bash scripts/run-benchmarks.sh
+
+- label: Benchmarks CLI Test
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
+
+- label: Attention Benchmarks Smoke Test (B200)
+  device: b200
+  num_gpus: 2
+  optional: true
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - benchmarks/attention_benchmarks/
+  - vllm/v1/attention/
+  commands:
+  - python benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1

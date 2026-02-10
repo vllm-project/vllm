@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-from typing import Optional
 
 import torch
 
@@ -58,6 +57,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -87,76 +87,91 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
         p_beta = beta + bos * HV + i_hv
-    p_g = g + bos * HV + i_hv
+
+    if not IS_KDA:
+        p_g = g + bos * HV + i_hv
+    else:
+        p_gk = g + (bos * HV + i_hv) * K + o_k
+
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+    mask_h = mask_v[:, None] & mask_k[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            p_h0 = (
-                h0
-                + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                    tl.int64
-                )
-                * stride_init_state_token
+            # Load state index and check for PAD_SLOT_ID (-1)
+            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
+                tl.int64
             )
+            # Skip if state index is invalid (PAD_SLOT_ID = -1)
+            if state_idx < 0:
+                return
+            p_h0 = h0 + state_idx * stride_init_state_token
         else:
-            p_h0 = h0 + bos * HV * K * V
-        p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            p_h0 = h0 + bos * HV * V * K
+        p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BK, BV]
-        b_h *= exp(b_g)
+        # [BV, BK]
+        if not IS_KDA:
+            b_g = tl.load(p_g).to(tl.float32)
+            b_h *= exp(b_g)
+        else:
+            b_gk = tl.load(p_gk).to(tl.float32)
+            b_h *= exp(b_gk[None, :])
         # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        b_v -= tl.sum(b_h * b_k[None, :], 1)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
         b_v *= b_beta
-        # [BK, BV]
-        b_h += b_k[:, None] * b_v[None, :]
+        # [BV, BK]
+        b_h += b_v[:, None] * b_k[None, :]
         # [BV]
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        b_o = tl.sum(b_h * b_q[None, :], 1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            p_ht = (
-                ht
-                + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                    tl.int64
-                )
-                * stride_final_state_token
-            )
+            # Load state index and check for PAD_SLOT_ID (-1)
+            final_state_idx = tl.load(
+                ssm_state_indices + i_n * stride_indices_seq + i_t
+            ).to(tl.int64)
+            # Only store if state index is valid (not PAD_SLOT_ID)
+            if final_state_idx >= 0:
+                p_ht = ht + final_state_idx * stride_final_state_token
+                p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += H * K
         p_k += H * K
         p_o += HV * V
         p_v += HV * V
-        p_g += HV
+        if not IS_KDA:
+            p_g += HV
+        else:
+            p_gk += HV * K
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
@@ -169,15 +184,15 @@ def fused_recurrent_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     inplace_final_state: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    ssm_state_indices: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
@@ -187,7 +202,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     if inplace_final_state:
         final_state = initial_state
     else:
-        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
@@ -229,6 +244,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
+        IS_KDA=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -248,9 +264,9 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         inplace_final_state: bool = True,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        ssm_state_indices: Optional[torch.Tensor] = None,
-        num_accepted_tokens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        ssm_state_indices: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -280,9 +296,9 @@ def fused_recurrent_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    ssm_state_indices: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -302,7 +318,7 @@ def fused_recurrent_gated_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, V, K]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         inplace_final_state: bool:
@@ -320,7 +336,7 @@ def fused_recurrent_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, HV, K, V]`.
+            Final state of shape `[N, HV, V, K]`.
 
     Examples::
         >>> import torch
@@ -334,7 +350,7 @@ def fused_recurrent_gated_delta_rule(
         >>> v = torch.randn(B, T, HV, V, device='cuda')
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
-        >>> h0 = torch.randn(B, HV, K, V, device='cuda')
+        >>> h0 = torch.randn(B, HV, V, K, device='cuda')
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,

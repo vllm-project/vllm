@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import ray
 import torch
@@ -14,7 +14,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.utils import current_stream
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
@@ -27,15 +27,15 @@ class RayPPCommunicator(Communicator):
     This class is not thread-safe.
     """
 
-    _comm: Optional[DeviceCommunicatorBase]
+    _comm: DeviceCommunicatorBase | None
 
     def __init__(
         self,
         world_size: int,
         comm_id: Any,
-        rank: Optional[int],
+        rank: int | None,
         actor_handles: list["ray.actor.ActorHandle"],
-        cuda_stream: Optional[torch.cuda.Stream],
+        cuda_stream: torch.cuda.Stream | None,
         use_communication_streams: bool = False,
     ):
         """
@@ -56,7 +56,7 @@ class RayPPCommunicator(Communicator):
                 This is not supported.
         """
         self._world_size = world_size
-        self._rank: Optional[int] = None
+        self._rank: int | None = None
         self._actor_handles = actor_handles
         if use_communication_streams:
             raise NotImplementedError("use_communication_streams is not supported")
@@ -99,7 +99,7 @@ class RayPPCommunicator(Communicator):
 
         # Ray actor IDs are 32-character hex strings (128 bits)
         ACTOR_ID_LEN = 32
-        actor_id_bytes = actor_id_str.encode("utf-8")
+        actor_id_bytes = bytearray(actor_id_str.encode("utf-8"))
         assert len(actor_id_bytes) == ACTOR_ID_LEN, (
             f"Unexpected actor ID length: {len(actor_id_bytes)}"
         )
@@ -143,7 +143,7 @@ class RayPPCommunicator(Communicator):
         else:
             raise ValueError(f"Actor {actor} not found in communicator group")
 
-    def get_self_rank(self) -> Optional[int]:
+    def get_self_rank(self) -> int | None:
         """
         Return this actor's rank.
         """

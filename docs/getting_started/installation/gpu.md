@@ -1,18 +1,22 @@
+---
+toc_depth: 3
+---
+
 # GPU
 
 vLLM is a Python library that supports the following GPU variants. Select your GPU type to see vendor specific instructions:
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:installation"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:installation"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:installation"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:installation"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:installation"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:installation"
 
 ## Requirements
 
@@ -24,15 +28,15 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:requirements"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:requirements"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:requirements"
 
 ## Set up using Python
 
@@ -42,86 +46,98 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:set-up-using-python"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:set-up-using-python"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:set-up-using-python"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:set-up-using-python"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:set-up-using-python"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:set-up-using-python"
 
-### Pre-built wheels
+### Pre-built wheels {#pre-built-wheels}
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:pre-built-wheels"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-wheels"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:pre-built-wheels"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-wheels"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:pre-built-wheels"
-
-[](){ #build-from-source }
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-wheels"
 
 ### Build wheel from source
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-wheel-from-source"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-wheel-from-source"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-wheel-from-source"
 
 ## Set up using Docker
 
 ### Pre-built images
 
+<!-- markdownlint-disable MD025 -->
+# --8<-- [start:pre-built-images]
+
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:pre-built-images"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:pre-built-images"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-images"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:pre-built-images"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
 
+# --8<-- [end:pre-built-images]
+<!-- markdownlint-enable MD025 -->
+
+<!-- markdownlint-disable MD001 -->
 ### Build image from source
+<!-- markdownlint-enable MD001 -->
+
+<!-- markdownlint-disable MD025 -->
+# --8<-- [start:build-image-from-source]
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-image-from-source"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-image-from-source"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
+
+# --8<-- [end:build-image-from-source]
+<!-- markdownlint-enable MD025 -->
 
 ## Supported features
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:supported-features"
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:supported-features"
 
 === "AMD ROCm"
 
-    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:supported-features"
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:supported-features"
 
 === "Intel XPU"
 
-    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:supported-features"
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:supported-features"

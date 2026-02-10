@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import tokenizers
 from packaging import version
@@ -10,8 +9,8 @@ from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer,
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
@@ -36,7 +35,10 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
+    def num_output_tokens(self) -> int:
+        return len(self.token_ids)
+
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         self.token_ids.extend(new_token_ids)
         return None
 
@@ -46,7 +48,7 @@ class IncrementalDetokenizer:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
         assert request.sampling_params is not None
@@ -70,14 +72,21 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        self.stop = stop = params.stop
+        stop_list: list[str]
+        if params.stop is None:
+            stop_list = []
+        elif isinstance(params.stop, str):
+            stop_list = [params.stop]
+        else:
+            stop_list = params.stop
+        self.stop = stop_list
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stop and not self.include_stop_str_in_output:
-            self.stop_buffer_length = max(len(s) for s in stop) - 1
+        if self.stop and not self.include_stop_str_in_output:
+            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
@@ -85,7 +94,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -106,14 +115,12 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        # TODO(woosuk): This method becomes very inefficient when the number of
-        # new_token_ids is more than 1. We need to optimize this.
         stop_check_offset = len(self.output_text)
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
-            if self.min_tokens and len(self.output_token_ids) <= self.min_tokens:
+            if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
         if skipped_stop_token_id is not None:
@@ -122,7 +129,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and len(self.output_token_ids) > self.min_tokens:
+        if self.stop and self.num_output_tokens() > self.min_tokens:
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
@@ -224,7 +231,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         return token or ""
 
-    def _protected_step(self, next_token_id: int) -> Optional[str]:
+    def _protected_step(self, next_token_id: int) -> str | None:
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
         except (OverflowError, TypeError):
@@ -250,7 +257,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: AnyTokenizer, request: EngineCoreRequest):
+    def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
         super().__init__(request)
 
         self.tokenizer = tokenizer
@@ -274,7 +281,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Prompt embedding requests cannot be detokenized, in general.
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
-            self.read_offest = 0
+            self.read_offset = 0
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 
@@ -288,6 +295,9 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             if not self.prompt_len
             else (self.token_ids[self.prompt_len :])
         )
+
+    def num_output_tokens(self) -> int:
+        return len(self.token_ids) - self.prompt_len
 
     def decode_next(self, next_token_id: int) -> str:
         new_tokens, decoded_text, prefix_offset, read_offset = detokenize_incrementally(
@@ -312,7 +322,7 @@ def check_stop_strings(
     new_char_count: int,
     stop: list[str],
     include_in_output: bool,
-) -> Optional[tuple[str, int]]:
+) -> tuple[str, int] | None:
     """Check if any stop strings are matched and truncate sequence
     output text accordingly.
 

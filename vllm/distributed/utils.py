@@ -15,7 +15,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ProcessGroup, TCPStore
@@ -29,7 +29,8 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import suppress_stdout
 
 logger = init_logger(__name__)
 
@@ -150,7 +151,7 @@ class StatelessProcessGroup:
     store: torch._C._distributed_c10d.Store
 
     # stores a reference to the socket so that the file descriptor stays alive
-    socket: Optional[socket.socket]
+    socket: socket.socket | None
 
     data_expiration_seconds: int = 3600  # 1 hour
 
@@ -197,7 +198,7 @@ class StatelessProcessGroup:
         self.recv_src_counter[src] += 1
         return obj
 
-    def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
+    def broadcast_obj(self, obj: Any | None, src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.
         It does not clean up after all ranks have received the object.
         Use it for limited times, e.g., for initialization.
@@ -276,7 +277,7 @@ class StatelessProcessGroup:
             # Check for timeout
             cur_time = time.time()
             if cur_time - start_time > timeout:
-                raise RuntimeError("Barrier timed out after %f seconds", timeout)
+                raise RuntimeError(f"Barrier timed out after {timeout:.2f} seconds")
 
             # Check for each process
             for i in range(self.world_size):
@@ -323,7 +324,9 @@ class StatelessProcessGroup:
         while len(processes_departed) < self.world_size:
             # Check for timeout
             if time.time() - start_time > timeout:
-                raise RuntimeError("Barrier departure timed out after %f s", timeout)
+                raise RuntimeError(
+                    f"Barrier departure timed out after {timeout:.2f} seconds"
+                )
 
             # Check for each process
             for i in range(self.world_size):
@@ -415,7 +418,6 @@ class StatelessProcessGroup:
 
 
 def init_gloo_process_group(
-    backend: Backend,
     prefix_store: PrefixStore,
     group_rank: int,
     group_size: int,
@@ -425,33 +427,23 @@ def init_gloo_process_group(
     Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
-    if is_torch_equal_or_newer("2.6"):
+    with suppress_stdout():
         pg = ProcessGroup(
             prefix_store,
             group_rank,
             group_size,
         )
-    else:
-        options = ProcessGroup.Options(backend=backend)
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-            options,
-        )
-    from torch.distributed.distributed_c10d import ProcessGroupGloo
+        from torch.distributed.distributed_c10d import ProcessGroupGloo
 
-    backend_class = ProcessGroupGloo(
-        prefix_store, group_rank, group_size, timeout=timeout
-    )
-    backend_type = ProcessGroup.BackendType.GLOO
-    device = torch.device("cpu")
-    if is_torch_equal_or_newer("2.6"):
-        # _set_default_backend is supported in torch >= 2.6
+        backend_class = ProcessGroupGloo(
+            prefix_store, group_rank, group_size, timeout=timeout
+        )
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
         pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
+        backend_class._set_sequence_number_for_group()
 
-    pg._register_backend(device, backend_type, backend_class)
+        pg._register_backend(device, backend_type, backend_class)
     return pg
 
 
@@ -504,24 +496,25 @@ def stateless_init_torch_distributed_process_group(
     # Use a PrefixStore to avoid accidental overrides of keys used by
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
+    try:
+        from vllm.platforms import current_platform
 
-    if backend == "gloo":
-        return init_gloo_process_group(
+        return current_platform.stateless_init_device_torch_dist_pg(
             backend=backend,
             prefix_store=prefix_store,
             group_rank=group_rank,
             group_size=group_size,
             timeout=timeout,
         )
-    from vllm.platforms import current_platform
-
-    return current_platform.stateless_init_device_torch_dist_pg(
-        backend=backend,
-        prefix_store=prefix_store,
-        group_rank=group_rank,
-        group_size=group_size,
-        timeout=timeout,
-    )
+    except NotImplementedError:
+        # If platform doesn't implement stateless_init_device_torch_dist_pg, it
+        # will raise a NotImplementedError. In this case, we fall back to gloo.
+        return init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=group_rank,
+            group_size=group_size,
+            timeout=timeout,
+        )
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
@@ -529,12 +522,5 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    if is_torch_equal_or_newer("2.7"):
-        pg.shutdown()
-    else:
-        # Lazy import for non-CUDA backends.
-        from torch.distributed.distributed_c10d import _shutdown_backend
-
-        _shutdown_backend(pg)
-
+    pg.shutdown()
     _unregister_process_group(pg.group_name)

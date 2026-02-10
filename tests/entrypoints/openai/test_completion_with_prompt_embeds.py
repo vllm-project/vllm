@@ -110,7 +110,7 @@ async def test_completions_with_prompt_embeds(
     # Test case: Single prompt embeds input
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         extra_body={"prompt_embeds": encoded_embeds},
@@ -121,7 +121,7 @@ async def test_completions_with_prompt_embeds(
     # Test case: batch completion with prompt_embeds
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
@@ -133,7 +133,7 @@ async def test_completions_with_prompt_embeds(
     # Test case: streaming with prompt_embeds
     single_completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         extra_body={"prompt_embeds": encoded_embeds},
@@ -142,7 +142,7 @@ async def test_completions_with_prompt_embeds(
 
     stream = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         stream=True,
@@ -162,7 +162,7 @@ async def test_completions_with_prompt_embeds(
     # Test case: batch streaming with prompt_embeds
     stream = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         stream=True,
@@ -197,7 +197,7 @@ async def test_completions_with_prompt_embeds(
     )
     completion_embeds_only = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         extra_body={"prompt_embeds": encoded_embeds},
@@ -215,7 +215,7 @@ async def test_completions_errors_with_prompt_embeds(
     # Test error case: invalid prompt_embeds
     with pytest.raises(BadRequestError):
         await client_with_prompt_embeds.completions.create(
-            prompt="",
+            prompt=None,
             model=model_name,
             max_tokens=5,
             temperature=0.0,
@@ -237,7 +237,7 @@ async def test_completions_with_logprobs_and_prompt_embeds(
     # Test case: Logprobs using prompt_embeds
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         echo=False,
@@ -257,7 +257,7 @@ async def test_completions_with_logprobs_and_prompt_embeds(
     # Test case: Log probs with batch completion and prompt_embeds
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
-        prompt="",  # Add empty prompt as required parameter
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         echo=False,
@@ -287,8 +287,21 @@ async def test_prompt_logprobs_raises_error(
     with pytest.raises(BadRequestError, match="not compatible"):
         await client_with_prompt_embeds.completions.create(
             model=MODEL_NAME,
-            prompt="",
+            prompt=None,
             max_tokens=5,
             temperature=0.0,
             extra_body={"prompt_embeds": encoded_embeds, "prompt_logprobs": True},
         )
+
+
+@pytest.mark.asyncio
+async def test_empty_prompt_embeds(
+    client_with_prompt_embeds: openai.AsyncOpenAI,
+) -> None:
+    await client_with_prompt_embeds.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=5,
+        temperature=0.0,
+        extra_body={"prompt_embeds": []},
+    )

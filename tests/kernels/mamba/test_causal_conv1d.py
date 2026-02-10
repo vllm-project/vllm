@@ -1,29 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def causal_conv1d_ref(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    initial_states: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
     return_final_states: bool = False,
-    final_states_out: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = "silu",
 ):
     """
     x: (batch, dim, seqlen)
@@ -117,12 +116,12 @@ def causal_conv1d_update_ref(
 def causal_conv1d_opcheck_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    cu_seq_len: Optional[torch.Tensor] = None,
-    cache_indices: Optional[torch.Tensor] = None,
-    has_initial_state: Optional[torch.Tensor] = None,
-    conv_states: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    bias: torch.Tensor | None = None,
+    cu_seq_len: torch.Tensor | None = None,
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    conv_states: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
 ):
     """
@@ -155,7 +154,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch = 2
     x = torch.randn(batch, dim, seqlen, device=device, dtype=itype)
     x_ref = x.clone()
@@ -184,7 +183,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("seqlen", [1, 3])
@@ -202,7 +201,7 @@ def test_causal_conv1d_update_with_batch_gather(
         rtol, atol = 1e-2, 5e-2
 
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     padding = 5 if with_padding else 0
     padded_batch_size = batch_size + padding
@@ -266,7 +265,7 @@ def test_causal_conv1d_update_with_batch_gather(
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("seqlen", [8, 30, 249, 2049, 4096])
+@pytest.mark.parametrize("seqlen", [8, 249, 4096])
 @pytest.mark.parametrize("dim", [64, 4096])
 @pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.parametrize("batch", [4, 10])
@@ -279,7 +278,7 @@ def test_causal_conv1d_varlen(
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     seqlens = []
     batch_size = batch
     padding = 3 if with_padding else 0

@@ -1,0 +1,91 @@
+group: Models - Language
+depends_on: 
+  - image-build
+steps:
+- label: Language Models Tests (Standard)
+  timeout_in_minutes: 25
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language
+  commands:
+    # Test standard language models, excluding a subset of slow tests
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language -m 'core_model and (not slow_test)'
+
+- label: Language Models Tests (Extra Standard) %N
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/language/pooling/test_embedding.py
+  - tests/models/language/generation/test_common.py
+  - tests/models/language/pooling/test_classification.py
+  commands:
+    # Shard slow subset of standard language models tests. Only run when model
+    # source is modified, or when specified test files are modified
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Language Models Tests (Hybrid) %N
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    # Shard hybrid language model tests
+    - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Language Models Test (Extended Generation) # 80min
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+
+- label: Language Models Test (PPL)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation_ppl_test
+  commands:
+    - pytest -v -s models/language/generation_ppl_test
+
+- label: Language Models Test (Extended Pooling)  # 36min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling
+  commands:
+    - pytest -v -s models/language/pooling -m 'not core_model'
+
+- label: Language Models Test (MTEB)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+    - pytest -v -s models/language/pooling_mteb_test

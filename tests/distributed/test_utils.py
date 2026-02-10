@@ -10,11 +10,10 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import (
-    cuda_device_count_stateless,
-    get_open_port,
-    update_environment_variables,
-)
+from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import multi_gpu_test
 
@@ -34,6 +33,8 @@ class _CUDADeviceCountStatelessTestActor:
 def test_cuda_device_count_stateless():
     """Test that cuda_device_count_stateless changes return value if
     CUDA_VISIBLE_DEVICES is changed."""
+    if current_platform.is_rocm():
+        pytest.skip("Skip for ROCm because Ray uses HIP_VISIBLE_DEVICES.")
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2
     ).remote()

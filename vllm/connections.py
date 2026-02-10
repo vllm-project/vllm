@@ -3,11 +3,10 @@
 
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse
 
 import aiohttp
 import requests
+from urllib3.util import parse_url
 
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -20,8 +19,8 @@ class HTTPConnection:
 
         self.reuse_client = reuse_client
 
-        self._sync_client: Optional[requests.Session] = None
-        self._async_client: Optional[aiohttp.ClientSession] = None
+        self._sync_client: requests.Session | None = None
+        self._async_client: aiohttp.ClientSession | None = None
 
     def get_sync_client(self) -> requests.Session:
         if self._sync_client is None or not self.reuse_client:
@@ -38,7 +37,7 @@ class HTTPConnection:
         return self._async_client
 
     def _validate_http_url(self, url: str):
-        parsed_url = urlparse(url)
+        parsed_url = parse_url(url)
 
         if parsed_url.scheme not in ("http", "https"):
             raise ValueError(
@@ -53,8 +52,8 @@ class HTTPConnection:
         url: str,
         *,
         stream: bool = False,
-        timeout: Optional[float] = None,
-        extra_headers: Optional[Mapping[str, str]] = None,
+        timeout: float | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
@@ -74,8 +73,8 @@ class HTTPConnection:
         self,
         url: str,
         *,
-        timeout: Optional[float] = None,
-        extra_headers: Optional[Mapping[str, str]] = None,
+        timeout: float | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
@@ -91,7 +90,7 @@ class HTTPConnection:
         )
 
     def get_bytes(
-        self, url: str, *, timeout: Optional[float] = None, allow_redirects: bool = True
+        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
     ) -> bytes:
         with self.get_response(
             url, timeout=timeout, allow_redirects=allow_redirects
@@ -104,7 +103,7 @@ class HTTPConnection:
         self,
         url: str,
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
         async with await self.get_async_response(
@@ -114,7 +113,7 @@ class HTTPConnection:
 
             return await r.read()
 
-    def get_text(self, url: str, *, timeout: Optional[float] = None) -> str:
+    def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -124,14 +123,14 @@ class HTTPConnection:
         self,
         url: str,
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> str:
         async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.text()
 
-    def get_json(self, url: str, *, timeout: Optional[float] = None) -> str:
+    def get_json(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -141,7 +140,7 @@ class HTTPConnection:
         self,
         url: str,
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> str:
         async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
@@ -153,7 +152,7 @@ class HTTPConnection:
         url: str,
         save_path: Path,
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
         with self.get_response(url, timeout=timeout) as r:
@@ -170,7 +169,7 @@ class HTTPConnection:
         url: str,
         save_path: Path,
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
         async with await self.get_async_response(url, timeout=timeout) as r:

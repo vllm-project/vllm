@@ -3,10 +3,10 @@
 
 import copy
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Optional, TypeAlias, Union
+from typing import Any, TypeAlias
 
-import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
 from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
 from torch.autograd.profiler import FunctionEvent
@@ -20,12 +20,18 @@ from vllm.profiler.utils import (
     event_torch_op_stack_trace,
     indent_string,
 )
+from vllm.utils.import_utils import PlaceholderModule
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 @dataclass
 class _ModuleTreeNode:
     event: _ProfilerEvent
-    parent: Optional["_ModuleTreeNode"] = None
+    parent: "_ModuleTreeNode | None" = None
     children: list["_ModuleTreeNode"] = field(default_factory=list)
     trace: str = ""
 
@@ -62,14 +68,14 @@ class ModelStatsEntry:
     trace: str
 
 
-StatsEntry: TypeAlias = Union[ModelStatsEntry, SummaryStatsEntry]
+StatsEntry: TypeAlias = ModelStatsEntry | SummaryStatsEntry
 
 
 @dataclass
 class _StatsTreeNode:
     entry: StatsEntry
     children: list[StatsEntry]
-    parent: Optional[StatsEntry]
+    parent: StatsEntry | None
 
 
 @dataclass
@@ -82,7 +88,7 @@ class LayerwiseProfileResults(profile):
     _summary_stats_tree: list[_StatsTreeNode] = field(init=False)
 
     # profile metadata
-    num_running_seqs: Optional[int] = None
+    num_running_seqs: int | None = None
 
     def __post_init__(self):
         self._build_correlation_map()
@@ -150,7 +156,7 @@ class LayerwiseProfileResults(profile):
     @staticmethod
     def _indent_row_names_based_on_depth(
         depths_rows: list[tuple[int, StatsEntry]],
-        indent_style: Union[Callable[[int], str], str] = " ",
+        indent_style: Callable[[int], str] | str = " ",
     ):
         indented_rows = []
         for depth, row in depths_rows:
@@ -171,7 +177,7 @@ class LayerwiseProfileResults(profile):
         event_tree = self._kineto_results.experimental_event_tree()
 
         def _df_traversal(
-            event: _ProfilerEvent, curr_node: Optional[_ModuleTreeNode] = None
+            event: _ProfilerEvent, curr_node: _ModuleTreeNode | None = None
         ):
             # For the tensor parallel case for now only look at task 1
             if event.start_tid != 1:
@@ -242,7 +248,7 @@ class LayerwiseProfileResults(profile):
 
         def build_summary_stats_tree_df(
             node: _ModuleTreeNode,
-            parent: Optional[_StatsTreeNode] = None,
+            parent: _StatsTreeNode | None = None,
             summary_trace: tuple[str] = (),
         ):
             if event_has_module(node.event):
@@ -287,7 +293,7 @@ class LayerwiseProfileResults(profile):
             self._summary_stats_tree.append(build_summary_stats_tree_df(root))
 
         def build_model_stats_tree_df(
-            node: _ModuleTreeNode, parent: Optional[_StatsTreeNode] = None
+            node: _ModuleTreeNode, parent: _StatsTreeNode | None = None
         ):
             if event_has_module(
                 node.event,
@@ -357,7 +363,7 @@ class LayerwiseProfileResults(profile):
 
 
 class layerwise_profile(profile):
-    def __init__(self, num_running_seqs: Optional[int] = None):
+    def __init__(self, num_running_seqs: int | None = None):
         """
         layerwise profile constructor.
 

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Iterable
-from typing import Optional
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
@@ -23,9 +22,9 @@ class LRUOffloadingManager(OffloadingManager):
         self.backend: Backend = backend
         # block_hash -> BlockStatus
         self.blocks: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
-        self.events: Optional[list[OffloadingEvent]] = [] if enable_events else None
+        self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
         for block_hash in block_hashes:
             block = self.blocks.get(block_hash)
@@ -57,7 +56,7 @@ class LRUOffloadingManager(OffloadingManager):
 
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]
-    ) -> Optional[PrepareStoreOutput]:
+    ) -> PrepareStoreOutput | None:
         # filter out blocks that are already stored
         block_hashes_to_store = [
             block_hash for block_hash in block_hashes if block_hash not in self.blocks

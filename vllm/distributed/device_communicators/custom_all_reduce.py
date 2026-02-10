@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Optional, Union
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -17,7 +17,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 try:
     ops.meta_size()
@@ -34,7 +34,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
         if i == rank:
             continue
         if envs.VLLM_SKIP_P2P_CHECK:
-            logger.info("Skipping P2P check and trusting the driver's P2P report.")
+            logger.debug("Skipping P2P check and trusting the driver's P2P report.")
             return torch.cuda.can_device_access_peer(rank, i)
         if not gpu_p2p_access_check(rank, i):
             return False
@@ -55,7 +55,7 @@ class CustomAllreduce:
     def __init__(
         self,
         group: ProcessGroup,
-        device: Union[int, str, torch.device],
+        device: int | str | torch.device,
         max_size=8192 * 1024,
         symm_mem_enabled=False,
     ) -> None:
@@ -119,15 +119,18 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
-        device_capability = current_platform.get_device_capability().as_version_str()
+        device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
-            and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES
+            and device_capability is not None
         ):
-            max_size = min(
-                CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size], max_size
-            )
+            device_capability_str = device_capability.as_version_str()
+            if device_capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES:
+                max_size = min(
+                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
+                    max_size,
+                )
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
@@ -214,6 +217,7 @@ class CustomAllreduce:
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
+        all_data: list[list[list[int] | None]]
         all_data = [[None, None] for _ in range(dist.get_world_size(group=self.group))]
         all_data[self.rank] = [handle, offset]
         ranks = sorted(dist.get_process_group_ranks(group=self.group))
@@ -222,8 +226,8 @@ class CustomAllreduce:
                 all_data[i], src=rank, group=self.group, device="cpu"
             )
         # Unpack list of tuples to tuple of lists.
-        handles = [d[0] for d in all_data]  # type: ignore
-        offsets = [d[1] for d in all_data]  # type: ignore
+        handles = cast(list[list[int]], [d[0] for d in all_data])
+        offsets = cast(list[list[int]], [d[1] for d in all_data])
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
@@ -260,7 +264,7 @@ class CustomAllreduce:
             )
         return out
 
-    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+    def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
@@ -292,8 +296,8 @@ class CustomAllreduce:
     @staticmethod
     def create_shared_buffer(
         size_in_bytes: int,
-        group: Optional[ProcessGroup] = None,
-        uncached: Optional[bool] = False,
+        group: ProcessGroup | None = None,
+        uncached: bool | None = False,
     ) -> list[int]:
         pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
 
@@ -313,8 +317,8 @@ class CustomAllreduce:
     @staticmethod
     def free_shared_buffer(
         pointers: list[int],
-        group: Optional[ProcessGroup] = None,
-        rank: Optional[int] = None,
+        group: ProcessGroup | None = None,
+        rank: int | None = None,
     ) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)

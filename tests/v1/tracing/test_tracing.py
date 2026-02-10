@@ -2,78 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 # type: ignore
-from __future__ import annotations
-
-import threading
-from collections.abc import Iterable
-from concurrent import futures
-from typing import Callable, Generator, Literal
-
-import grpc
 import pytest
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
-    ExportTraceServiceResponse,
-)
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
-    TraceServiceServicer,
-    add_TraceServiceServicer_to_server,
-)
-from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+import time
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes
 
-FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
-
-FieldName = Literal[
-    "bool_value", "string_value", "int_value", "double_value", "array_value"
-]
-
-
-def decode_value(value: AnyValue):
-    field_decoders: dict[FieldName, Callable] = {
-        "bool_value": (lambda v: v.bool_value),
-        "string_value": (lambda v: v.string_value),
-        "int_value": (lambda v: v.int_value),
-        "double_value": (lambda v: v.double_value),
-        "array_value": (
-            lambda v: [decode_value(item) for item in v.array_value.values]
-        ),
-    }
-    for field, decoder in field_decoders.items():
-        if value.HasField(field):
-            return decoder(value)
-    raise ValueError(f"Couldn't decode value: {value}")
-
-
-def decode_attributes(attributes: Iterable[KeyValue]):
-    return {kv.key: decode_value(kv.value) for kv in attributes}
-
-
-class FakeTraceService(TraceServiceServicer):
-    def __init__(self):
-        self.request = None
-        self.evt = threading.Event()
-
-    def Export(self, request, context):
-        self.request = request
-        self.evt.set()
-        return ExportTraceServiceResponse()
-
-
-@pytest.fixture
-def trace_service() -> Generator[FakeTraceService, None, None]:
-    """Fixture to set up a fake gRPC trace service"""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
-    service = FakeTraceService()
-    add_TraceServiceServicer_to_server(service, server)
-    server.add_insecure_port(FAKE_TRACE_SERVER_ADDRESS)
-    server.start()
-
-    yield service
-
-    server.stop(None)
+# Import shared fixtures from the tracing conftest
+from tests.tracing.conftest import (  # noqa: F401
+    FAKE_TRACE_SERVER_ADDRESS,
+    FakeTraceService,
+    trace_service,
+)
 
 
 def test_traces(
@@ -99,29 +40,25 @@ def test_traces(
         outputs = llm.generate(prompts, sampling_params=sampling_params)
         print(f"test_traces outputs is : {outputs}")
 
-        timeout = 10
-        if not trace_service.evt.wait(timeout):
-            raise TimeoutError(
-                f"The fake trace service didn't receive a trace within "
-                f"the {timeout} seconds timeout"
-            )
+        # Wait for the "llm_request" span to be exported.
+        # The BatchSpanProcessor batches spans and exports them periodically,
+        # so we need to wait specifically for the llm_request span to appear.
+        timeout = 15
+        deadline = time.time() + timeout
+        llm_request_spans = []
+        while time.time() < deadline:
+            all_spans = trace_service.get_all_spans()
+            llm_request_spans = [s for s in all_spans if s["name"] == "llm_request"]
+            if llm_request_spans:
+                break
+            time.sleep(0.5)
 
-        request = trace_service.request
-        assert len(request.resource_spans) == 1, (
-            f"Expected 1 resource span, but got {len(request.resource_spans)}"
-        )
-        assert len(request.resource_spans[0].scope_spans) == 1, (
-            f"Expected 1 scope span, "
-            f"but got {len(request.resource_spans[0].scope_spans)}"
-        )
-        assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
-            f"Expected 1 span, "
-            f"but got {len(request.resource_spans[0].scope_spans[0].spans)}"
+        assert len(llm_request_spans) == 1, (
+            f"Expected exactly 1 'llm_request' span, but got {len(llm_request_spans)}. "
+            f"All span names: {[s['name'] for s in all_spans]}"
         )
 
-        attributes = decode_attributes(
-            request.resource_spans[0].scope_spans[0].spans[0].attributes
-        )
+        attributes = llm_request_spans[0]["attributes"]
         # assert attributes.get(SpanAttributes.GEN_AI_RESPONSE_MODEL) == model
         assert attributes.get(SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
         assert (

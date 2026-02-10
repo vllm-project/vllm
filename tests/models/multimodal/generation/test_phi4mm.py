@@ -3,7 +3,6 @@
 
 import os
 from collections.abc import Sequence
-from typing import Optional
 
 import librosa
 import pytest
@@ -15,7 +14,6 @@ from vllm.assets.image import ImageAsset
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
-from vllm.platforms import current_platform
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -48,7 +46,7 @@ models = [model_path]
 
 
 def vllm_to_hf_output(
-    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]], model: str
+    vllm_output: tuple[list[int], str, SampleLogprobs | None], model: str
 ):
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -69,17 +67,11 @@ def vllm_to_hf_output(
 
 target_dtype = "half"
 
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
 
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: Sequence[tuple[list[str], PromptImageInput, Optional[PromptAudioInput]]],
+    inputs: Sequence[tuple[list[str], PromptImageInput, PromptAudioInput | None]],
     model: str,
     *,
     max_model_len: int,
@@ -88,7 +80,7 @@ def run_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 
@@ -178,8 +170,6 @@ def run_test(
 @pytest.mark.parametrize(
     "size_factors",
     [
-        # No image
-        [],
         # Single-scale
         [1.0],
         # Single-scale, batched

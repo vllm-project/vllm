@@ -4,29 +4,29 @@
 
 # Added by the IBM Team, 2025
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
 from transformers import GraniteMoeHybridConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -35,7 +35,14 @@ from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeMoE
 from .granitemoeshared import GraniteMoeSharedMLP
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -50,9 +57,9 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         self,
         config: GraniteMoeHybridConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -105,13 +112,12 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        output = torch.empty_like(hidden_states)
-        self.mamba(hidden_states, output)
+        output = self.mamba(hidden_states)
         hidden_states = residual + output * self.residual_multiplier
 
         residual = hidden_states
@@ -139,9 +145,9 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         self,
         config: GraniteMoeHybridConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -183,7 +189,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -218,9 +224,9 @@ class GraniteMoeHybridAttention(nn.Module):
     def __init__(
         self,
         config: GraniteMoeHybridConfig,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -267,12 +273,8 @@ class GraniteMoeHybridAttention(nn.Module):
         if config.position_embedding_type == "rope":
             self.rotary_emb = get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=config.max_position_embeddings,
-                base=int(config.rope_theta),
-                rope_scaling=config.rope_scaling
-                if hasattr(config, "rope_scaling") and config.rope_scaling is not None
-                else None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=True,
             )
         else:
@@ -328,21 +330,15 @@ class GraniteMoeHybridModel(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+        self.quant_config = quant_config
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
         self.embedding_multiplier = config.embedding_multiplier
 
@@ -367,21 +363,21 @@ class GraniteMoeHybridModel(nn.Module):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
                 hidden_states = hidden_states * self.embedding_multiplier
             residual = None
         else:
@@ -406,6 +402,33 @@ class GraniteMoeHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        # layers.0.block_sparse_moe.expert_0.input_linear.input_scale
+        ckpt_gate_proj_name = "gate_proj"
+        ckpt_down_proj_name = "down_proj"
+        ckpt_up_proj_name = "up_proj"
+        num_experts = self.config.num_local_experts
+
+        return [
+            # (param_name, weight_name, expert_id, shard_id)
+            (
+                "block_sparse_moe.experts.w13_"
+                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
+                else "block_sparse_moe.experts.w2_",
+                f"block_sparse_moe.experts.{expert_id}.{weight_name}.",
+                expert_id,
+                shard_id,
+            )
+            for expert_id in range(num_experts)
+            for shard_id, weight_name in [
+                ("w1", ckpt_gate_proj_name),
+                ("w2", ckpt_down_proj_name),
+                ("w3", ckpt_up_proj_name),
+            ]
+        ]
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -415,6 +438,7 @@ class GraniteMoeHybridModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
 
         def _load(n, p):
             param = params_dict[n]
@@ -436,9 +460,55 @@ class GraniteMoeHybridModel(nn.Module):
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
             loaded_params.add(n)
 
+        def _load_quant_expert(name, loaded_weight):
+            for mapping in expert_params_mapping:
+                param_name, weight_name, expert_id, shard_id = mapping
+
+                if weight_name not in name:
+                    continue
+
+                name_mapped = name.replace(weight_name, param_name)
+
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name_mapped, self):
+                    continue
+
+                param = params_dict[name_mapped]
+                weight_loader = param.weight_loader
+                success = False
+
+                if weight_loader is not None:
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+
+                if success:
+                    return name_mapped
+            return None
+
         for n, p in weights:
             if "A_log" in n:
                 n = n.replace("A_log", "A")
+
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(n)
+            ):
+                # Loading kv cache quantization scales
+                loaded_weight = p
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                _load(scale_name, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+
+            if _load_quant_expert(n, p):
+                continue
 
             # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
             # Mapping different experts' layout:
@@ -510,7 +580,13 @@ class GraniteMoeHybridModel(nn.Module):
 
 
 class GraniteMoeHybridForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -518,12 +594,14 @@ class GraniteMoeHybridForCausalLM(
             "k_proj",
             "v_proj",
         ],
+        "conv1d": ["conv1d"],
+        "in_proj": ["in_proj"],
+        "input_linear": ["input_linear"],
     }
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -565,13 +643,17 @@ class GraniteMoeHybridForCausalLM(
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
         self.quant_config = vllm_config.quant_config
         self.config = config
@@ -579,26 +661,17 @@ class GraniteMoeHybridForCausalLM(
         self.model = GraniteMoeHybridModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.vocab_size,
             scale=1 / self.config.logits_scaling,
         )
@@ -607,15 +680,15 @@ class GraniteMoeHybridForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.model(
@@ -627,7 +700,7 @@ class GraniteMoeHybridForCausalLM(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Union
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.33.2/src/transformers/models/llama/modeling_llama.py
@@ -65,7 +64,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         max_position_embeddings: int,
         base: float,
         is_neox_style: bool,
-        scaling_factors: Union[list[float], float],
+        scaling_factors: list[float] | float,
         dtype: torch.dtype,
     ) -> None:
         if isinstance(scaling_factors, float):

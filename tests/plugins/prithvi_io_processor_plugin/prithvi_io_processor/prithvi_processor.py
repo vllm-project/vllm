@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import base64
 import datetime
 import os
 import tempfile
 import urllib.request
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any
 
 import albumentations
 import numpy as np
@@ -20,7 +18,10 @@ from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorRequest, IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
+    IOProcessorResponse,
+)
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -160,11 +161,11 @@ def read_geotiff(
 
 
 def load_image(
-    data: Union[list[str]],
+    data: list[str],
     path_type: str,
     mean: list[float] | None = None,
     std: list[float] | None = None,
-    indices: Union[list[int], None] | None = None,
+    indices: list[int] | None | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 
@@ -280,7 +281,7 @@ class PrithviMultimodalDataProcessor(IOProcessor):
         prompt: IOProcessorInput,
         request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         image_data = dict(prompt)
 
         if request_id:
@@ -348,8 +349,10 @@ class PrithviMultimodalDataProcessor(IOProcessor):
                 {
                     "prompt_token_ids": [1],
                     "multi_modal_data": {
-                        "pixel_values": window.to(torch.float16)[0],
-                        "location_coords": location_coords.to(torch.float16),
+                        "image": {
+                            "pixel_values": window.to(torch.float16)[0],
+                            "location_coords": location_coords.to(torch.float16),
+                        }
                     },
                 }
             )
@@ -370,9 +373,9 @@ class PrithviMultimodalDataProcessor(IOProcessor):
             out_format = "b64_json"
 
         for output in model_output:
-            y_hat = output.outputs.data.argmax(dim=1)
+            y_hat = output.outputs.data.argmax(dim=0)
             pred = torch.nn.functional.interpolate(
-                y_hat.unsqueeze(1).float(),
+                y_hat[None, None, ...].float(),
                 size=self.img_size,
                 mode="nearest",
             )

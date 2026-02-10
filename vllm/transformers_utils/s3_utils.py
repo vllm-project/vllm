@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient
@@ -32,9 +32,9 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
 
 
 def glob(
-    s3: Optional["BaseClient"] = None,
+    s3: "BaseClient | None" = None,
     path: str = "",
-    allow_pattern: Optional[list[str]] = None,
+    allow_pattern: list[str] | None = None,
 ) -> list[str]:
     """
     List full file names from S3 path and filter by allow pattern.
@@ -58,8 +58,8 @@ def glob(
 def list_files(
     s3: "BaseClient",
     path: str,
-    allow_pattern: Optional[list[str]] = None,
-    ignore_pattern: Optional[list[str]] = None,
+    allow_pattern: list[str] | None = None,
+    ignore_pattern: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
     """
     List files from S3 path and filter by pattern.

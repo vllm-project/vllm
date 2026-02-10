@@ -11,29 +11,50 @@ import os
 
 from vllm.triton_utils import tl, tldevice, triton
 
+from .utils import is_gather_supported
+
 if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
-    div = tldevice.fast_dividef
     exp = tldevice.fast_expf
     log = tldevice.fast_logf
     log2 = tldevice.fast_log2f
 else:
-
-    @triton.jit
-    def div_normal(x, y):
-        return x / y
-
-    div = div_normal
     exp = tl.exp
     log = tl.log
     log2 = tl.log2
 
 
-if not hasattr(tl, "gather"):
+if not is_gather_supported:
 
     @triton.jit
     def gather(src, index, axis, _builder=None):
-        # This is a fallback implementation when tl.gather is not supported
-        # In order to pass triton compiler, there is no actual gather operation
-        return src
+        """
+        Gather operation that works when tl.gather is not supported.
+        This is a fallback implementation that returns None.
+        Just to make triton compiler happy.
+        """
+        return None
 else:
     gather = tl.gather
+
+if hasattr(triton.language, "_experimental_make_tensor_descriptor"):
+    # For Triton 3.3.x
+    make_tensor_descriptor = triton.language._experimental_make_tensor_descriptor
+elif hasattr(triton.language, "make_tensor_descriptor"):
+    # For Triton 3.4.x and later
+    make_tensor_descriptor = triton.language.make_tensor_descriptor
+else:
+    """
+    Fallback implementation when TMA is not supported.
+    Returns None to indicate TMA descriptors are unavailable.
+    Just make triton compiler happy.
+    """
+
+    @triton.jit
+    def make_tensor_descriptor(
+        base,
+        shape,
+        strides,
+        block_shape,
+        _builder=None,
+    ):
+        return None

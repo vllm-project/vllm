@@ -25,18 +25,17 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
-
 # from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -58,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .ernie45_moe import Ernie4_5_MoeMLP
 from .interfaces import SupportsPP
@@ -74,7 +74,7 @@ logger = init_logger(__name__)
 
 
 class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
-    def __init__(self, shared_experts: Optional[torch.nn.Module] = None, **kwargs):
+    def __init__(self, shared_experts: torch.nn.Module | None = None, **kwargs):
         super().__init__(**kwargs)
         self.shared_experts = shared_experts
 
@@ -91,15 +91,14 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: Optional[int] = None,
-        rope_theta: float = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_parameters: dict[str, Any],
+        head_dim: int | None = None,
         freq_allocation: int = 20,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -126,7 +125,6 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -155,7 +153,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
             head_size=self.head_dim,
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
-            base=rope_theta,
+            base=rope_parameters["rope_theta"],
             is_neox_style=False,
             dtype=torch.get_default_dtype(),
             mrope_section=[h_rope, w_rope, t_rope],
@@ -192,7 +190,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -270,6 +268,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
                 prefix=f"{prefix}.text_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.text_experts = Ernie4_5_VLMoeMLP(
@@ -307,6 +306,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
                 prefix=f"{prefix}.vision_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.vision_experts = Ernie4_5_VLMoeMLP(
@@ -341,7 +341,10 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             # text and vision modals input
             visual_token_mask = visual_token_mask.repeat(1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
-            final_hidden_states = torch.zeros_like(hidden_states)
+            final_experts_hidden_states = torch.zeros_like(hidden_states)
+            final_shared_ouput = (
+                torch.zeros_like(hidden_states) if self.has_shared_experts else None
+            )
 
             text_hidden_states = hidden_states[text_token_mask].reshape(
                 -1, self.hidden_size
@@ -353,16 +356,26 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             text_router_logits, _ = self.text_experts_gate(
                 text_hidden_states.to(dtype=torch.float32)
             )
-            final_hidden_states[text_token_mask] = self.text_experts(
+            text_shared_ouput, text_experts_output = self.text_experts(
                 hidden_states=text_hidden_states, router_logits=text_router_logits
-            ).flatten()
+            )
+            final_experts_hidden_states[text_token_mask] = text_experts_output.flatten()
+            if self.has_shared_experts:
+                final_shared_ouput[text_token_mask] = text_shared_ouput.flatten()
 
             vision_router_logits, _ = self.vision_experts_gate(
                 vision_hidden_states.to(dtype=torch.float32)
             )
-            final_hidden_states[visual_token_mask] = self.vision_experts(
+            vision_shared_ouput, vision_experts_output = self.vision_experts(
                 hidden_states=vision_hidden_states, router_logits=vision_router_logits
-            ).flatten()
+            )
+            final_experts_hidden_states[visual_token_mask] = (
+                vision_experts_output.flatten()
+            )
+            if self.has_shared_experts:
+                final_shared_ouput[visual_token_mask] = vision_shared_ouput.flatten()
+
+            final_hidden_states = (final_shared_ouput, final_experts_hidden_states)
         else:
             # only text modal input
             text_router_logits, _ = self.text_experts_gate(
@@ -374,7 +387,11 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             )
 
         if self.has_shared_experts:
+            # for shared_experts model
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+        else:
+            # for not shared_experts model
+            final_hidden_states = final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = (
@@ -390,14 +407,13 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 500000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        set_default_rope_theta(config, default_theta=500000)
         freq_allocation = getattr(config, "freq_allocation", 20)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
 
@@ -406,8 +422,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             head_dim=getattr(config, "head_dim", None),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             freq_allocation=freq_allocation,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
@@ -463,8 +478,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        visual_token_mask: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
+        visual_token_mask: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor:
         # Self Attention
@@ -544,23 +559,23 @@ class Ernie4_5_VLMoeModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        visual_token_mask: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -625,17 +640,17 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -644,7 +659,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -661,6 +676,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

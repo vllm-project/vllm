@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import numpy as np
-import openai
 import pytest
 from scipy.spatial.distance import cosine
 
@@ -11,6 +8,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import ModelConfig
 
 from ....utils import RemoteOpenAIServer
+from .embed_utils import run_client_embeddings
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
@@ -55,18 +53,6 @@ def run_llm_encode(
 ) -> list[list[float]]:
     outputs = llm.embed([instruction + q for q in queries])
     return [output.outputs.embedding for output in outputs]
-
-
-async def run_client_embeddings(
-    client: openai.AsyncOpenAI,
-    queries: list[str],
-    instruction: str,
-) -> list[list[float]]:
-    outputs = await client.embeddings.create(
-        model=MODEL_NAME,
-        input=[instruction + q for q in queries],
-    )
-    return [data.embedding for data in outputs.data]
 
 
 def gritlm_instruction(instruction):
@@ -147,11 +133,13 @@ async def test_gritlm_api_server_embedding():
 
         d_rep = await run_client_embeddings(
             client_embedding,
+            MODEL_NAME,
             documents,
             d_instruction,
         )
         q_rep = await run_client_embeddings(
             client_embedding,
+            MODEL_NAME,
             queries,
             q_instruction,
         )

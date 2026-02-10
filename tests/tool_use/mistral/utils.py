@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from typing_extensions import TypedDict
 
@@ -9,9 +8,9 @@ from typing_extensions import TypedDict
 class ServerConfig(TypedDict, total=False):
     model: str
     arguments: list[str]
-    system_prompt: Optional[str]
-    supports_parallel: Optional[bool]
-    supports_rocm: Optional[bool]
+    system_prompt: str | None
+    supports_parallel: bool | None
+    supports_rocm: bool | None
 
 
 ARGS: list[str] = ["--max-model-len", "1024"]

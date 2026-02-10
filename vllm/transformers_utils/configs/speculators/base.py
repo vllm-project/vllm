@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Any, Union
+from typing import Any
 
 from transformers import PretrainedConfig
 
@@ -18,19 +18,22 @@ class SpeculatorsConfig(PretrainedConfig):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: Union[str, os.PathLike],
+        pretrained_model_name_or_path: str | os.PathLike,
         **kwargs,
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""
         config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
 
-        vllm_config = cls.extract_vllm_speculative_config(config_dict)
+        vllm_config = cls.extract_transformers_pre_trained_config(config_dict)
         return cls(**vllm_config)
 
     @classmethod
-    def extract_vllm_speculative_config(
+    def extract_transformers_pre_trained_config(
         cls, config_dict: dict[str, Any]
     ) -> dict[str, Any]:
+        """
+        Extract standard Transformers PreTrainedConfig config from speculators config.
+        """
         speculators_model_type = config_dict.get("speculators_model_type")
         if speculators_model_type not in SUPPORTED_SPECULATORS_TYPES:
             raise ValueError(
@@ -38,15 +41,23 @@ class SpeculatorsConfig(PretrainedConfig):
                 "Please ensure you're loading a speculators-format model."
             )
 
+        # Start with transformer layer configuration if present
+        pre_trained_config = config_dict.get("transformer_layer_config", {})
+        # Apply anything specific to the supported algorithm
+        algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
+        algo_updater(config_dict=config_dict, pre_trained_config=pre_trained_config)
+        return pre_trained_config
+
+    @classmethod
+    def extract_vllm_speculative_config(
+        cls, config_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Extract vLLM speculative config from speculators config."""
         # validate fields
         # TODO: @dsikka - use speculators pydantic model to validate
         cls.validate_speculators_config(config_dict=config_dict)
         # Convert from speculators config -> format that can be ingested by vLLM
-        vllm_config = cls.build_vllm_speculative_config(config_dict=config_dict)
-        # Apply anything specific to the supported algorithm
-        algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
-        algo_updater(config_dict=config_dict, vllm_config=vllm_config)
-        return vllm_config
+        return cls.build_vllm_speculative_config(config_dict=config_dict)
 
     @classmethod
     def validate_speculators_config(cls, config_dict: dict[str, Any]) -> None:
@@ -101,14 +112,7 @@ class SpeculatorsConfig(PretrainedConfig):
             )
 
         # Build base vLLM speculative configuration
-        vllm_config = {
+        return {
             "method": config_dict.get("speculators_model_type"),
             "num_speculative_tokens": num_speculative_tokens,
-            "target_model": spec_config.get("verifier")["name_or_path"],
         }
-
-        # Merge transformer layer configuration if present
-        transformer_config = config_dict.get("transformer_layer_config", {})
-        vllm_config.update(transformer_config)
-
-        return vllm_config

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
@@ -42,9 +43,9 @@ class CompressedTensors24(CompressedTensorsScheme):
     def __init__(
         self,
         quantized: bool = False,
-        weight_quant: Optional[QuantizationArgs] = None,
-        input_quant: Optional[QuantizationArgs] = None,
-        model_compression_config: Optional[dict[str, Any]] = None,
+        weight_quant: QuantizationArgs | None = None,
+        input_quant: QuantizationArgs | None = None,
+        model_compression_config: dict[str, Any] | None = None,
     ):
         self.quantized = quantized
         self.weight_quant = weight_quant
@@ -247,7 +248,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Returns the output tensor for the layer with 2:4

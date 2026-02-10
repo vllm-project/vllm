@@ -12,10 +12,10 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 @pytest.mark.asyncio

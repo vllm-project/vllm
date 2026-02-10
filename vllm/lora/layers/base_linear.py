@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
@@ -37,7 +36,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
         #
@@ -95,14 +94,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
         assert (
             len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
         )
@@ -119,10 +119,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
@@ -131,11 +131,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_linear(
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
             output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
         )
         if not current_platform.can_update_inplace():
             output = lora_output
+
+        # Reshape the flattened output back to its original shape,
+        # as some MM encoders cannot handle flattened inputs.
+        if original_shape is not None:
+            output = output.reshape(original_shape)
 
         return output
 
@@ -153,14 +158,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # marlin
         elif hasattr(self.base_layer, "B"):
             return self.base_layer.B
-        # HQQ marlin
-        elif hasattr(self.base_layer, "W_q"):
-            return self.base_layer.W_q
         else:
             raise ValueError(f"Unsupported base layer: {self.base_layer}")
 
     @property
-    def bias(self) -> Optional[torch.Tensor]:
+    def bias(self) -> torch.Tensor | None:
         if hasattr(self.base_layer, "bias"):
             return self.base_layer.bias
         else:

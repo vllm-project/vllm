@@ -22,8 +22,8 @@ Example:
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -39,7 +39,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 )
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -264,12 +264,12 @@ class CommunicatorBenchmark:
     def benchmark_allreduce_single(
         self,
         sequence_length: int,
-        allreduce_fn: Callable[[torch.Tensor], Optional[torch.Tensor]],
+        allreduce_fn: Callable[[torch.Tensor], torch.Tensor | None],
         should_use_fn: Callable[[torch.Tensor], bool],
         context,
         num_warmup: int,
         num_trials: int,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Benchmark method with CUDA graph optimization."""
         try:
             # Create test tensor (2D: sequence_length x hidden_size)
@@ -293,7 +293,7 @@ class CommunicatorBenchmark:
                     graph = torch.cuda.CUDAGraph()
                     graph_pool = torch.cuda.graph_pool_handle()
                     set_graph_pool_id(graph_pool)
-                    with torch.cuda.graph(graph, pool=graph_pool):
+                    with torch.cuda.graph(graph, pool=graph_pool, stream=stream):
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 

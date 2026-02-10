@@ -25,17 +25,16 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import PersimmonConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -63,14 +62,23 @@ from .utils import (
 
 class PersimmonMLP(nn.Module):
     def __init__(
-        self, config: PersimmonConfig, quant_config: Optional[QuantizationConfig] = None
+        self,
+        config: PersimmonConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(
-            config.hidden_size, config.intermediate_size, quant_config=quant_config
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.dense_4h_to_h = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, quant_config=quant_config
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
         self.act = get_act_fn(config.hidden_act)
 
@@ -85,8 +93,8 @@ class PersimmonAttention(nn.Module):
     def __init__(
         self,
         config: PersimmonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -98,8 +106,6 @@ class PersimmonAttention(nn.Module):
         self.num_heads = self.total_num_heads // tensor_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
-        self.partial_rotary_factor = config.partial_rotary_factor
         self.is_causal = True
 
         assert (self.head_dim * self.total_num_heads) == self.hidden_size
@@ -111,12 +117,14 @@ class PersimmonAttention(nn.Module):
             self.total_num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
         self.is_qk_layernorm = config.qk_layernorm
 
@@ -126,10 +134,8 @@ class PersimmonAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            partial_rotary_factor=self.partial_rotary_factor,
+            rope_parameters=config.rope_parameters,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -181,8 +187,8 @@ class PersimmonDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PersimmonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -193,7 +199,11 @@ class PersimmonDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = PersimmonMLP(config, quant_config=quant_config)
+        self.mlp = PersimmonMLP(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
         )
@@ -256,21 +266,21 @@ class PersimmonModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -333,15 +343,15 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ):
         hidden_states = self.model(
             input_ids=input_ids,
@@ -354,7 +364,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

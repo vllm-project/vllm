@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any
 
 import gguf
 import torch
@@ -14,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -25,9 +30,14 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import direct_register_custom_op
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -35,7 +45,7 @@ logger = init_logger(__name__)
 class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
-    def __init__(self, unquantized_modules: Optional[list[str]] = None) -> None:
+    def __init__(self, unquantized_modules: list[str] | None = None) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
 
@@ -46,6 +56,11 @@ class GGUFConfig(QuantizationConfig):
         return "gguf"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        # GGUF dequantization kernels use half precision (fp16) internally.
+        # bfloat16 has precision issues on Blackwell devices.
+        if current_platform.has_device_capability(100):
+            logger.warning_once("GGUF has precision issues with bfloat16 on Blackwell.")
+            return [torch.half, torch.float32]
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
@@ -62,20 +77,73 @@ class GGUFConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
-            if is_layer_skipped_gguf(prefix, self.unquantized_modules):
+            if is_layer_skipped_gguf(
+                prefix, self.unquantized_modules, self.packed_modules_mapping
+            ):
                 return UnquantizedLinearMethod()
             return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):
+            if is_layer_skipped_gguf(
+                prefix, self.unquantized_modules, self.packed_modules_mapping
+            ):
+                return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
         elif isinstance(layer, FusedMoE):
+            # TODO: Select UnquantizedFusedMoEMethod on unquantized layers.
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        """
+        Interface for models to update module names referenced in
+        quantization configs in order to reflect the vllm model structure
 
-def is_layer_skipped_gguf(prefix: str, unquantized_modules: list[str]):
-    return any(module_name in prefix for module_name in unquantized_modules)
+        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
+            structure of the qconfig) to vllm model structure
+        """
+        if self.unquantized_modules is not None:
+            self.unquantized_modules = hf_to_vllm_mapper.apply_list(
+                self.unquantized_modules
+            )
+
+
+def is_layer_skipped_gguf(
+    prefix: str,
+    unquantized_modules: list[str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+):
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    proj_name = prefix.split(".")[-1]
+    if proj_name in fused_mapping:
+        shard_prefixes = [
+            prefix.replace(proj_name, shard_proj_name)
+            for shard_proj_name in fused_mapping[proj_name]
+        ]
+
+        is_skipped = None
+        for shard_prefix in shard_prefixes:
+            is_shard_skipped = any(
+                shard_prefix in module_name for module_name in unquantized_modules
+            )
+
+            if is_skipped is None:
+                is_skipped = is_shard_skipped
+            elif is_shard_skipped != is_skipped:
+                raise ValueError(
+                    f"Detected some but not all shards of {prefix} "
+                    "are quantized. All shards of fused layers "
+                    "to have the same precision."
+                )
+    else:
+        is_skipped = any(module_name in prefix for module_name in unquantized_modules)
+
+    assert is_skipped is not None
+    return is_skipped
 
 
 UNQUANTIZED_TYPES = {WeightType.F32, WeightType.F16, WeightType.BF16}
@@ -307,7 +375,7 @@ def _apply_gguf_embedding(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if qweight_type in UNQUANTIZED_TYPES:
         return torch.embedding(qweight, x)
@@ -330,7 +398,7 @@ def _apply_gguf_embedding_fake(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], hidden_size, dtype=dtype, device=x.device)
 
@@ -452,7 +520,7 @@ class GGUFLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         shard_id = layer.qweight.shard_id
 
@@ -558,58 +626,23 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        assert self.fused_experts is None
-
-        if enable_eplb:
-            raise NotImplementedError("EPLB not supported for `GGUFMoEMethod` yet.")
-
-        assert activation == "silu", "Only SiLU activation is supported."
-        if apply_router_weight_on_input:
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert layer.activation == "silu", "Only SiLU activation is supported."
+        if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
                 "fused GGUF MoE method."
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-        )
         return fused_moe_gguf(
             x,
             layer.w13_qweight,
@@ -618,7 +651,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             topk_ids,
             layer.w13_qweight_type.weight_type,
             layer.w2_qweight_type.weight_type,
-            activation,
+            layer.activation,
         )
 
 

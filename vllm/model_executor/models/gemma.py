@@ -20,18 +20,18 @@
 from collections.abc import Iterable
 from functools import cache
 from itertools import islice
-from typing import Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
 from transformers import GemmaConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -59,8 +59,8 @@ logger = init_logger(__name__)
 
 @cache
 def _get_gemma_act_fn(
-    hidden_act: Optional[str],
-    hidden_activation: Optional[str],
+    hidden_act: str | None,
+    hidden_activation: str | None,
 ) -> nn.Module:
     if hidden_activation is None:
         if hidden_act is not None:
@@ -92,9 +92,9 @@ class GemmaMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: Optional[str] = None,
-        hidden_activation: Optional[str] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        hidden_act: str | None = None,
+        hidden_activation: str | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -128,10 +128,10 @@ class GemmaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -154,7 +154,6 @@ class GemmaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -175,9 +174,8 @@ class GemmaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -207,8 +205,8 @@ class GemmaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: GemmaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -219,7 +217,7 @@ class GemmaDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            rope_theta=config.rope_theta,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -241,7 +239,7 @@ class GemmaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -294,21 +292,21 @@ class GemmaModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             hidden_states *= self.normalizer
             residual = None
         else:
@@ -383,12 +381,10 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         # currently all existing Gemma models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = GemmaModel(
@@ -399,16 +395,16 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -417,7 +413,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 

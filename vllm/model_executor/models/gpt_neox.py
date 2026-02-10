@@ -21,17 +21,16 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import GPTNeoXConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -61,8 +60,8 @@ class GPTNeoXAttention(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -81,24 +80,22 @@ class GPTNeoXAttention(nn.Module):
             self.total_num_heads,
             bias=self.bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=self.bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
-        scaling = self.head_size**-0.5
-        rotary_dim = int(self.head_size * config.rotary_pct)
-        assert rotary_dim % 2 == 0
-        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
         )
+        scaling = self.head_size**-0.5
         self.attn = Attention(
             self.num_heads,
             self.head_size,
@@ -125,18 +122,21 @@ class GPTNeoXMLP(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.dense_4h_to_h = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
         self.act = get_act_fn(config.hidden_act)
 
@@ -151,8 +151,8 @@ class GPTNeoXLayer(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -166,7 +166,7 @@ class GPTNeoXLayer(nn.Module):
         self.attention = GPTNeoXAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attention"
         )
-        self.mlp = GPTNeoXMLP(config, quant_config)
+        self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -225,21 +225,21 @@ class GPTNeoXModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_in(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
@@ -313,16 +313,16 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
             self.gpt_neox.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.gpt_neox.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.gpt_neox.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.gpt_neox(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -331,7 +331,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.embed_out, hidden_states)
         return logits
 

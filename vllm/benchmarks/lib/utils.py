@@ -8,6 +8,32 @@ import os
 from typing import Any
 
 
+def extract_field(
+    args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
+) -> str:
+    if field_name in extra_info:
+        return extra_info[field_name]
+
+    v = args
+    # For example, args.compilation_config.mode
+    for nested_field in field_name.split("."):
+        if not hasattr(v, nested_field):
+            return ""
+        v = getattr(v, nested_field)
+    return v
+
+
+def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
+    """
+    Check if the benchmark is run with torch.compile
+    """
+    return not (
+        extract_field(args, extra_info, "compilation_config.mode") == "0"
+        or "eager" in getattr(args, "output_json", "")
+        or "eager" in getattr(args, "result_filename", "")
+    )
+
+
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
 ) -> list:
@@ -21,11 +47,25 @@ def convert_to_pytorch_benchmark_format(
         return records
 
     for name, benchmark_values in metrics.items():
+        if not isinstance(benchmark_values, list):
+            raise TypeError(
+                f"benchmark_values for metric '{name}' must be a list, "
+                f"but got {type(benchmark_values).__name__}"
+            )
+
         record = {
             "benchmark": {
                 "name": "vLLM benchmark",
                 "extra_info": {
                     "args": vars(args),
+                    "compilation_config.mode": extract_field(
+                        args, extra_info, "compilation_config.mode"
+                    ),
+                    "optimization_level": extract_field(
+                        args, extra_info, "optimization_level"
+                    ),
+                    # A boolean field used by vLLM benchmark HUD dashboard
+                    "use_compile": use_compile(args, extra_info),
                 },
             },
             "model": {

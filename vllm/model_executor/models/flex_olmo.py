@@ -14,8 +14,6 @@
 # limitations under the License.
 """Inference-only FlexOlmo model compatible with HuggingFace weights."""
 
-from typing import Optional
-
 import torch
 from torch import nn
 
@@ -73,7 +71,6 @@ class FlexOlmoMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        # Gate always runs at half / full precision for now.
         self.experts = FusedMoE(
             num_experts=hf_config.num_experts,
             top_k=hf_config.num_experts_per_tok,
@@ -84,6 +81,7 @@ class FlexOlmoMoE(nn.Module):
             quant_config=None,
             tp_size=tp_size,
             prefix=f"{prefix}.experts",
+            router_logits_dtype=torch.float32,
         )
 
         self.top_k = hf_config.num_experts_per_tok
@@ -128,8 +126,8 @@ class FlexOlmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Attention block.
         residual = hidden_states
         hidden_states = self.self_attn(positions, hidden_states)

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
-from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -10,11 +9,11 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -58,9 +57,7 @@ class QuickAllReduce:
         (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
     }
 
-    def __init__(
-        self, group: ProcessGroup, device: Union[int, str, torch.device]
-    ) -> None:
+    def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
         """
         Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
@@ -187,7 +184,7 @@ class QuickAllReduce:
             )
             return
         self.qr_quant_level = QuickReduceRegime[regime_str]
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
         if (
             vllm_config is not None
             and hasattr(vllm_config, "model_config")

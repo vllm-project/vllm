@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused batched MoE kernel."""
 
-from typing import Optional
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -19,7 +21,17 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_batched_scales_shape,
     normalize_scales_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    group_broadcast,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -370,8 +382,8 @@ def invoke_moe_batched_triton_kernel(
     expert_num_tokens: torch.Tensor,  # [E]
     compute_type: tl.dtype,
     # Quantization data
-    A_scale: Optional[torch.Tensor],
-    B_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
     B_zp: torch.Tensor,
     # Quantization schemes
     use_fp8_w8a8: bool,
@@ -379,7 +391,7 @@ def invoke_moe_batched_triton_kernel(
     use_int4_w4a16: bool,
     config: dict[str, int],
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ):
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
@@ -500,10 +512,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return self.max_num_tokens
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return None
 
     def num_dispatchers(self) -> int:
@@ -518,10 +530,16 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -635,25 +653,62 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
         )
 
     def supports_chunking(self) -> bool:
@@ -674,8 +729,11 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
@@ -701,12 +759,12 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         assert hidden_states.dim() == 3
@@ -754,15 +812,15 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 def batched_moe_kernel_quantize_input(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     num_tokens: int,
     E: int,
     N: int,
     expert_num_tokens: torch.Tensor,
-    qtype: Optional[torch.dtype],
+    qtype: torch.dtype | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    block_shape: list[int] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
@@ -827,28 +885,76 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        assert max_num_tokens > 0
-        assert num_dispatchers > 0
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda_alike()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        p = current_platform
+        if p.is_rocm():
+            from vllm.platforms.rocm import on_gfx9
+
+            is_rocm_on_gfx9 = on_gfx9()
+        else:
+            is_rocm_on_gfx9 = False
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
+
+        SUPPORTED_W_A_FP8 = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) == (None, None) or (
+            device_supports_fp8 and (weight_key, activation_key) in SUPPORTED_W_A_FP8
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in [
+            "silu",
+            "gelu",
+            "swigluoai",
+            "silu_no_mul",
+            "gelu_no_mul",
+            "relu2_no_mul",
+        ]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_chunking(self) -> bool:
         return False
@@ -868,13 +974,17 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dp, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dp, K)
         return (workspace13, workspace2, output)
 
@@ -888,12 +998,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         # Check constraints.
@@ -949,7 +1059,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13, (E, max_num_tokens, N))
-        intermediate_cache2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(
+            workspace2, (E, max_num_tokens, activation_out_dim)
+        )
 
         # TODO(bnell): should this be done for any quantized type?
         if self.quant_config.use_fp8_w8a8:
@@ -980,7 +1093,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (bnell): use triton utility from batched deep gemm.
         self.activation(
             activation,
-            intermediate_cache2.view(-1, N // 2),
+            intermediate_cache2.view(-1, activation_out_dim),
             intermediate_cache1.view(-1, N),
         )
 

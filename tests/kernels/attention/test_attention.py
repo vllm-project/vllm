@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
-from typing import Optional
 
 import pytest
 import torch
@@ -10,15 +9,10 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.attention.layer import Attention, MultiHeadAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
-from vllm.utils import get_max_shared_memory_bytes
-
-if not current_platform.is_rocm():
-    from xformers import ops as xops
-    from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
-
-    from tests.kernels.utils import make_alibi_bias
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import set_random_seed
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -35,7 +29,7 @@ NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
-# vllm.attention.ops.paged_attn.PagedAttention
+# vllm.v1.attention.ops.paged_attn.PagedAttention
 HEAD_SIZES = [32, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]
@@ -50,7 +44,7 @@ def ref_masked_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    attn_mask: Optional[torch.Tensor] = None,
+    attn_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     if attn_mask is not None:
@@ -69,7 +63,7 @@ def ref_single_query_cached_kv_attention(
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
     scale: float,
-    alibi_slopes: Optional[torch.Tensor],
+    alibi_slopes: torch.Tensor | None,
 ) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
@@ -156,7 +150,7 @@ def test_paged_attention(
 
     global PARTITION_SIZE
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -415,7 +409,7 @@ def ref_multi_query_kv_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    alibi_bias: Optional[list[torch.Tensor]],
+    alibi_bias: list[torch.Tensor] | None,
     dtype: torch.dtype,
 ) -> torch.Tensor:
     num_seqs = len(cu_seq_lens) - 1
@@ -449,130 +443,7 @@ def ref_multi_query_kv_attention(
     return torch.cat(ref_outputs, dim=0)
 
 
-@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
-@torch.inference_mode()
-def test_multi_query_kv_attention(
-    num_seqs: int,
-    num_heads: tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
-    seed: int,
-    device: str,
-    use_alibi: bool = False,
-) -> None:
-    current_platform.seed_everything(seed)
-    torch.set_default_device(device)
-    # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
-    # As the xformers library is already tested with its own tests, we can use
-    # a smaller MAX_SEQ_LEN here.
-    max_len = min(MAX_SEQ_LEN, 4096)
-    seq_lens = random.sample(range(1, max_len), num_seqs)
-    num_tokens = sum(seq_lens)
-
-    scale = float(1.0 / (head_size**0.5))
-    num_query_heads, num_kv_heads = num_heads
-    qkv = torch.empty(
-        num_tokens, num_query_heads + 2 * num_kv_heads, head_size, dtype=dtype
-    )
-    qkv.uniform_(-scale, scale)
-    query, key, value = qkv.split([num_query_heads, num_kv_heads, num_kv_heads], dim=1)
-
-    num_queries_per_kv = num_query_heads // num_kv_heads
-    if num_queries_per_kv > 1:
-        # Handle MQA and GQA
-        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
-        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
-    alibi_bias = None
-    if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
-        attn_bias = make_alibi_bias(alibi_slopes, num_kv_heads, dtype, seq_lens)
-        output = torch.empty_like(query)
-        start = 0
-        # Dynamic sequence length not supported with custom attn_bias.
-        for i, seq_len in enumerate(seq_lens):
-            end = start + seq_len
-            out = xops.memory_efficient_attention_forward(
-                query[None, start:end],
-                key[None, start:end],
-                value[None, start:end],
-                attn_bias=attn_bias[i],
-                p=0.0,
-                scale=scale,
-            )
-            output[start:end].copy_(out.view_as(query[start:end]))
-            start += seq_len
-        # xformers.AttentionBias to Tensor for use in reference impl.
-        alibi_bias = [
-            b.materialize((1, num_query_heads, i, i), device=device).squeeze()
-            for b, i in zip(attn_bias, seq_lens)
-        ]
-    else:
-        attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-        output = xops.memory_efficient_attention_forward(
-            query.unsqueeze(0),
-            key.unsqueeze(0),
-            value.unsqueeze(0),
-            attn_bias=attn_bias,
-            p=0.0,
-            scale=scale,
-        )
-        output = output.squeeze(0)
-
-    cu_seq_lens = [0]
-    for seq_len in seq_lens:
-        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
-    ref_output = ref_multi_query_kv_attention(
-        cu_seq_lens,
-        query,
-        key,
-        value,
-        scale,
-        alibi_bias,
-        dtype,
-    )
-    atol = get_default_atol(output) if current_platform.is_rocm() else 1e-3
-    rtol = get_default_rtol(output) if current_platform.is_rocm() else 1e-5
-    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-
-
-@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
-@torch.inference_mode()
-def test_multi_query_kv_attention_with_alibi(
-    num_seqs: int,
-    num_heads: tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
-    seed: int,
-    device: str,
-) -> None:
-    return test_multi_query_kv_attention(
-        num_seqs,
-        num_heads,
-        head_size,
-        dtype,
-        seed,
-        device,
-        use_alibi=True,
-    )
-
-
-@pytest.mark.parametrize("attention_cls", [Attention, MultiHeadAttention])
+@pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
 def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
     head_size = 64
     scale = float(1.0 / (head_size**0.5))

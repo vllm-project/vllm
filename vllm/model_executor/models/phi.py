@@ -40,17 +40,16 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import PhiConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -80,50 +79,41 @@ class PhiAttention(nn.Module):
     def __init__(
         self,
         config: PhiConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
-        self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
-        self.head_size = self.hidden_size // self.total_num_heads
+        self.head_size = self.hidden_size // config.num_attention_heads
 
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
-        assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        assert config.num_attention_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = config.num_attention_heads // tensor_model_parallel_world_size
 
         # pylint: disable=C0103
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_size,
-            self.total_num_heads,
+            config.num_attention_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         scaling = self.head_size**-0.5
-        rotary_dim = int(
-            config.partial_rotary_factor
-            * (config.hidden_size // config.num_attention_heads)
-        )
-        assert rotary_dim % 2 == 0
 
-        # pylint: disable=C0301
-        # Refer to:
-        # https://huggingface.co/microsoft/phi-1_5/blob/d212a789620c380ff32ca1d1ee9943a777360987/modeling_phi.py#L518
-        rope_theta = getattr(config, "rope_theta", 10000.0)
         max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -149,7 +139,10 @@ class PhiAttention(nn.Module):
 
 class PhiMLP(nn.Module):
     def __init__(
-        self, config: PhiConfig, quant_config: Optional[QuantizationConfig] = None
+        self,
+        config: PhiConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -160,11 +153,13 @@ class PhiMLP(nn.Module):
             config.hidden_size,
             n_inner,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             n_inner,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
         )
         self.act = get_act_fn(config.hidden_act)
 
@@ -179,8 +174,8 @@ class PhiLayer(nn.Module):
     def __init__(
         self,
         config: PhiConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -190,7 +185,7 @@ class PhiLayer(nn.Module):
         self.self_attn = PhiAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.self_attn"
         )
-        self.mlp = PhiMLP(config, quant_config)
+        self.mlp = PhiMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -234,21 +229,21 @@ class PhiModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -317,11 +312,10 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
         # lm_head use bias, cannot share word embeddings
         assert not config.tie_word_embeddings
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
 
@@ -341,16 +335,16 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -360,7 +354,7 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
 

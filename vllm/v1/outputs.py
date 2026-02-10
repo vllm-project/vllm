@@ -3,43 +3,86 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
+import numpy as np
 import torch
 
+from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.core.sched.output import SchedulerOutput
+
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+else:
+    KVConnectorStats = object
+    KVConnectorKVEvents = object
 
 
 class LogprobsLists(NamedTuple):
-    # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: list[list[int]]
-    # [num_reqs, max_num_logprobs + 1]
-    logprobs: list[list[float]]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
+    logprob_token_ids: np.ndarray
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
+    logprobs: np.ndarray
+    # [num_reqs x num_generated_tokens]
+    sampled_token_ranks: np.ndarray
     # [num_reqs]
-    sampled_token_ranks: list[int]
+    # Used for slicing the logprobs in cases like speculative
+    # decoding where the number of generated tokens may be
+    # different for each request.
+    cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start: int, end: int):
+    def slice_request(self, req_idx: int, num_positions: int):
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
         return LogprobsLists(
-            self.logprob_token_ids[start:end],
-            self.logprobs[start:end],
-            self.sampled_token_ranks[start:end],
+            self.logprob_token_ids[req_idx:end_idx],
+            self.logprobs[req_idx:end_idx],
+            self.sampled_token_ranks[req_idx:end_idx],
+            None,
         )
 
 
 class LogprobsTensors(NamedTuple):
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: torch.Tensor
-    # [num_reqs]
+    # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
+    # [num_reqs]
+    cu_num_generated_tokens: list[int] | None = None
 
-    def tolists(self):
+    def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
-            self.logprob_token_ids.tolist(),
-            self.logprobs.tolist(),
-            self.selected_token_ranks.tolist(),
+            self.logprob_token_ids.cpu().numpy(),
+            self.logprobs.cpu().numpy(),
+            self.selected_token_ranks.cpu().numpy(),
+            cu_num_generated_tokens
+            if cu_num_generated_tokens is not None
+            else self.cu_num_generated_tokens,
+        )
+
+    def to_cpu_nonblocking(self) -> "LogprobsTensors":
+        if self.logprob_token_ids.device.type == "cpu":
+            return self
+        return LogprobsTensors(
+            self.logprob_token_ids.to("cpu", non_blocking=True),
+            self.logprobs.to("cpu", non_blocking=True),
+            self.selected_token_ranks.to("cpu", non_blocking=True),
+            self.cu_num_generated_tokens,
+        )
+
+    def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
+        """Filter the logprobs tensors with the given bool mask."""
+        assert self.cu_num_generated_tokens is None, (
+            "filter can't be used with cu_num_generated_tokens"
+        )
+        return LogprobsTensors(
+            self.logprob_token_ids[mask],
+            self.logprobs[mask],
+            self.selected_token_ranks[mask],
         )
 
     @staticmethod
@@ -64,7 +107,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = Union[torch.Tensor, list[torch.Tensor]]
+PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
 
 @dataclass
@@ -74,26 +117,41 @@ class SamplerOutput:
     # All requests are padded to max_num_generated_tokens.
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
-    logprobs_tensors: Optional[LogprobsTensors]
+    logprobs_tensors: LogprobsTensors | None
 
 
 @dataclass
 class KVConnectorOutput:
     # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
-    kv_connector_stats: Optional["KVConnectorStats"] = None
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+    kv_connector_stats: KVConnectorStats | None = None
+    kv_cache_events: KVConnectorKVEvents | None = None
     # IDs of externally computed KV blocks that failed to load.
-    # Requests referencing these blocks should be rescheduled to recompute them.
+    # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # Configuration describing how many finished sending/receiving
+    # notifications should be expected for each request. This allows
+    # handshake-based connectors like Nixl to update the KVOutputAggregator.
+    # It captures a static setup info and should almost always remain constant
+    # for a given connector after discovery. Default value entails no change.
+    expected_finished_count: int = 0
 
     def is_empty(self):
         return (
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
+            and not self.kv_cache_events
             and not self.invalid_block_ids
         )
+
+
+@dataclass
+class ECConnectorOutput:
+    # [mm_hash]
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -109,26 +167,33 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[list[int]] = field(default_factory=list)
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: Optional[LogprobsLists]
+    logprobs: LogprobsLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
+        default_factory=dict
+    )
 
     # [num_reqs, hidden_size]
-    pooler_output: list[Optional[torch.Tensor]]
+    pooler_output: list[torch.Tensor | None] | None = None
 
-    kv_connector_output: Optional[KVConnectorOutput] = None
+    kv_connector_output: KVConnectorOutput | None = None
+
+    ec_connector_output: ECConnectorOutput | None = None
 
     # req_id -> num_nans_in_logits
-    num_nans_in_logits: Optional[dict[str, int]] = None
+    num_nans_in_logits: dict[str, int] | None = None
+
+    # information related to cudagraph execution
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.
@@ -152,12 +217,34 @@ class DraftTokenIds:
     draft_token_ids: list[list[int]]
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
-    req_ids=[],
-    req_id_to_index={},
-    sampled_token_ids=[],
-    logprobs=None,
-    prompt_logprobs_dict={},
-    pooler_output=[],
-    num_nans_in_logits=None,
-)
+def make_empty_encoder_model_runner_output(
+    scheduler_output: "SchedulerOutput",
+) -> ModelRunnerOutput:
+    """
+    Create a ModelRunnerOutput stub that contains the correct
+    per-request bookkeeping but no generated data yet.
+    """
+    if not scheduler_output.num_scheduled_tokens:
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    # Convert to list so we get a deterministic, indexable sequence
+    req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
+
+    # Give every request its own contiguous index
+    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
+
+    # No tokens generated yet ⇒ one empty list per request
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+
+    # Pooler outputs are not available yet ⇒ use None placeholders
+    pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
+
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        pooler_output=pooler_output,
+    )
+
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})

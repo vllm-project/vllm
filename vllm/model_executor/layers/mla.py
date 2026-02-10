@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
-from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -19,23 +18,25 @@ class MLAModules:
     kv_b_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
     o_proj: torch.nn.Module
-    fused_qkv_a_proj: Optional[torch.nn.Module]
-    kv_a_proj_with_mqa: Optional[torch.nn.Module]
-    q_a_layernorm: Optional[torch.nn.Module]
-    q_b_proj: Optional[torch.nn.Module]
-    q_proj: Optional[torch.nn.Module]
-    indexer: Optional[torch.nn.Module]
+    fused_qkv_a_proj: torch.nn.Module | None
+    kv_a_proj_with_mqa: torch.nn.Module | None
+    q_a_layernorm: torch.nn.Module | None
+    q_b_proj: torch.nn.Module | None
+    q_proj: torch.nn.Module | None
+    indexer: torch.nn.Module | None
     is_sparse: bool
-    topk_indices_buffer: Optional[torch.Tensor]
+    topk_indices_buffer: torch.Tensor | None
+    indexer_rotary_emb: torch.nn.Module | None = None
 
 
-@CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(CustomOp):
-    """MLA layer registered as CustomOp to allow OOT backends to add
+# --8<-- [start:multi_head_latent_attention]
+@PluggableLayer.register("multi_head_latent_attention")
+class MultiHeadLatentAttentionWrapper(PluggableLayer):
+    """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently MLA ignores the enable/disable mechanism of CustomOp
-    because there is only one in-tree implementation in forward_native.
-    TODO: implement this with a new PluggableLayer mechanism.
+    Note that currently oot platforms can still use CustomOp.register_oot to
+    replace MLA layer entirly, although we use PluggableLayer to register
+    this layer now.
 
     This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
@@ -47,6 +48,8 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
     3. Return the output tensor.
     """
 
+    # --8<-- [end:multi_head_latent_attention]
+
     def __init__(
         self,
         hidden_size: int,
@@ -55,11 +58,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         mla_modules: MLAModules,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -81,6 +84,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
+        self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
         if self.indexer is not None:
@@ -106,10 +110,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         self.prefix = prefix
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -148,12 +153,18 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
+            _topk_indices = self.indexer(
+                hidden_states, q_c, positions, self.indexer_rope_emb
+            )
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
 
         attn_out = self.mla_attn(
             q,
@@ -161,7 +172,5 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
-        return self.o_proj(attn_out)[0]
 
-    def forward_cuda(self, *args, **kwargs):
-        return self.forward_native(*args, **kwargs)
+        return self.o_proj(attn_out)[0]
