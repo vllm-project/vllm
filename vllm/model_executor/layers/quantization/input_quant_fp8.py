@@ -171,7 +171,6 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
-        **kwargs,
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
