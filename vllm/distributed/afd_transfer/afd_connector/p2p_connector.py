@@ -54,9 +54,16 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    comm.send(tensor, dst)
+    print("begin afd_p2p_send_impl", flush=True)
+    comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
+    print("end afd_p2p_send_impl", flush=True)
+    if not torch.cuda.is_current_stream_capturing():
+        print("jcz before synchronize afd_p2p_send_impl", flush=True)
+        torch.cuda.synchronize()
+        print("jcz after synchronize afd_p2p_send_impl", flush=True)
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
+    print("afd_p2p_send_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -76,7 +83,13 @@ def afd_p2p_recv_impl(
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    comm.recv(out, src)
+    print("begin afd_p2p_recv_impl", flush=True)
+    comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
+    print("end afd_p2p_recv_impl", flush=True)
+    if not torch.cuda.is_current_stream_capturing():
+        print("jcz before synchronize afd_p2p_recv_impl", flush=True)
+        torch.cuda.synchronize()
+        print("jcz after synchronize afd_p2p_recv_impl", flush=True)
 
 
 def afd_p2p_recv_fake(
@@ -84,6 +97,7 @@ def afd_p2p_recv_fake(
     src: int,
     comm_id: int,
 ) -> None:
+    print("afd_p2p_recv_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -309,11 +323,9 @@ class P2PAFDConnector(AFDConnectorBase):
                 and ref_tensor.dtype == tensor_metadata.dtype
                 and ref_tensor.device == tensor_metadata.device
             ):
-                logger.info(f"jcz _recv_hidden_states ref_tensor is not None:{ref_tensor.shape}")
                 hidden_states = ref_tensor
             else:
                 # Note: If using cudagraph, this branch should not be taken
-                logger.info("jcz _recv_hidden_states ref_tensor is None")
                 hidden_states = torch.empty(
                     tuple(size),
                     dtype=tensor_metadata.dtype,
