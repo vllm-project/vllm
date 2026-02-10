@@ -56,8 +56,7 @@ cleanup_network() {
 }
 
 log_diagnostics() {
-  local log_file
-  log_file="$(pwd)/gpu_diagnostics.log"
+  local log_file="/home/buildkite-agent/gpu_diagnostics.log"
   echo "--- Capturing GPU Diagnostics"
   {
     echo "================================================================"
@@ -285,8 +284,12 @@ else
           "${image_name}" \
           /bin/bash -c "${commands}"
   EXIT_STATUS=$?
+  echo "--- Docker run finished with exit code $EXIT_STATUS"
 
   # Stop the background monitor
-  kill $MONITOR_PID 2>/dev/null || true
+  if [ -n "$MONITOR_PID" ]; then
+    kill $MONITOR_PID 2>/dev/null || true
+  fi
+  
   exit $EXIT_STATUS
 fi
