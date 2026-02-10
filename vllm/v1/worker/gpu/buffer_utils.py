@@ -8,7 +8,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    get_accelerator_view_from_cpu_tensor,
+)
 
 
 def async_copy_to_gpu(
@@ -168,10 +171,9 @@ class StagedWriteTensor:
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
         # Special handling for write_contents
-        write_contents = torch.tensor(
-            self._staged_write_contents, dtype=self.dtype, device="cpu", pin_memory=True
+        write_contents = async_tensor_h2d(
+            self._staged_write_contents, self.dtype, self.device, pin_memory=True
         )
-        write_contents = write_contents.to(device=self.device, non_blocking=True)
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
