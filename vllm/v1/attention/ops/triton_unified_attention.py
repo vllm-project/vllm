@@ -10,10 +10,12 @@
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+is_batch_invariant = vllm_is_batch_invariant()
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
@@ -1104,6 +1106,7 @@ def unified_attention(
         # Launch the 2D kernel if
         # 1. No intermediate tiled softmax buffers have been allocated, or
         # 2. The number of sequences exceeds the configured threshold
+        # 3. Batch invariance is enabled
         if (
             seq_threshold_3D is None
             or num_par_softmax_segments is None
@@ -1111,6 +1114,7 @@ def unified_attention(
             or softmax_segm_max is None
             or softmax_segm_expsum is None
             or num_decodes > seq_threshold_3D
+            or is_batch_invariant
         ):
             kernel_unified_attention_2d[
                 (
