@@ -58,7 +58,7 @@ logger = init_logger(__name__)
 @dataclass
 class EplbStats:
     """
-    Model stats used in EPLB rebalanding algorithm.
+    Model stats used in EPLB rebalancing algorithm.
     """
 
     global_expert_load_window: torch.Tensor
