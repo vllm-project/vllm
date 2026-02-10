@@ -767,7 +767,7 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         Assume that total_num_frames = 10 and fps = 1.
         The timestamp of frame 0 is 0.0.
         The timestamp of frame 1 is 1.0.…
-        The timestamp of frame 9 (the last frame) should be 9.0, that is, (total_frames_num – 1) / original_fps.
+        The timestamp of frame 9 (the last frame) should be 9.0, that is, (total_frames_num – 1) / original_fps. # noqa: E501
 
         Args:
             data: Raw video bytes
@@ -796,10 +796,10 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         # -1 indicates that sampling can be performed directly without FPS limitation.
         if fps > 0:
             # Num_frames is the maximum number of frames to sample.
-            # If fewer frames are sampled at this sample_fps, the update duration will be longer.
+            # If fewer frames are sampled at this sample_fps, the update duration will be longer. # noqa: E501
             if num_frames >= int(total_duration * fps) + 1:
                 num_frames = int(total_duration * fps) + 1
-                # Under the new maximum frame rate, the video duration of the rightmost frame,
+                # Under the new maximum frame rate, the video duration of the rightmost frame, # noqa: E501
                 # cannot be calculated for frame 0.
                 total_duration = min(total_duration, (num_frames - 1) / fps)
         elif fps != -1:
