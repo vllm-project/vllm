@@ -814,6 +814,7 @@ def fastsafetensors_weights_iterator(
         pg = SingleGroup()
 
     device = torch.device(f"cuda:{current_platform.current_device()}")
+    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
     weight_files_sub_lists = [
         hf_weights_files[i : i + pg.size()]
         for i in range(0, len(hf_weights_files), pg.size())

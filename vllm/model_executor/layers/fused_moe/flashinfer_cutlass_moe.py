@@ -139,7 +139,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # work with SP. This will be removed in follow up after we get
         # rid of the FlashInfer specific P/F function.
         # TODO: the per-tensor fp8 kernels don't work with MNNVL FI A2As.
-        return not moe_parallel_config.is_sequence_parallel
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
