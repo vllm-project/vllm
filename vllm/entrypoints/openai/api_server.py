@@ -176,10 +176,6 @@ def build_app(
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
 
-    from vllm.entrypoints.openai.basic.api_router import register_basic_api_routers
-
-    register_basic_api_routers(app)
-
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)
@@ -202,6 +198,24 @@ def build_app(
         )
 
         register_generate_api_routers(app)
+
+        from vllm.entrypoints.serve.disagg.api_router import (
+            attach_router as attach_disagg_router,
+        )
+
+        attach_disagg_router(app)
+
+        from vllm.entrypoints.serve.rlhf.api_router import (
+            attach_router as attach_rlhf_router,
+        )
+
+        attach_rlhf_router(app)
+
+        from vllm.entrypoints.serve.elastic_ep.api_router import (
+            attach_router as elastic_ep_attach_router,
+        )
+
+        elastic_ep_attach_router(app)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
