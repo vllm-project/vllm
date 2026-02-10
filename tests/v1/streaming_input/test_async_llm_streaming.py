@@ -180,8 +180,10 @@ async def test_generate_with_async_generator():
     llm = MagicMock(spec=AsyncLLM)
     llm.vllm_config = MagicMock()
     llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
-    llm.model_config = MagicMock()
-    llm.model_config.max_model_len = 2048
+    llm.model_config = MockModelConfig()
+    llm.input_processor = MagicMock()
+    llm.io_processor = MagicMock()
+    llm.renderer = _build_renderer(llm.model_config)
     llm.log_requests = False
     llm.errored = False
     llm._pause_cond = asyncio.Condition()
