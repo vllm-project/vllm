@@ -866,7 +866,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
-            return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
