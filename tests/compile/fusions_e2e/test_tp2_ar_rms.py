@@ -17,6 +17,7 @@ from .common import (
 from .models import (
     FLASHINFER_ATTN,
     TRITON_ATTN,
+    gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
     llama3_8b_fp8,
@@ -150,7 +151,7 @@ def test_tp2_ar_rms_fp4_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    [llama3_8b, qwen3_a3b, gpt_oss_20b],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])

@@ -66,6 +66,9 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         tp_size: int = 1,
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
+        # TODO: remove this after finishing migration from envs to model kwargs
+        if model_name == "openai/gpt-oss-20b":
+            monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.
