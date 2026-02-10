@@ -1137,10 +1137,10 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         # Check that we actually had preemptions
         metrics_after = vllm_model.llm.get_metrics()
         preemptions_before = next(
-            (m.value for m in metrics_before if m.name == "vllm:num_preemptions"), 0
+            (m.value for m in metrics_before if m.name == "vllm_num_preemptions"), 0
         )
         preemptions_after = next(
-            (m.value for m in metrics_after if m.name == "vllm:num_preemptions"), 0
+            (m.value for m in metrics_after if m.name == "vllm_num_preemptions"), 0
         )
         preemptions = preemptions_after - preemptions_before
         assert preemptions > 0, "Test did not trigger any preemptions"

@@ -738,19 +738,19 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         ]
 
         self._counter_kv_bytes = self._counter_cls(
-            name="vllm:kv_offload_total_bytes",
+            name="vllm_kv_offload_total_bytes",
             documentation="Number of bytes offloaded by KV connector",
             labelnames=labelnames + ["transfer_type"],
         )
 
         self._counter_kv_transfer_time = self._counter_cls(
-            name="vllm:kv_offload_total_time",
+            name="vllm_kv_offload_total_time",
             documentation="Total time measured by all KV offloading operations",
             labelnames=labelnames + ["transfer_type"],
         )
 
         self._histogram_transfer_size = self._histogram_cls(
-            name="vllm:kv_offload_size",
+            name="vllm_kv_offload_size",
             documentation="Histogram of KV offload transfer size, in bytes.",
             buckets=buckets[:],
             labelnames=labelnames + ["transfer_type"],

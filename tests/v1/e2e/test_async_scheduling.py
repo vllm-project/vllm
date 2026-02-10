@@ -324,7 +324,7 @@ def run_test(
 
             if test_preemption:
                 preemptions = _get_count(
-                    metrics_before, metrics_after, "vllm:num_preemptions"
+                    metrics_before, metrics_after, "vllm_num_preemptions"
                 )
                 assert preemptions > 0, "preemption test had no preemptions"
 
@@ -373,8 +373,8 @@ def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> boo
 
 
 def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
-    draft = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
-    accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
+    draft = _get_count(before, after, "vllm_spec_decode_num_draft_tokens")
+    accept = _get_count(before, after, "vllm_spec_decode_num_accepted_tokens")
     return accept / draft if draft > 0 else 0.0
 
 

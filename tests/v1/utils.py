@@ -14,7 +14,7 @@ def get_prometheus_metrics(server: RemoteOpenAIServer) -> dict[str, dict[str, fl
 
     Returns:
         Dict mapping metric names to their values grouped by labels.
-        For example: {"vllm:request_success": {
+        For example: {"vllm_request_success": {
             "engine=0": 5.0, "engine=1": 3.0}
         }
     """
@@ -76,7 +76,7 @@ def get_engine_request_counts(metrics: dict[str, dict[str, float]]) -> dict[str,
     engine_counts = {}
 
     # Look for request success metrics with engine labels
-    success_metrics = metrics.get("vllm:request_success_total", {})
+    success_metrics = metrics.get("vllm_request_success_total", {})
     engine_pattern = re.compile(r'engine="([^"]*)"')
 
     for labels, count in success_metrics.items():
