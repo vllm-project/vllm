@@ -20,9 +20,8 @@ QDTYPES = (
     if not current_platform.is_rocm()
     else [None, torch.float8_e4m3fnuz]
 )
-FP8_DTYPE = (
-    torch.float8_e4m3fn if not current_platform.is_rocm() else torch.float8_e4m3fnuz
-)
+FP8_DTYPE = current_platform.fp8_dtype()
+
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
