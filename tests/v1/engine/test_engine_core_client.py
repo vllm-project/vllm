@@ -26,7 +26,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, UtilityFuture
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
@@ -280,18 +280,19 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
-def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
-    """Utility that returns a Future completed by a worker thread after a short delay.
-    num_wait_loops controls delay in 50ms steps.
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> UtilityFuture:
+    """Utility that returns a UtilityFuture whose future is completed by the
+    step_fn after num_wait_loops engine steps (tests deferred utility path).
     """
     future: Future = Future()
+    remaining = [num_wait_loops]
 
-    def complete_later() -> None:
-        time.sleep(num_wait_loops * 0.05)
-        future.set_result(value)
+    def _step() -> None:
+        remaining[0] -= 1
+        if remaining[0] <= 0:
+            future.set_result(value)
 
-    Thread(target=complete_later, daemon=True).start()
-    return future
+    return UtilityFuture(future, _step)
 
 
 # --- Fixtures for subprocess patching ---
@@ -407,10 +408,9 @@ def subprocess_future_echo_patch(monkeypatch, tmp_path):
         "\n".join(
             [
                 "from concurrent.futures import Future",
-                "from threading import Thread",
                 "from typing import Any",
-                "import time",
                 "",
+                "from vllm.v1.engine import UtilityFuture",
                 "from vllm.v1.engine.core import EngineCore",
                 inspect.getsource(future_echo),
                 "EngineCore.future_echo = future_echo",
@@ -831,8 +831,8 @@ async def test_engine_core_client_future_utility_async(
     monkeypatch: pytest.MonkeyPatch,
     subprocess_future_echo_patch,
 ):
-    """Test that a utility returning a Future completes when the Future is done
-    (worker thread sets result; engine uses add_done_callback to send output).
+    """Test that a utility returning UtilityFuture completes when the future
+    is done (step_fn sets result after N steps; engine uses add_done_callback).
     """
     with monkeypatch.context() as m:
         m.setattr(EngineCore, "future_echo", future_echo, raising=False)
@@ -855,13 +855,13 @@ async def test_engine_core_client_future_utility_async(
         try:
             core_client: AsyncMPClient = client
 
-            # Completes after worker thread sleeps (num_wait_loops=2 → ~100ms delay)
+            # Completes after 2 engine steps (num_wait_loops=2)
             result = await core_client.call_utility_async(
                 "future_echo", "future_result", 2
             )
             assert result == "future_result"
 
-            # None is a valid result (num_wait_loops=0 → minimal delay)
+            # None is a valid result (num_wait_loops=0 → completes on first step)
             result = await core_client.call_utility_async("future_echo", None, 0)
             assert result is None
         finally:

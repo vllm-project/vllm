@@ -982,15 +982,12 @@ class AsyncMPClient(MPClient):
         mode: PauseMode = "abort",
         clear_cache: bool = True,
     ) -> None:
-        """Pause generation (DP clients broadcast to all engines)."""
         await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler (DP clients broadcast to all engines)."""
         await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        """Return whether the scheduler is paused (DP: first engine's result)."""
         return await self.call_utility_async("is_scheduler_paused")
 
     async def profile_async(self, is_start: bool = True) -> None:

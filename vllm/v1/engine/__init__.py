@@ -3,13 +3,15 @@
 
 import enum
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from typing import Any, Literal
 
 import msgspec
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -17,6 +19,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+
+logger = init_logger(__name__)
 
 # Type for pause_generation mode parameter.
 # - "abort": Abort all in-flight requests immediately (default).
@@ -176,6 +180,51 @@ class EngineCoreOutput(
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
+
+
+class UtilityFuture:
+    """
+    Standard type for deferred utility completion. Utilities return this;
+    the engine calls register_done() with request context and step() each loop.
+    When the future completes, the same done behavior runs (set output, put on queue).
+    """
+
+    def __init__(
+        self,
+        future: Future[Any],
+        step_fn: Callable[[], None],
+    ) -> None:
+        self.future = future
+        self._step_fn = step_fn
+
+    def register_done(
+        self,
+        output_queue: Any,
+        client_idx: int,
+        call_id: int,
+        method_name: str,
+    ) -> None:
+        """Register the standard done behavior with request context."""
+        future = self.future
+
+        def _done(f: Future[Any]) -> None:
+            output = UtilityOutput(call_id)
+            try:
+                output.result = UtilityResult(f.result())
+            except BaseException as e:
+                logger.exception("Invocation of %s method failed", method_name)
+                output.failure_message = (
+                    f"Call to {method_name} method failed: {str(e)}"
+                )
+            output_queue.put_nowait(
+                (client_idx, EngineCoreOutputs(utility_output=output))
+            )
+
+        future.add_done_callback(_done)
+
+    def step(self) -> None:
+        """Run one step; the callback may complete the future when ready."""
+        self._step_fn()
 
 
 class UtilityOutput(

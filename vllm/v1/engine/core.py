@@ -52,6 +52,7 @@ from vllm.v1.engine import (
     PauseState,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    UtilityFuture,
     UtilityOutput,
     UtilityResult,
 )
@@ -373,7 +374,7 @@ class EngineCore:
         self,
         mode: PauseMode = "abort",
         clear_cache: bool = True,
-    ) -> None | Future:
+    ) -> UtilityFuture:
         """Pause generation; behavior depends on mode.
 
         All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
@@ -384,66 +385,60 @@ class EngineCore:
           then complete the returned Future.
         - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
           set PAUSE_KEEP, clear caches, complete the returned Future.
-        - ``keep``: Set PAUSE_KEEP; when running with output_queue, return a
-          Future that completes when the queue is empty (clean state, no tokens
-          in flight to the client). Otherwise return None.
+        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
+          output queue is empty.
         """
 
-        def _complete_future_once_output_queue_drained(
-            out_queue: queue.Queue[Any] | None, f: Future
-        ) -> None:
-            while out_queue is not None and not out_queue.empty():
-                time.sleep(0.01)
-            f.set_result(None)
+        if not hasattr(self, "_pending_step_completions"):
+            raise RuntimeError(
+                "pause_scheduler with deferrable modes requires "
+                "_pending_step_completions (use EngineCoreProc, not EngineCore)"
+            )
+        if not hasattr(self, "output_queue"):
+            raise RuntimeError(
+                "pause_scheduler requires output_queue (use EngineCoreProc)"
+            )
+        else:
+            output_queue = self.output_queue
+
+        future: Future[Any] = Future()
+
+        def _step_queue_empty() -> None:
+            if not output_queue.empty():
+                return
+            future.set_result(None)
 
         if mode == "abort":
             self._scheduler_pause_state = PauseState.PAUSE_ABORT
             request_ids = self.scheduler.get_all_request_ids()
-            output_queue = getattr(self, "output_queue", None)
             if request_ids:
                 self.abort_requests(request_ids)
             if clear_cache:
                 self.reset_prefix_cache()
                 self.reset_mm_cache()
                 self.reset_encoder_cache()
-
-            future: Future[Any] = Future()
-            threading.Thread(
-                target=_complete_future_once_output_queue_drained,
-                args=(output_queue, future),
-                daemon=True,
-            ).start()
-            return future
-        if mode == "keep":
+            return UtilityFuture(future, _step_queue_empty)
+        elif mode == "keep":
             self._scheduler_pause_state = PauseState.PAUSE_KEEP
-            output_queue = getattr(self, "output_queue", None)
-            if output_queue is not None:
-                future = Future()
-                threading.Thread(
-                    target=_complete_future_once_output_queue_drained,
-                    args=(output_queue, future),
-                    daemon=True,
-                ).start()
-                return future
-            return None
+            return UtilityFuture(future, _step_queue_empty)
 
-        # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
-        self._scheduler_pause_state = PauseState.PAUSE_WAIT
+        elif mode == "wait":
+            # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
+            self._scheduler_pause_state = PauseState.PAUSE_WAIT
 
-        future = Future()
+            def _step_wait() -> None:
+                if self.scheduler.has_unfinished_requests():
+                    return
+                self._scheduler_pause_state = PauseState.PAUSE_KEEP
+                if clear_cache:
+                    self.reset_prefix_cache()
+                    self.reset_mm_cache()
+                    self.reset_encoder_cache()
+                future.set_result(None)
 
-        def _wait_drained() -> None:
-            while self.scheduler.has_unfinished_requests():
-                time.sleep(0.01)
-            self._scheduler_pause_state = PauseState.PAUSE_KEEP
-            if clear_cache:
-                self.reset_prefix_cache()
-                self.reset_mm_cache()
-                self.reset_encoder_cache()
-            future.set_result(None)
-
-        threading.Thread(target=_wait_drained, daemon=True).start()
-        return future
+            return UtilityFuture(future, _step_wait)
+        else:
+            raise ValueError(f"Invalid pause mode: {mode}")
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
@@ -821,6 +816,8 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        # Deferred utilities: engine calls .step() each loop until .future is done.
+        self._pending_step_completions: list[UtilityFuture] = []
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -1145,6 +1142,8 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            # 3) Run step-based completion checks (e.g. pause_scheduler futures).
+            self._process_pending_step_completions()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1155,6 +1154,7 @@ class EngineCoreProc(EngineCore):
             and not self.scheduler.has_requests()
             and not self.batch_queue
             and self._scheduler_pause_state == PauseState.UNPAUSED
+            and not self._pending_step_completions
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1194,6 +1194,25 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
+    def _process_pending_step_completions(self) -> None:
+        """Run step() on deferred utilities; remove any whose future is done."""
+        pending = self._pending_step_completions
+        if not pending:
+            return
+        still_pending: list[UtilityFuture] = []
+        for uf in pending:
+            if uf.future.done():
+                continue
+            try:
+                uf.step()
+            except BaseException as e:
+                logger.exception("Step completion check failed")
+                uf.future.set_exception(e)
+                continue
+            if not uf.future.done():
+                still_pending.append(uf)
+        self._pending_step_completions = still_pending
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1206,38 +1225,30 @@ class EngineCoreProc(EngineCore):
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
-            output = UtilityOutput(call_id)
             try:
                 method = getattr(self, method_name)
                 result = method(*self._convert_msgspec_args(method, args))
-                if isinstance(result, Future):
-                    output_queue = self.output_queue
 
-                    def utility_completed(f: Future) -> None:
-                        try:
-                            output.result = UtilityResult(f.result())
-                        except BaseException as e:
-                            logger.exception(
-                                "Invocation of %s method failed", method_name
-                            )
-                            output.failure_message = (
-                                f"Call to {method_name} method failed: {str(e)}"
-                            )
-                        output_queue.put_nowait(
-                            (client_idx, EngineCoreOutputs(utility_output=output))
-                        )
-
-                    result.add_done_callback(utility_completed)
-                    return
-                output.result = UtilityResult(result)
+                if isinstance(result, UtilityFuture):
+                    result.register_done(
+                        self.output_queue, client_idx, call_id, method_name
+                    )
+                    self._pending_step_completions.append(result)
+                else:
+                    output = UtilityOutput(call_id)
+                    output.result = UtilityResult(result)
+                    self.output_queue.put_nowait(
+                        (client_idx, EngineCoreOutputs(utility_output=output))
+                    )
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
+                output = UtilityOutput(call_id)
                 output.failure_message = (
                     f"Call to {method_name} method failed: {str(e)}"
                 )
-            self.output_queue.put_nowait(
-                (client_idx, EngineCoreOutputs(utility_output=output))
-            )
+                self.output_queue.put_nowait(
+                    (client_idx, EngineCoreOutputs(utility_output=output))
+                )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
