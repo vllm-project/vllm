@@ -7,9 +7,11 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    get_accelerator_view_from_cpu_tensor,
+)
 
 
 def async_copy_to_gpu(
@@ -38,7 +40,7 @@ class UvaBuffer:
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
-        self.uva = get_cuda_view_from_cpu_tensor(self.cpu)
+        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
 
 
 class UvaBufferPool:
@@ -117,6 +119,7 @@ class StagedWriteTensor:
             )
         self.num_rows = size if isinstance(size, int) else size[0]
         self.dtype = dtype
+        self.device = device
         self.max_concurrency = max_concurrency
 
         if not uva_instead_of_gpu:
@@ -137,8 +140,6 @@ class StagedWriteTensor:
 
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
-        init_size = next_power_of_2(self.num_rows)
-        self.write_contents = new_buffer(init_size, dtype=dtype)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
 
     def stage_write(
@@ -170,21 +171,9 @@ class StagedWriteTensor:
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
         # Special handling for write_contents
-        diff_len = len(self._staged_write_contents)
-        assert isinstance(self.write_contents.size, int)
-        if diff_len > self.write_contents.size:
-            # Re-allocate a larger buffer for the write_contents
-            new_size = next_power_of_2(diff_len)
-            self.write_contents = UvaBufferPool(
-                new_size, dtype=self.dtype, max_concurrency=self.max_concurrency
-            )
-            # NOTE(woosuk): Since the previous write_contents buffer is released,
-            # we perform a synchronization here to ensure that all data transfers
-            # involving the old buffer have finished before allocating a new one.
-            # This prevents potential race conditions. The slight overhead is
-            # negligible because the reallocations are infrequent in practice.
-            torch.cuda.synchronize()
-        contents_uva = self.write_contents.copy_to_uva(self._staged_write_contents)
+        write_contents = async_tensor_h2d(
+            self._staged_write_contents, self.dtype, self.device, pin_memory=True
+        )
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
@@ -192,7 +181,7 @@ class StagedWriteTensor:
             self.gpu.stride(0),
             indices_uva,
             starts_uva,
-            contents_uva,
+            write_contents,
             cu_lens_uva,
             BLOCK_SIZE=1024,
         )
