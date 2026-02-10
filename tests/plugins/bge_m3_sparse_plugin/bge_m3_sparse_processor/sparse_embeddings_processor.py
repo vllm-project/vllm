@@ -54,7 +54,9 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
     def parse_request(self, request: Any) -> IOProcessorInput:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
         if type(request) is dict and "data" in request:
-            return SparseEmbeddingCompletionRequestMixin(input=[request["data"]])
+            if isinstance(request["data"], str):
+                return SparseEmbeddingCompletionRequestMixin(input=[request["data"]])
+            return SparseEmbeddingCompletionRequestMixin(input=request["data"])
 
         # for online serving `pooling` endpoint
         if isinstance(request, IOProcessorRequest):
