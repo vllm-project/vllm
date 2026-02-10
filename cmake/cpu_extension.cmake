@@ -365,6 +365,19 @@ else()
 endif()
 
 #
+# Generate CPU attention dispatch header
+#
+message(STATUS "Generating CPU attention dispatch header")
+execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/csrc/cpu/generate_cpu_attn_dispatch.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/csrc/cpu
+    RESULT_VARIABLE GEN_RESULT
+)
+if(NOT GEN_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate CPU attention dispatch header")
+endif()
+
+#
 # _C extension
 #
 set(VLLM_EXT_SRC

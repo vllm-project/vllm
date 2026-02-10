@@ -35,6 +35,9 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
+    def num_output_tokens(self) -> int:
+        return len(self.token_ids)
+
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         self.token_ids.extend(new_token_ids)
         return None
@@ -112,14 +115,12 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        # TODO(woosuk): This method becomes very inefficient when the number of
-        # new_token_ids is more than 1. We need to optimize this.
         stop_check_offset = len(self.output_text)
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
-            if self.min_tokens and len(self.output_token_ids) <= self.min_tokens:
+            if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
         if skipped_stop_token_id is not None:
@@ -128,7 +129,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and len(self.output_token_ids) > self.min_tokens:
+        if self.stop and self.num_output_tokens() > self.min_tokens:
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
@@ -280,7 +281,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Prompt embedding requests cannot be detokenized, in general.
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
-            self.read_offest = 0
+            self.read_offset = 0
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 
@@ -294,6 +295,9 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             if not self.prompt_len
             else (self.token_ids[self.prompt_len :])
         )
+
+    def num_output_tokens(self) -> int:
+        return len(self.token_ids) - self.prompt_len
 
     def decode_next(self, next_token_id: int) -> str:
         new_tokens, decoded_text, prefix_offset, read_offset = detokenize_incrementally(

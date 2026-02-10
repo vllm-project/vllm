@@ -3,7 +3,7 @@
 import enum
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
@@ -128,12 +128,6 @@ def create_worker_adapter(
         kv_rank,
         vllm_config.cache_config.block_size,
     )
-
-
-def convert_block_hashes_to_bytes(
-    block_hashes: list["BlockHash"],
-) -> list[bytes]:
-    return cast(list[bytes], block_hashes)
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -266,6 +260,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
@@ -282,15 +277,21 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+            op = LoadStoreOp(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="STORE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
             )
 
             # Update the request tracker
@@ -303,6 +304,7 @@ class LMCacheMPRequestMetadata:
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
+        vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -310,6 +312,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -330,15 +333,21 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+            op = LoadStoreOp(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
             )
             return ret
 
@@ -385,7 +394,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -595,7 +604,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             self.worker_adapter.shutdown()
         return None
 
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
         Get the KV connector stats collected during the last interval.
         """
@@ -643,7 +652,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id, convert_block_hashes_to_bytes(request.block_hashes)
+            request.request_id,
+            token_ids=list(request.all_token_ids),
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -766,6 +776,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+        # Notify LMCache to end the session for this request
+        self.scheduler_adapter.end_session(request.request_id)
+
         return True, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
@@ -810,7 +823,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> Optional["KVConnectorStats"]:
+    ) -> "KVConnectorStats | None":
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -825,7 +838,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-    ) -> Optional["KVConnectorPromMetrics"]:
+    ) -> "KVConnectorPromMetrics | None":
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
@@ -846,7 +859,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
-                request_tracker, blocks_per_chunk
+                request_tracker,
+                blocks_per_chunk,
+                vllm_block_size=self.vllm_block_size,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)

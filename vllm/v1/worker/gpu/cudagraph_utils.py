@@ -24,12 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class CudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        uses_mrope: bool,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, uses_mrope: bool, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.uses_mrope = uses_mrope
@@ -41,11 +36,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-        self.cudagraph_mode: CUDAGraphMode
-        if self.compilation_config.cudagraph_mode is None:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
@@ -276,6 +267,7 @@ def prepare_inputs_to_capture(
         num_tokens=num_tokens,
         query_start_loc_gpu=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=num_tokens_per_req,
         seq_lens=input_buffers.seq_lens,
         max_seq_len=max_model_len,
         block_tables=input_block_tables,

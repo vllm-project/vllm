@@ -30,11 +30,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.fused_experts = experts
+        self.moe_mk = experts
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
-            not self.fused_experts.supports_expert_map(),
+            not self.moe_mk.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
         assert not self.old_quant_method.is_monolithic
@@ -46,6 +46,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         shared_experts: torch.nn.Module | None,
+        inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
@@ -54,20 +55,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
                 moe_parallel_config=moe_layer.moe_parallel_config,
+                inplace=inplace,
             ),
         )
 
     @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return self.fused_experts.prepare_finalize.topk_indices_dtype()
-
-    @property
     def supports_eplb(self) -> bool:
         return self.old_quant_method.supports_eplb
-
-    @property
-    def allow_inplace(self) -> bool:
-        return self.old_quant_method.allow_inplace
 
     @property
     def method_name(self) -> str:
@@ -96,15 +90,16 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.fused_experts(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=self.allow_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
+            shared_experts_input=layer._get_shared_experts_input(x),
         )
