@@ -118,4 +118,4 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
             [(i, item) async for i, item in model_output], key=lambda output: output[0]
         )
         collected_output = [output[1] for output in sorted_output]
-        return self.post_process(collected_output, **kwargs)
+        return self.post_process(collected_output, request_id=request_id, **kwargs)
