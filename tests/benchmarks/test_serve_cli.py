@@ -70,7 +70,7 @@ class RemoteOpenAIServerSSL(RemoteOpenAIServer):
                     raise RuntimeError("Server failed to start in time.") from None
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def server():
     args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
 
@@ -78,7 +78,7 @@ def server():
         yield remote_server
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def ssl_server():
     """Start a vLLM server with SSL enabled using a self-signed certificate."""
     with tempfile.TemporaryDirectory() as cert_dir:
