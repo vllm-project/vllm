@@ -878,6 +878,7 @@ def _fused_moe_lora(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    total_m_blocks_ub: int = 0,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
@@ -906,19 +907,17 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
-    # Compute CPU upper bound for merged m-blocks (no GPU sync needed).
-    # Total padded tokens across all adapters <=
-    #   topk_numel + max_loras * num_experts * (block_size - 1)
-    # Total m-blocks <= ceil(total_padded / block_size) + max_loras
-    num_experts = lora_a_stacked[0].shape[1]
-    max_loras_dim = sorted_token_ids.shape[0]
-    topk_numel = M * top_k_num
-    total_padded_ub = (
-        topk_numel + max_loras_dim * num_experts * (shrink_block_size_m - 1)
-    )
-    total_m_blocks_ub = (
-        triton.cdiv(total_padded_ub, shrink_block_size_m) + max_loras_dim
-    )
+    # Use caller-provided upper bound, or fall back to conservative bound
+    if total_m_blocks_ub <= 0:
+        num_experts = lora_a_stacked[0].shape[1]
+        max_loras_dim = sorted_token_ids.shape[0]
+        total_padded_ub = (
+            num_tokens
+            + max_loras_dim * num_experts * (shrink_block_size_m - 1)
+        )
+        total_m_blocks_ub = (
+            triton.cdiv(total_padded_ub, shrink_block_size_m) + max_loras_dim
+        )
 
     # Merge per-adapter token lists into flat layout (fully GPU, graph-safe)
     merged_sorted, merged_experts, block_adapter_map, total_m_blocks = (
@@ -1042,6 +1041,7 @@ def _fused_moe_lora_fake(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    total_m_blocks_ub: int = 0,
     mul_routed_weight: bool = False,
 ) -> None:
     return

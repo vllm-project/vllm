@@ -74,6 +74,14 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+        # Per-adapter token counts from CPU scheduling data (no GPU sync).
+        # Used to compute tight m-block upper bounds for merged MoE kernel.
+        counts: dict[int, int] = {}
+        for lora_id in mapping.index_mapping:
+            if lora_id > 0:
+                counts[lora_id] = counts.get(lora_id, 0) + 1
+        self._per_adapter_token_counts: list[int] = list(counts.values())
+
     def add_shrink(
         self,
         y: torch.Tensor,
@@ -378,6 +386,19 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
         (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
+
+        # Compute tight m-block upper bound from CPU per-adapter token counts.
+        # Only looseness remaining: not knowing which experts tokens route to.
+        num_experts = lora_a_stacked[0].shape[1]
+        block_size_m = shrink_config.get("BLOCK_SIZE_M", 64)
+        total_m_blocks_ub = 0
+        for n_tokens in self._per_adapter_token_counts:
+            topk_pairs = n_tokens * top_k_num
+            max_experts_hit = min(topk_pairs, num_experts)
+            ntpp_ub = topk_pairs + max_experts_hit * (block_size_m - 1)
+            total_m_blocks_ub += (ntpp_ub + block_size_m - 1) // block_size_m
+        total_m_blocks_ub = max(total_m_blocks_ub, 1)
+
         fused_moe_lora(
             y,
             x,
@@ -405,6 +426,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expand_config.get("NUM_WARPS", 4),
             expand_config.get("NUM_STAGES", 3),
             expand_config.get("SPLIT_K", 1),
+            total_m_blocks_ub,
             mul_routed_weight,
             fully_sharded,
             offset,
