@@ -5,8 +5,8 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
-from typing import Annotated, Any, Literal
+from dataclasses import fields
+from typing import Annotated, Any, Literal, cast
 
 import torch
 from pydantic import Field, model_validator
@@ -285,10 +285,16 @@ class CompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = (
                     StructuredOutputsParams(**structured_outputs_kwargs)
                     if self.structured_outputs is None
-                    else replace(
-                        self.structured_outputs,
-                        **structured_outputs_kwargs,
-                    )  # type: ignore[type-var]
+                    else StructuredOutputsParams(
+                        **{
+                            **{
+                                field.name: getattr(self.structured_outputs, field.name)
+                                for field in fields(cast(Any, StructuredOutputsParams))
+                                if field.init
+                            },
+                            **structured_outputs_kwargs,
+                        }
+                    )
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}

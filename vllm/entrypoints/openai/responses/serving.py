@@ -9,9 +9,9 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields
 from http import HTTPStatus
-from typing import Final
+from typing import Any, Final, cast
 
 import jinja2
 from fastapi import Request
@@ -493,12 +493,21 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         and struct_out.all_non_structural_tag_constraints_none()
                     ):
-                        sampling_params.structured_outputs = replace(
-                            struct_out,
-                            structural_tag=reasoning_parser.prepare_structured_tag(
-                                struct_out.structural_tag, self.tool_server
-                            ),
-                        )  # type: ignore[type-var]
+                        base_structured_outputs = {
+                            field.name: getattr(struct_out, field.name)
+                            for field in fields(cast(Any, StructuredOutputsParams))
+                            if field.init
+                        }
+                        structural_tag = reasoning_parser.prepare_structured_tag(
+                            struct_out.structural_tag,
+                            self.tool_server,
+                        )
+                        sampling_params.structured_outputs = StructuredOutputsParams(
+                            **{
+                                **base_structured_outputs,
+                                "structural_tag": structural_tag,
+                            }
+                        )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
