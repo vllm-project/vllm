@@ -139,7 +139,7 @@ def scaled_mm_kernel(
 
 def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
     """Heuristic to select BLOCK_SIZE_M/N/K based on problem dimensions
-    and target architecture (RDNA vs CDNA)."""
+    and target architecture."""
     is_small_N = N < 8192
     next_power_of_2_M = max(32, triton.next_power_of_2(M))
 
@@ -154,7 +154,7 @@ def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
             return (128, 64, 128) if is_small_N else (256, 64, 32)
         return (256, 64, 32)
 
-    # Default (CDNA / MI-series)
+    # Default
     if next_power_of_2_M <= 32:
         return (64, 64, 256) if is_small_N else (64, 128, 256)
     if next_power_of_2_M <= 64:
