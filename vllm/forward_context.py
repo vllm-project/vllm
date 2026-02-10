@@ -56,10 +56,11 @@ class BatchDescriptor(NamedTuple):
     to be properly captured.
     """
 
-    def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
+    def relax_for_piecewise_cudagraphs(self) -> "BatchDescriptor":
         """
-        Return a relaxed version of current batch descriptor that is still compatible
-        with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
+        Return a relaxed version of current batch descriptor that is compatible
+        with PIECEWISE cudagraphs. FULL cudagraphs require exact num_reqs match
+        because FA3's scheduler_metadata computation depends on it.
         """
         return BatchDescriptor(
             self.num_tokens,

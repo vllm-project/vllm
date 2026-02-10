@@ -150,18 +150,21 @@ class TestCudagraphDispatcher:
 
         # 2. uniform decode batch, size in cudagraph size list
         desc_uniform_exact = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=True)
+        desc_non_uniform = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=True, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
+            # Pure FULL mode uses non-uniform keys for all batches
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == desc_non_uniform
         elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
+            # These modes have separate uniform decode keys
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == desc_uniform_exact.relax_for_piecewise_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
@@ -180,7 +183,7 @@ class TestCudagraphDispatcher:
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == desc_full_exact.relax_for_piecewise_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
