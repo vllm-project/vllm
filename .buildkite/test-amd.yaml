@@ -1814,7 +1814,7 @@ steps:
     - "pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'llama-3'"
 
 - label: Fusion E2E TP2 (MI325)
-  mirror_hardwares: [amdexperimental, amdproduction, tj]
+  mirror_hardwares: [amdexperimental, amdproduction, tj, tj2]
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: mi325_2
@@ -1828,4 +1828,4 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - "pytest -v -s vllm/tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+    - "pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
