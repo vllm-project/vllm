@@ -401,7 +401,10 @@ class Idefics2VisionTransformer(nn.Module):
         tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
+
         if patch_attention_mask is None:
+            # No mask provided - create default all-ones mask for embeddings
+            # and skip attention masking (no padding to mask)
             patch_attention_mask = torch.ones(
                 size=(
                     batch_size,
@@ -411,6 +414,9 @@ class Idefics2VisionTransformer(nn.Module):
                 dtype=torch.bool,
                 device=pixel_values.device,
             )
+            flat_patch_mask = None
+        else:
+            flat_patch_mask = patch_attention_mask.view(batch_size, -1)
 
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
@@ -419,17 +425,18 @@ class Idefics2VisionTransformer(nn.Module):
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
-        # - flatten patch_attention_mask to (B, L)
-        # - if any padding exists, create an additive 4D mask and pass it to
-        #   attention; else skip mask for performance.
-        flat_patch_mask = patch_attention_mask.view(batch_size, -1)
-        if not torch.any(~flat_patch_mask):
+        # - if patch_attention_mask was None, skip attention masking
+        # - if any padding exists, create an additive 4D mask and pass it
+        #   to attention; else skip mask for performance.
+        if flat_patch_mask is None or not torch.any(~flat_patch_mask):
             attention_mask = None
         else:
             # Additive mask: masked positions receive a large negative value.
             # Shape: (B, 1, 1, L) broadcastable to (B, H, Q, K).
             min_val = torch.finfo(hidden_states.dtype).min
-            attention_mask = (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
+            attention_mask = (
+                (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
+            )
             attention_mask = attention_mask[:, None, None, :]
 
         if self.use_data_parallel:
