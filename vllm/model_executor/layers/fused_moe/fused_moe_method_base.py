@@ -9,6 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -62,6 +63,37 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         'weight_scale_2' pattern instead of the standard 'weight_scale' pattern.
         """
         return False
+
+    def maybe_roundup_hidden_size(
+        self,
+        hidden_size: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+        is_lora_enabled: bool,
+        model_type: str | None,
+    ) -> int:
+        """
+        Given layer hidden size and MoE configurations, round up hidden_size
+        if necessary.
+
+        Args:
+            hidden_size: Layer hidden-size
+            act_dtype: Data type of the layer activations.
+            moe_parallel_config: Fused MoE parallelization strategy configuration.
+            is_lora_enabled: True if the engine is enabled with LoRA. This
+                is used in the case of mxfp4 quantization in selecting the
+                MxFP4Backend.
+            model_type: for checking if gpt-oss
+
+        Return:
+            Rounded up hidden_size if rounding up is required based on the configs.
+            Original hidden size otherwise.
+        """
+        from .all2all_utils import maybe_roundup_layer_hidden_size
+
+        return maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype, moe_parallel_config
+        )
 
     def maybe_make_prepare_finalize(
         self,

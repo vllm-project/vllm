@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -251,6 +252,38 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
+    def maybe_roundup_hidden_size(
+        self,
+        hidden_size: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+        is_lora_enabled: bool,
+        model_type: str | None,
+    ) -> int:
+        hidden_size = super().maybe_roundup_hidden_size(
+            hidden_size=hidden_size,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+            is_lora_enabled=is_lora_enabled,
+            model_type=model_type,
+        )
+
+        if model_type == "gpt_oss":
+            current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
+            if (
+                current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+            ):
+                hidden_size = round_up(hidden_size, 128)
+            elif (
+                current_platform.is_rocm()
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
+            ):
+                hidden_size = round_up(hidden_size, 256)
+
+        return hidden_size
 
     def create_weights(
         self,

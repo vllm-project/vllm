@@ -541,9 +541,28 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        self.quant_config = quant_config
+
+        def _get_quant_method() -> FusedMoEMethodBase:
+            """
+            Helper method to ensure self.quant_method is never None and
+            of the proper type.
+            """
+            quant_method = None
+            if self.quant_config is not None:
+                quant_method = self.quant_config.get_quant_method(self, prefix)
+            if quant_method is None:
+                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+            assert isinstance(quant_method, FusedMoEMethodBase)
+            return quant_method
+
+        # Note: get_quant_method will look at the layer's local_num_experts
+        # for heuristic purposes, so it must be initialized first.
+        self.quant_method: FusedMoEMethodBase = _get_quant_method()
+
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size = maybe_roundup_hidden_size(
+        hidden_size = self.quant_method.maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
@@ -552,9 +571,6 @@ class FusedMoE(CustomOp):
                 self.vllm_config.model_config.hf_config.model_type
                 if self.vllm_config.model_config is not None
                 else None
-            ),
-            is_mxfp4_quant=(
-                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
         )
         self.hidden_size = hidden_size
@@ -586,25 +602,6 @@ class FusedMoE(CustomOp):
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
-
-        self.quant_config = quant_config
-
-        def _get_quant_method() -> FusedMoEMethodBase:
-            """
-            Helper method to ensure self.quant_method is never None and
-            of the proper type.
-            """
-            quant_method = None
-            if self.quant_config is not None:
-                quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None:
-                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
-            assert isinstance(quant_method, FusedMoEMethodBase)
-            return quant_method
-
-        # Note: get_quant_method will look at the layer's local_num_experts
-        # for heuristic purposes, so it must be initialized first.
-        self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
