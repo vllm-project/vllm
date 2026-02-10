@@ -82,38 +82,6 @@ def test_embed_input_ids_smoke_no_shape_errors():
     assert out_proj.shape == (s, hidden)
 
 
-def test_kimi_audio_post_process_output_cleans_prompt_echo() -> None:
-    raw = (
-        "这 并不是 告别 这是一个 篇章 的 结束 也是 新篇章 的 开始 "
-        "AA AA A A , , Please trans cribe the following audio ."
-    )
-    cleaned = KimiAudioForConditionalGeneration.post_process_output(raw)
-    compact = cleaned.replace(" ", "").replace("，", "").replace("。", "")
-
-    assert "这并不是告别这是一个篇章的结束也是新篇章的开始" in compact
-    assert "transcribe" not in cleaned.lower()
-    assert "audio" not in cleaned.lower()
-    assert "AA" not in cleaned
-
-
-def test_kimi_audio_post_process_output_dedupes_chinese() -> None:
-    raw = (
-        "输出转写文本， 不要其他内容。 远"
-        "这并不是告别这是一个篇章的结束也是新篇章的开始"
-        "这并不是告别这是一个篇章的结束也是新篇章的开始"
-    )
-    cleaned = KimiAudioForConditionalGeneration.post_process_output(raw)
-
-    assert cleaned == "这并不是告别这是一个篇章的结束也是新篇章的开始"
-
-
-def test_kimi_audio_post_process_output_strips_leading_char() -> None:
-    raw = "输出转写文本不要其他内容远这并不是告别这是一个篇章的结束也是新篇章的开始"
-    cleaned = KimiAudioForConditionalGeneration.post_process_output(raw)
-
-    assert cleaned == "这并不是告别这是一个篇章的结束也是新篇章的开始"
-
-
 def test_kimi_audio_does_not_register_audio_tower_submodule() -> None:
     """Regression test: Kimi-Audio must not register a tower submodule.
 

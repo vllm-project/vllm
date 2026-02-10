@@ -28,7 +28,6 @@ from contextlib import suppress
 from typing import Any, ClassVar, Literal
 
 import numpy as np
-import regex as re
 import torch
 from scipy.io import wavfile
 from transformers.feature_extraction_utils import BatchFeature
@@ -143,139 +142,6 @@ def _kimia_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         text_input_ids=MultiModalFieldConfig.batched("audio"),
         audio_input_ids=MultiModalFieldConfig.batched("audio"),
     )
-
-
-_CJK_PATTERN = re.compile(r"\p{Han}")
-_CJK_SPACE_PATTERN = re.compile(r"(?<=\p{Han})\s+(?=\p{Han})")
-_INSTRUCTION_PATTERN = re.compile(
-    r"(?:please\s+)?trans\s*cribe\s+the\s+following\s+audio\s*[:：\.]*",
-    flags=re.IGNORECASE,
-)
-_FOLLOWING_AUDIO_PATTERN = re.compile(
-    r"the\s+following\s+audio\s*[:：\.]*", flags=re.IGNORECASE
-)
-_TRANSCRIBE_TOKEN_PATTERN = re.compile(r"\btrans\s*cribe\b", flags=re.IGNORECASE)
-_CRIBE_TOKEN_PATTERN = re.compile(r"\bcribe\b", flags=re.IGNORECASE)
-_AUDIO_LABEL_PATTERN = re.compile(r"\baudio\s*[:：]", flags=re.IGNORECASE)
-_PLEASE_PATTERN = re.compile(r"\bplease\b", flags=re.IGNORECASE)
-_TRAILING_A_PATTERN = re.compile(r"(?:\s*[AＡ]+[\s,，。]*){3,}\s*$")
-_TRAILING_PUNCT_PATTERN = re.compile(r"(?:\s*[,.，。]){3,}\s*$")
-_CHINESE_INSTRUCTION_PATTERN = re.compile(
-    r"请?只?\s*输出\s*转写\s*文本[，,。\.\s]*不要\s*其他\s*内容[，,。\.\s]*"
-)
-_GA_NOISE_PATTERN = re.compile(r"(?:^|[\s，。,.])噶(?=[\s，。,.]|$)")
-
-
-def _is_chinese_language(language: str | None) -> bool:
-    if not language:
-        return False
-    return language.lower().startswith("zh")
-
-
-def _default_kimia_instruction(language: str | None) -> str:
-    if _is_chinese_language(language):
-        return "请只输出转写文本，不要其他内容。"
-    return "Please transcribe the following audio:"
-
-
-def _cjk_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    cjk = len(_CJK_PATTERN.findall(text))
-    non_space = len(re.findall(r"\S", text))
-    if non_space == 0:
-        return 0.0
-    return cjk / non_space
-
-
-def _truncate_repeated_substring(text: str, min_len: int) -> str:
-    if min_len <= 0:
-        return text
-    n = len(text)
-    if n < min_len * 2:
-        return text
-    for i in range(0, n - min_len + 1):
-        substr = text[i : i + min_len]
-        idx = text.find(substr, i + min_len)
-        if idx != -1:
-            return text[:idx]
-    return text
-
-
-def _dedupe_repeated_cjk(text: str) -> str:
-    compact = re.sub(r"[\s，。！？；：,.]", "", text)
-    if len(compact) < 8:
-        return text
-
-    for offset in (0, 1):
-        part = compact[offset:]
-        if len(part) % 2 == 0:
-            half = len(part) // 2
-            if part[:half] == part[half:]:
-                return part[:half]
-
-    min_len = max(6, min(12, len(compact) // 4))
-    truncated = _truncate_repeated_substring(compact, min_len)
-    if truncated != compact:
-        return truncated
-
-    if len(compact) > 10:
-        lead_char = compact[0]
-        if _CJK_PATTERN.match(lead_char):
-            remainder = compact[1:]
-            if len(remainder) % 2 == 0:
-                half = len(remainder) // 2
-                if remainder[:half] == remainder[half:]:
-                    return remainder[:half]
-
-    return text
-
-
-def _cleanup_kimia_output(text: str) -> str:
-    text = text.strip()
-    if not text:
-        return ""
-
-    cjk_ratio = _cjk_ratio(text)
-    had_instruction = False
-    if cjk_ratio >= 0.3:
-        text = _INSTRUCTION_PATTERN.sub(" ", text)
-        text = _FOLLOWING_AUDIO_PATTERN.sub(" ", text)
-        text = _TRANSCRIBE_TOKEN_PATTERN.sub(" ", text)
-        text = _CRIBE_TOKEN_PATTERN.sub(" ", text)
-        text = _AUDIO_LABEL_PATTERN.sub(" ", text)
-        text = _PLEASE_PATTERN.sub(" ", text)
-        text, instruction_hits = _CHINESE_INSTRUCTION_PATTERN.subn(" ", text)
-        had_instruction = instruction_hits > 0
-        text = _GA_NOISE_PATTERN.sub(" ", text)
-
-    text = _TRAILING_A_PATTERN.sub("", text)
-    text = _TRAILING_PUNCT_PATTERN.sub("", text)
-
-    if _cjk_ratio(text) >= 0.3:
-        text = _CJK_SPACE_PATTERN.sub("", text)
-        text = re.sub(r"\s+([，。！？；：])", r"\1", text)
-
-    text = re.sub(r"\s{2,}", " ", text).strip()
-
-    if had_instruction and _cjk_ratio(text) >= 0.3:
-        compact = re.sub(r"[\s，。！？；：,.]", "", text)
-        if (
-            len(compact) >= 6
-            and _CJK_PATTERN.match(compact[0])
-            and compact.count(compact[0]) == 1
-        ):
-            for idx, char in enumerate(text):
-                if _CJK_PATTERN.match(char):
-                    text = (text[:idx] + text[idx + 1 :]).strip()
-                    break
-
-    if _cjk_ratio(text) >= 0.3:
-        deduped = _dedupe_repeated_cjk(text)
-        if deduped != text:
-            text = deduped.strip()
-
-    return text
 
 
 def _has_nonzero_mm_inputs(*items: object) -> bool:
@@ -569,6 +435,8 @@ class KimiAudioForConditionalGeneration(
 ):
     """Kimi-Audio model for conditional generation + transcription."""
 
+    is_kimia_asr: ClassVar[bool] = True
+
     # vLLM V1: treat this as a "raw input only" multimodal model so that
     # multimodal kwargs (whisper_input_features / masks / ids) are forwarded
     # directly into the model forward/embed methods.
@@ -819,26 +687,22 @@ class KimiAudioForConditionalGeneration(
                 kimia_text_audiodelaytokens=kimia_text_audiodelaytokens,
             )
 
-            # Follow the official Kimi-Audio ASR example: provide an explicit
-            # instruction text message before the audio.
+            messages = []
             if request_prompt.strip():
-                instruction = request_prompt
-            else:
-                # Match the upstream Kimi-Audio README ASR example.
-                instruction = _default_kimia_instruction(language)
-
-            messages = [
-                {
-                    "role": "user",
-                    "message_type": "text",
-                    "content": instruction,
-                },
+                messages.append(
+                    {
+                        "role": "user",
+                        "message_type": "text",
+                        "content": request_prompt,
+                    }
+                )
+            messages.append(
                 {
                     "role": "user",
                     "message_type": "audio",
                     "content": wav_path,
-                },
-            ]
+                }
+            )
 
             content = prompt_manager.get_prompt(messages, output_type="text")
             (
@@ -898,8 +762,8 @@ class KimiAudioForConditionalGeneration(
 
     @classmethod
     def post_process_output(cls, text: str) -> str:
-        """Clean Kimi-Audio ASR output by trimming prompt-echo noise."""
-        return _cleanup_kimia_output(text)
+        """Return transcription text without additional cleanup."""
+        return text
 
     def forward(self, *args, **kwargs):  # type: ignore[override]
         # Pull out our extra multimodal tensors
