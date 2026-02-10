@@ -21,6 +21,7 @@ class KimiTokenizer(TokenizerLike):
     def __init__(self, hf_tokenizer: Any):
         """Initialize with a HuggingFace TikTokenTokenizer."""
         self._tokenizer = hf_tokenizer
+        self._name_or_path = getattr(hf_tokenizer, "name_or_path", None)
         # Cache vocab for performance
         self._vocab = self.get_vocab()
         self._vocab_size = len(self._vocab)
@@ -67,6 +68,10 @@ class KimiTokenizer(TokenizerLike):
         if hasattr(self._tokenizer, "special_tokens"):
             return list(self._tokenizer.special_tokens.values())
         return []
+
+    @property
+    def name_or_path(self) -> str | None:
+        return self._name_or_path
 
     @property
     def bos_token_id(self) -> int:

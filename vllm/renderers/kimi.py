@@ -34,9 +34,10 @@ class KimiRenderer(HfRenderer):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        # Initialize without calling super().__init__ to avoid creating
+        super().__init__(config)
+
+        # Initialize without calling HfRenderer.__init__ to avoid creating
         # the HF tokenizer. We'll create KimiTokenizer instead.
-        self.config = config
 
         if config.skip_tokenizer_init:
             tokenizer = None
