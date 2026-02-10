@@ -47,12 +47,9 @@ def _get_cached_tokens(
     usage: "UsageInfo | None",
 ) -> int | None:
     """Extract cached token count from OpenAI UsageInfo."""
-    if usage is None:
+    if usage is None or usage.prompt_tokens_details is None:
         return None
-    details = usage.prompt_tokens_details
-    if details is not None and details.cached_tokens:
-        return details.cached_tokens
-    return None
+    return usage.prompt_tokens_details.cached_tokens
 
 
 def wrap_data_with_event(data: str, event: str):
