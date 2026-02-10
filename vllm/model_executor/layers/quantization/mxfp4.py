@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -49,14 +50,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
-    get_padding_alignment,
+    maybe_roundup_mxfp4_fused_moe_sizes,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -259,6 +259,28 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
         self.moe_mk: mk.FusedMoEModularKernel | None = None
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        rounded_hidden_size, rounded_intermediate_size_per_partition = (
+            maybe_roundup_mxfp4_fused_moe_sizes(
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                mxfp4_backend=self.mxfp4_backend,
+            )
+        )
+        return rounded_hidden_size, rounded_intermediate_size_per_partition
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -282,67 +304,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         mxfp4_block = 32
 
-        intermediate_size_per_partition_after_pad = intermediate_size_per_partition
-        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            # The moe marlin kernel requires that for each linear
-            # n % 256 == 0 and k % 128 == 0.
-            # In gate_up_proj:
-            #    n = 2 * intermediate_size_per_partition_after_pad
-            #    k = hidden_size
-            # In down_proj
-            #    n = hidden_size
-            #    k = intermediate_size_per_partition_after_pad
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 128
-            )
-            if current_platform.is_xpu():
-                hidden_size = round_up(hidden_size, 128)
-            else:
-                hidden_size = round_up(hidden_size, 256)
-
-            layer.params_dtype = params_dtype
-            layer.num_experts = num_experts
-            layer.hidden_size = hidden_size
-            layer.intermediate_size_per_partition = (
-                intermediate_size_per_partition_after_pad
-            )
-        elif (
-            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            # pad the intermediate size to be a multiple of 2 * mxfp4_block
-            # for to hold non-uniform sharded tensor as well as swizzling
-            # other padding to increase performance
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 256
-            )
-            hidden_size = round_up(hidden_size, 256)
-        elif (
-            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-            or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-        ):
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 128
-            )
-            hidden_size = round_up(hidden_size, 128)
-        elif current_platform.is_rocm():
-            pad_align = get_padding_alignment()
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, pad_align
-            )
-            hidden_size = round_up(hidden_size, pad_align)
-        else:
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 64
-            )
-
-        self.intermediate_size = intermediate_size_per_partition_after_pad
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        self.intermediate_size = intermediate_size_per_partition
         self.hidden_size = hidden_size
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition_after_pad,
+                2 * intermediate_size_per_partition,
                 hidden_size // 2,
                 dtype=weight_dtype,
             ),
@@ -354,7 +324,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition_after_pad,
+                2 * intermediate_size_per_partition,
                 hidden_size // mxfp4_block,
                 dtype=scale_dtype,
             ),
@@ -366,7 +336,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_bias = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition_after_pad,
+                2 * intermediate_size_per_partition,
                 dtype=torch.bfloat16,
             ),
             requires_grad=False,
@@ -379,7 +349,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition_after_pad // 2,
+                intermediate_size_per_partition // 2,
                 dtype=weight_dtype,
             ),
             requires_grad=False,
@@ -391,7 +361,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition_after_pad // mxfp4_block,
+                intermediate_size_per_partition // mxfp4_block,
                 dtype=scale_dtype,
             ),
             requires_grad=False,
