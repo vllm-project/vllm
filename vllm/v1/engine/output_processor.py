@@ -316,14 +316,7 @@ class RequestState:
                     >= self.stream_interval_ms
                 )
 
-                # When both are configured, emit on whichever comes first.
-                # When only one is configured, wait for that one.
-                if has_token_interval and has_time_interval:
-                    should_emit = token_ok or time_ok
-                elif has_token_interval:
-                    should_emit = token_ok
-                else:
-                    should_emit = time_ok
+                should_emit = token_ok or time_ok
 
                 if not should_emit:
                     return None
