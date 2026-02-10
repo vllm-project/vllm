@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms.rocm import on_gfx1x
 from vllm.triton_utils import tl, triton
 
 
@@ -136,6 +137,33 @@ def scaled_mm_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
+def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
+    """Heuristic to select BLOCK_SIZE_M/N/K based on problem dimensions
+    and target architecture (RDNA vs CDNA)."""
+    is_small_N = N < 8192
+    next_power_of_2_M = max(32, triton.next_power_of_2(M))
+
+    if on_gfx1x():
+        if next_power_of_2_M <= 32:
+            return (32, 64, 128) if is_small_N else (16, 256, 64)
+        if next_power_of_2_M <= 64:
+            return (64, 128, 128) if is_small_N else (64, 128, 64)
+        if next_power_of_2_M <= 128:
+            return (128, 64, 128)
+        if next_power_of_2_M <= 512:
+            return (128, 64, 128) if is_small_N else (256, 64, 32)
+        return (256, 64, 32)
+
+    # Default (CDNA / MI-series)
+    if next_power_of_2_M <= 32:
+        return (64, 64, 256) if is_small_N else (64, 128, 256)
+    if next_power_of_2_M <= 64:
+        return (64, 64, 256)
+    if next_power_of_2_M <= 128:
+        return (64, 128, 128)
+    return (128, 128, 128)
+
+
 # input   - [M, K]
 # weight - [K, N]
 def triton_scaled_mm(
@@ -177,18 +205,7 @@ def triton_scaled_mm(
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
     if use_heuristic:
-        is_small_N = N < 8192
-        next_power_of_2_M = max(32, triton.next_power_of_2(M))
-        if next_power_of_2_M <= 32:
-            tile_shape = (64, 64, 256) if is_small_N else (64, 128, 256)
-        elif next_power_of_2_M <= 64:
-            tile_shape = (64, 64, 256)
-        elif next_power_of_2_M <= 128:
-            tile_shape = (64, 128, 128)
-        else:
-            tile_shape = (128, 128, 128)
-
-    block_size_m, block_size_n, block_size_k = tile_shape
+        block_size_m, block_size_n, block_size_k = _get_tile_config(M, N)
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
