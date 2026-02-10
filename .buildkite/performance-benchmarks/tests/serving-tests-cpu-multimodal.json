@@ -23,7 +23,7 @@
       "dtype": "bfloat16",
       "max_model_len": 16384,
       "limit_mm_per_prompt": "'{\"image\": 3, \"video\": 0}'",
-      "mm_processor_kwargs": "max_pixels=1003520"
+      "mm_processor_kwargs": "'{\"max_pixels\": 1003520}'"
     },
     "client_parameters": {
       "backend": "openai-chat",

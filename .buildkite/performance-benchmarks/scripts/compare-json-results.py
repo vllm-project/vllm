@@ -7,12 +7,12 @@ import argparse
 import html as _html
 import json
 import os
-import re
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 
 import pandas as pd
+import regex as re
 
 pd.options.display.float_format = "{:.2f}".format
 plotly_found = util.find_spec("plotly.express") is not None
@@ -402,7 +402,6 @@ def _load_env_df_for_inputs(args, files: list[str]) -> pd.DataFrame | None:
     return df
 
 
-
 # -----------------------------
 # Valid max concurrency summary helpers
 # -----------------------------
@@ -757,13 +756,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--excel-out",
         type=str,
         default="perf_comparison.xlsx",
-        help="Write an Excel workbook with one sheet per (Model, Dataset, Input Len, Output Len).",
+        help="Write one sheet per (Model, Dataset, Input Len, Output Len).",
     )
     parser.add_argument(
         "--csv-out-dir",
         type=str,
         default="",
-        help="If set, write per-group per-metric CSVs into this directory (CSV cannot have sheets).",
+        help="If set, write per-group per-metric CSVs into this directory.",
     )
 
     return parser
@@ -969,7 +968,13 @@ def write_report_group_first(
         env_df = _load_env_df_for_inputs(args, files)
         if env_df is None or env_df.empty:
             pd.DataFrame(
-                [{"Section": "Environment", "Key": "vllm_env.txt", "Value": "NOT FOUND (or empty)"}]
+                [
+                    {
+                        "Section": "Environment",
+                        "Key": "vllm_env.txt",
+                        "Value": "NOT FOUND (or empty)",
+                    }
+                ]
             ).to_excel(xw, sheet_name=env_sheet, index=False)
         else:
             env_df.to_excel(xw, sheet_name=env_sheet, index=False)
@@ -1058,7 +1063,9 @@ def write_report_group_first(
                         )
                         if csv_dir:
                             fn = _safe_filename(
-                                f"{sheet}__{metric_label}".replace(" ", "_").replace("/", "_")
+                                f"{sheet}__{metric_label}".replace(" ", "_").replace(
+                                    "/", "_"
+                                )
                             )
                             display_group.to_csv(csv_dir / f"{fn}.csv", index=False)
 
@@ -1081,9 +1088,13 @@ def write_report_group_first(
                         args=args,
                     )
                     if summary_df is not None:
-                        excel_blocks.append(("Valid Max Concurrency Summary", summary_df))
+                        excel_blocks.append(
+                            ("Valid Max Concurrency Summary", summary_df)
+                        )
                         if csv_dir:
-                            fn = _safe_filename(f"{sheet}__Valid_Max_Concurrency_Summary")
+                            fn = _safe_filename(
+                                f"{sheet}__Valid_Max_Concurrency_Summary"
+                            )
                             summary_df.to_csv(csv_dir / f"{fn}.csv", index=False)
 
                 _write_tables_to_excel_sheet(xw, sheet, excel_blocks)

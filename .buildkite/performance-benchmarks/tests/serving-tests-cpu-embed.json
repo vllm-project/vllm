@@ -16,6 +16,7 @@
       "VLLM_CPU_KVCACHE_SPACE": 40
     },
     "server_parameters": {
+      "dtype": "bfloat16",
       "model": "jinaai/jina-embeddings-v3",
       "trust_remote_code": ""
     },

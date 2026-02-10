@@ -189,8 +189,6 @@ ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmar
 The benchmark results will be saved in `./benchmark/results/`.
 In the directory, the generated `.commands` files contain all example commands for the benchmark.
 
-
-
 We recommend configuring tensor-parallel-size to match the number of NUMA nodes on your system. Note that the current release does not support tensor-parallel-size=6.
 To determine the number of NUMA nodes available, use the following command:
 
@@ -202,6 +200,7 @@ For performance reference, users may also consult the [vLLM Performance Dashboar
 , which publishes default-model CPU results produced using the same Benchmark Suite.
 
 #### Dry-Run
+
 For users only need to get the optimized runtime configurations without running benchmark, a Dry-Run mode is provided.
 By adding --dry-run with run-performance-benchmarks.sh, all commands will be generated under `./benchmark/results/`.
 

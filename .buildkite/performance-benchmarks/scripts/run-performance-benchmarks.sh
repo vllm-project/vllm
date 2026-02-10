@@ -176,17 +176,6 @@ wait_for_server() {
   '
 }
 
-
-#wait_for_server() {
-  # wait for vllm server to start
-  # return 1 if vllm server crashes
-#  local timeout_val="1200"
-#  timeout "$timeout_val" bash -c '
-#    until curl -X POST localhost:8000/v1/completions; do
-#      sleep 1
-#    done' && return 0 || return 1
-#}
-
 kill_processes_launched_by_current_bash() {
   # Kill all python processes launched from current bash script
   current_shell_pid=$$
