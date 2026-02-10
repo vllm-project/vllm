@@ -44,8 +44,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
-    CompressedTensorsConfig,
+from vllm.model_executor.layers.quantization.compressed_tensors import (
+    compressed_tensors as ct,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
@@ -876,7 +876,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         )
         is_ct_int8_or_fp8_weight_scale = False
         if modules[-1] == "weight_scale" and isinstance(
-            self.model.quant_config, CompressedTensorsConfig
+            self.model.quant_config, ct.CompressedTensorsConfig
         ):
             from compressed_tensors import CompressionFormat
 
