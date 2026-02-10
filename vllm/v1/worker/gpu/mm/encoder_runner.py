@@ -115,7 +115,7 @@ class EncoderRunner:
 
         mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu", pin_memory=True
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
@@ -163,8 +163,6 @@ class EncoderRunner:
                 )
                 mm_embeds.append(mm_embeds_item)
 
-        # Copy the is_mm_embed tensor to the GPU.
-        is_mm_embed = is_mm_embed.to(device=self.device, non_blocking=True)
         return mm_embeds, is_mm_embed
 
     @torch.inference_mode()
