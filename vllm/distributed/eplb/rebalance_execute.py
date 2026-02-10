@@ -53,6 +53,8 @@ class CommunicationPlan:
     """Total number of communication rounds."""
     ops_per_expert: int
     """Number of P2P operations per expert (equals number of weight tensors)."""
+    communication_config: EPLBCommunicationConfig
+    """The communication config used (may be auto-tuned from the input config)."""
 
 
 # Type alias for the result of move_to_buffer or transfer_layer
@@ -182,6 +184,347 @@ def _get_communication_round(rank1: int, rank2: int, group_size: int) -> int:
     return group1 ^ group2
 
 
+def _compute_send_destinations(
+    rank: int,
+    expert: int,
+    ranks_to_send: list[int],
+    ranks_to_recv: list[int],
+) -> list[int]:
+    """
+    Compute destination ranks for sending an expert.
+
+    Args:
+        rank: Current rank sending the expert.
+        expert: Expert ID being sent.
+        ranks_to_send: List of ranks that have this expert and can send.
+        ranks_to_recv: List of ranks that need this expert.
+
+    Returns:
+        List of destination ranks this sender should send to.
+    """
+    if not ranks_to_send or not ranks_to_recv or rank not in ranks_to_send:
+        return []
+
+    num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+    sender_pos = ranks_to_send.index(rank)
+    recv_begin = sender_pos * num_dst_per_sender
+    recv_end = recv_begin + num_dst_per_sender
+    recv_ranks = ranks_to_recv[recv_begin:recv_end].copy()
+
+    # Handle remainder
+    remainder_start = len(ranks_to_send) * num_dst_per_sender
+    recver_pos = remainder_start + sender_pos
+    if recver_pos < len(ranks_to_recv):
+        recv_ranks.append(ranks_to_recv[recver_pos])
+
+    return recv_ranks
+
+
+def _compute_recv_source(
+    rank: int,
+    expert: int,
+    ranks_to_send: list[int],
+    ranks_to_recv: list[int],
+) -> int | None:
+    """
+    Compute source rank for receiving an expert.
+
+    Args:
+        rank: Current rank receiving the expert.
+        expert: Expert ID being received.
+        ranks_to_send: List of ranks that have this expert and can send.
+        ranks_to_recv: List of ranks that need this expert.
+
+    Returns:
+        Source rank to receive from, or None if not found.
+    """
+    if not ranks_to_send or not ranks_to_recv or rank not in ranks_to_recv:
+        return None
+
+    num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+    recver_pos = ranks_to_recv.index(rank)
+    remainder_start = len(ranks_to_send) * num_dst_per_sender
+
+    if recver_pos < remainder_start:
+        src = ranks_to_send[recver_pos // num_dst_per_sender]
+    else:
+        src = ranks_to_send[recver_pos - remainder_start]
+
+    return src
+
+
+def _build_rank_transfer_lists(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_size: int,
+) -> list[tuple[list[tuple[int, int]], list[tuple[int, int]]]]:
+    """
+    Build send/recv lists for all ranks.
+
+    Args:
+        num_local_experts: Number of local experts per rank.
+        old_indices: Current expert assignments.
+        new_indices: Desired expert assignments.
+        ep_size: Expert parallel world size.
+
+    Returns:
+        List of (send_list, recv_list) for each rank, where:
+        - send_list: List of (dst_rank, expert_id) tuples for sends
+        - recv_list: List of (src_rank, expert_id) tuples for recvs
+    """
+    rank_transfers = []
+
+    for rank in range(ep_size):
+        send_list = []
+        recv_list = []
+
+        # Generate send/recv maps for this rank
+        base = rank * num_local_experts
+        local_rows = np.arange(num_local_experts, dtype=np.int32)
+        local_global = base + local_rows
+
+        old_local_expert_ids = old_indices[local_global]
+        new_local_expert_ids = new_indices[local_global]
+
+        # Build send map for this rank
+        rank_send_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
+        rank_send_count = 0
+        valid_old = old_local_expert_ids != -1
+        if np.any(valid_old):
+            uniq_experts, _ = np.unique(
+                old_local_expert_ids[valid_old], return_index=True
+            )
+            rank_send_count = int(uniq_experts.shape[0])
+            rank_send_expert_ids[:rank_send_count] = uniq_experts
+
+        # Build recv map for this rank
+        is_unchanged = old_local_expert_ids == new_local_expert_ids
+        new_valid = new_local_expert_ids != -1
+        can_recv_local = np.isin(
+            new_local_expert_ids, old_local_expert_ids, assume_unique=False
+        )
+        is_received_locally = np.logical_or(
+            is_unchanged, np.logical_and(new_valid, can_recv_local)
+        )
+        need_recv_mask = np.logical_and(~is_received_locally, new_valid)
+
+        rank_recv_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
+        rank_recv_count = 0
+        if np.any(need_recv_mask):
+            desired_experts = new_local_expert_ids[need_recv_mask]
+            uniq_recv_experts, _ = np.unique(desired_experts, return_index=True)
+            rank_recv_count = int(uniq_recv_experts.shape[0])
+            rank_recv_expert_ids[:rank_recv_count] = uniq_recv_experts
+
+        # Calculate sends for this rank
+        if rank_send_count > 0:
+            experts = rank_send_expert_ids[:rank_send_count]
+            order = np.argsort(experts, kind="stable")
+            experts = experts[order]
+
+            send_map, recv_map = get_ep_ranks_with_experts_batch(
+                experts,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+
+            for expert in experts.tolist():
+                ranks_to_send = send_map[expert]
+                ranks_to_recv = recv_map[expert]
+
+                dst_ranks = _compute_send_destinations(
+                    rank, expert, ranks_to_send, ranks_to_recv
+                )
+                for dst in dst_ranks:
+                    send_list.append((dst, expert))
+
+        # Calculate recvs for this rank
+        if rank_recv_count > 0:
+            experts = rank_recv_expert_ids[:rank_recv_count]
+            order = np.argsort(experts, kind="stable")
+            experts = experts[order]
+
+            send_map, recv_map = get_ep_ranks_with_experts_batch(
+                experts,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+
+            for expert in experts.tolist():
+                ranks_to_send = send_map[expert]
+                ranks_to_recv = recv_map[expert]
+
+                src = _compute_recv_source(rank, expert, ranks_to_send, ranks_to_recv)
+                if src is not None:
+                    recv_list.append((src, expert))
+
+        rank_transfers.append((send_list, recv_list))
+
+    return rank_transfers
+
+
+def _calculate_max_experts_per_rank_per_round(
+    rank_transfers: list[tuple[list[tuple[int, int]], list[tuple[int, int]]]],
+    ep_size: int,
+    group_size: int,
+) -> int:
+    """
+    Calculate the maximum number of expert transfers (sends + recvs) per rank
+    per communication round within a batch_isend_irecv.
+
+    Args:
+        rank_transfers: Pre-built list of (send_list, recv_list) for each rank.
+        ep_size: Expert parallel world size.
+        group_size: Size of each communication group.
+
+    Returns:
+        Maximum number of experts transferred (sent + received) by any rank
+        in any single communication round.
+    """
+    max_transfers = 0
+
+    # Calculate for all ranks
+    for rank in range(ep_size):
+        send_list, recv_list = rank_transfers[rank]
+        transfers_per_round: dict[int, int] = {}
+
+        # Count sends per round
+        for dst, _ in send_list:
+            round_idx = _get_communication_round(rank, dst, group_size)
+            transfers_per_round[round_idx] = transfers_per_round.get(round_idx, 0) + 1
+
+        # Count recvs per round
+        for src, _ in recv_list:
+            round_idx = _get_communication_round(rank, src, group_size)
+            transfers_per_round[round_idx] = transfers_per_round.get(round_idx, 0) + 1
+
+        # Update max across all rounds for this rank
+        if transfers_per_round:
+            max_transfers = max(max_transfers, max(transfers_per_round.values()))
+
+    return max_transfers
+
+
+def _auto_tune_communication_config(
+    communication_config: EPLBCommunicationConfig,
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_size: int,
+    ep_rank: int,
+) -> tuple[
+    EPLBCommunicationConfig,
+    list[tuple[list[tuple[int, int]], list[tuple[int, int]]]] | None,
+]:
+    """
+    Auto-tune communication configuration based on max_num_experts_transfers.
+
+    If max_num_experts_transfers is set and the current configuration exceeds it,
+    this function will:
+    1. Decrease group_size (increase num_groups) until group_size = 1
+    2. If still exceeding, enable experts_batch_size
+
+    Args:
+        communication_config: Current communication configuration.
+        num_local_experts: Number of local experts per rank.
+        old_indices: Current expert assignments.
+        new_indices: Desired expert assignments.
+        ep_size: Expert parallel world size.
+        ep_rank: Current rank in the expert parallel group.
+
+    Returns:
+        Tuple of (tuned EPLBCommunicationConfig, rank_transfers).
+        rank_transfers is the pre-computed transfer lists for all ranks or None.
+    """
+    max_limit = communication_config.max_num_experts_transfers
+    if max_limit is None:
+        return communication_config, None
+
+    # Start with current config
+    num_groups = communication_config.num_groups
+    experts_batch_size = communication_config.experts_batch_size
+
+    # If experts_batch_size was explicitly set, don't auto-tune
+    if experts_batch_size is not None:
+        return communication_config, None
+
+    # Build transfer lists once for all ranks
+    rank_transfers = _build_rank_transfer_lists(
+        num_local_experts=num_local_experts,
+        old_indices=old_indices,
+        new_indices=new_indices,
+        ep_size=ep_size,
+    )
+
+    group_size = ep_size // num_groups
+
+    # Calculate current max transfers using pre-built lists
+    max_transfers = _calculate_max_experts_per_rank_per_round(
+        rank_transfers=rank_transfers,
+        ep_size=ep_size,
+        group_size=group_size,
+    )
+
+    if max_transfers <= max_limit:
+        # Already within limit, but return the pre-computed lists for reuse
+        return communication_config, rank_transfers
+
+    # Try decreasing group_size (increasing num_groups)
+    while group_size > 1 and max_transfers > max_limit:
+        # Increase num_groups (decrease group_size)
+        # Try next power of 2 or just increment
+        num_groups = min(num_groups * 2, ep_size)
+        group_size = ep_size // num_groups
+
+        max_transfers = _calculate_max_experts_per_rank_per_round(
+            rank_transfers=rank_transfers,
+            ep_size=ep_size,
+            group_size=group_size,
+        )
+
+    # If still exceeding after group_size = 1, enable batching
+    if max_transfers > max_limit:
+        # Calculate required batch size
+        # We need: max_transfers / batch_size <= max_limit
+        # So: batch_size >= ceil(max_transfers / max_limit)
+        required_batch_size = (max_transfers + max_limit - 1) // max_limit
+        experts_batch_size = required_batch_size
+
+        # When using batching, num_groups must equal world size
+        num_groups = ep_size
+
+        logger.info(
+            "EPLB auto-tuning: Enabling experts_batch_size=%d to meet "
+            "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
+            experts_batch_size,
+            max_limit,
+            max_transfers,
+            ep_size,
+        )
+    elif num_groups != communication_config.num_groups:
+        logger.info(
+            "EPLB auto-tuning: Adjusted num_groups from %d to %d to meet "
+            "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
+            communication_config.num_groups,
+            num_groups,
+            max_limit,
+            max_transfers,
+            ep_size,
+        )
+
+    return (
+        EPLBCommunicationConfig(
+            num_groups=num_groups,
+            experts_batch_size=experts_batch_size,
+            max_num_experts_transfers=max_limit,
+        ),
+        rank_transfers,
+    )
+
+
 def _build_communication_plan(
     num_local_experts: int,
     old_indices: np.ndarray,
@@ -224,8 +567,21 @@ def _build_communication_plan(
     # Pre-compute global ranks mapping
     rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
 
-    # Use the already-validated configuration from EPLBConfig
-    num_groups = communication_config.num_groups
+    # Auto-tune communication config if max_num_experts_transfers is set
+    tuned_config, rank_transfers = _auto_tune_communication_config(
+        communication_config=communication_config,
+        num_local_experts=num_local_experts,
+        old_indices=old_indices,
+        new_indices=new_indices,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
+
+    # Extract transfer list for current rank if available
+    rank_transfer_list = rank_transfers[ep_rank] if rank_transfers is not None else None
+
+    # Use the tuned configuration
+    num_groups = tuned_config.num_groups
     group_size = ep_size // num_groups
 
     # Calculate number of communication rounds
@@ -247,27 +603,35 @@ def _build_communication_plan(
         experts = experts[order]
         srcs = srcs[order]
 
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
+        # Build expert_id -> [dst_ranks] mapping
+        expert_to_dsts: dict[int, list[int]] = {}
+        if rank_transfer_list is not None:
+            # Use pre-computed transfer list
+            send_list, _ = rank_transfer_list
+            for dst, expert in send_list:
+                if expert not in expert_to_dsts:
+                    expert_to_dsts[expert] = []
+                expert_to_dsts[expert].append(dst)
+        else:
+            # Compute transfer mappings
+            send_map, recv_map = get_ep_ranks_with_experts_batch(
+                experts,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+            for expert in experts.tolist():
+                ranks_to_send = send_map[expert]
+                ranks_to_recv = recv_map[expert]
+                recv_ranks = _compute_send_destinations(
+                    ep_rank, expert, ranks_to_send, ranks_to_recv
+                )
+                if recv_ranks:
+                    expert_to_dsts[expert] = recv_ranks
 
+        # Build send operations using computed destinations
         for expert, src in zip(experts.tolist(), srcs.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
-                continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            sender_pos = ranks_to_send.index(ep_rank)
-            recv_begin = sender_pos * num_dst_per_sender
-            recv_end = recv_begin + num_dst_per_sender
-            recv_ranks = ranks_to_recv[recv_begin:recv_end]
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            recver_pos = remainder_start + sender_pos
-            if recver_pos < len(ranks_to_recv):
-                recv_ranks.append(ranks_to_recv[recver_pos])
+            recv_ranks = expert_to_dsts.get(expert, [])
             for dst in recv_ranks:
                 dst_global = rank_to_global[dst]
                 send_ops = [
@@ -290,25 +654,35 @@ def _build_communication_plan(
         experts = experts[order]
         dsts = dsts[order]
 
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
+        # Build expert_id -> src_rank mapping
+        expert_to_src: dict[int, int] = {}
+        if rank_transfer_list is not None:
+            # Use pre-computed transfer list
+            _, recv_list = rank_transfer_list
+            for src, expert in recv_list:
+                expert_to_src[expert] = src
+        else:
+            # Compute transfer mappings
+            send_map, recv_map = get_ep_ranks_with_experts_batch(
+                experts,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+            for expert in experts.tolist():
+                ranks_to_send = send_map[expert]
+                ranks_to_recv = recv_map[expert]
+                src = _compute_recv_source(
+                    ep_rank, expert, ranks_to_send, ranks_to_recv
+                )
+                if src is not None:
+                    expert_to_src[expert] = src
 
+        # Build receive operations using computed sources
         for expert, dst in zip(experts.tolist(), dsts.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
+            src = expert_to_src.get(expert)
+            if src is None:
                 continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            recver_pos = ranks_to_recv.index(ep_rank)
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            if recver_pos < remainder_start:
-                src = ranks_to_send[recver_pos // num_dst_per_sender]
-            else:
-                src = ranks_to_send[recver_pos - remainder_start]
             src_global = rank_to_global[src]
             recv_ops = [
                 P2POp(
@@ -328,6 +702,7 @@ def _build_communication_plan(
         rank_to_global=rank_to_global,
         num_rounds=num_rounds,
         ops_per_expert=ops_per_expert,
+        communication_config=tuned_config,
     )
 
 
@@ -515,6 +890,7 @@ def move_to_buffer(
                     b[dst].copy_(w[src_local], non_blocking=True)
 
     # 2. Build communication plan (routing)
+    # This will auto-tune the configuration if needed
     comm_plan = _build_communication_plan(
         num_local_experts=num_local_experts,
         old_indices=old_indices,
@@ -538,7 +914,7 @@ def move_to_buffer(
     # Round i (i>0): Inter-group with XOR = i
 
     # Convert expert batch size to operation batch size
-    experts_batch_size = communication_config.experts_batch_size
+    experts_batch_size = comm_plan.communication_config.experts_batch_size
     op_batch_size = (
         experts_batch_size * comm_plan.ops_per_expert
         if experts_batch_size is not None

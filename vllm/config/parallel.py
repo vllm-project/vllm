@@ -63,6 +63,15 @@ class EPLBCommunicationConfig:
     The actual number of P2P operations will be experts_batch_size * num_weight_tensors.
     """
 
+    max_num_experts_transfers: int | None = None
+    """
+    Maximum number of expert transfers per rank per operation in a batch_isend_irecv.
+
+    Used for auto-tuning num_groups and experts_batch_size when those are not explicitly
+    set. If a rank exceeds this limit, group_size is decreased until it reaches 1,
+    then batching is enabled.
+    """
+
 
 @config
 class EPLBConfig:
@@ -123,6 +132,21 @@ class EPLBConfig:
     - If None (default), no special batching is applied
     """
 
+    max_num_experts_transfers: int | None = Field(default=None, ge=1)
+    """
+    Maximum number of expert transfers (sends + recvs) per rank per batch_isend_irecv.
+
+    Used for auto-tuning num_communication_groups and 
+    communication_experts_batch_size when those are not explicitly set. If the
+    estimated communication load exceeds this limit, group_size is decreased
+    (increasing num_groups) until it reaches 1, then experts_batch_size is
+    enabled to further split the communication.
+
+    - If None (default), no auto-tuning is applied
+    - Only takes effect when num_communication_groups and
+      communication_experts_batch_size are at their default values
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
@@ -179,6 +203,7 @@ class EPLBConfig:
         return EPLBCommunicationConfig(
             num_groups=num_groups,
             experts_batch_size=experts_batch_size,
+            max_num_experts_transfers=self.max_num_experts_transfers,
         )
 
 
