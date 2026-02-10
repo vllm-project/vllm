@@ -438,6 +438,17 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
     )
+
+    kv_cache_dummy_dep_pre_is_none = (
+        attn_nodes_pre[0].kwargs.get("kv_cache_dummy_dep") is None
+    )
+    kv_cache_dummy_dep_post_is_none = (
+        attn_nodes_post[0].kwargs.get("kv_cache_dummy_dep") is None
+    )
+    assert not (kv_cache_dummy_dep_pre_is_none ^ kv_cache_dummy_dep_post_is_none), (
+        "The kv_cache_dummy_dep should be consistent before and after fusion"
+    )
+
     if quant_key.dtype == FP8_DTYPE:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
             "Attention should not have output_block_scale after FP8 fusion"

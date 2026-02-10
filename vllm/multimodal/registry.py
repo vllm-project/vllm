@@ -138,6 +138,11 @@ class MultiModalRegistry:
             mm_config.get_limit_per_prompt(modality) == 0
             for modality in info.supported_mm_limits
         ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
                 "are set to 0, running in text-only mode."
