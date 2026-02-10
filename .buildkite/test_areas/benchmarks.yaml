@@ -27,4 +27,4 @@ steps:
   - benchmarks/attention_benchmarks/
   - vllm/v1/attention/
   commands:
-  - python benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
