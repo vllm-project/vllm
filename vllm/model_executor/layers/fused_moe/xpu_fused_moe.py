@@ -38,10 +38,8 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         self.is_fp8 = False
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        fused_moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
+    @property
+    def expects_unquantized_inputs(self) -> bool:
         return True
 
     @staticmethod
