@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-from pydantic.dataclasses import dataclass
-
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
 from vllm.tokenizers import cached_tokenizer_from_config
 
 
 @config
-@dataclass
 class ReasoningConfig:
     """Configuration for reasoning models."""
 
