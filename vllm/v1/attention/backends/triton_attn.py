@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -110,7 +111,9 @@ class TritonAttentionMetadata:
             for r in range_lists
         ]
 
-        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
+        return torch.nested.nested_tensor(
+            range_tensors, layout=torch.jagged
+        ).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -299,6 +302,7 @@ class TritonAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
@@ -307,6 +311,8 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
+
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -498,31 +504,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if self.kv_cache_dtype.startswith("fp8"):
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-                # triton kernel does not support uint8 kv_cache
-                #  (because some explicit casts (e.g. float8_e4m3fnuz)
-                #   are not supported)
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
         if self.kv_cache_dtype.startswith("fp8"):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
@@ -631,3 +612,36 @@ class TritonAttentionImpl(AttentionImpl):
             sliding_window_k=self.sliding_window[1],
         )
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
+        # For decoder and cross-attention, use KV cache as before
+        key_cache, value_cache = kv_cache.unbind(1)
+
+        # Reshape the input keys and values and store them in the cache.
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+            # triton kernel does not support uint8 kv_cache
+            #  (because some explicit casts (e.g. float8_e4m3fnuz)
+            #   are not supported)
+        triton_reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
