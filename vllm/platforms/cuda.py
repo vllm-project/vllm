@@ -439,6 +439,38 @@ class CudaPlatformBase(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
+    def current_stream(cls):
+        return torch.cuda.current_stream()
+
+    @classmethod
+    def create_stream(cls, device=None):
+        return torch.cuda.Stream(device)
+
+    @classmethod
+    def stream(cls, stream):
+        return torch.cuda.stream(stream)
+
+    @classmethod
+    def synchronize(cls):
+        return torch.cuda.synchronize()
+
+    @classmethod
+    def empty_cache(cls):
+        return torch.cuda.empty_cache()
+
+    @classmethod
+    def mem_get_info(cls, device=None):
+        return torch.cuda.mem_get_info(device)
+
+    @classmethod
+    def get_device_properties(cls, device):
+        return torch.cuda.get_device_properties(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int):
+        return torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):

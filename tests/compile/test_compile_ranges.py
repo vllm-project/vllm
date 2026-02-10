@@ -22,6 +22,7 @@ from vllm.config.compilation import CompilationConfig, CompilationMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 BATCH_SIZE = 64
 MLP_SIZE = 128
@@ -76,7 +77,7 @@ def test_compile_ranges(use_fresh_inductor_cache):
             Range(start=33, end=8192),
         ]
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -141,7 +142,7 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
         max_model_len=8192,
         is_encoder_decoder=False,
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
 
     def create_vllm_config():
         return VllmConfig(

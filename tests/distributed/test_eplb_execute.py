@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -251,7 +252,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     tp_group = get_tp_group()
     ep_group = tp_group.device_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     total_physical_experts = world_size * num_local_experts
     hidden_sizes = [16, 32]
@@ -290,7 +291,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     new_indices_cpu = new_indices.cpu()
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-    cuda_stream = torch.cuda.Stream(device=device)
+    cuda_stream = current_platform.create_stream(device=device)
 
     for layer_idx in range(num_layers):
         is_unchanged, is_received_locally, recv_metadata = asyncio.run(
@@ -343,7 +344,7 @@ def _test_rearrange_expert_weights_with_redundancy(
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     # Test parameters
     total_physical_experts = world_size * num_local_experts
@@ -432,7 +433,7 @@ def test_rearrange_expert_weights_with_redundancy(
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
-    if torch.cuda.device_count() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
         _test_rearrange_expert_weights_with_redundancy,
@@ -451,7 +452,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     num_layers = 2
     num_local_experts = 2
@@ -513,7 +514,7 @@ def test_async_transfer_layer_without_mtp(
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
-    if torch.cuda.device_count() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     distributed_run(
@@ -531,8 +532,7 @@ def test_rearrange_expert_weights_no_change(world_size):
     Test that when the indices do not change, the weights should remain
     unchanged.
     """
-
-    if torch.cuda.device_count() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_rearrange_expert_weights_no_change, world_size)
 
@@ -545,7 +545,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     num_layers = 1
     num_local_experts = 2
@@ -603,6 +603,6 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
 
-    if torch.cuda.device_count() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
