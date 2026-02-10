@@ -6,7 +6,7 @@ PyNccl Communicator - NCCL bindings for vLLM.
 
 This module provides the PyNcclCommunicator class for GPU collective operations.
 By default, it uses nccl4py (official NVIDIA Python bindings). Set environment
-variable VLLM_USE_LEGACY_NCCL=1 to use the legacy ctypes-based implementation.
+variable VLLM_DISABLE_NCCL4PY=1 to use the legacy ctypes-based implementation.
 """
 
 # ===================== import region =====================
@@ -83,7 +83,7 @@ class PyNcclCommunicator:
     NCCL Communicator for GPU collective operations.
 
     This implementation uses nccl4py (official NVIDIA Python bindings) by default.
-    Set VLLM_USE_LEGACY_NCCL=1 to use the legacy ctypes-based implementation.
+    Set VLLM_DISABLE_NCCL4PY=1 to use the legacy ctypes-based implementation.
     """
 
     def __init__(
@@ -465,9 +465,9 @@ class PyNcclCommunicator:
 
 # ===================== Legacy implementation fallback =====================
 
-if envs.VLLM_USE_LEGACY_NCCL:
+if envs.VLLM_DISABLE_NCCL4PY:
     # Import the legacy implementation and replace PyNcclCommunicator
-    logger.info("Using legacy ctypes-based NCCL bindings (VLLM_USE_LEGACY_NCCL=1)")
+    logger.info("Using legacy ctypes-based NCCL bindings (VLLM_DISABLE_NCCL4PY=1)")
 
     from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
         NCCLLibrary,

@@ -22,7 +22,7 @@ def find_nccl_library() -> str:
     .. deprecated::
         This function is used by the legacy ctypes-based NCCL bindings.
         The new nccl4py bindings automatically discover the NCCL library
-        via the nvidia-nccl-cuXX package. Set VLLM_USE_LEGACY_NCCL=1 to
+        via the nvidia-nccl-cuXX package. Set VLLM_DISABLE_NCCL4PY=1 to
         use the legacy bindings which require this function.
     """
     so_file = envs.VLLM_NCCL_SO_PATH
