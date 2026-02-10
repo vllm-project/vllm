@@ -65,6 +65,8 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 class Handle(Protocol):
+    """Minimal async work handle used by P2P send/recv methods."""
+
     def is_completed(self) -> bool: ...
 
     def wait(self) -> None: ...
@@ -845,15 +847,22 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Handle]:
-        if not torch.distributed.is_initialized() or self.world_size == 1:
-            return []
-        if self.use_cpu_custom_send_recv:
-            if self.device_communicator is None:
-                raise ValueError("No device communicator found")
-            # custom device communicator path is synchronous
-            self.device_communicator.send_tensor_dict(  # type: ignore
-                tensor_dict, dst
-            )
+        if (
+            not torch.distributed.is_initialized()
+            or self.world_size == 1
+            or self.use_cpu_custom_send_recv
+        ):
+            if (
+                self.use_cpu_custom_send_recv
+                and torch.distributed.is_initialized()
+                and self.world_size > 1
+            ):
+                if self.device_communicator is None:
+                    raise ValueError("No device communicator found")
+                # custom device communicator path is synchronous
+                self.device_communicator.send_tensor_dict(  # type: ignore
+                    tensor_dict, dst
+                )
             return []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
@@ -987,10 +996,10 @@ class GroupCoordinator:
                         all_gather_rank
                     ]
                     comm_group = metadata_group if slice_tensor.is_cpu else group
-                    h = torch.distributed.irecv(
+                    handle = torch.distributed.irecv(
                         slice_tensor, src=self.ranks[src], group=comm_group
                     )
-                    handles.append(h)
+                    handles.append(handle)
 
                     def _postprocess(
                         key: str = key,
@@ -1007,10 +1016,10 @@ class GroupCoordinator:
                     tensor_dict[key] = slice_tensor
                 else:
                     comm_group = metadata_group if full_tensor.is_cpu else group
-                    h = torch.distributed.irecv(
+                    handle = torch.distributed.irecv(
                         full_tensor, src=self.ranks[src], group=comm_group
                     )
-                    handles.append(h)
+                    handles.append(handle)
                     tensor_dict[key] = full_tensor
             else:
                 tensor_dict[key] = value

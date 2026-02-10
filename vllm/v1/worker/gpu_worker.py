@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    Handle,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
@@ -640,8 +641,8 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # ensure any previous non-blocking PP sends are complete
         if self._pp_send_work:
-            for h in self._pp_send_work:
-                h.wait()
+            for handle in self._pp_send_work:
+                handle.wait()
             self._pp_send_work = []
 
         intermediate_tensors = None
