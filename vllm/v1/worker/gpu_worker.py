@@ -22,6 +22,7 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -286,9 +287,10 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -1034,6 +1036,7 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance(attention_config.backend)
+    override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
