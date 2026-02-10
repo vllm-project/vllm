@@ -39,6 +39,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -56,11 +57,6 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -2076,32 +2072,38 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
-            new_output_len = output_len
-            if output_len is None or output_len == -1:
-                # check that the request has an 'output_tokens' field
-                if "output_tokens" not in item:
-                    raise ValueError(
-                        "If no output length is provided the "
-                        "custom dataset must contain an 'output_tokens' field."
+            if tokenizer is None:
+                new_output_len = 1
+            else:
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    # check that the request has an 'output_tokens' field
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    # Use number of output tokens from the request data
+                    try:
+                        new_output_len = int(item["output_tokens"])
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Invalid value for 'output_tokens' in custom dataset: "
+                            f"'{item['output_tokens']}'. Must be an integer."
+                        ) from e
+
+            if tokenizer is None:
+                prompt_len = 1
+            else:
+                # apply template
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
                     )
-                # Use number of output tokens from the request data
-                try:
-                    new_output_len = int(item["output_tokens"])
-                except (ValueError, TypeError) as e:
-                    raise ValueError(
-                        f"Invalid value for 'output_tokens' in custom dataset: "
-                        f"'{item['output_tokens']}'. Must be an integer."
-                    ) from e
 
-            # apply template
-            if not skip_chat_template:
-                prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
-
-            prompt_len = len(tokenizer(prompt).input_ids)
+                prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,

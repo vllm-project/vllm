@@ -230,10 +230,15 @@ class Mxfp4Config(QuantizationConfig):
             )
         return None
 
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """MXFP4 config always uses MXFP4 quantization."""
+        return True
+
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+        self.weight_dtype = "mxfp4"
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
         self.marlin_input_dtype = None
