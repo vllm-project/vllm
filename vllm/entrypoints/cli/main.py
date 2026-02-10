@@ -8,6 +8,7 @@ to avoid certain eager import breakage."""
 import importlib.metadata
 import sys
 
+from vllm.engine.arg_utils import NEEDS_HELP
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -16,11 +17,7 @@ logger = init_logger(__name__)
 def main():
     # Check if help is requested before doing any heavy initialization
     # This allows --help to be fast without CUDA init
-    if any(arg in ("--help", "-h") for arg in sys.argv[1:]):
-        # For help, we need to skip platform detection and other heavy setup
-        # We'll do minimal imports and let argparse handle the help display
-        pass
-    else:
+    if not NEEDS_HELP:
         # Only do platform detection when not showing help
         # Note: We import current_platform lazily to avoid triggering
         # platform detection during help display
@@ -43,16 +40,12 @@ def main():
     ]
 
     # Only do environment setup if not showing help
-    if not any(arg in ("--help", "-h") for arg in sys.argv[1:]):
+    if not NEEDS_HELP:
         cli_env_setup()
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
     # Skip this check if showing help to avoid platform detection
-    if (
-        len(sys.argv) > 1
-        and sys.argv[1] == "bench"
-        and not any(arg in ("--help", "-h") for arg in sys.argv[1:])
-    ):
+    if len(sys.argv) > 1 and sys.argv[1] == "bench" and not NEEDS_HELP:
         logger.debug(
             "Bench command detected, must ensure current platform is not "
             "UnspecifiedPlatform to avoid device type inference error"

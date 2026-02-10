@@ -89,14 +89,13 @@ def test_bench_help_flag_skips_platform_detection():
 def test_no_help_flag_allows_platform_detection():
     """Test that platform detection happens when not showing help."""
     import vllm.platforms
+    from vllm.engine.arg_utils import NEEDS_HELP
 
     vllm.platforms._current_platform = None
 
     # We can't fully test command execution without proper setup,
     # but we can verify the help check logic
     with patch.object(sys, "argv", ["vllm", "serve", "--model", "test"]):
-        # Just check that help detection logic allows platform detection
-
-        # The actual check in main.py
-        has_help_flag = any(arg in ("--help", "-h") for arg in sys.argv[1:])
-        assert not has_help_flag, "Should not detect help when not present"
+        # Just check that NEEDS_HELP correctly detects absence of help flags
+        # The actual check in main.py uses NEEDS_HELP
+        assert not NEEDS_HELP, "Should not detect help when not present"
