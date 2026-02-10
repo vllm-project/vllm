@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Awaitable
+import asyncio
 
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -32,17 +32,29 @@ class ServiceUnavailableMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
-            return self.app(scope, receive, send)
+            await self.app(scope, receive, send)
+            return
 
-        path = scope.get("path", "")
-        rejecting = is_rejecting_requests()
-        if rejecting and path not in _EXEMPT_PATHS:
+        if is_rejecting_requests() and scope.get("path", "") not in _EXEMPT_PATHS:
             response = JSONResponse(
                 content={"error": "Server is unavailable. Please try again later."},
                 status_code=503,
             )
-            return response(scope, receive, send)
+            await response(scope, receive, send)
+            return
 
-        return self.app(scope, receive, send)
+        try:
+            await self.app(scope, receive, send)
+        except asyncio.CancelledError:
+            if not is_rejecting_requests():
+                raise
+            try:
+                response = JSONResponse(
+                    content={"error": "Server is shutting down."},
+                    status_code=503,
+                )
+                await response(scope, receive, send)
+            except (Exception, asyncio.CancelledError):
+                pass

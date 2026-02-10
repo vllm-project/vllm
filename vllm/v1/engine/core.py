@@ -991,9 +991,14 @@ class EngineCoreProc(EngineCore):
                         (EngineCoreRequestType.SHUTDOWN, None)
                     )
 
-        # Either SIGTERM or SIGINT will terminate the engine_core
+        # SIGTERM triggers immediate shutdown; SIGINT is handled by the
+        # parent process which coordinates graceful drain via shutdown pipe.
         signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+        if shutdown_pipe is not None:
+            # New process group so terminal Ctrl-C doesn't kill workers.
+            os.setpgrp()
+        else:
+            signal.signal(signal.SIGINT, signal_handler)
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
