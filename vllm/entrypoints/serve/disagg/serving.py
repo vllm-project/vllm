@@ -127,11 +127,15 @@ class ServingTokens(OpenAIServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
 
-            engine_request, tokenization_kwargs = await self._process_inputs(
+            tok_params = request.build_tok_params(self.model_config)
+            tokenization_kwargs = tok_params.get_encode_kwargs()
+
+            engine_request = self.input_processor.process_inputs(
                 request_id,
                 engine_prompt,
                 sampling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=request.priority,
             )

@@ -474,7 +474,7 @@ class OpenAISpeechToText(OpenAIServing):
             list_result_generator = []
             for i, prompt in enumerate(prompts):
                 request_id_item = f"{request_id}_{i}"
-                engine_request, tokenization_kwargs = await self._process_inputs(
+                engine_request = self.input_processor.process_inputs(
                     request_id_item,
                     prompt,
                     sampling_params,
@@ -488,7 +488,6 @@ class OpenAISpeechToText(OpenAIServing):
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
                     )
                 )
         except ValueError as e:
