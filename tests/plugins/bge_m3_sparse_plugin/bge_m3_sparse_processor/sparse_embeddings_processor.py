@@ -49,11 +49,11 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
                 if isinstance(request, IOProcessorRequest)
                 else None,
             )
-        return params
+        return params or PoolingParams()
 
     def parse_request(self, request: Any) -> IOProcessorInput:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
-        if type(request) is dict and "data" in request:
+        if isinstance(request, dict) and "data" in request:
             if isinstance(request["data"], str):
                 return SparseEmbeddingCompletionRequestMixin(input=[request["data"]])
             return SparseEmbeddingCompletionRequestMixin(input=request["data"])
@@ -64,13 +64,13 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
                 raise ValueError("missing 'data' field in OpenAIBaseModel Request")
             request_data = request.data
             kwargs = {"truncate_prompt_tokens": request.truncate_prompt_tokens}
-            if type(request_data) is list:
+            if isinstance(request_data, list):
                 kwargs["input"] = request_data
                 return SparseEmbeddingCompletionRequestMixin(**kwargs)
-            if type(request_data) is str:
+            if isinstance(request_data, str):
                 kwargs["input"] = [request_data]
                 return SparseEmbeddingCompletionRequestMixin(**kwargs)
-            if type(request_data) is dict:
+            if isinstance(request_data, dict):
                 kwargs.update(request_data)
                 return SparseEmbeddingCompletionRequestMixin(**kwargs)
         raise ValueError("Unable to parse request")
