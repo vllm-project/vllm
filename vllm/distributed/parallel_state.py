@@ -847,22 +847,16 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Handle]:
-        if (
-            not torch.distributed.is_initialized()
-            or self.world_size == 1
-            or self.use_cpu_custom_send_recv
-        ):
-            if (
-                self.use_cpu_custom_send_recv
-                and torch.distributed.is_initialized()
-                and self.world_size > 1
-            ):
-                if self.device_communicator is None:
-                    raise ValueError("No device communicator found")
-                # custom device communicator path is synchronous
-                self.device_communicator.send_tensor_dict(  # type: ignore
-                    tensor_dict, dst
-                )
+        if self.world_size <= 1:
+            return []
+
+        if self.use_cpu_custom_send_recv:
+            if self.device_communicator is None:
+                raise ValueError("No device communicator found")
+            # custom device communicator path is synchronous
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst
+            )
             return []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
