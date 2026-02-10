@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from typing import Sequence
 from unittest.mock import Mock
 
 import pytest
@@ -21,7 +20,6 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -509,24 +507,24 @@ def test_stop_via_update_from_output():
 def test_reasoning_spec_decode_grammar_comprehensive():
     """
     Test for speculative decoding with reasoning parser and grammar constraints.
-    
+
     This test validates the complete fix for the bug where combining reasoning parser,
     structured output (JSON schema), and speculative decoding resulted in invalid JSON output.
-    
+
     The test covers three critical aspects:
-    
+
     1. SPEC TOKEN CLEARING (Primary fix):
        - When </think> is detected in spec tokens, ALL spec tokens are cleared
        - This prevents unconstrained tokens from violating grammar during transition
-    
+
     2. GRAMMAR FSM PROTECTION (Last 3 commits - d2efd099):
        - Grammar FSM does NOT accept </think> token
        - Only actual content tokens are fed to grammar FSM
-    
+
     3. STALE FLAG HANDLING (Last 3 commits - c5b6562e + 65f02134):
        - Spec tokens validated even when reasoning_ended flag is stale
        - Validation based on actual tokens, not flag state
-    
+
     Without the complete fix, this test FAILS at one or more assertions.
     """
     REASONING_END_TOKEN_ID = 151660
@@ -539,39 +537,44 @@ def test_reasoning_spec_decode_grammar_comprehensive():
     structured_params = StructuredOutputsParams(
         json='{"type": "object", "properties": {"answer": {"type": "string"}}}'
     )
-    
+
     from vllm.v1.structured_output.request import StructuredOutputRequest
+
     structured_req = StructuredOutputRequest(params=structured_params)
     structured_req.reasoning_ended = False
-    
+
     # Mock grammar with spies on accept_tokens() and validate_tokens()
     mock_grammar = Mock()
     mock_grammar.is_terminated = Mock(return_value=False)
     mock_grammar.validate_tokens = Mock(side_effect=lambda tokens: tokens)
     mock_grammar.accept_tokens = Mock(return_value=True)
     structured_req.grammar = mock_grammar
-    
+
     request.structured_output_request = structured_req
-    
+
     # Mock reasoning parser
     mock_reasoner = Mock()
-    mock_reasoner.is_reasoning_end = lambda token_ids: REASONING_END_TOKEN_ID in token_ids
-    mock_reasoner.is_reasoning_end_streaming = lambda full_ids, delta_ids: REASONING_END_TOKEN_ID in delta_ids
-    
+    mock_reasoner.is_reasoning_end = (
+        lambda token_ids: REASONING_END_TOKEN_ID in token_ids
+    )
+    mock_reasoner.is_reasoning_end_streaming = (
+        lambda full_ids, delta_ids: REASONING_END_TOKEN_ID in delta_ids
+    )
+
     def extract_content_ids(delta_ids):
         if REASONING_END_TOKEN_ID not in delta_ids:
             return []
         idx = delta_ids.index(REASONING_END_TOKEN_ID)
-        return delta_ids[idx + 1:]
-    
+        return delta_ids[idx + 1 :]
+
     mock_reasoner.extract_content_ids = extract_content_ids
     scheduler.structured_output_manager.reasoner = mock_reasoner
     scheduler.structured_output_manager.enable_in_reasoning = False
-    
+
     # Initialize request with reasoning tokens
     request.num_computed_tokens = request.num_tokens + 3
     request.append_output_token_ids([100, 101, 102])
-    
+
     scheduler.requests[request.request_id] = request
     scheduler.running.append(request)
     request.status = RequestStatus.RUNNING
@@ -601,17 +604,15 @@ def test_reasoning_spec_decode_grammar_comprehensive():
         pooler_output=[],
     )
     scheduler.update_from_output(scheduler_output, model_output)
-    
+
     # speculative decode proposes tokens including </think> + content
     draft_tokens = DraftTokenIds(
-        [request.request_id],
-        [[105, REASONING_END_TOKEN_ID, 200, 201]]
+        [request.request_id], [[105, REASONING_END_TOKEN_ID, 200, 201]]
     )
     scheduler.update_draft_token_ids(draft_tokens)
 
     # Spec tokens should be cleared when </think> detected.
     assert request.spec_token_ids == []
-
 
     # Test case 2: grammar should not accept reasoning_end token
 
@@ -624,7 +625,7 @@ def test_reasoning_spec_decode_grammar_comprehensive():
         prompt_logprobs_dict={},
         pooler_output=[],
     )
-    
+
     mock_grammar.accept_tokens.reset_mock()
     scheduler.update_from_output(scheduler_output2, model_output2)
 
@@ -633,9 +634,8 @@ def test_reasoning_spec_decode_grammar_comprehensive():
     # only </think> should have been appended, but tokens after reasoning_end dropped
     assert request.all_token_ids[-1] == REASONING_END_TOKEN_ID
 
-
     # Test case 3: grammar should accept content tokens after reasoning
-    
+
     scheduler_output3 = scheduler.schedule()
     model_output3 = ModelRunnerOutput(
         req_ids=[request.request_id],
@@ -645,7 +645,7 @@ def test_reasoning_spec_decode_grammar_comprehensive():
         prompt_logprobs_dict={},
         pooler_output=[],
     )
-    
+
     mock_grammar.accept_tokens.reset_mock()
     scheduler.update_from_output(scheduler_output3, model_output3)
 
@@ -654,7 +654,6 @@ def test_reasoning_spec_decode_grammar_comprehensive():
     accepted_tokens = accept_call_args[0][1]  # Second positional argument
     assert accepted_tokens == [300]
     assert REASONING_END_TOKEN_ID not in accepted_tokens
-
 
     # Test case 4: stale flag should be updated
     # Scenario: reasoning has ended but flag not updated (happens in async scheduling)
@@ -681,10 +680,9 @@ def test_reasoning_spec_decode_grammar_comprehensive():
     validated_tokens = validate_call_args[0][0]
     assert validated_tokens == [302, 303, 304]
 
-
     # Test case 5: all spec tokens should be validated normally after reasoning ended
     structured_req.reasoning_ended = True
-    
+
     # Trigger should_fill_bitmask to ensure grammar is active
     should_fill = scheduler.structured_output_manager.should_fill_bitmask(request)
     assert should_fill is True
@@ -3869,5 +3867,3 @@ def test_abort_request_finished_recving():
     # verify request is deleted
     assert request.request_id not in scheduler.requests
     assert not scheduler.finished_recving_kv_req_ids
-
-

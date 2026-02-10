@@ -1399,8 +1399,7 @@ class Scheduler(SchedulerInterface):
             # When reasoning just ended via primary detection, new_token_ids will be empty or
             # contain only </think>, which shouldn't be fed to the grammar FSM
             should_advance_grammar = (
-                new_token_ids
-                and self.structured_output_manager.should_advance(request)
+                new_token_ids and self.structured_output_manager.should_advance(request)
             )
 
             # Don't advance grammar if this was the step where reasoning ended via primary detection
@@ -1415,11 +1414,10 @@ class Scheduler(SchedulerInterface):
             ):
                 full_ids_with_new = list(request.all_token_ids)
                 # If the current all_token_ids ends with reasoning end, this is the step it ended
-                if (
-                    reasoner.is_reasoning_end(full_ids_with_new)
-                    and len(full_ids_with_new) > len(new_token_ids)
-                ):
-                    prev_ids = full_ids_with_new[:-len(new_token_ids)]
+                if reasoner.is_reasoning_end(full_ids_with_new) and len(
+                    full_ids_with_new
+                ) > len(new_token_ids):
+                    prev_ids = full_ids_with_new[: -len(new_token_ids)]
                     if not reasoner.is_reasoning_end(prev_ids):
                         # Reasoning ended in THIS step, don't advance grammar with these tokens
                         should_advance_grammar = False
@@ -1664,7 +1662,7 @@ class Scheduler(SchedulerInterface):
                 # non-speculative generation, allowing grammar to activate cleanly.
                 if not should_validate:
                     for i, token_id in enumerate(spec_token_ids):
-                        test_seq = list(request.all_token_ids) + spec_token_ids[:i + 1]
+                        test_seq = list(request.all_token_ids) + spec_token_ids[: i + 1]
                         if reasoner.is_reasoning_end(test_seq):
                             spec_token_ids = []
                             break
@@ -1704,7 +1702,9 @@ class Scheduler(SchedulerInterface):
                 # Check if reasoning has already ended even if should_advance returns False
                 reasoner = self.structured_output_manager.reasoner
                 if reasoner is not None:
-                    should_validate = reasoner.is_reasoning_end(list(request.all_token_ids))
+                    should_validate = reasoner.is_reasoning_end(
+                        list(request.all_token_ids)
+                    )
 
             if should_validate:
                 metadata = request.structured_output_request
