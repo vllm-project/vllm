@@ -980,7 +980,9 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
-    def _extract_system_message_from_request(self, request) -> str | None:
+    def _extract_system_message_from_request(
+        self, request: ResponsesRequest
+    ) -> str | None:
         system_msg = None
         if not isinstance(request.input, str):
             for response_msg in request.input:
@@ -988,7 +990,14 @@ class OpenAIServingResponses(OpenAIServing):
                     isinstance(response_msg, dict)
                     and response_msg.get("role") == "system"
                 ):
-                    system_msg = response_msg.get("content")
+                    content = response_msg.get("content")
+                    if isinstance(content, str):
+                        system_msg = response_msg.get("content")
+                    elif isinstance(content, list):
+                        for param in content:
+                            if param.get("type") == "input_text":
+                                system_msg = param.get("text")
+                                break
                     break
         return system_msg
 
