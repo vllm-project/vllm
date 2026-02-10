@@ -156,9 +156,9 @@ async def test_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: str):
     assert completed_event.response.status == "completed"
     assert completed_event.response.usage is not None
     assert completed_event.response.usage.output_tokens_details is not None
-    assert (
-        completed_event.response.usage.output_tokens_details.reasoning_tokens > 0
-    ), "Expected reasoning_tokens > 0 for streamed Qwen3 response."
+    assert completed_event.response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for streamed Qwen3 response."
+    )
 
 
 @pytest.mark.asyncio
@@ -177,9 +177,9 @@ async def test_non_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: st
     assert response.status == "completed"
     assert response.usage is not None
     assert response.usage.output_tokens_details is not None
-    assert (
-        response.usage.output_tokens_details.reasoning_tokens > 0
-    ), "Expected reasoning_tokens > 0 for non-streamed Qwen3 response."
+    assert response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for non-streamed Qwen3 response."
+    )
 
 
 @pytest.mark.asyncio
