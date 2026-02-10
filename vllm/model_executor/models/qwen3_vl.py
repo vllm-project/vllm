@@ -1114,10 +1114,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 class Qwen3LLMModel(Qwen3Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        if not get_pp_group().is_first_rank:
-            assert self.start_layer >= len(
-                vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
-            ), (
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        if not get_pp_group().is_first_rank and hasattr(
+            vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
                 "start_layer should be greater than or equal to "
                 "len(deepstack_visual_indexes)"
             )

@@ -320,7 +320,7 @@ WORKDIR /workspace
 
 # Build DeepGEMM wheel
 # Default moved here from tools/install_deepgemm.sh for centralized version management
-ARG DEEPGEMM_GIT_REF=594953acce41793ae00a1233eb516044d604bcb6
+ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
@@ -582,7 +582,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.2
+ARG FLASHINFER_VERSION=0.6.3
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
     && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
