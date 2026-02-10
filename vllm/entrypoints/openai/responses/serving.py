@@ -122,7 +122,6 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
-from vllm.reasoning import ReasoningParser
 from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
@@ -188,8 +187,6 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 class OpenAIServingResponses(OpenAIServing):
-    reasoning_parser: Callable[[TokenizerLike], ReasoningParser] | None
-
     def __init__(
         self,
         engine_client: EngineClient,
@@ -762,10 +759,11 @@ class OpenAIServingResponses(OpenAIServing):
         # accumulated output token IDs using the parser if not already set.
         if (
             num_reasoning_tokens == 0
-            and self.reasoning_parser is not None
+            and self.parser is not None
+            and self.parser.reasoning_parser_cls is not None
             and isinstance(context, (SimpleContext, ParsableContext))
         ):
-            reasoning_parser = self.reasoning_parser(tokenizer)
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
             num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
 
