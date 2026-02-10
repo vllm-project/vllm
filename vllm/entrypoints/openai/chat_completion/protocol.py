@@ -476,10 +476,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = (
                     StructuredOutputsParams(**structured_outputs_kwargs)
                     if self.structured_outputs is None
-                    else replace(
-                        self.structured_outputs,
-                        **structured_outputs_kwargs,
-                    )  # type: ignore[type-var]
+                    else replace(self.structured_outputs, **structured_outputs_kwargs)
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
