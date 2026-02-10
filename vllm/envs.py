@@ -98,7 +98,6 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_ROCM_USE_AITER: bool = False
-    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -257,6 +256,14 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def use_aiter() -> bool:
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    return is_aiter_found_and_supported() and os.getenv(
+        "VLLM_ROCM_USE_AITER", "True"
+    ).lower() in ("true", "1")
 
 
 def disable_compile_cache() -> bool:
@@ -882,14 +889,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
-    "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
-    ),
-    # Whether to use aiter paged attention.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in ("true", "1")
-    ),
+    "VLLM_ROCM_USE_AITER": use_aiter,
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -911,9 +911,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter mha ops.
-    # By default is enabled.
+    # By default is disabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_MHA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
