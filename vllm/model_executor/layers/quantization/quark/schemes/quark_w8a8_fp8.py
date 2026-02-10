@@ -12,6 +12,10 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.quark.transform import (
+    OrthogonalTransform,
+    rotation_weight_loader,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
@@ -36,7 +40,11 @@ logger = init_logger(__name__)
 
 class QuarkW8A8Fp8(QuarkScheme):
     def __init__(
-        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any] | None,
+        quant_config: dict[str, Any] | None = None,
+        layer_names: list[str] | None = None,
     ):
         self.weight_qscheme = cast(str, weight_config.get("qscheme"))
         self.is_static_input_scheme: bool = False
@@ -57,6 +65,20 @@ class QuarkW8A8Fp8(QuarkScheme):
             kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
         )
         self.out_dtype = torch.get_default_dtype()
+
+        # Setup optional online activation transform.
+        if quant_config is not None and layer_names is not None:
+            (
+                self.use_online_rotation,
+                self.rotation_config,
+                self.rotation_size,
+            ) = OrthogonalTransform.setup_transform(
+                quant_config=quant_config, layer_names=layer_names
+            )
+        else:
+            self.use_online_rotation = False
+            self.rotation_config = None
+            self.rotation_size = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -117,6 +139,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         # INPUT SCALE
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+        if self.use_online_rotation:
+            self.input_transform.post_process_transform()
 
     def create_weights(
         self,
@@ -179,10 +204,28 @@ class QuarkW8A8Fp8(QuarkScheme):
             module_name=self.__class__.__name__,
         )
 
+        if self.use_online_rotation:
+            dtype = torch.float64 if self.rotation_config["trainable"] else torch.int8  # type: ignore[index]
+
+            input_rotation = ModelWeightParameter(
+                data=torch.empty(self.rotation_size, self.rotation_size, dtype=dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=rotation_weight_loader,
+            )
+            layer.register_parameter("input_rotation", input_rotation)
+
+            self.input_transform = OrthogonalTransform(
+                layer.input_rotation, self.rotation_config
+            )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_online_rotation:
+            x = self.input_transform(x)
+
         return self.fp8_linear.apply_weights(layer, x, bias)
