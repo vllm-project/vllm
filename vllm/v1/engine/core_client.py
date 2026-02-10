@@ -951,17 +951,6 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
-    async def broadcast_utility_async(self, method: str, *args) -> list[Any]:
-        """Call the utility on all engines and return the list of results."""
-        return list(
-            await asyncio.gather(
-                *[
-                    self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
-        )
-
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -993,21 +982,16 @@ class AsyncMPClient(MPClient):
         mode: PauseMode = "abort",
         clear_cache: bool = True,
     ) -> None:
-        """Pause generation with the given mode; broadcast to all engines."""
-        await self.broadcast_utility_async("pause_scheduler", mode, clear_cache)
+        """Pause generation (DP clients broadcast to all engines)."""
+        await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause; broadcast to all engines."""
-        await self.broadcast_utility_async("resume_scheduler")
+        """Resume the scheduler (DP clients broadcast to all engines)."""
+        await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        """Return whether the scheduler is paused on all engines; warn if
-        inconsistent.
-        """
-        results = await self.broadcast_utility_async("is_scheduler_paused")
-        if len(set(results)) > 1:
-            logger.warning("inconsistent pause state across engines: %s", results)
-        return all(results)
+        """Return whether the scheduler is paused (DP: first engine's result)."""
+        return await self.call_utility_async("is_scheduler_paused")
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)

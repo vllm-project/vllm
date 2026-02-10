@@ -384,8 +384,18 @@ class EngineCore:
           then complete the returned Future.
         - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
           set PAUSE_KEEP, clear caches, complete the returned Future.
-        - ``keep``: Set PAUSE_KEEP, return None immediately.
+        - ``keep``: Set PAUSE_KEEP; when running with output_queue, return a
+          Future that completes when the queue is empty (clean state, no tokens
+          in flight to the client). Otherwise return None.
         """
+
+        def _complete_future_once_output_queue_drained(
+            out_queue: queue.Queue[Any] | None, f: Future
+        ) -> None:
+            while out_queue is not None and not out_queue.empty():
+                time.sleep(0.01)
+            f.set_result(None)
+
         if mode == "abort":
             self._scheduler_pause_state = PauseState.PAUSE_ABORT
             request_ids = self.scheduler.get_all_request_ids()
@@ -398,16 +408,23 @@ class EngineCore:
                 self.reset_encoder_cache()
 
             future: Future[Any] = Future()
-
-            def _wait_abort_sent() -> None:
-                while output_queue is not None and not output_queue.empty():
-                    time.sleep(0.01)
-                future.set_result(None)
-
-            threading.Thread(target=_wait_abort_sent, daemon=True).start()
+            threading.Thread(
+                target=_complete_future_once_output_queue_drained,
+                args=(output_queue, future),
+                daemon=True,
+            ).start()
             return future
         if mode == "keep":
             self._scheduler_pause_state = PauseState.PAUSE_KEEP
+            output_queue = getattr(self, "output_queue", None)
+            if output_queue is not None:
+                future = Future()
+                threading.Thread(
+                    target=_complete_future_once_output_queue_drained,
+                    args=(output_queue, future),
+                    daemon=True,
+                ).start()
+                return future
             return None
 
         # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
