@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Environment variable declarations for vLLM.
+"""All env var declarations with type annotations and defaults.
 
-This module contains all environment variable declarations with type annotations
-and default values. These are the single source of truth for environment variables.
-
-WARNING: Do NOT import from this module directly (except under TYPE_CHECKING).
-         Always use `import vllm.envs as envs` or `from vllm import envs`.
+Do NOT import from this module directly. Use ``import vllm.envs as envs``.
 """
 
 import os
@@ -15,34 +11,28 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-# Only import utilities at runtime, not during type checking
-# This avoids circular imports since __init__.py imports this module
 if not TYPE_CHECKING:
     from vllm.envs_impl.utils import (
-        env_default_factory,
         env_factory,
-        env_set_with_choices,
-        env_with_choices,
         parse_list,
         parse_path,
+        validate_choice,
+        validate_set_choices,
     )
 else:
-    # Provide type stubs for type checking
-    def env_default_factory(factory_fn): ...
+
     def env_factory(default_value, parse_fn): ...
-    def env_with_choices(env_name, default, choices, **kwargs): ...
-    def env_set_with_choices(env_name, default=None, choices=None, **kwargs): ...
     def parse_path(path): ...
     def parse_list(value, sep=","): ...
+    def validate_choice(value, env_name, choices, **kwargs): ...
+    def validate_set_choices(value, env_name, choices, **kwargs): ...
 
 
 def disable_compile_cache() -> bool:
-    """Check if compile cache should be disabled."""
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
 
 
 def use_aot_compile() -> bool:
-    """Determine if AOT compilation should be used."""
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
@@ -71,7 +61,6 @@ If you are using multi-node inference, you should set this differently on each n
 
 
 def _get_vllm_port(env_port: str) -> int:
-    """Parse VLLM_PORT environment variable with validation."""
     try:
         return int(env_port)
     except ValueError as err:
@@ -214,19 +203,18 @@ VLLM_MODEL_REDIRECT_PATH: Path | None = None
 
 
 def _get_default_cache_root() -> str:
-    """Get the default cache root directory."""
     cache_home = os.getenv("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
     return os.path.join(cache_home, "vllm")
 
 
-VLLM_CACHE_ROOT: str = env_default_factory(_get_default_cache_root)
+VLLM_CACHE_ROOT: str = env_factory(_get_default_cache_root, lambda x: x)
 """
 Root directory for vLLM cache files.
 Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set.
 """
 
-VLLM_CONFIG_ROOT: str = env_default_factory(
-    lambda: os.path.expanduser("~/.config/vllm")
+VLLM_CONFIG_ROOT: str = env_factory(
+    lambda: os.path.expanduser("~/.config/vllm"), lambda x: x
 )
 """Root directory for vLLM configuration files. Defaults to `~/.config/vllm`."""
 
@@ -239,17 +227,11 @@ VLLM_NO_USAGE_STATS: bool = False
 """If set to 1, vllm will not send usage stats."""
 
 
-def _get_dnt_value() -> bool:
-    """Check VLLM_DO_NOT_TRACK first, then fall back to DO_NOT_TRACK."""
-    # VLLM_DO_NOT_TRACK takes precedence
-    vllm_dnt = os.getenv("VLLM_DO_NOT_TRACK")
-    if vllm_dnt is not None:
-        return vllm_dnt == "1"
-    # Fallback to standard DO_NOT_TRACK
+def _get_dnt_fallback() -> bool:
     return os.getenv("DO_NOT_TRACK", "0") == "1"
 
 
-VLLM_DO_NOT_TRACK: bool = env_default_factory(_get_dnt_value)
+VLLM_DO_NOT_TRACK: bool = env_factory(_get_dnt_fallback, lambda x: x.strip() == "1")
 """
 Honors DO_NOT_TRACK and VLLM_DO_NOT_TRACK environment variables.
 If set to 1, disables usage tracking.
@@ -311,7 +293,6 @@ Useful for debugging.
 
 
 def _parse_optional_bool_int(value: str) -> bool | None:
-    """Parse optional boolean from int string (used for VLLM_USE_FLASHINFER_SAMPLER)."""
     return bool(int(value))
 
 
@@ -333,14 +314,13 @@ VLLM_CPU_SGL_KERNEL: bool = False
 
 
 def _get_xla_cache_path() -> str:
-    """Get XLA cache path, dependent on VLLM_CACHE_ROOT."""
     cache_root = os.getenv("VLLM_CACHE_ROOT")
     if cache_root:
         return os.path.join(cache_root, "xla_cache")
     return os.path.join(_get_default_cache_root(), "xla_cache")
 
 
-VLLM_XLA_CACHE_PATH: str = env_default_factory(_get_xla_cache_path)
+VLLM_XLA_CACHE_PATH: str = env_factory(_get_xla_cache_path, lambda x: x)
 """Path for XLA compilation cache. Defaults to VLLM_CACHE_ROOT/xla_cache."""
 
 VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -381,14 +361,13 @@ VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
 
 
 def _get_assets_cache_path() -> str:
-    """Get assets cache path, dependent on VLLM_CACHE_ROOT."""
     cache_root = os.getenv("VLLM_CACHE_ROOT")
     if cache_root:
         return os.path.join(cache_root, "assets")
     return os.path.join(_get_default_cache_root(), "assets")
 
 
-VLLM_ASSETS_CACHE: str = env_default_factory(_get_assets_cache_path)
+VLLM_ASSETS_CACHE: str = env_factory(_get_assets_cache_path, lambda x: x)
 """Cache directory for downloaded assets (images, videos, audio)."""
 
 VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
@@ -418,11 +397,14 @@ VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
 VLLM_MEDIA_CONNECTOR: str = "http"
 """Connector type for media loading. Default is http."""
 
-VLLM_MM_HASHER_ALGORITHM: str = env_with_choices(
-    "VLLM_MM_HASHER_ALGORITHM",
+VLLM_MM_HASHER_ALGORITHM: str = env_factory(
     "blake3",
-    ["blake3", "sha256", "sha512"],
-    case_sensitive=False,
+    lambda x: validate_choice(
+        x,
+        "VLLM_MM_HASHER_ALGORITHM",
+        ["blake3", "sha256", "sha512"],
+        case_sensitive=False,
+    ),
 )
 """
 Hash algorithm for multimodal content hashing.
@@ -466,14 +448,10 @@ If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
 """
 
 
-def _get_use_precompiled_default() -> bool:
-    """Check for VLLM_USE_PRECOMPILED or VLLM_PRECOMPILED_WHEEL_LOCATION."""
-    if os.getenv("VLLM_USE_PRECOMPILED", "0").strip().lower() in ("1", "true"):
-        return True
-    return os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION") is not None
-
-
-VLLM_USE_PRECOMPILED: bool = env_default_factory(_get_use_precompiled_default)
+VLLM_USE_PRECOMPILED: bool = env_factory(
+    lambda: os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION") is not None,
+    lambda x: x.strip().lower() in ("1", "true"),
+)
 """
 If set, vllm will use precompiled binaries (*.so).
 Also enabled if VLLM_PRECOMPILED_WHEEL_LOCATION is set.
@@ -510,12 +488,13 @@ VLLM_PLUGINS: list[str] | None = env_factory(None, parse_list)
 
 # ================== MCP (Model Context Protocol) Configuration ==================
 
-VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = env_default_factory(
-    env_set_with_choices(
+VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = env_factory(
+    set(),
+    lambda x: validate_set_choices(
+        x,
         "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        default=[],
-        choices=["container", "code_interpreter", "web_search_preview"],
-    )
+        ["container", "code_interpreter", "web_search_preview"],
+    ),
 )
 """
 Valid server labels for MCP tools.
@@ -530,7 +509,29 @@ VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
 
 # ================== Compilation and Build Flags ==================
 
-VLLM_USE_AOT_COMPILE: bool = env_default_factory(lambda: use_aot_compile())
+
+def _get_aot_compile_default() -> bool:
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    return (
+        not vllm_is_batch_invariant()
+        and is_torch_equal_or_newer("2.10.0.dev")
+        and not disable_compile_cache()
+    )
+
+
+def _parse_aot_compile(value: str) -> bool:
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
+
+    return not vllm_is_batch_invariant() and value == "1"
+
+
+VLLM_USE_AOT_COMPILE: bool = env_factory(_get_aot_compile_default, _parse_aot_compile)
 """
 Enable/disable AOT compilation. Ensures compilation is done in warmup phase
 and reused in subsequent calls. Auto-enabled in torch >= 2.10.0 
@@ -556,7 +557,7 @@ Enable/disable Inductor standalone compile.
 In torch <= 2.7 ignored; in torch >= 2.9 enabled by default.
 """
 
-VLLM_DISABLE_COMPILE_CACHE: bool = env_default_factory(lambda: disable_compile_cache())
+VLLM_DISABLE_COMPILE_CACHE: bool = env_factory(False, lambda x: bool(int(x)))
 """Disable torch.compile cache."""
 
 VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
@@ -638,8 +639,9 @@ If set to 8, forward pass will run with [16, 24, 32, ...].
 VLLM_TPU_MOST_MODEL_LEN: int | None = None
 """Most common model length for TPU bucketing."""
 
-VLLM_TPU_USING_PATHWAYS: bool = env_default_factory(
-    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower())
+VLLM_TPU_USING_PATHWAYS: bool = env_factory(
+    lambda: "proxy" in os.getenv("JAX_PLATFORMS", "").lower(),
+    lambda x: x.strip().lower() in ("1", "true"),
 )
 """Whether using Pathways for TPU."""
 
@@ -1043,6 +1045,4 @@ Cache size in MB used by the xgrammar compiler.
 Default of 512 MB should be enough for roughly 1000 JSON schemas.
 """
 
-# ================== Internal: Default Values Store ==================
-# This dict is used internally by the __getattr__ mechanism to access defaults
 _defaults = {k: v for k, v in locals().items() if not k.startswith("_") and k.isupper()}
