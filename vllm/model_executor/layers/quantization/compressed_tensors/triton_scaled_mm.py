@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.platforms.rocm import on_gfx1x
+from vllm.platforms.rocm import on_gfx11
 from vllm.triton_utils import tl, triton
 
 
@@ -143,7 +143,7 @@ def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
     is_small_N = N < 8192
     next_power_of_2_M = max(32, triton.next_power_of_2(M))
 
-    if on_gfx1x():
+    if on_gfx11():
         if next_power_of_2_M <= 32:
             return (32, 64, 128) if is_small_N else (16, 256, 64)
         if next_power_of_2_M <= 64:
