@@ -50,8 +50,9 @@ class MultiLayerEagleProposer(EagleProposer):
         target_hidden_states: torch.Tensor,
         token_indices_to_sample: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
-        multi_layer_eagle_metadata: MultiLayerEagleMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+        assert multi_layer_eagle_metadata is not None
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 

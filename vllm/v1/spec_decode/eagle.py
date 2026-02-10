@@ -383,7 +383,7 @@ class SpecDecodeBaseProposer:
         target_hidden_states: torch.Tensor,
         token_indices_to_sample: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
-        multi_layer_eagle_metadata: MultiLayerEagleMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
         return (
             target_token_ids,
@@ -542,50 +542,6 @@ class SpecDecodeBaseProposer:
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
 
-            # Early exit if there is only one draft token to be generated.
-            if self.num_speculative_tokens == 1 or self.parallel_drafting:
-                draft_token_ids = logits.argmax(dim=-1)
-                return draft_token_ids.view(-1, self.num_speculative_tokens)
-
-            # multi layer mtp unsupported tree attention yet
-            if not self.enable_multi_layers_mtp:
-                if self.uses_mrope:
-                    positions = self.mrope_positions[:, token_indices_to_sample]
-                else:
-                    positions = self.positions[token_indices_to_sample]
-                if self.method in (
-                    "deepseek_mtp",
-                    "ernie_mtp",
-                    "longcat_flash_mtp",
-                    "pangu_ultra_moe_mtp",
-                ):
-                    hidden_states = self.hidden_states[token_indices_to_sample]
-                else:
-                    hidden_states = hidden_states[token_indices_to_sample]
-
-                if isinstance(attn_metadata, TreeAttentionMetadata):
-                    # Draft using tree attention.
-                    draft_token_ids_list = self.propose_tree(
-                        batch_size=batch_size,
-                        logits=logits,
-                        positions=positions,
-                        hidden_states=hidden_states,
-                        common_attn_metadata=common_attn_metadata,
-                        slot_mappings=slot_mappings,
-                    )
-                    # [batch_size, num_tree_tokens]
-                    return torch.cat(draft_token_ids_list, dim=1)
-
-            if self.allowed_attn_types is not None and not isinstance(
-                attn_metadata, self.allowed_attn_types
-            ):
-                raise ValueError(
-                    f"Unsupported attention metadata type for speculative "
-                    "decoding with num_speculative_tokens > 1: "
-                    f"{type(attn_metadata)}. Supported types are: "
-                    f"{self.allowed_attn_types}"
-                )
-
             draft_token_ids = logits.argmax(dim=-1)
 
             # Generate the remaining draft tokens.
@@ -608,10 +564,52 @@ class SpecDecodeBaseProposer:
                     )
                 )
 
-        if self.layer_num == self.num_speculative_tokens:
-            # [batch_size, num_speculative_tokens]
+        # Early exit if all draft tokens are generated in one pass
+        if self.num_speculative_tokens == self.layer_num or self.parallel_drafting:
             draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
             return draft_token_ids
+
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, token_indices_to_sample]
+        else:
+            positions = self.positions[token_indices_to_sample]
+        if self.method in (
+            "deepseek_mtp",
+            "ernie_mtp",
+            "longcat_flash_mtp",
+            "pangu_ultra_moe_mtp",
+        ):
+            hidden_states = self.hidden_states[token_indices_to_sample]
+        else:
+            hidden_states = hidden_states[token_indices_to_sample]
+
+        if isinstance(attn_metadata, TreeAttentionMetadata):
+            if self.enable_multi_layers_mtp:
+                raise NotImplementedError(
+                    "Speculative Decoding with multi-layer MTP and tree attention "
+                    "is not supported yet."
+                )
+            # Draft using tree attention.
+            draft_token_ids_list = self.propose_tree(
+                batch_size=batch_size,
+                logits=logits,
+                positions=positions,
+                hidden_states=hidden_states,
+                common_attn_metadata=common_attn_metadata,
+                slot_mappings=slot_mappings,
+            )
+            # [batch_size, num_tree_tokens]
+            return torch.cat(draft_token_ids_list, dim=1)
+
+        if self.allowed_attn_types is not None and not isinstance(
+            attn_metadata, self.allowed_attn_types
+        ):
+            raise ValueError(
+                f"Unsupported attention metadata type for speculative "
+                "decoding with num_speculative_tokens > layer_num: "
+                f"{type(attn_metadata)}. Supported types are: "
+                f"{self.allowed_attn_types}"
+            )
 
         batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
             num_tokens_unpadded=batch_size, num_tokens_padded=batch_size
