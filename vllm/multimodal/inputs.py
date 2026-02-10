@@ -20,7 +20,7 @@ from typing import (
 
 import numpy as np
 from PIL.Image import Image
-from typing_extensions import NotRequired, TypeVar
+from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -32,8 +32,12 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+
+    from vllm.inputs.data import _InputOptions
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    _InputOptions = dict
 
 _T = TypeVar("_T")
 
@@ -195,7 +199,6 @@ class PlaceholderRange:
     def embeds_cumsum(self) -> torch.Tensor | None:
         return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
-    @cached_property
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
@@ -1059,7 +1062,7 @@ A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
-class MultiModalInputs(TypedDict):
+class MultiModalInputs(_InputOptions):
     """
     Represents the outputs of
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor],
@@ -1084,11 +1087,6 @@ class MultiModalInputs(TypedDict):
     `prompt_token_ids`.
     """
 
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
-
 
 class MultiModalEncDecInputs(MultiModalInputs):
     """
@@ -1098,7 +1096,7 @@ class MultiModalEncDecInputs(MultiModalInputs):
 
     Note: Even text-only encoder-decoder models are currently implemented
     as multi-modal models for convenience.
-    (Example: https://github.com/neuralmagic/bart-plugin)
+    (Example: https://github.com/vllm-project/bart-plugin)
     """
 
     encoder_prompt_token_ids: list[int]
