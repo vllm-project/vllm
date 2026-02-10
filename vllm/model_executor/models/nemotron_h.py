@@ -782,7 +782,7 @@ class NemotronHModel(nn.Module):
 
         return loaded_params
 
-    def _get_weight_type(name: str) -> str | None:
+    def _get_projection_type(name: str) -> str | None:
         if ".experts.down_proj" in name:
             return "down_proj"
         elif ".experts.up_proj" in name:
@@ -801,16 +801,27 @@ class NemotronHModel(nn.Module):
     def _load_batched_expert_params(
         self, expert_params_mapping, params_dict, loaded_params, name, loaded_weight
     ) -> None:
+        """
+        Load expert weights in batched format where all experts' weights are
+        stored in a single tensor with an extra leading dimension for
+        expert_id. The main difference between the batched and the non batched
+        is that here we loop over the experts in the weight tensor and loads
+        *all* of the relevant expert param, while in the non batched we loop
+        over the expert params and try to find the corresponding expert weight
+        in the checkpoint.
+        """
+
         # should be either down_proj or up_proj
-        weight_type = self._get_weight_type(name)
+        projection_type = self._get_projection_type(name)
         for mapping in expert_params_mapping:
             param_name, weight_name, expert_id, shard_id = mapping
 
-            if weight_type not in weight_name:
+            # Make sure we load only the weigts of the current type
+            if projection_type not in weight_name:
                 continue
 
             suffix = f"{param_name}weight"
-            name_mapped = name.replace(f"experts.{weight_type}", suffix)
+            name_mapped = name.replace(f"experts.{projection_type}", suffix)
             current_loaded_weight = loaded_weight[expert_id]
 
             if is_pp_missing_parameter(name_mapped, self):
