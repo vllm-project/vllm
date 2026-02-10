@@ -104,7 +104,7 @@ class OpenAIServingPooling(OpenAIServing):
                         "offline inference example for more details."
                     )
 
-                validated_prompt = self.io_processor.parse_request(request)
+                validated_prompt = self.io_processor.parse_data(request.data)
 
                 raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
@@ -145,7 +145,7 @@ class OpenAIServingPooling(OpenAIServing):
                 assert self.io_processor is not None and isinstance(
                     request, IOProcessorRequest
                 )
-                pooling_params = self.io_processor.validate_or_generate_params()
+                pooling_params = self.io_processor.merge_pooling_params()
             else:
                 pooling_params = request.to_pooling_params()
 
@@ -189,11 +189,24 @@ class OpenAIServingPooling(OpenAIServing):
 
         if is_io_processor_request:
             assert self.io_processor is not None
-            output = await self.io_processor.post_process_async(
-                model_output=result_generator,
-                request_id=request_id,
-            )
-            return self.io_processor.output_to_response(output)
+            output = await self.io_processor.post_process_async(result_generator)
+
+            if callable(
+                output_to_response := getattr(
+                    self.io_processor, "output_to_response", None
+                )
+            ):
+                logger.warning_once(
+                    "`IOProcessor.output_to_response` is deprecated. To ensure "
+                    "consistency between offline and online APIs, "
+                    "`IOProcessorResponse` will become a transparent wrapper "
+                    "around output data from v0.19 onwards.",
+                )
+
+                output.request_id = request_id  # type: ignore
+                return output_to_response(output)  # type: ignore
+
+            return IOProcessorResponse(request_id=request_id, data=output)
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)

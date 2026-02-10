@@ -85,7 +85,7 @@ from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.utils.collection_utils import as_iter
 from vllm.utils.counter import Counter
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -1068,25 +1068,15 @@ class LLM:
                 )
 
             # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_request(prompts)
+            validated_prompt = self.io_processor.parse_data(prompts)
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
 
-        if io_processor_prompt:
-            assert self.io_processor is not None
-            if is_list_of(pooling_params, PoolingParams):
-                validated_pooling_params: list[PoolingParams] = []
-                for param in as_iter(pooling_params):
-                    validated_pooling_params.append(
-                        self.io_processor.validate_or_generate_params(param)
-                    )
-                pooling_params = validated_pooling_params
-            else:
-                assert not isinstance(pooling_params, Sequence)
-                pooling_params = self.io_processor.validate_or_generate_params(
-                    pooling_params
-                )
+            pooling_params = [
+                self.io_processor.merge_pooling_params(param)
+                for param in as_iter(pooling_params)
+            ]
 
         if pooling_params is None:
             # Use default pooling params.
@@ -1114,9 +1104,7 @@ class LLM:
         if io_processor_prompt:
             # get the post-processed model outputs
             assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(
-                model_output=model_outputs
-            )
+            processed_outputs = self.io_processor.post_process(model_outputs)
 
             return [
                 PoolingRequestOutput[Any](
