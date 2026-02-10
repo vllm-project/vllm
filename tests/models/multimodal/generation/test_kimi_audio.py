@@ -43,6 +43,24 @@ class _DummyModel:
         self.vq_adaptor = _DummyVQAdaptor(hidden)
 
 
+def test_mask_audio_logits_respects_cutoffs() -> None:
+    dummy = type("_Dummy", (), {})()
+    dummy.config = type("_Cfg", (), {"kimia_token_offset": 5})()
+
+    logits = torch.zeros((1, 10), dtype=torch.float32)
+    out = KimiAudioForConditionalGeneration._mask_audio_logits_(dummy, logits.clone())
+    assert torch.all(out[..., 5:] == -1e30)
+    assert torch.all(out[..., :5] == 0)
+
+    dummy.config = type(
+        "_Cfg", (), {"kimia_token_offset": None, "kimia_text_output_vocab": 7}
+    )()
+    logits = torch.zeros((1, 10), dtype=torch.float32)
+    out = KimiAudioForConditionalGeneration._mask_audio_logits_(dummy, logits.clone())
+    assert torch.all(out[..., 7:] == -1e30)
+    assert torch.all(out[..., :7] == 0)
+
+
 def test_embed_input_ids_smoke_no_shape_errors():
     # Lightweight smoke test for embed_input_ids mixing path.
     hidden = 3584
