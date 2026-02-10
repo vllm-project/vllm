@@ -87,6 +87,7 @@ _REASONING_PARSERS_TO_REGISTER = {
     "pangu": (
         "pangu_reasoning_parser",
         "PanguReasoningParser",
+    ),
     "step3p5": (
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
