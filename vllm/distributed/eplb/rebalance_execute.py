@@ -483,18 +483,18 @@ def _auto_tune_communication_config(
 
     # If still exceeding after group_size = 1, enable batching
     if max_transfers > max_limit:
-        # Calculate required batch size
-        # We need: max_transfers / batch_size <= max_limit
-        # So: batch_size >= ceil(max_transfers / max_limit)
-        required_batch_size = (max_transfers + max_limit - 1) // max_limit
-        experts_batch_size = required_batch_size
+        # Enable batching: each batch handles up to max_limit experts
+        # The batch_isend_irecv will be called multiple times:
+        # num_batches = ceil(max_transfers / max_limit)
+        experts_batch_size = max_limit
 
         # When using batching, num_groups must equal world size
         num_groups = ep_size
 
         logger.info(
-            "EPLB auto-tuning: Enabling experts_batch_size=%d to meet "
-            "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
+            "EPLB auto-tuning: Enabling experts_batch_size=%d "
+            "to meet max_num_experts_transfers=%d "
+            "(max_transfers=%d, ep_size=%d)",
             experts_batch_size,
             max_limit,
             max_transfers,

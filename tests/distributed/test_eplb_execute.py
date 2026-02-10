@@ -595,10 +595,10 @@ def test_rearrange_with_communication_config(
         # Low limit - should increase num_groups
         (4, 2, 6, 2, 2, None),
         # Very low limit - should enable batching
-        (4, 2, 6, 1, 4, 2),
-        # 2 GPUs, 3 experts per GPU, 4 logical experts
+        (4, 8, 24, 2, 4, 2),
+        # 2 GPUs, 4 experts per GPU, 4 logical experts
         # Low limit - should increase num_groups
-        (2, 3, 4, 2, 2, None),
+        (2, 4, 6, 2, 2, None),
     ],
 )
 def test_auto_tuning_config(
