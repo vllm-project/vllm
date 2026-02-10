@@ -36,10 +36,23 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     StreamOptions,
+    UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 logger = logging.getLogger(__name__)
+
+
+def _get_cached_tokens(
+    usage: "UsageInfo | None",
+) -> int | None:
+    """Extract cached token count from OpenAI UsageInfo."""
+    if usage is None:
+        return None
+    details = usage.prompt_tokens_details
+    if details is not None and details.cached_tokens:
+        return details.cached_tokens
+    return None
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -254,6 +267,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         self,
         generator: ChatCompletionResponse,
     ) -> AnthropicMessagesResponse:
+        cached_tokens = _get_cached_tokens(generator.usage)
         result = AnthropicMessagesResponse(
             id=generator.id,
             content=[],
@@ -261,6 +275,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             usage=AnthropicUsage(
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
+                cache_read_input_tokens=cached_tokens,
             ),
         )
         if generator.choices[0].finish_reason == "stop":
@@ -320,6 +335,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
 
                         if first_item:
+                            cached = _get_cached_tokens(origin_chunk.usage)
                             chunk = AnthropicStreamEvent(
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
@@ -331,6 +347,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         if origin_chunk.usage
                                         else 0,
                                         output_tokens=0,
+                                        cache_read_input_tokens=cached,
                                     ),
                                 ),
                             )
@@ -351,6 +368,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             stop_reason = self.stop_reason_map.get(
                                 finish_reason or "stop"
                             )
+                            cached = _get_cached_tokens(origin_chunk.usage)
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
@@ -361,6 +379,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     output_tokens=origin_chunk.usage.completion_tokens
                                     if origin_chunk.usage
                                     else 0,
+                                    cache_read_input_tokens=cached,
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
