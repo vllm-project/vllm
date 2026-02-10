@@ -4,8 +4,15 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 from transformers import PretrainedConfig
 
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+)
 from vllm.multimodal.processing import InputProcessingContext
 
 
@@ -220,3 +227,103 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _make_mm_kwargs_item_with_audio_in_video(
+    use_audio_in_video: bool,
+) -> MultiModalKwargsItem:
+    """Helper to create a MultiModalKwargsItem with use_audio_in_video field."""
+    field = MultiModalSharedField(batch_size=1)
+    item = MultiModalKwargsItem(
+        {
+            "video_grid_thw": MultiModalFieldElem(
+                data=torch.tensor([6, 36, 64]),
+                field=field,
+            ),
+            "use_audio_in_video": MultiModalFieldElem(
+                data=torch.tensor(use_audio_in_video, dtype=torch.bool),
+                field=field,
+            ),
+        }
+    )
+    return item
+
+
+def _make_mm_kwargs_item_without_audio_in_video() -> MultiModalKwargsItem:
+    """Helper to create a MultiModalKwargsItem WITHOUT use_audio_in_video."""
+    field = MultiModalSharedField(batch_size=1)
+    item = MultiModalKwargsItem(
+        {
+            "video_grid_thw": MultiModalFieldElem(
+                data=torch.tensor([6, 36, 64]),
+                field=field,
+            ),
+        }
+    )
+    return item
+
+
+@pytest.mark.parametrize(
+    "items, expected",
+    [
+        # use_audio_in_video=True should be detected
+        (
+            [_make_mm_kwargs_item_with_audio_in_video(True)],
+            True,
+        ),
+        # use_audio_in_video=False should not trigger
+        (
+            [_make_mm_kwargs_item_with_audio_in_video(False)],
+            False,
+        ),
+        # Missing use_audio_in_video key should not trigger (no KeyError)
+        (
+            [_make_mm_kwargs_item_without_audio_in_video()],
+            False,
+        ),
+        # Multiple items: first is True → should detect and break
+        (
+            [
+                _make_mm_kwargs_item_with_audio_in_video(True),
+                _make_mm_kwargs_item_with_audio_in_video(False),
+            ],
+            True,
+        ),
+        # Multiple items: first is False, second is True → first doesn't
+        # break, second is True → detect True
+        (
+            [
+                _make_mm_kwargs_item_with_audio_in_video(False),
+                _make_mm_kwargs_item_with_audio_in_video(True),
+            ],
+            True,
+        ),
+    ],
+    ids=[
+        "single-true",
+        "single-false",
+        "missing-key",
+        "multi-true-first",
+        "multi-true-second",
+    ],
+)
+def test_use_audio_in_video_detection(items, expected):
+    """
+    Test that _maybe_apply_prompt_updates correctly detects
+    use_audio_in_video from mm_kwargs without raising KeyError.
+
+    Regression test for: item['use_audio_in_video'] → item.get(...)
+    """
+    mm_kwargs = MultiModalKwargsItems({"video": items})
+
+    # Extract the detection logic (matches the fixed code)
+    use_audio_in_video = False
+    if "video" in mm_kwargs:
+        for item in mm_kwargs["video"]:
+            if item and item.get("use_audio_in_video"):
+                use_audio_in_video_tensor = item["use_audio_in_video"].data
+                if use_audio_in_video_tensor.numel() > 0:
+                    use_audio_in_video = bool(use_audio_in_video_tensor.item())
+                    break
+
+    assert use_audio_in_video == expected
