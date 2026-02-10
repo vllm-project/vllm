@@ -317,8 +317,8 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
 
     def __call__(
         self,
-        # raw_speech: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
-        raw_speech: np.ndarray | list[np.ndarray],
+        raw_speech: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
+        # raw_speech: np.ndarray | list[np.ndarray],
         truncation: bool = True,
         pad_to_multiple_of: int | None = None,
         return_tensors: str | TensorType | None = None,
