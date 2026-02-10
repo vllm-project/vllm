@@ -189,7 +189,10 @@ class OpenAIServingPooling(OpenAIServing):
 
         if is_io_processor_request:
             assert self.io_processor is not None
-            output = await self.io_processor.post_process_async(result_generator)
+            output = await self.io_processor.post_process_async(
+                result_generator,
+                request_id=request_id,
+            )
 
             if callable(
                 output_to_response := getattr(
