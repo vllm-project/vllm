@@ -1041,12 +1041,14 @@ class FusedMoE(CustomOp):
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
-        # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
-        # and we're not loading the full weight
+        # Only narrow if we are loading a global tensor. Some loaders may
+        # already provide rank-local shards (shape == shard_size).
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            loaded_dim = loaded_weight.shape[shard_dim]
+            if loaded_dim != shard_size:
+                loaded_weight = loaded_weight.narrow(
+                    shard_dim, shard_size * tp_rank, shard_size
+                )
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
@@ -1069,12 +1071,14 @@ class FusedMoE(CustomOp):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
-        # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
-        # and we're not loading the full weight
+        # Only narrow if we are loading a global tensor. Some loaders may
+        # already provide rank-local shards (shape == shard_size).
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            loaded_dim = loaded_weight.shape[shard_dim]
+            if loaded_dim != shard_size:
+                loaded_weight = loaded_weight.narrow(
+                    shard_dim, shard_size * tp_rank, shard_size
+                )
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
 
