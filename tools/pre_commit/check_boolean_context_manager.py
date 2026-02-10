@@ -20,7 +20,7 @@ import sys
 
 def check_file(filepath: str) -> list[str]:
     try:
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             source = f.read()
     except (OSError, UnicodeDecodeError):
         return []
