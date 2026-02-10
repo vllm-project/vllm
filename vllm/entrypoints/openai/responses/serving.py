@@ -1070,9 +1070,15 @@ class OpenAIServingResponses(OpenAIServing):
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
             prev_msgs = self.msg_store[prev_response.id]
-            # Remove the previous chain-of-thoughts if there is a new "final"
-            # message. Note that this also removes these messages from the
-            # msg_store.
+
+            # FIXME(woosuk): The slice-delete-reappend cycle below is
+            # currently a no-op --- it removes messages then puts them all
+            # back unfiltered. It may be intentionally deferred (see FIXME
+            # above) or redundant if the Harmony encoder already strips
+            # analysis messages at render time. If analysis messages need
+            # to be dropped here, add a channel != "analysis" filter when
+            # re-appending, similar to auto_drop_analysis_messages in
+            # harmony_utils.py.
             if len(prev_msgs) > 0:
                 last_msg = prev_msgs[-1]
                 assert isinstance(last_msg, OpenAIHarmonyMessage)
@@ -1093,7 +1099,11 @@ class OpenAIServingResponses(OpenAIServing):
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
-            messages.append(get_user_message(request.input))
+            # Skip empty string input when previous_input_messages supplies
+            # the full conversation history --- an empty trailing user message
+            # confuses the model into thinking nothing was sent.
+            if request.input or not request.previous_input_messages:
+                messages.append(get_user_message(request.input))
         else:
             if prev_response is not None:
                 prev_outputs = copy(prev_response.output)

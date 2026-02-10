@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 BASE_TEST_ENV = {
     # The day vLLM said "hello world" on arxiv 🚀
-    "VLLM_GPT_OSS_SYSTEM_START_DATE": "2023-09-12",
+    "VLLM_SYSTEM_START_DATE": "2023-09-12",
 }
 DEFAULT_MAX_RETRIES = 3
 
@@ -49,7 +49,7 @@ async def retry_for_tool_call(
     client,
     *,
     model: str,
-    expected_tool_type: str = "function_call",
+    expected_tool_type: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
     **create_kwargs: Any,
 ):

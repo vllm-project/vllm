@@ -205,7 +205,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
-    VLLM_GPT_OSS_SYSTEM_START_DATE: str | None = None
+    VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
@@ -1431,9 +1431,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # non-determinism (different tokens -> different model behaviour at
     # temperature=0). Set to an ISO date string, e.g. "2023-09-12",
     # for reproducible inference or testing.
-    "VLLM_GPT_OSS_SYSTEM_START_DATE": lambda: os.getenv(
-        "VLLM_GPT_OSS_SYSTEM_START_DATE", None
-    ),
+    "VLLM_SYSTEM_START_DATE": lambda: os.getenv("VLLM_SYSTEM_START_DATE", None),
     # Enable automatic retry when tool call JSON parsing fails
     # If enabled, returns an error message to the model to retry
     # If disabled (default), raises an exception and fails the request
