@@ -124,6 +124,23 @@ class RoutingMethodType(IntEnum):
     Unspecified = 8.0
 
 
+def get_routing_method_type(
+    scoring_func: str, top_k: int, renormalize: bool
+) -> RoutingMethodType:
+    if scoring_func == "sigmoid":
+        if top_k == 1:
+            return RoutingMethodType.Llama4
+        else:
+            return RoutingMethodType.DeepSeekV3
+    elif scoring_func == "softmax":
+        if renormalize:
+            return RoutingMethodType.Renormalize
+        else:
+            return RoutingMethodType.Default
+    else:
+        return RoutingMethodType.Unspecified
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -369,6 +386,10 @@ class FusedMoEQuantConfig:
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
+    @property
+    def use_mxfp4_w4a8(self) -> bool:
+        return self._a1.dtype == "fp8" and self._w1.dtype == "mxfp4"
+
     def config_name(self, dtype: torch.dtype) -> str | None:
         """
         Return a string used to construct the filename that contains the
@@ -477,6 +498,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "mxfp8",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -484,6 +506,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "int4",
+            "mxfp8",
         }
 
         if weight_dtype is None:
@@ -513,6 +536,8 @@ def fp8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
@@ -530,6 +555,8 @@ def fp8_w8a8_moe_quant_config(
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
         g2_alphas=g2_alphas,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_scale=a1_scale,
         a1_gscale=a1_gscale,
         a2_scale=a2_scale,
@@ -545,6 +572,8 @@ def int8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     """
@@ -556,6 +585,8 @@ def int8_w8a8_moe_quant_config(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
@@ -635,6 +666,26 @@ def mxfp4_mxfp8_moe_quant_config(
     )
 
 
+def mxfp4_w4a8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for fp8 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
+        _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
 def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -672,6 +723,8 @@ def nvfp4_moe_quant_config(
     a2_gscale: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -680,6 +733,8 @@ def nvfp4_moe_quant_config(
         "nvfp4",
         w1_scale=w1_scale,
         w2_scale=w2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_gscale=a1_gscale,
         a2_gscale=a2_gscale,
         g1_alphas=g1_alphas,
