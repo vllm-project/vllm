@@ -767,7 +767,8 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         Assume that total_num_frames = 10 and fps = 1.
         The timestamp of frame 0 is 0.0.
         The timestamp of frame 1 is 1.0.…
-        The timestamp of frame 9 (the last frame) should be 9.0, that is, (total_frames_num – 1) / original_fps. # noqa: E501
+        The timestamp of frame 9 (the last frame) should be 9.0, that is,
+        (total_frames_num – 1) / original_fps.
 
         Args:
             data: Raw video bytes
