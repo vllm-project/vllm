@@ -861,7 +861,9 @@ class Worker(WorkerBase):
                     else:
                         self.model_runner.execute_model(scheduler_output=None,
                                                         dp_metadata_list=dp_metadata_list)
+                    logger.info("jcz before synchronize")
                     torch.cuda.synchronize()
+                    logger.info("jcz after synchronize")
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise

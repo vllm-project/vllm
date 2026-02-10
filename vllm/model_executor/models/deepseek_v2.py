@@ -1177,7 +1177,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         return hidden_states
 
 
-# @support_torch_compile
+@support_torch_compile
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
 
