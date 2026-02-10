@@ -58,7 +58,9 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     """Run MLA benchmark with appropriate backend."""
     from mla_runner import run_mla_benchmark as run_mla
 
-    return run_mla(config.backend, config, **kwargs)
+    return run_mla(
+        config.backend, config, prefill_backend=config.prefill_backend, **kwargs
+    )
 
 
 def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
@@ -436,13 +438,20 @@ def main():
     # Backend selection
     parser.add_argument(
         "--backends",
+        "--decode-backends",
         nargs="+",
-        help="Backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
+        help="Decode backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
         "flashinfer_mla, flashattn_mla, flashmla)",
     )
     parser.add_argument(
         "--backend",
         help="Single backend (alternative to --backends)",
+    )
+    parser.add_argument(
+        "--prefill-backends",
+        nargs="+",
+        help="Prefill backends to compare (fa2, fa3, fa4). "
+        "Uses the first decode backend for impl construction.",
     )
 
     # Batch specifications
@@ -498,13 +507,19 @@ def main():
 
         # Override args with YAML values
         # (YAML takes precedence unless CLI arg was explicitly set)
-        # Backend(s)
+        # Backend(s) - support both "backends" (legacy) and "decode_backends"
         if "backend" in yaml_config:
             args.backend = yaml_config["backend"]
             args.backends = None
+        elif "decode_backends" in yaml_config:
+            args.backends = yaml_config["decode_backends"]
+            args.backend = None
         elif "backends" in yaml_config:
             args.backends = yaml_config["backends"]
             args.backend = None
+
+        # Prefill backends (e.g., ["fa3", "fa4"])
+        args.prefill_backends = yaml_config.get("prefill_backends", None)
 
         # Check for special modes
         if "mode" in yaml_config:
@@ -604,7 +619,10 @@ def main():
 
     # Determine backends
     backends = args.backends or ([args.backend] if args.backend else ["flash"])
+    prefill_backends = getattr(args, "prefill_backends", None)
     console.print(f"Backends: {', '.join(backends)}")
+    if prefill_backends:
+        console.print(f"Prefill backends: {', '.join(prefill_backends)}")
     console.print(f"Batch specs: {', '.join(args.batch_specs)}")
     console.print()
 
@@ -841,37 +859,93 @@ def main():
 
     else:
         # Normal mode: compare backends
-        total = len(backends) * len(args.batch_specs)
+        decode_results = []
+        prefill_results = []
 
-        with tqdm(total=total, desc="Benchmarking") as pbar:
-            for spec in args.batch_specs:
-                for backend in backends:
-                    config = BenchmarkConfig(
-                        backend=backend,
-                        batch_spec=spec,
-                        num_layers=args.num_layers,
-                        head_dim=args.head_dim,
-                        num_q_heads=args.num_q_heads,
-                        num_kv_heads=args.num_kv_heads,
-                        block_size=args.block_size,
-                        device=args.device,
-                        repeats=args.repeats,
-                        warmup_iters=args.warmup_iters,
-                        profile_memory=args.profile_memory,
-                    )
+        # Run decode backend comparison
+        if not prefill_backends:
+            # No prefill backends specified: compare decode backends as before
+            total = len(backends) * len(args.batch_specs)
 
-                    result = run_benchmark(config)
-                    all_results.append(result)
+            with tqdm(total=total, desc="Benchmarking") as pbar:
+                for spec in args.batch_specs:
+                    for backend in backends:
+                        config = BenchmarkConfig(
+                            backend=backend,
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            repeats=args.repeats,
+                            warmup_iters=args.warmup_iters,
+                            profile_memory=args.profile_memory,
+                        )
 
-                    if not result.success:
-                        console.print(f"[red]Error {backend} {spec}: {result.error}[/]")
+                        result = run_benchmark(config)
+                        decode_results.append(result)
 
-                    pbar.update(1)
+                        if not result.success:
+                            console.print(
+                                f"[red]Error {backend} {spec}: {result.error}[/]"
+                            )
 
-        # Display results
-        console.print("\n[bold green]Results:[/]")
-        formatter = ResultsFormatter(console)
-        formatter.print_table(all_results, backends)
+                        pbar.update(1)
+
+            console.print("\n[bold green]Results:[/]")
+            formatter = ResultsFormatter(console)
+            formatter.print_table(decode_results, backends)
+
+        # Run prefill backend comparison
+        if prefill_backends:
+            # Use first decode backend for impl construction
+            decode_backend = backends[0]
+            total = len(prefill_backends) * len(args.batch_specs)
+
+            console.print(
+                f"[yellow]Prefill comparison mode: "
+                f"using {decode_backend} for decode impl[/]"
+            )
+
+            with tqdm(total=total, desc="Prefill benchmarking") as pbar:
+                for spec in args.batch_specs:
+                    for pb in prefill_backends:
+                        config = BenchmarkConfig(
+                            backend=decode_backend,
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            repeats=args.repeats,
+                            warmup_iters=args.warmup_iters,
+                            profile_memory=args.profile_memory,
+                            prefill_backend=pb,
+                        )
+
+                        result = run_benchmark(config)
+
+                        # Label result with prefill backend name for display
+                        labeled_config = replace(result.config, backend=pb)
+                        result = replace(result, config=labeled_config)
+                        prefill_results.append(result)
+
+                        if not result.success:
+                            console.print(f"[red]Error {pb} {spec}: {result.error}[/]")
+
+                        pbar.update(1)
+
+            console.print("\n[bold green]Prefill Backend Results:[/]")
+            formatter = ResultsFormatter(console)
+            formatter.print_table(
+                prefill_results, prefill_backends, compare_to_fastest=True
+            )
+
+        all_results = decode_results + prefill_results
 
     # Save results
     if all_results:

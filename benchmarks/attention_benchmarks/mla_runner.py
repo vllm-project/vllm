@@ -62,6 +62,7 @@ def create_minimal_vllm_config(
     block_size: int = 128,
     max_num_seqs: int = 256,
     mla_dims: dict | None = None,
+    flash_attn_version: int | None = None,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -73,6 +74,10 @@ def create_minimal_vllm_config(
         max_num_seqs: Maximum number of sequences
         mla_dims: Optional custom MLA dimensions dict. If not provided, uses
                   setup_mla_dims(model_name)
+        flash_attn_version: Force a specific FlashAttention version (2, 3, or 4).
+                           When set, also disables non-FA prefill backends
+                           (flashinfer, cudnn, trtllm_ragged) to ensure the
+                           FA path is used.
 
     Returns:
         VllmConfig for benchmarking
@@ -120,16 +125,12 @@ def create_minimal_vllm_config(
             seed=0,
             max_model_len=32768,
             quantization=None,
-            quantization_param_path=None,
             enforce_eager=False,
-            max_context_len_to_capture=None,
-            max_seq_len_to_capture=8192,
             max_logprobs=20,
             disable_sliding_window=False,
             skip_tokenizer_init=True,
             served_model_name=None,
             limit_mm_per_prompt=None,
-            use_async_output_proc=True,
             config_format="auto",
         )
     finally:
@@ -166,7 +167,7 @@ def create_minimal_vllm_config(
 
     compilation_config = CompilationConfig()
 
-    return VllmConfig(
+    vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=cache_config,
         parallel_config=parallel_config,
@@ -174,9 +175,40 @@ def create_minimal_vllm_config(
         compilation_config=compilation_config,
     )
 
+    if flash_attn_version is not None:
+        vllm_config.attention_config.flash_attn_version = flash_attn_version
+        # Disable non-FA prefill backends so the FA path is always used
+        vllm_config.attention_config.disable_flashinfer_prefill = True
+        vllm_config.attention_config.use_cudnn_prefill = False
+        vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = False
+
+    return vllm_config
+
 
 # ============================================================================
-# Backend Configuration
+# Prefill Backend Configuration
+# ============================================================================
+
+# Maps prefill backend names to FlashAttention version numbers
+_PREFILL_BACKEND_FA_VERSION: dict[str, int] = {
+    "fa2": 2,
+    "fa3": 3,
+    "fa4": 4,
+}
+
+
+def get_prefill_backend_fa_version(prefill_backend: str) -> int:
+    """Get the FlashAttention version for a prefill backend name."""
+    if prefill_backend not in _PREFILL_BACKEND_FA_VERSION:
+        raise ValueError(
+            f"Unknown prefill backend: {prefill_backend!r}. "
+            f"Available: {list(_PREFILL_BACKEND_FA_VERSION.keys())}"
+        )
+    return _PREFILL_BACKEND_FA_VERSION[prefill_backend]
+
+
+# ============================================================================
+# Decode Backend Configuration
 # ============================================================================
 
 
@@ -643,11 +675,9 @@ def _run_single_benchmark(
 
     # Determine which forward method to use based on metadata
     if metadata.decode is not None:
-        forward_fn = lambda: impl._forward_decode(
-            decode_inputs, kv_cache, metadata, layer
-        )
+        forward_fn = lambda: impl.forward_mqa(decode_inputs, kv_cache, metadata, layer)
     elif metadata.prefill is not None:
-        forward_fn = lambda: impl._forward_prefill(
+        forward_fn = lambda: impl.forward_mha(
             prefill_inputs["q"],
             prefill_inputs["k_c_normed"],
             prefill_inputs["k_pe"],
@@ -693,6 +723,7 @@ def _run_single_benchmark(
 def _run_mla_benchmark_batched(
     backend: str,
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
+    prefill_backend: str | None = None,
 ) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
@@ -703,10 +734,12 @@ def _run_mla_benchmark_batched(
     to avoid setup/teardown overhead.
 
     Args:
-        backend: Backend name
+        backend: Backend name (decode backend used for impl construction)
         configs_with_params: List of (config, threshold, num_splits) tuples
             - threshold: reorder_batch_threshold (FlashAttn/FlashMLA only)
             - num_splits: num_kv_splits (CUTLASS only)
+        prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
+            When set, forces the specified FlashAttention version for prefill.
 
     Returns:
         List of BenchmarkResult objects
@@ -730,11 +763,17 @@ def _run_mla_benchmark_batched(
     if mla_dims is None:
         mla_dims = setup_mla_dims("deepseek-v3")
 
+    # Resolve FA version from prefill backend
+    flash_attn_version = None
+    if prefill_backend is not None:
+        flash_attn_version = get_prefill_backend_fa_version(prefill_backend)
+
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
         model_name="deepseek-v3",  # Used only for model path
         block_size=block_size,
         mla_dims=mla_dims,  # Use custom dims from config or default
+        flash_attn_version=flash_attn_version,
     )
 
     results = []
@@ -744,6 +783,19 @@ def _run_mla_benchmark_batched(
         impl, layer, builder_instance = _create_backend_impl(
             backend_cfg, mla_dims, vllm_config, device
         )
+
+        # Verify the actual FA version matches what was requested
+        if prefill_backend is not None:
+            actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
+            if actual_fa_version != flash_attn_version:
+                raise RuntimeError(
+                    f"Prefill backend '{prefill_backend}' requested FA version "
+                    f"{flash_attn_version}, but the impl is using FA version "
+                    f"{actual_fa_version}. This is likely due to guards in "
+                    f"get_flash_attn_version() (e.g., head_size > 128 blocking "
+                    f"FA4, or FA3 unsupported on this platform). Check "
+                    f"vllm/v1/attention/backends/fa_utils.py."
+                )
 
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
@@ -793,6 +845,7 @@ def run_mla_benchmark(
     config,
     reorder_batch_threshold: int | None = None,
     num_kv_splits: int | None = None,
+    prefill_backend: str | None = None,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
@@ -807,6 +860,8 @@ def run_mla_benchmark(
         reorder_batch_threshold: Threshold override for FlashAttn/FlashMLA
                                  (single config mode only)
         num_kv_splits: Number of KV splits for CUTLASS (single config mode only)
+        prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
+            When set, forces the specified FlashAttention version for prefill.
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
@@ -830,7 +885,9 @@ def run_mla_benchmark(
         return_single = True
 
     # Use unified batched execution
-    results = _run_mla_benchmark_batched(backend, configs_with_params)
+    results = _run_mla_benchmark_batched(
+        backend, configs_with_params, prefill_backend=prefill_backend
+    )
 
     # Return single result or list based on input
     return results[0] if return_single else results

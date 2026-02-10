@@ -1952,13 +1952,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             # For MLA the v head dim is smaller than qk head dim so we pad out
             # v with 0s to match the qk head dim for attention backends that do
-            # not support different headdims
-            # We don't need to pad V if we are on a hopper system with FA3
+            # not support different headdims.
+            # FA3 on Hopper (SM90) and FA4 natively handle diff headdims.
             device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
-                self.vllm_flash_attn_version == 3
-                and device_capability is not None
-                and device_capability[0] == 9
+                (
+                    self.vllm_flash_attn_version == 3
+                    and device_capability is not None
+                    and device_capability[0] == 9
+                )
+                or self.vllm_flash_attn_version == 4
             )
 
         self.dcp_world_size: int = -1

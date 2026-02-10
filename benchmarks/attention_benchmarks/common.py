@@ -253,6 +253,7 @@ class BenchmarkConfig:
     use_cuda_graphs: bool = False
 
     # MLA-specific
+    prefill_backend: str | None = None
     kv_lora_rank: int | None = None
     qk_nope_head_dim: int | None = None
     qk_rope_head_dim: int | None = None
