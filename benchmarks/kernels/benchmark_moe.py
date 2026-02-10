@@ -907,7 +907,12 @@ def main(args: argparse.Namespace):
         # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
         # search space generation (no matrix_instr_nonkdim/kpack exploration).
         is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
-        search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
+        # For int4_w4a16, the group_size constraint on BLOCK_SIZE_K does not
+        # apply: the gptq_awq kernel handles arbitrary BLOCK_SIZE_K regardless
+        # of group_size. Skip block_quant_shape filtering to keep the full
+        # search space (e.g. BLOCK_SIZE_K=64 with group_size=128).
+        tune_block_quant_shape = None if use_int4_w4a16 else block_quant_shape
+        search_space = get_configs_compute_bound(is_fp16, tune_block_quant_shape)
         if use_int4_w4a16:
             # SPLIT_K is a required kernel constexpr for gptq_awq kernel;
             # only SPLIT_K=1 is used at runtime, so fix it during tuning.
