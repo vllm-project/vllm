@@ -35,8 +35,7 @@ def check_file(filepath: str) -> list[str]:
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if isinstance(item.context_expr, ast.BoolOp):
-                    op = "and" if isinstance(item.context_expr.op, ast.And) \
-                        else "or"
+                    op = "and" if isinstance(item.context_expr.op, ast.And) else "or"
                     violations.append(
                         f"{filepath}:{item.context_expr.lineno}: "
                         f"boolean `{op}` used to combine context managers "
@@ -47,8 +46,7 @@ def check_file(filepath: str) -> list[str]:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: check_boolean_context_manager.py <file> ...",
-              file=sys.stderr)
+        print("Usage: check_boolean_context_manager.py <file> ...", file=sys.stderr)
         return 1
 
     all_violations = []
