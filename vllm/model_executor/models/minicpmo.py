@@ -74,14 +74,11 @@ from .minicpmv import (
 )
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
-try:
-    import flag_gems
-except ImportError:
-    flag_gems = None
-
 CPU_DEVICE = torch.device("cpu")
 
-if flag_gems and os.getenv("USE_FLAGOS") == "1":
+if os.getenv("USE_FLAGOS") == "1":
+    import flag_gems
+
     FLAG_GEMS_CONFIG = [
         "sort",
         "sort_stable",
