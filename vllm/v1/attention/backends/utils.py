@@ -17,6 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -824,33 +825,38 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens.squeeze(1)
 
 
-def extend_all_queries_by_1(
-    common_attn_metadata: CommonAttentionMetadata,
-    arange: torch.Tensor,
-    new_slot_mapping: torch.Tensor,
-) -> CommonAttentionMetadata:
+def mamba_get_block_table_tensor(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    kv_cache_spec: KVCacheSpec,
+    mamba_cache_mode: str,
+) -> torch.Tensor:
     """
-    Creates a new CommonAttentionMetadata with all query lengths increased by 1.
-    Also all seq lens are increased by 1.
-    This is useful e.g. in speculative decoding with draft models, where we
-    extend each sequence by 1 token.
-    The slot mapping is computed externally, as it requires more information.
+    Get the block table tensor for mamba kernels from the input
+    common_attn_metadata.block_table_tensor given different mamba cache modes.
+
+    - "all":   input  (#requests, cdiv(max_model_len, block_size));
+               output (#requests, cdiv(max_model_len, block_size)).
+
+    - "none":  input  (#requests, 1 + num_speculative_blocks);
+               output (#requests, 1 + num_speculative_blocks).
+
+    - "align": input  (#requests, cdiv(max_model_len, block_size));
+               output (#requests, 1 + num_speculative_blocks), which are the last
+               1 + num_speculative_blocks of each request.
     """
-    cad = common_attn_metadata
-    # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
-    new_query_start_loc = cad.query_start_loc + arange[: len(cad.query_start_loc)]
-    new_query_start_loc_cpu = cad.query_start_loc_cpu + torch.arange(
-        len(cad.query_start_loc_cpu), dtype=torch.int32
-    )
-    new_cad = cad.replace(
-        query_start_loc=new_query_start_loc,
-        query_start_loc_cpu=new_query_start_loc_cpu,
-        seq_lens=cad.seq_lens + 1,
-        # each request is extended by 1 token -> batch_size tokens are added
-        num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
-        # All query lens increase by 1, so max query len increases by 1
-        max_query_len=cad.max_query_len + 1,
-        max_seq_len=cad.max_seq_len + 1,
-        slot_mapping=new_slot_mapping,
-    )
-    return new_cad
+    if mamba_cache_mode in ("all", "none"):
+        return block_table
+    else:
+        assert isinstance(kv_cache_spec, MambaSpec)
+        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
+        # to handle the invalid block table.
+        start_indices = torch.clamp(
+            (seq_lens - 1) // kv_cache_spec.block_size,
+            min=0,
+        )
+        offsets = torch.arange(
+            1 + kv_cache_spec.num_speculative_blocks, device=block_table.device
+        )
+        indices_to_gather = start_indices.unsqueeze(1) + offsets
+        return torch.gather(block_table, 1, indices_to_gather)

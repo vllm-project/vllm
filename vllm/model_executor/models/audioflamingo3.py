@@ -128,6 +128,12 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         super().__init__(config)
         self.avg_pooler = nn.AvgPool1d(kernel_size=2, stride=2)
         # self.layer_norm is already initialized in super().__init__
+        # Keep a dummy freqs parameter for MusicFlamingo checkpoints.
+        self.pos_emb = nn.Module()
+        freqs = torch.empty(getattr(config, "num_mel_bins", 128))
+        self.pos_emb.register_parameter(
+            "freqs", nn.Parameter(freqs, requires_grad=False)
+        )
 
     def forward(
         self,
@@ -146,7 +152,8 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         ).to(hidden_states.dtype)
 
         for layer in self.layers:
-            layer_outputs = layer(hidden_states, attention_mask)
+            # Qwen2AudioEncoderLayer expects layer_head_mask as third arg.
+            layer_outputs = layer(hidden_states, attention_mask, None)
             hidden_states = layer_outputs[0]
 
         # AvgPool (time/2) + LayerNorm
@@ -192,6 +199,22 @@ class AudioFlamingo3MultiModalProjector(nn.Module):
         return hidden_states
 
 
+class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
+    def _parse_audio_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=_audioflamingo3_field_config,
+            )
+
+        return super()._parse_audio_data(data)
+
+
 class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(AudioFlamingo3Config)
@@ -204,8 +227,16 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor
         return feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return AudioFlamingo3MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        return {"audio": 1}
 
 
 class AudioFlamingo3DummyInputsBuilder(
@@ -259,30 +290,9 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     )
 
 
-class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_audioflamingo3_field_config,
-            )
-        return super()._parse_audio_data(data)
-
-
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return AudioFlamingo3MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -609,7 +619,7 @@ class AudioFlamingo3ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

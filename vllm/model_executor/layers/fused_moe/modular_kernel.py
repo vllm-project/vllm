@@ -180,6 +180,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> PrepareResultType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
@@ -192,6 +193,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -220,6 +224,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> tuple[Callable, ReceiverType] | ReceiverType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
@@ -235,6 +240,9 @@ class FusedMoEPrepareAndFinalize(ABC):
           space to the local expert space of the expert parallel shard.
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a callback or a hook callback pair that when invoked waits for
         results from other workers and has the same return signature as
@@ -407,10 +415,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
+    @property
+    def expects_unquantized_inputs(self) -> bool:
         """
         Whether or not the PrepareFinalize should defer input quantization
         in the prepare step. If True, then the Experts kernel will
@@ -805,11 +811,13 @@ class FusedMoEModularKernel(torch.nn.Module):
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
+        inplace: bool = False,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        self.inplace = inplace
 
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).
@@ -1069,6 +1077,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
         else:
             # Overlap shared expert compute with all2all dispatch.
@@ -1081,6 +1090,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
 
             # TODO(lucas): refactor this in the alternative schedules followup
@@ -1218,12 +1228,27 @@ class FusedMoEModularKernel(torch.nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
+
+        Args:
+            shared_experts_input: Optional separate input for shared experts.
+                When latent MoE is used, hidden_states is the latent-projected
+                tensor (smaller dimension) used by routed experts, while
+                shared_experts_input is the original hidden_states (full
+                dimension) needed by the shared expert MLP.
         """
         shared_output: torch.Tensor | None = None
+
+        # For latent MoE: shared experts need the original hidden_states
+        # (full hidden_size), not the latent-projected version used by
+        # routed experts.
+        se_hidden_states = (
+            shared_experts_input if shared_experts_input is not None else hidden_states
+        )
 
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
@@ -1237,7 +1262,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self.shared_experts(se_hidden_states)
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1248,7 +1273,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self.shared_experts(se_hidden_states)
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1284,11 +1309,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        inplace: bool = False,
         activation: str = "silu",
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1301,8 +1326,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         - topk_weights (torch.Tensor): The topk weights applied at the end of
           the layer.
         - topk_ids (torch.Tensor): A map of row to expert id.
-        - inplace (bool): If True, perform the operation in-place.
-          Defaults to False.
         - activation (str): The activation function to apply after the first
           MoE layer.
         - global_num_experts (int): The total number of experts in the global
@@ -1313,12 +1336,17 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - shared_experts_input (Optional[torch.Tensor]): Optional separate
+          input for shared experts. For latent MoE, this is the original
+          hidden_states before latent projection.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
 
-        if inplace and self.shared_experts is None and not disable_inplace():
+        if self.inplace:
+            assert self.shared_experts is None
+            assert not disable_inplace()
             output = hidden_states
         else:
             output = torch.zeros_like(hidden_states)
@@ -1359,4 +1387,5 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
         )

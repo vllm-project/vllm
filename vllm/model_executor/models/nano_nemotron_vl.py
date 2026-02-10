@@ -1143,6 +1143,12 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     def supports_video(self):
         return self.get_hf_processor().supports_video
 
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
@@ -1273,9 +1279,6 @@ class NanoNemotronVLMultiModalProcessor(
     NanoNemotronBaseVLMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
     """MultiModalProcessor extended for video support"""
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
 
     def _get_mm_fields_config(
         self,
@@ -1917,7 +1920,7 @@ class NemotronH_Nano_VL_V2(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2128,3 +2131,7 @@ class NemotronH_Nano_VL_V2(
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        return NemotronHForCausalLM.get_mamba_state_copy_func()
