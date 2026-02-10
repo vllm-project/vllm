@@ -114,6 +114,11 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
                 audio_tokenizer = mm_processor_kwargs.get("audio_tokenizer")
                 if audio_tokenizer and isinstance(audio_tokenizer, str):
                     kwargs["audio_tokenizer"] = audio_tokenizer
+        
+        # Remove call-time only arguments to avoid warnings in func_utils
+        call_only_args = ['audio_input_ids', 'is_continuous_mask', 'audio_waveforms', 'tokenizer']
+        for arg in call_only_args:
+            kwargs.pop(arg, None)
 
         return self.ctx.get_hf_processor(KimiAudioProcessor, **kwargs)
 
@@ -235,30 +240,51 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             # Use get_items() to robustly check for audio items
             audio_items = mm_items.get_items("audio", AudioProcessorItems)
             if audio_items:
-                # Check if data is already in processor_data
-                if "audio" not in processor_data and "audios" not in processor_data:
-                    # Force inject using the key expected by KimiAudioProcessor.__call__
-                    processor_data["audio"] = audio_items.get_all()
+                items = audio_items.get_all()
+                # Check for pre-processed input (dict-like with audio_input_ids)
+                if len(items) == 1 and isinstance(items[0], Mapping) and "audio_input_ids" in items[0]:
+                    mm_input = items[0]
+                    # Map fields to processor args
+                    processor_data["audio_input_ids"] = mm_input.get("audio_input_ids")
+                    processor_data["is_continuous_mask"] = mm_input.get("is_continuous_mask")
+                    processor_data["audio_waveforms"] = mm_input.get("audio_waveforms")
+                    
+                    # Passthrough for model
+                    passthrough_data = dict(passthrough_data)
+                    # Use the waveforms from the input dict
+                    wfs = mm_input.get("audio_waveforms")
+                    # Ensure it's a list for consistency
+                    if wfs is not None and not isinstance(wfs, list):
+                        wfs = [wfs]
+                    passthrough_data["audio_waveforms"] = wfs
+                    # Also pass other fields to model
+                    passthrough_data["audio_input_ids"] = mm_input.get("audio_input_ids")
+                    passthrough_data["is_continuous_mask"] = mm_input.get("is_continuous_mask")
+                else:
+                    # Check if data is already in processor_data
+                    if "audio" not in processor_data and "audios" not in processor_data:
+                        # Force inject using the key expected by KimiAudioProcessor.__call__
+                        processor_data["audio"] = items
 
-                # Also inject audio_waveforms into passthrough_data so it reaches the
-                # model
-                passthrough_data = dict(passthrough_data)
+                    # Also inject audio_waveforms into passthrough_data so it reaches the
+                    # model
+                    passthrough_data = dict(passthrough_data)
 
-                # Convert numpy arrays to tensors for safe serialization in serial_utils
-                audio_waveforms_raw = audio_items.get_all()
-                audio_waveforms_tensor = []
-                for item in audio_waveforms_raw:
-                    if isinstance(item, np.ndarray):
-                        # Convert numpy to tensor
-                        audio_waveforms_tensor.append(torch.from_numpy(item))
-                    elif isinstance(item, list):
-                        # Convert list (e.g. dummy inputs) to tensor
-                        audio_waveforms_tensor.append(torch.tensor(item))
-                    else:
-                        # Keep as is (e.g. already tensor)
-                        audio_waveforms_tensor.append(item)
+                    # Convert numpy arrays to tensors for safe serialization in serial_utils
+                    audio_waveforms_raw = items
+                    audio_waveforms_tensor = []
+                    for item in audio_waveforms_raw:
+                        if isinstance(item, np.ndarray):
+                            # Convert numpy to tensor
+                            audio_waveforms_tensor.append(torch.from_numpy(item))
+                        elif isinstance(item, list):
+                            # Convert list (e.g. dummy inputs) to tensor
+                            audio_waveforms_tensor.append(torch.tensor(item))
+                        else:
+                            # Keep as is (e.g. already tensor)
+                            audio_waveforms_tensor.append(item)
 
-                passthrough_data["audio_waveforms"] = audio_waveforms_tensor
+                    passthrough_data["audio_waveforms"] = audio_waveforms_tensor
 
         return processor_data, passthrough_data
 
@@ -487,11 +513,9 @@ class MoonshotKimiaForCausalLM(
         return self.model
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
-        # print(f"[DEBUG] embed_multimodal called with kwargs keys: {kwargs.keys()}")
         # Validate the multimodal input keyword arguments
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
-            print("[DEBUG] _parse_and_validate_audio_input returned None")
             return []
 
         audio_waveforms = audio_input["audio_waveforms"]
@@ -617,6 +641,25 @@ class MoonshotKimiaForCausalLM(
 
         return inputs_embeds.to(target_dtype)
 
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: list[torch.Tensor] | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        # Get text embeddings from the inner model
+        inputs_embeds = self.model.embed_input_ids(input_ids)
+
+        # Merge audio embeddings if available
+        if multimodal_embeddings is not None:
+            inputs_embeds = self._merge_audio_embeddings(
+                inputs_embeds, input_ids, multimodal_embeddings
+            )
+        
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -625,19 +668,6 @@ class MoonshotKimiaForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> tuple[torch.Tensor] | IntermediateTensors:
-        if inputs_embeds is None:
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-
-        multimodal_embeddings = kwargs.get(
-            "audio"
-        )  # Assuming 'audio' is the key based on registry
-
-        # merge audio embeddings(whisper features) into text embeddings
-        if multimodal_embeddings is not None:
-            inputs_embeds = self._merge_audio_embeddings(
-                inputs_embeds, input_ids, multimodal_embeddings
-            )
-
         hidden_states = self.model(
             input_ids=None,
             positions=positions,

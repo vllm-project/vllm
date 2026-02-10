@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from https://github.com/MoonshotAI/Kimi-Audio/tree/master/kimia_infer/api/prompt_manager.py
-import contextlib
 import os
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -103,20 +103,21 @@ def mel_filters(device: str | torch.device, n_mels: int = 128) -> torch.Tensor:
         )
     """
     try:
-        with np.load(os.path.join(os.path.dirname(__file__), "mel_filters.npz")) as f:
+        with np.load(
+            os.path.join(os.path.dirname(__file__), "mel_filters.npz")
+        ) as f:
             return torch.from_numpy(f[f"mel_{n_mels}"]).to(device).to(torch.float32)
     except FileNotFoundError:
         # Fallback to creating filters on the fly if file is missing (e.g. in CI/CD)
         # This requires librosa, but handles the missing file case gracefully
         try:
             import librosa
-
             filters = librosa.filters.mel(sr=16000, n_fft=400, n_mels=n_mels)
             return torch.from_numpy(filters).to(device).to(torch.float32)
         except ImportError as e:
             raise RuntimeError(
                 "mel_filters.npz not found and librosa not installed. "
-                "Please ensure mel_filters.npz exists in "
+                "Please ensure mel_filters.npz exists in " + 
                 "vllm/transformers_utils/processors/"
             ) from e
 
@@ -168,7 +169,7 @@ def log_mel_spectrogram(
         magnitudes = magnitudes.to(torch.float32)
 
     filters = mel_filters(audio.device, n_mels)
-
+    
     # Ensure dtypes match for matrix multiplication
     if filters.dtype != magnitudes.dtype:
         # Fallback: if magnitudes is still not float32 for some reason
@@ -361,7 +362,8 @@ class KimiAContent:
 
     def text_prepend(self, index: int, text_token_loss_mask: bool = False):
         self.text_token_ids = [index] + self.text_token_ids
-        self.text_token_loss_mask = [text_token_loss_mask] + (self.text_token_loss_mask)
+        self.text_token_loss_mask = [text_token_loss_mask] + (
+            self.text_token_loss_mask)
 
     def audio_pretend(
         self,
@@ -370,7 +372,8 @@ class KimiAContent:
         audio_token_loss_mask: bool = False,
     ):
         self.audio_token_ids = ids + self.audio_token_ids
-        self.is_continuous_mask = [is_continuous] * len(ids) + (self.is_continuous_mask)
+        self.is_continuous_mask = [is_continuous] * len(ids) + (
+            self.is_continuous_mask)
         self.audio_token_loss_mask = [audio_token_loss_mask] * len(
             ids
         ) + self.audio_token_loss_mask
@@ -442,14 +445,14 @@ class KimiAudioProcessor:
         kimia_text_audiodelaytokens (`int`, *optional*, defaults to 5):
             Number of blank tokens to insert in audio stream.
         kimia_token_offset (`int`, *optional*, defaults to 152064):
-            Offset applied to discrete audio IDs to map them into the LLM's
+            Offset applied to discrete audio IDs to map them into the LLM's 
             extended embedding space.
         text_tokenizer ([`Tiktokenizer`]):
             The tokenizer is a required input.
         audio_tokenizer ([`glm-4-voice-tokenizer`]):
             The tokenizer is a required input.
         chat_template (`Optional[str]`, *optional*):
-            The Jinja template to use for formatting the conversation. If
+            The Jinja template to use for formatting the conversation. If 
             not provided, the default chat template is used.
     """
 
@@ -701,9 +704,9 @@ class KimiAudioProcessor:
         # Pass audio paths (not loaded data) to avoid fork issues
         text_input_ids = text_input_ids.cpu().tolist()[0]  # Remove batch dimension
         # mm_data = audio_paths
-
+        
         # NOTE: vLLM's MultiModalDataParser requires raw audio data (numpy/tensor)
-        # to perform validation and resampling. Passing paths directly causes
+        # to perform validation and resampling. Passing paths directly causes 
         # assertion errors. We load the audio here to satisfy the parser.
         mm_data = []
         for path in audio_paths:
@@ -796,9 +799,13 @@ class KimiAudioProcessor:
     def __call__(
         self,
         text: TextInput | list[TextInput] | None = None,
-        audio: str | list[str] | AUDIO_TYPE | list[AUDIO_TYPE] | None = None,  # type: ignore
+        audio: str | list[str] | AUDIO_TYPE | list[AUDIO_TYPE] | None = None, # type: ignore
+        audio_input_ids=None,
+        is_continuous_mask=None,
+        audio_waveforms=None,
+        tokenizer=None,
         **kwargs,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         """
         This method implements the core 'Dual-Track' synchronization logic
         required by the Kimia architecture, ensuring that text and audio token
@@ -820,8 +827,10 @@ class KimiAudioProcessor:
         Args:
             text: Raw prompt text.
             audio: Raw audio waveforms (np.ndarray) for profiling or direct usage.
-            **kwargs: Includes 'audio_input_ids', 'audio_waveforms',
-                     'is_continuous_mask' from manual pre-processing (get_prompt).
+            audio_input_ids: Pre-tokenized audio IDs.
+            is_continuous_mask: Continuous mask for audio tokens.
+            audio_waveforms: Raw audio waveforms (np.ndarray) for profiling or direct usage.
+            tokenizer: Audio tokenizer for encoding audio waveforms.
 
         Returns:
             BatchFeature: A dictionary-like object containing synchronized
@@ -831,12 +840,10 @@ class KimiAudioProcessor:
         # Extract return_tensors parameter (like Qwen2-Audio does)
         return_tensors = kwargs.pop("return_tensors", None)
 
-        audio_input_ids = kwargs.get("audio_input_ids")
         text_input_ids = kwargs.get("prompt_token_ids")
-        is_continuous_mask = kwargs.get("is_continuous_mask")
-        audio_waveforms = kwargs.get("audio_waveforms")
         if "audio_tokenizer" in kwargs:
             self.audio_tokenizer = kwargs["audio_tokenizer"]
+        self.text_tokenizer = tokenizer or self.text_tokenizer
 
         audio_tokens = None
         new_audios = audio if audio is not None else []
@@ -855,7 +862,7 @@ class KimiAudioProcessor:
                     # Convert to tensor immediately
                     loaded_audios.append(torch.from_numpy(audio_data))
                 audio_waveforms = loaded_audios
-
+            
             if not isinstance(audio_input_ids, list):
                 audio_input_ids = [audio_input_ids]
 
@@ -875,7 +882,7 @@ class KimiAudioProcessor:
                 audio_tokens = torch.tensor([concatenated], dtype=torch.long)
 
             if text_input_ids is None:
-                text_input_ids = [self._tokenize_text(text)]  # type: ignore
+                text_input_ids = [self._tokenize_text(text)] # type: ignore
             text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
 
             # Manually add placeholders in text tokens to get throught the logic in
@@ -899,8 +906,8 @@ class KimiAudioProcessor:
                 is_continuous_mask if is_continuous_mask else None
             )
 
-            # NOTE: Convert numpy waveforms to Tensors for serialization
-            # compatibility. This applies to both manual and automatic paths
+            # NOTE: Convert numpy waveforms to Tensors for serialization 
+            # compatibility. This applies to both manual and automatic paths 
             # as they both populate audio_waveforms
             if audio_waveforms:
                 new_waveforms = []
@@ -972,7 +979,7 @@ class KimiAudioProcessor:
                 audio_seq = [media_begin] + placeholders + [media_end]
                 mask = [False] + [True] * audio_len + [False]
 
-                # Concatenate (extend, not append)
+                # Concatenate (extend, not append) 
                 # following official KimiAContent.merge()
                 concatenated_audio_ids.extend(audio_seq)
                 concatenated_mask.extend(mask)
@@ -989,7 +996,7 @@ class KimiAudioProcessor:
 
         # Construct dummy text input to match the only multi modal data input
         if text_input_ids is None:
-            text_input_ids = [self._tokenize_text(text) * (len(new_audios) + 2)]  # type: ignore
+            text_input_ids = [self._tokenize_text(text) * (len(new_audios) + 2)] # type: ignore
         text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
 
         # NOTE: We now rely on vLLM's PromptInsertion to inject placeholders
@@ -1017,8 +1024,8 @@ class KimiAudioProcessor:
             is_continuous_mask if is_continuous_mask else None
         )
 
-        # NOTE: Convert numpy waveforms to Tensors for serialization
-        # compatibility. This applies to both manual and automatic paths as
+        # NOTE: Convert numpy waveforms to Tensors for serialization 
+        # compatibility. This applies to both manual and automatic paths as 
         # they both populate audio_waveforms
         if audio_waveforms:
             new_waveforms = []
@@ -1030,7 +1037,7 @@ class KimiAudioProcessor:
                 else:
                     new_waveforms.append(wf)
             audio_waveforms = new_waveforms
-
+            
             result["audio_waveforms"] = audio_waveforms if audio_waveforms else None
 
         # Optional: audio_tokenizer (string path)
