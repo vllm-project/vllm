@@ -78,7 +78,7 @@ CPU_DEVICE = torch.device("cpu")
 
 if os.getenv("USE_FLAGOS") == "1":
     import flag_gems
-    
+
     FLAG_GEMS_CONFIG = [
         "sort",
         "sort_stable",
