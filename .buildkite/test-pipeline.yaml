@@ -123,6 +123,7 @@ steps:
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
+  artifact_paths: ["gpu_diagnostics.log"]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true

@@ -135,6 +135,7 @@ steps:
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration Test (LLM) # 30min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355B_1
@@ -153,6 +154,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Integration Test (API Server 1) # 100min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 130
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355B_1
@@ -170,6 +172,7 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355B_1
@@ -185,6 +188,7 @@ steps:
   - pytest -v -s entrypoints/pooling
 
 - label: Entrypoints Integration Test (Responses API)
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
@@ -200,6 +204,7 @@ steps:
   - pytest -v -s entrypoints/openai/responses
 
 - label: Distributed Tests (4 GPUs) # 35min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355B_4
@@ -255,6 +260,7 @@ steps:
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_8
@@ -323,6 +329,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 7min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355B_1
@@ -336,6 +343,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 9min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355B_1
@@ -365,6 +373,7 @@ steps:
     - pytest -v -s v1/engine
 
 - label: V1 Test entrypoints # 35min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355B_1
@@ -376,6 +385,7 @@ steps:
     - pytest -v -s v1/entrypoints
 
 - label: V1 Test others # 42min
+  artifact_paths: ["gpu_diagnostics.log"]
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355B_1

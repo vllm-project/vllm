@@ -55,6 +55,38 @@ cleanup_network() {
   fi
 }
 
+log_diagnostics() {
+  local log_file="gpu_diagnostics.log"
+  echo "--- Capturing GPU Diagnostics"
+  {
+    echo "================================================================"
+    echo "GPU Diagnostics captured at $(date)"
+    echo "================================================================"
+    echo ""
+    echo "--- Process list ---"
+    ps -ef
+    echo ""
+    echo "--- ROCm SMI PID info ---"
+    rocm-smi --showpids || echo "rocm-smi --showpids failed"
+    echo ""
+    echo "--- ROCm SMI Memory info ---"
+    rocm-smi --showmemuse || echo "rocm-smi --showmemuse failed"
+    echo ""
+    echo "--- Docker container status ---"
+    docker ps -a
+    echo ""
+    echo "--- End of Diagnostics ---"
+  } > "$log_file"
+
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    echo "--- Uploading $log_file as artifact"
+    buildkite-agent artifact upload "$log_file"
+  else
+    echo "--- buildkite-agent not found, skipping artifact upload"
+    cat "$log_file"
+  fi
+}
+
 # Call the cleanup docker function
 cleanup_docker
 
@@ -219,6 +251,19 @@ if [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total"*
   fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
+  (
+    # Background monitor for memory errors
+    while ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; do
+      sleep 1
+    done
+    docker logs -f "${container_name}" 2>&1 | grep --line-buffered "ValueError: Free memory" | while read -r line; do
+      echo "--- DETECTED GPU MEMORY ERROR: $line"
+      log_diagnostics
+    done
+  ) &
+  MONITOR_PID=$!
+
   docker run \
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --group-add $(getent group render | cut -d: -f3) \
@@ -235,4 +280,7 @@ else
           --name "${container_name}" \
           "${image_name}" \
           /bin/bash -c "${commands}"
+
+  # Stop the background monitor
+  kill $MONITOR_PID 2>/dev/null || true
 fi
