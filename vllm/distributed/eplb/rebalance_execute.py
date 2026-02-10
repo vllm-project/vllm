@@ -414,6 +414,7 @@ def _auto_tune_communication_config(
     old_indices: np.ndarray,
     new_indices: np.ndarray,
     ep_size: int,
+    ep_rank: int,
 ) -> tuple[
     EPLBCommunicationConfig,
     list[tuple[list[tuple[int, int]], list[tuple[int, int]]]] | None,
@@ -434,6 +435,7 @@ def _auto_tune_communication_config(
         old_indices: Current expert assignments.
         new_indices: Desired expert assignments.
         ep_size: Expert parallel world size.
+        ep_rank: Current rank in the expert parallel group.
 
     Returns:
         Tuple of (tuned EPLBCommunicationConfig, rank_transfers).
@@ -491,25 +493,29 @@ def _auto_tune_communication_config(
         # When using batching, num_groups must equal world size
         num_groups = ep_size
 
-        logger.debug(
-            "EPLB auto-tuning: Enabling experts_batch_size=%d "
-            "to meet max_num_experts_transfers=%d "
-            "(max_transfers=%d, ep_size=%d)",
-            experts_batch_size,
-            max_limit,
-            max_transfers,
-            ep_size,
-        )
+        if ep_rank == 0:
+            num_batches = (max_transfers + max_limit - 1) // max_limit
+            logger.info(
+                "EPLB auto-tuning: Enabling experts_batch_size=%d "
+                "(num_batches=%d) to meet max_num_experts_transfers=%d "
+                "(max_transfers=%d, ep_size=%d)",
+                experts_batch_size,
+                num_batches,
+                max_limit,
+                max_transfers,
+                ep_size,
+            )
     elif num_groups != communication_config.num_groups:
-        logger.debug(
-            "EPLB auto-tuning: Adjusted num_groups from %d to %d to meet "
-            "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
-            communication_config.num_groups,
-            num_groups,
-            max_limit,
-            max_transfers,
-            ep_size,
-        )
+        if ep_rank == 0:
+            logger.info(
+                "EPLB auto-tuning: Adjusted num_groups from %d to %d to meet "
+                "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
+                communication_config.num_groups,
+                num_groups,
+                max_limit,
+                max_transfers,
+                ep_size,
+            )
 
     return (
         EPLBCommunicationConfig(
@@ -570,6 +576,7 @@ def _build_communication_plan(
         old_indices=old_indices,
         new_indices=new_indices,
         ep_size=ep_size,
+        ep_rank=ep_rank,
     )
 
     # Extract transfer list for current rank if available

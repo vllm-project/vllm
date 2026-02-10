@@ -645,6 +645,7 @@ def test_auto_tuning_config(
         old_indices=old_indices[0].cpu().numpy(),
         new_indices=new_indices[0].cpu().numpy(),
         ep_size=world_size,
+        ep_rank=0,
     )
 
     assert tuned_config.num_groups >= expected_num_groups_min, (
