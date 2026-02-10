@@ -39,6 +39,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -56,11 +57,6 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -1314,11 +1310,6 @@ class _ValidateDatasetArgs(argparse.Action):
 
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
-    parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Trust remote code from huggingface",
-    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--num-prompts",
