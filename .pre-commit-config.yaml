@@ -158,6 +158,11 @@ repos:
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
     language: python
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/pre_commit/check_boolean_context_manager.py
+    language: python
+    types: [python]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
