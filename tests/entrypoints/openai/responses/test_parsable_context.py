@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
+import importlib.util
 import json
 
 import pytest
@@ -179,12 +179,12 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
     assert response.output[2].type == "reasoning"
     # make sure the correct math is in the final output
     assert response.output[3].type == "message"
-    assert "56088" in response.output[3].content[0].text
+    assert any(s in response.output[3].content[0].text for s in ("56088", "56,088"))
 
     # test raw input_messages / output_messages
     assert len(response.input_messages) == 1
     assert len(response.output_messages) == 3
-    assert "56088" in response.output_messages[2]["message"]
+    assert any(s in response.output_messages[2]["message"] for s in ("56088", "56,088"))
 
 
 @pytest.mark.asyncio
