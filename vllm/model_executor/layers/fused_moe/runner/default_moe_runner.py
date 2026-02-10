@@ -432,9 +432,10 @@ class DefaultMoERunner(MoERunner):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
-        assert shared_input is None, (
-            "Routed input transform is not currently supported with DP chunking."
-        )
+        # TODO(bnell): Fix shared_expert_inputs w/chunking.
+        # assert shared_input is None, (
+        #    "Routed input transform is not currently supported with DP chunking."
+        # )
 
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
@@ -489,7 +490,7 @@ class DefaultMoERunner(MoERunner):
                     x=staged_hidden_states,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
-                    shared_experts_input=None,
+                    shared_experts_input=shared_input,
                 )
 
             if has_separate_shared_experts:
