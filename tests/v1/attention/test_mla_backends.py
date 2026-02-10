@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -512,7 +512,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
 
 def run_attention_backend(
     backend: AttentionBackendEnum,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: MLAAttentionSpec,
     layer_names: list[str],
     vllm_config,
     device: torch.device,
@@ -989,7 +989,7 @@ def test_backend_correctness(
         kv_cache = kv_cache_per_block_size[block_size]
 
         # Create kv_cache_spec with the correct block_size for this backend
-        backend_kv_cache_spec = FullAttentionSpec(
+        backend_kv_cache_spec = MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=vllm_config.model_config.get_num_kv_heads(
                 vllm_config.parallel_config
@@ -997,6 +997,7 @@ def test_backend_correctness(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             sliding_window=vllm_config.model_config.get_sliding_window(),
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
         )
 
         backend_output = run_attention_backend(
