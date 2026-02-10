@@ -146,10 +146,6 @@ class EPLBConfig:
         Returns:
             EPLBCommunicationConfig
         """
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         num_groups = self.num_communication_groups
         experts_batch_size = self.communication_experts_batch_size
 
