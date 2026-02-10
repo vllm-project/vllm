@@ -256,6 +256,9 @@ class OpenAISpeechToText(OpenAIServing):
                 tokenizer_name=self.model_config.tokenizer,
                 tokenizer_mode=self.model_config.tokenizer_mode,
             )
+        if not hasattr(tokenizer, "pad_id"):
+            pad_token_id = getattr(tokenizer, "pad_token_id", 0)
+            tokenizer.pad_id = pad_token_id
         return instantiate_extra_tokens(tokenizer)
 
     def _apply_kimia_sampling_params(self, sampling_params) -> None:
