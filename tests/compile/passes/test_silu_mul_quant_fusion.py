@@ -184,10 +184,11 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+EXTENDED_TESTCASES: list[tuple[type[Any], bool, None]] = []
+# SiluMulGroupFp8Quant is only supported on ROCm
+if current_platform.is_rocm():
+    EXTENDED_TESTCASES.append((TestSiluMulGroupFp8QuantModel, True, None))
 
-EXTENDED_TESTCASES: list[tuple[type[Any], bool, None]] = [
-    (TestSiluMulGroupFp8QuantModel, True, None),
-]
 if current_platform.is_cuda():
     EXTENDED_TESTCASES.append((TestSiluMulNvfp4QuantModel, False, None))
 
@@ -245,7 +246,7 @@ def test_fusion_silu_and_mul_quant(
 
     with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND:
+        if current_platform.is_rocm() and IS_AITER_FOUND:
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )

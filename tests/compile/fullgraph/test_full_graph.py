@@ -10,6 +10,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -224,17 +225,25 @@ def test_fp8_kv_scale_compile(
     compilation_mode: int,
     model: str,
     backend: AttentionBackendEnum | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    model_kwargs = {
-        "quantization": "fp8",
-        "kv_cache_dtype": "fp8_e4m3" if current_platform.is_cuda() else "fp8",
-        "calculate_kv_scales": True,
-        "max_model_len": 512,
-    }
-    if backend:
-        model_kwargs["attention_config"] = {"backend": backend.name}
+    with monkeypatch.context() as m:
+        model_kwargs = {
+            "quantization": "fp8",
+            "kv_cache_dtype": "fp8_e4m3" if current_platform.is_cuda() else "fp8",
+            "calculate_kv_scales": True,
+            "max_model_len": 512,
+        }
+        if backend:
+            model_kwargs["attention_config"] = {"backend": backend.name}
+            if current_platform.is_rocm():
+                m.setenv("VLLM_ROCM_USE_AITER", "1")
+                # Disable Aiter MOE as some shapes are not supported
+                m.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
 
-    run_model(compilation_mode, model, **model_kwargs)
+                rocm_aiter_ops.refresh_env_variables()
+
+        run_model(compilation_mode, model, **model_kwargs)
 
 
 def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):

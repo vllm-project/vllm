@@ -403,6 +403,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
             and self.kv_b_proj.weight.dtype == torch.bfloat16
+            and current_platform.has_device_capability(95)  # gfx950 and above
         )
 
         # Attributes for forward_impl method
