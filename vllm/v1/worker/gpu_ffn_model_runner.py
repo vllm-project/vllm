@@ -167,6 +167,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 with set_forward_context(
                     attn_metadata=None, vllm_config=self.vllm_config
                 ):
+                    print(f"jcz _ffn_forward execute_eager_mode dp_metadata:{dp_metadata} hidden_states:{hidden_states.shape}")
                     get_forward_context().dp_metadata = dp_metadata
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, layer_idx
@@ -180,11 +181,11 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
     
     @torch.inference_mode()
     def execute_model(
-        self, 
-        scheduler_output=None, 
-        intermediate_tensors=None, 
+        self,
+        scheduler_output=None,
+        intermediate_tensors=None,
         dp_metadata_list: dict | None = None,
-        is_graph_capturing: bool = False
+        is_graph_capturing: bool = False,
     ):
         """Execute FFN computation for a single request"""
         self.profiler.step()
@@ -293,16 +294,18 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
     def capture_model(
         self,
         dp_metadata_list: Optional[dict] = None,
+        is_warmup: bool = False,
+        is_attn_graph_capturing: bool = True,
     ) -> int:
         """Capture CUDA graphs for FFN operations.
-        When dp_metadata_list and is_graph_capturing are provided (e.g. from attn
-        side), use them without recv so that no extra recv is needed.
+        Handles both warmup (is_warmup=True) and formal capture (is_warmup=False).
+        When dp_metadata_list is provided from attn side, use it without recv.
         """
         if not self.use_cuda_graph:
             logger.warning("Skipping CUDA graph capture.")
             return 0
 
-        logger.info("Starting CUDA graph capture for FFN operations...")
+        # Formal capture
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
@@ -310,14 +313,21 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         if self._graph_memory_pool is None:
             self._graph_memory_pool = torch.cuda.graph_pool_handle()
 
-        # Capture graphs for each layer and different batch sizes
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with graph_capture(device=self.device):
-            self._capture_graphs(
-                cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                dp_metadata_list=dp_metadata_list)
+            if is_warmup:
+                logger.info("Starting CUDA graph capture for FFN warmup...")
+                self._ffn_forward(
+                    dp_metadata_list=dp_metadata_list,
+                    is_graph_capturing=False,
+                )
+            else:
+                logger.info("Starting CUDA graph capture for FFN operations...")
+                self._capture_graphs(
+                    cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                    dp_metadata_list=dp_metadata_list,
+                    is_attn_graph_capturing=is_attn_graph_capturing,
+                )
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
@@ -336,12 +346,13 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         self,
         cudagraph_runtime_mode: CUDAGraphMode,
         dp_metadata_list: dict,
+        is_attn_graph_capturing: bool = True,
     ):
         assert cudagraph_runtime_mode == CUDAGraphMode.FULL
         self._dummy_run(
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             dp_metadata_list=dp_metadata_list,
-            is_attn_graph_capturing=True,
+            is_attn_graph_capturing=is_attn_graph_capturing,
         )
 
     def _run_ffn_computation(

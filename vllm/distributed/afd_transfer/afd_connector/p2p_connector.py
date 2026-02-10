@@ -82,7 +82,6 @@ def afd_p2p_recv_impl(
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
     print("end afd_p2p_recv_impl", flush=True)
 
-
 def afd_p2p_recv_fake(
     out: torch.Tensor,
     src: int,
@@ -335,12 +334,14 @@ class P2PAFDConnector(AFDConnectorBase):
         self,
         dp_metadata_list: dict[int, DPMetadata],
         is_graph_capturing: bool = False,
+        is_warmup: bool = False,
     ) -> None:
         """Update the connector state based on the received DPMetadata list.
         This replaces the explicit metadata communication step.
         """
         self.dp_metadata_list = dp_metadata_list
         self.is_graph_capturing = is_graph_capturing
+        self.is_warmup = is_warmup
         num_of_stages = len(dp_metadata_list)
         
         # Build tensor metadata list for each stage
@@ -490,19 +491,31 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         return hidden_states, metadata
 
-    def send_dp_metadata_list(self, data, is_graph_capturing: bool = False):
+    def send_dp_metadata_list(
+        self,
+        data,
+        is_graph_capturing: bool = False,
+        is_warmup: bool = False,
+    ):
         self.update_state_from_dp_metadata(data, is_graph_capturing)
-        send_data = (data, is_graph_capturing)
+        send_data = (data, is_graph_capturing, is_warmup)
         for dst in self.dst_list:
             object_bytes = pickle.dumps(send_data)
             # Use CPU tensor for Gloo backend
             object_tensor = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
             size_tensor = torch.tensor([object_tensor.numel()], dtype=torch.long)
-            
-            logger.info(f"jcz send_dp_metadata_list dst:{dst} self.p2p_rank:{self.p2p_rank} is_graph_capturing:{is_graph_capturing}")
+
+            logger.info(
+                "jcz send_dp_metadata_list dst:%s self.p2p_rank:%s "
+                "is_graph_capturing:%s is_warmup:%s",
+                dst,
+                self.p2p_rank,
+                is_graph_capturing,
+                is_warmup,
+            )
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor, dst=dst, group=self.p2p_pg)
-    
+
     def recv_dp_metadata_list(self):
         src = self.p2p_rank % self.min_size + self.ffn_size
         logger.info(f"jcz recv_dp_metadata_list src:{src} self.p2p_rank:{self.p2p_rank}")
@@ -510,15 +523,24 @@ class P2PAFDConnector(AFDConnectorBase):
         # Use CPU tensor for Gloo backend
         size_tensor = torch.empty(1, dtype=torch.long)
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
-        
+
         object_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8)
         rank_object = torch.distributed.recv(object_tensor, src=src, group=self.p2p_pg)
 
         assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
 
-        data, is_graph_capturing = pickle.loads(object_tensor.numpy().tobytes())
-        logger.info(f"jcz recv_dp_metadata_list is_graph_capturing:{is_graph_capturing}")
-        return data, is_graph_capturing
+        obj = pickle.loads(object_tensor.numpy().tobytes())
+        if len(obj) == 3:
+            data, is_graph_capturing, is_warmup = obj
+        else:
+            data, is_graph_capturing = obj
+            is_warmup = False
+        logger.info(
+            "jcz recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s",
+            is_graph_capturing,
+            is_warmup,
+        )
+        return data, is_graph_capturing, is_warmup
 
     def is_vaild_rank_for_inequal_AF(self,rank):
         # Only support ffn rank < attn rank

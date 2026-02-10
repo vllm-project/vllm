@@ -489,6 +489,10 @@ class GPUModelRunner(
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+        # True only during cudagraph warmup _dummy_run(s); False during
+        # capture and normal runs. Used for AFD send_dp_metadata_list.
+        self._is_warmup = False
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -3700,7 +3704,9 @@ class GPUModelRunner(
             if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                 logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                self.afd_connector.send_dp_metadata_list(dp_metadata_list)
+                self.afd_connector.send_dp_metadata_list(
+                    dp_metadata_list, is_warmup=self._is_warmup
+                )
             logger.info(f'jcz send dp_metadata_list in prepare input')
 
             model_output = self._model_forward(
@@ -5101,7 +5107,11 @@ class GPUModelRunner(
                 if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
                     logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                    self.afd_connector.send_dp_metadata_list(dp_metadata_list, is_graph_capturing)
+                    self.afd_connector.send_dp_metadata_list(
+                        dp_metadata_list,
+                        is_graph_capturing=is_graph_capturing,
+                        is_warmup=self._is_warmup,
+                    )
                 logger.info(f'jcz send dp_metadata_list in prepare input')
                 outputs = self.model(
                     input_ids=input_ids,
@@ -5556,14 +5566,14 @@ class GPUModelRunner(
                 # if we want to warm up attention or not. This is
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
-
+                self._is_warmup = True
                 dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     allow_microbatching=allow_microbatching,
                     num_active_loras=num_active_loras,
                 )
-
+            self._is_warmup = False
             # Capture run
             dummy_run(
                 num_tokens,

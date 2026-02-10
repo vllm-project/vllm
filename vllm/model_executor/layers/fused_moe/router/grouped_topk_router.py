@@ -78,11 +78,11 @@ def fused_grouped_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-# @torch.compile(
-#     dynamic=True,
-#     backend=current_platform.simple_compile_backend,
-#     options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-# )
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+)
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -112,7 +112,9 @@ def grouped_topk(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
         )
-
+    
+    print(f"jcz grouped_topk hidden_states.shape: {hidden_states.shape}")
+    print(f"jcz grouped_topk gating_output.shape: {gating_output.shape}")
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
     if scoring_func == "softmax":
@@ -340,6 +342,8 @@ class GroupedTopKRouter(BaseRouter):
         else:
             grouped_topk_impl = grouped_topk
 
+        print(f"jcz _compute_routing hidden_states.shape: {hidden_states.shape}")
+        print(f"jcz _compute_routing router_logits.shape: {router_logits.shape}")
         topk_weights, topk_ids = grouped_topk_impl(
             hidden_states=hidden_states,
             gating_output=router_logits,
