@@ -10,12 +10,13 @@ build:
   jobs:
     post_checkout:
       - git fetch --unshallow || true
+    pre_create_environment:
+      - pip install uv
+    create_environment:
+      - uv venv $READTHEDOCS_VIRTUALENV_PATH
+    post_create_environment:
+      - uv pip install -r requirements/docs.txt
 
 mkdocs:
   configuration: mkdocs.yaml
   fail_on_warning: true
-
-# Optionally declare the Python requirements required to build your docs
-python:
-  install:
-    - requirements: requirements/docs.txt
