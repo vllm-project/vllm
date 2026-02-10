@@ -83,7 +83,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.xpu import (
+from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
