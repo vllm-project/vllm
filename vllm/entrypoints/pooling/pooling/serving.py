@@ -141,12 +141,13 @@ class OpenAIServingPooling(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             if use_io_processor:
-                assert self.io_processor is not None and isinstance(
-                    request, IOProcessorRequest
-                )
+                assert self.io_processor is not None
                 pooling_params = self.io_processor.merge_pooling_params()
+                tokenization_kwargs: dict[str, Any] = {}
             else:
-                pooling_params = request.to_pooling_params()
+                pooling_params = request.to_pooling_params()  # type: ignore
+                tok_params = request.build_tok_params(self.model_config)  # type: ignore
+                tokenization_kwargs = tok_params.get_encode_kwargs()
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
@@ -163,12 +164,6 @@ class OpenAIServingPooling(OpenAIServing):
                     if raw_request is None
                     else await self._get_trace_headers(raw_request.headers)
                 )
-
-                if use_io_processor:
-                    tokenization_kwargs: dict[str, Any] = {}
-                else:
-                    tok_params = request.build_tok_params(self.model_config)  # type: ignore
-                    tokenization_kwargs = tok_params.get_encode_kwargs()
 
                 generator = self.engine_client.encode(
                     engine_prompt,
