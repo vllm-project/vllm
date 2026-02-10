@@ -9,7 +9,7 @@ blake3
 py-cpuinfo
 transformers >= 4.56.0, < 5
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
-protobuf # Required by LlamaTokenizer, gRPC.
+protobuf >= 5.29.6, !=6.30.*, !=6.31.*, !=6.32.*, !=6.33.0, !=6.33.1, !=6.33.2, !=6.33.3, !=6.33.4 # Required by LlamaTokenizer, gRPC. CVE-2026-0994
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp >= 3.13.3
 openai >= 1.99.1  # For Responses API with reasoning content
