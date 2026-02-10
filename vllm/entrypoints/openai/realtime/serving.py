@@ -8,13 +8,14 @@ from typing import Literal, cast
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import PromptType, StreamingInput
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 
 logger = init_logger(__name__)
 
@@ -70,15 +71,21 @@ class OpenAIServingRealtime(OpenAIServing):
         Yields:
             StreamingInput objects containing audio prompts for the engine
         """
+        model_config = self.model_config
+        renderer = self.renderer
 
         # mypy is being stupid
         # TODO(Patrick) - fix this
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, self.model_config
+                audio_stream, input_stream, model_config
             ),
         )
 
         async for prompt in stream_input_iter:
-            yield StreamingInput(prompt=prompt)
+            (tok_prompt,) = await renderer.render_cmpl_async(
+                [parse_model_prompt(model_config, prompt)]
+            )
+
+            yield StreamingInput(prompt=tok_prompt)

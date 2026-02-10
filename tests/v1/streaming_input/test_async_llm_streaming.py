@@ -7,10 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vllm.inputs import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 

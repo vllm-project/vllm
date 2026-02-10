@@ -72,7 +72,7 @@ from vllm.outputs import (
 )
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
@@ -788,19 +788,6 @@ class LLM:
 
         return outputs
 
-    def _get_cmpl_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
-
-        return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            # For Whisper, special tokens should be provided by the user based
-            # on the task and language of their request. Also needed to avoid
-            # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens=not model_config.is_encoder_decoder,
-        ).with_kwargs(tokenization_kwargs)
-
     def _preprocess_completion(
         self,
         prompts: Sequence[PromptType],
@@ -822,19 +809,9 @@ class LLM:
         parsed_prompts = [
             parse_model_prompt(model_config, prompt) for prompt in prompts
         ]
-        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
+        tok_params = renderer.default_cmpl_tok_params.with_kwargs(tokenization_kwargs)
 
         return renderer.render_cmpl(parsed_prompts, tok_params)
-
-    def _get_chat_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
-
-        return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            add_special_tokens=False,
-        ).with_kwargs(tokenization_kwargs)
 
     def _preprocess_chat(
         self,
@@ -873,7 +850,7 @@ class LLM:
                 ),
             ),
         )
-        tok_params = self._get_chat_tok_params(tokenization_kwargs)
+        tok_params = renderer.default_chat_tok_params.with_kwargs(tokenization_kwargs)
 
         _, engine_prompts = renderer.render_chat(
             conversations,
@@ -1567,7 +1544,8 @@ class LLM:
             architecture=architecture,
         )
 
-        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
+        renderer = self.llm_engine.renderer
+        tok_params = renderer.default_cmpl_tok_params.with_kwargs(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
         if model_config.is_cross_encoder:
@@ -1873,7 +1851,8 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
+        renderer = self.llm_engine.renderer
+        tok_params = renderer.default_cmpl_tok_params.with_kwargs(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(

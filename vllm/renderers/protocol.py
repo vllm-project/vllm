@@ -3,6 +3,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -62,6 +63,31 @@ class BaseRenderer(ABC):
             self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
 
         return self._async_tokenizer
+
+    @cached_property
+    def default_cmpl_tok_params(self) -> TokenizeParams:
+        config = self.config
+        encoder_config = config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens=not config.is_encoder_decoder,
+        )
+
+    @cached_property
+    def default_chat_tok_params(self) -> TokenizeParams:
+        config = self.config
+        encoder_config = config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=False,
+        )
 
     # Step 1: Convert raw inputs to prompts
     def render_prompt(
@@ -296,10 +322,13 @@ class BaseRenderer(ABC):
     def render_cmpl(
         self,
         prompts: Sequence[DictPrompt | bytes],
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_cmpl_tok_params
+
         dict_prompts = self.render_prompts(prompts)
 
         # NOTE: Some MM models have non-default `add_special_tokens`
@@ -318,10 +347,13 @@ class BaseRenderer(ABC):
     async def render_cmpl_async(
         self,
         prompts: Sequence[DictPrompt | bytes],
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_cmpl_tok_params
+
         dict_prompts = await self.render_prompts_async(prompts)
 
         # NOTE: MM data cannot be passed to online Completions API
@@ -337,10 +369,13 @@ class BaseRenderer(ABC):
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
         chat_params: ChatParams,
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_chat_tok_params
+
         rendered = [
             self.render_messages(conversation, chat_params)
             for conversation in conversations
@@ -363,10 +398,13 @@ class BaseRenderer(ABC):
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
         chat_params: ChatParams,
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_chat_tok_params
+
         rendered = [
             self.render_messages_async(conversation, chat_params)
             for conversation in conversations
