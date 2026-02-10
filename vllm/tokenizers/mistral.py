@@ -74,7 +74,10 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
                     f"'tool_calls' must be a list of tool call objects, "
                     f"got {type(raw_tool_calls).__name__}"
                 )
-            tool_calls_validator = raw_tool_calls
+            if isinstance(raw_tool_calls, (list, tuple)):
+                tool_calls_validator = iter(raw_tool_calls)
+            else:
+                tool_calls_validator = raw_tool_calls
             validated_tool_calls = []
             while True:
                 try:
