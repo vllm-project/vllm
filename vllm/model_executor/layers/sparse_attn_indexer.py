@@ -24,6 +24,8 @@ elif current_platform.is_xpu():
 
 logger = init_logger(__name__)
 
+import flashinfer
+
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -39,6 +41,7 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
+    offsets_buffer: torch.Tensor
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -65,6 +68,7 @@ def sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            offsets_buffer,
         )
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
@@ -184,13 +188,10 @@ def sparse_attn_indexer(
                     + 1
                     + decode_metadata.offsets
                 ).flatten()
-
-            torch.ops._C.large_context_topk(
-                logits,
-                topk_indices,
-                lengths,
-                None,
-            )
+    
+            offsets = offsets_buffer[:num_rows]
+            result = flashinfer.top_k_ragged_transform(logits, offsets, lengths, topk_tokens)
+            topk_indices[:] = result
         else:
             torch.ops._C.top_k_per_row_decode(
                 logits,
@@ -231,6 +232,7 @@ def sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    offsets_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -277,6 +279,12 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
+        # Pre-allocate offsets buffer for FlashInfer top-k (reused across calls)
+        self.register_buffer(
+            "_offsets_buffer",
+            torch.zeros(max_total_seq_len, dtype=torch.int32),
+            persistent=False
+        )
 
     def forward_native(
         self,
@@ -316,6 +324,7 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            self._offsets_buffer,
         )
 
     def forward_hip(
@@ -326,6 +335,8 @@ class SparseAttnIndexer(CustomOp):
         weights: torch.Tensor,
     ):
         if rocm_aiter_ops.is_enabled():
+            # ROCm path doesn't use FlashInfer, but pass dummy offsets_buffer for API compatibility
+            offsets_buffer = self._get_offsets_buffer(hidden_states.device)
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 self.k_cache.prefix,
@@ -340,6 +351,7 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
+                self._offsets_buffer,
             )
         else:
             raise RuntimeError(
