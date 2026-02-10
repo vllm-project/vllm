@@ -318,7 +318,6 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
     def __call__(
         self,
         raw_speech: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
-        # raw_speech: np.ndarray | list[np.ndarray],
         truncation: bool = True,
         pad_to_multiple_of: int | None = None,
         return_tensors: str | TensorType | None = None,
@@ -331,13 +330,6 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
         return_token_timestamps: bool | None = None,
         **kwargs,
     ) -> BatchFeature:
-        # is_batched_numpy = (
-        #    isinstance(raw_speech, np.ndarray) and len(raw_speech.shape) > 1
-        # )
-        # if is_batched_numpy and len(raw_speech.shape) > 2:
-        #    raise ValueError(
-        #        f"Only mono-channel audio is supported for input to {self}"
-        #    )
         is_batched = isinstance(raw_speech, (list, tuple)) and (
             isinstance(raw_speech[0], (np.ndarray, tuple, list))
         )
