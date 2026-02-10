@@ -17,7 +17,11 @@ logger = init_logger(__name__)
 
 
 class KimiTokenizer(TokenizerLike):
-    """Tokenizer wrapper for Kimi models using TikTokenTokenizer backend."""
+    """Tokenizer wrapper for Kimi models using TikTokenTokenizer backend.
+
+    Relies on the tokenizer's embedded chat_template for chat completions,
+    rather than hard-coding templates inside vLLM.
+    """
 
     def __init__(self, hf_tokenizer: Any):
         """Initialize with a HuggingFace TikTokenTokenizer."""
@@ -232,6 +236,7 @@ class KimiTokenizer(TokenizerLike):
         chat_template: str | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
+        """Return the tokenizer-provided chat template when available."""
         if hasattr(self._tokenizer, "get_chat_template"):
             return self._tokenizer.get_chat_template(chat_template, tools=tools)
         if chat_template is not None:
