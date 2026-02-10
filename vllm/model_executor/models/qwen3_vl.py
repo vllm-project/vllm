@@ -1112,17 +1112,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     }
 )
 class Qwen3LLMModel(Qwen3Model):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        vision_config = vllm_config.model_config.hf_config.vision_config
-        if not get_pp_group().is_first_rank and hasattr(
-            vision_config, "deepstack_visual_indexes"
-        ):
-            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
-                "start_layer should be greater than or equal to "
-                "len(deepstack_visual_indexes)"
-            )
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1178,7 +1167,7 @@ class Qwen3LLMModel(Qwen3Model):
 class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3ForCausalLM, self).__init__()
-        config = vllm_config.model_config.hf_config.text_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -1298,7 +1287,18 @@ class Qwen3VLForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3LLMForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.language_model.start_layer >= len(
+                config.vision_config.deepstack_visual_indexes
+            ), (
+                "start_layer should be greater than or equal to "
+                "len(deepstack_visual_indexes)"
             )
 
         self.make_empty_intermediate_tensors = (
