@@ -13,8 +13,6 @@ from collections.abc import Sequence
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic.dataclasses import dataclass
-
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
@@ -69,7 +67,6 @@ class LoRAParserAction(argparse.Action):
 
 
 @config
-@dataclass
 class FrontendArgs:
     """Arguments for the OpenAI-compatible frontend server."""
 

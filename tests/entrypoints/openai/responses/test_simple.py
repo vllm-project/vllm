@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -35,7 +34,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
@@ -194,3 +193,27 @@ async def test_max_tokens(client: OpenAI, model_name: str):
     assert response is not None
     assert response.status == "incomplete"
     assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_extra_sampling_params(client: OpenAI, model_name: str):
+    """Test that extra sampling parameters are accepted and work."""
+    # Test with multiple sampling parameters - just verify they're accepted
+    response = await client.responses.create(
+        model=model_name,
+        input="Write a short sentence",
+        max_output_tokens=50,
+        temperature=0.7,
+        top_p=0.9,
+        extra_body={
+            "top_k": 40,
+            "repetition_penalty": 1.2,
+            "seed": 42,
+        },
+    )
+
+    # Verify request succeeded and parameters were accepted
+    assert response.status in ["completed", "incomplete"]
+    assert len(response.output) > 0
+    assert response.output[0].content[0].text  # Has text output

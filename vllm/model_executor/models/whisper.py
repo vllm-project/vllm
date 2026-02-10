@@ -5,7 +5,7 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -727,6 +727,14 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
+        # The HF WhisperProcessor passes **kwargs to both the tokenizer
+        # and the feature extractor. Text-tokenizer kwargs like
+        # `truncation` and `max_length` must be removed when audio data
+        # is present, otherwise the feature extractor interprets
+        # `max_length` as raw audio samples and truncates the audio.
+        tok_kwargs = {
+            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
+        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -815,21 +823,18 @@ class WhisperForConditionalGeneration(
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt"
             )
-        prompt = {
-            "encoder_prompt": {
-                # Whisper does not support encoder prompt.
-                "prompt": "",
-                "multi_modal_data": {
-                    "audio": (audio, stt_config.sample_rate),
-                },
-            },
-            "decoder_prompt": (
-                (f"<|prev|>{request_prompt}" if request_prompt else "")
-                + f"<|startoftranscript|><|{language}|>"
-                + f"<|{task_type}|><|notimestamps|>"
+
+        decoder_text = (
+            f"<|prev|>{request_prompt}" if request_prompt else ""
+        ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
+
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",  # Whisper does not support encoder prompt.
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
             ),
-        }
-        return cast(PromptType, prompt)
+            decoder_prompt=TextPrompt(prompt=decoder_text),
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -953,8 +958,8 @@ def _create_fake_bias_for_k_proj(
     So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
     for name, weight in weights:
+        yield name, weight
         if name.endswith(fake_bias_key_name):
             bias = torch.zeros(weight.size(0))
             bias_name = name.replace("weight", "bias")
-            yield from [(name, weight), (bias_name, bias)]
-        yield name, weight
+            yield bias_name, bias
