@@ -319,6 +319,7 @@ class EagleSpeculator:
             num_tokens=num_reqs,
             query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=1,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
