@@ -7,7 +7,7 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Final, Literal, TypeAlias, TypeVar, cast
+from typing import Any, Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -256,10 +256,10 @@ class OpenAISpeechToText(OpenAIServing):
                 tokenizer_name=self.model_config.tokenizer,
                 tokenizer_mode=self.model_config.tokenizer_mode,
             )
-        if not hasattr(tokenizer, "pad_id"):
-            pad_token_id = getattr(tokenizer, "pad_token_id", 0)
-            tokenizer.pad_id = pad_token_id
-        return instantiate_extra_tokens(tokenizer)
+        tokenizer_any = cast(Any, tokenizer)
+        if not hasattr(tokenizer_any, "pad_id"):
+            tokenizer_any.pad_id = getattr(tokenizer_any, "pad_token_id", 0)
+        return instantiate_extra_tokens(tokenizer_any)
 
     def _apply_kimia_sampling_params(self, sampling_params) -> None:
         sampling_params.temperature = 0.0
