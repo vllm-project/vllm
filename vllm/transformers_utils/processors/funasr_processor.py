@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -316,7 +317,8 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
 
     def __call__(
         self,
-        raw_speech: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
+        # raw_speech: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
+        raw_speech: np.ndarray | list[np.ndarray],
         truncation: bool = True,
         pad_to_multiple_of: int | None = None,
         return_tensors: str | TensorType | None = None,
@@ -329,9 +331,47 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
         return_token_timestamps: bool | None = None,
         **kwargs,
     ) -> BatchFeature:
+        # is_batched_numpy = (
+        #    isinstance(raw_speech, np.ndarray) and len(raw_speech.shape) > 1
+        # )
+        # if is_batched_numpy and len(raw_speech.shape) > 2:
+        #    raise ValueError(
+        #        f"Only mono-channel audio is supported for input to {self}"
+        #    )
+        is_batched = isinstance(raw_speech, (list, tuple)) and (
+            isinstance(raw_speech[0], (np.ndarray, tuple, list))
+        )
+
+        if is_batched:
+            raw_speech = [
+                np.asarray([speech], dtype=np.float32).T for speech in raw_speech
+            ]
+        elif not is_batched and not isinstance(raw_speech, np.ndarray):
+            raw_speech = np.asarray(raw_speech, dtype=np.float32)
+        elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(
+            np.float64
+        ):
+            raw_speech = raw_speech.astype(np.float32)
+
+        if not is_batched:
+            raw_speech = [np.asarray([raw_speech]).T]
+
+        batched_speech = BatchFeature({"input_features": raw_speech})
+
+        padded_inputs = self.pad(
+            batched_speech,
+            padding=padding,
+            max_length=max_length if max_length else self.n_samples,
+            truncation=truncation,
+            pad_to_multiple_of=pad_to_multiple_of,
+            return_attention_mask=return_attention_mask or do_normalize,
+        )
+
+        input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
+
         self.frontend = WavFrontend(**self.frontend_conf)
-        speech, speech_lengths = self.extract_fbank(
-            raw_speech,
+        input_features, speech_lengths = self.extract_fbank(
+            input_features[0],
             data_type=kwargs.get("data_type", "sound"),
             frontend=self.frontend,
             is_final=True,
@@ -339,14 +379,21 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
         olens = 1 + (speech_lengths - 3 + 2 * 1) // 2
         olens = 1 + (olens - 3 + 2 * 1) // 2
         fake_token_len = (olens - 1) // 2 + 1
-        batched_speech = BatchFeature(
-            {
-                "input_features": speech,
-                "speech_lengths": speech_lengths,
-                "fake_token_len": fake_token_len,
-            }
-        )
-        return batched_speech
+        if isinstance(input_features[0], list):
+            padded_inputs["input_features"] = [
+                np.asarray(feature, dtype=np.float32) for feature in input_features
+            ]
+
+        else:
+            padded_inputs["input_features"] = input_features
+
+        if return_tensors is not None:
+            padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
+
+        padded_inputs["speech_lengths"] = speech_lengths
+        padded_inputs["fake_token_len"] = fake_token_len
+
+        return padded_inputs
 
 
 class FunASRProcessor(ProcessorMixin):

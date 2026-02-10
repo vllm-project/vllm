@@ -622,7 +622,7 @@ class FunASRAudioInputs(TensorSchema):
     ]
     speech_lengths: Annotated[
         list[torch.Tensor] | None,
-        TensorShape("m"),
+        TensorShape("b"),
     ]
 
 
