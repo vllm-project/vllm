@@ -97,6 +97,8 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+RUN pip install --extra-index-url https://download.pytorch.org/whl/test/rocm7.0 \
+    torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
