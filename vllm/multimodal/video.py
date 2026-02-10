@@ -758,6 +758,8 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         data: bytes,
         num_frames: int = 32,
         fps: int = 1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
