@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from typing import Any
 
 import pytest
 import torch
@@ -10,7 +9,7 @@ import vllm.envs as envs
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
-from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._aiter_ops import IS_AITER_FOUND
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     FUSED_OPS,
@@ -184,13 +183,6 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
-EXTENDED_TESTCASES: list[tuple[type[Any], bool, None]] = []
-# SiluMulGroupFp8Quant is only supported on ROCm
-if current_platform.is_rocm():
-    EXTENDED_TESTCASES.append((TestSiluMulGroupFp8QuantModel, True, None))
-
-if current_platform.is_cuda():
-    EXTENDED_TESTCASES.append((TestSiluMulNvfp4QuantModel, False, None))
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
@@ -200,7 +192,10 @@ if current_platform.is_cuda():
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, force_kernel",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
-    + EXTENDED_TESTCASES,
+    + [
+        (TestSiluMulNvfp4QuantModel, False, None),
+        (TestSiluMulGroupFp8QuantModel, True, None),
+    ],
 )
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
@@ -246,14 +241,14 @@ def test_fusion_silu_and_mul_quant(
 
     with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if current_platform.is_rocm() and IS_AITER_FOUND:
+        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
             m.setenv("VLLM_ROCM_USE_AITER", "1")
             rocm_aiter_ops.refresh_env_variables()
-
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]

@@ -1695,6 +1695,7 @@ steps:
 - label: AsyncTP Correctness Tests  (2xMI325 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   device: mi325_2
   optional: true
   num_devices: 2
@@ -1789,6 +1790,7 @@ steps:
 - label: Fusion E2E TP2 Quick (MI325)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   device: mi325_1
   num_devices: 2
   source_file_dependencies:
@@ -1806,6 +1808,7 @@ steps:
 - label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   device: mi325_2
   num_devices: 2
   source_file_dependencies:
@@ -1823,6 +1826,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
 
 - label: Fusion E2E TP2 (MI325)
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: mi325_2
