@@ -1,0 +1,52 @@
+# MLA prefill backend comparison (FA3 vs FA4)
+#
+# Compares FlashAttention versions for MLA prefill performance.
+# Uses cutlass_mla as the decode backend for impl construction
+# (only the prefill path is exercised).
+#
+# Usage:
+#   python benchmark.py --config configs/mla_prefill.yaml
+
+description: "MLA prefill backend comparison (FA3 vs FA4)"
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+batch_specs:
+  # Pure prefill (q_len == kv_len)
+  - "q512"
+  - "q1k"
+  - "q2k"
+  - "q4k"
+  - "q8k"
+
+  # Batched prefill
+  - "2q1k"
+  - "4q1k"
+  - "8q512"
+
+  # Chunked prefill / extend (q_len < kv_len)
+  - "q128s1k"
+  - "q256s2k"
+  - "q512s4k"
+  - "q1ks4k"
+
+decode_backends:
+  - cutlass_mla
+
+prefill_backends:
+  - fa3
+  - fa4
+
+device: "cuda:0"
+repeats: 5
+warmup_iters: 3
