@@ -509,23 +509,15 @@ def test_reasoning_spec_decode_grammar_comprehensive():
     Test for speculative decoding with reasoning parser and grammar constraints.
 
     This test validates the complete fix for the bug where combining reasoning parser,
-    structured output (JSON schema), and speculative decoding resulted in invalid JSON output.
+    structured output (JSON schema), and speculative decoding resulted in
+    invalid JSON output.
 
-    The test covers three critical aspects:
-
-    1. SPEC TOKEN CLEARING (Primary fix):
-       - When </think> is detected in spec tokens, ALL spec tokens are cleared
-       - This prevents unconstrained tokens from violating grammar during transition
-
-    2. GRAMMAR FSM PROTECTION (Last 3 commits - d2efd099):
-       - Grammar FSM does NOT accept </think> token
-       - Only actual content tokens are fed to grammar FSM
-
-    3. STALE FLAG HANDLING (Last 3 commits - c5b6562e + 65f02134):
-       - Spec tokens validated even when reasoning_ended flag is stale
-       - Validation based on actual tokens, not flag state
-
-    Without the complete fix, this test FAILS at one or more assertions.
+      - When reasoning_end is detected in spec tokens, ALL spec tokens are cleared.
+        This prevents unconstrained tokens from violating grammar during transition.
+      - Grammar FSM does NOT accept reasoning_end token.
+        Only actual content tokens are fed to grammar FSM.
+      - Spec tokens validated even when reasoning_ended flag is stale.
+        Validation based on actual tokens, not flag state.
     """
     REASONING_END_TOKEN_ID = 151660
 

@@ -269,10 +269,9 @@ class StructuredOutputManager:
                 ):
                     # Check each spec token position to find where reasoning ends
                     for idx in range(len(req_tokens)):
-                        check_seq = list(request.all_token_ids) + list(
-                            req_tokens[: idx + 1]
-                        )
-                        if self.reasoner.is_reasoning_end(check_seq):
+                        if self.reasoner.is_reasoning_end_streaming(
+                            request.all_token_ids, req_tokens[: idx + 1]
+                        ):
                             reasoning_ends_at_idx = idx
                             break
 
@@ -359,7 +358,7 @@ class StructuredOutputManager:
 
             # Check if reasoning has actually ended by looking at tokens
             # This handles async scheduling where flags might be stale
-            if self.reasoner.is_reasoning_end(list(request.all_token_ids)):
+            if self.reasoner.is_reasoning_end(request.all_token_ids):
                 # Also update the flag for consistency
                 request.structured_output_request.reasoning_ended = True
                 return True
@@ -388,8 +387,9 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             # Guard against speculative draft tokens that suggested reasoning
             # ended but were not actually accepted in the output.
-            all_token_ids = list(request.all_token_ids)
-            is_reasoning_end_check = self.reasoner.is_reasoning_end(all_token_ids)
+            is_reasoning_end_check = self.reasoner.is_reasoning_end(
+                request.all_token_ids
+            )
             if not is_reasoning_end_check:
                 structured_req.reasoning_ended = False
                 return False
@@ -397,7 +397,7 @@ class StructuredOutputManager:
 
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
-        delta_ids = list(request.all_token_ids[delta_from:])
+        delta_ids = request.all_token_ids[delta_from:]
         if self.reasoner.is_reasoning_end_streaming(request.all_token_ids, delta_ids):
             structured_req.reasoning_ended = True
             # Try to sync grammar with tokens after </think> that were
