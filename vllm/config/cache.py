@@ -168,6 +168,17 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    pinned_prefix_cap_ratio: float = Field(default=0.2, ge=0, le=1)
+    """Maximum fraction of total GPU blocks that may be pinned for prefix
+    caching per engine instance (in [0.0, 1.0]). Defaults to 0.2 (20%). This
+    cap prevents the prefix cache from occupying all blocks, improving
+    stability under load."""
+
+    enable_pinned_prefix: bool = False
+    """Global gate for pinned-prefix behavior. If False, requests with
+    pin_prefix=True will not pin any blocks. Default is disabled to allow
+    conservative rollouts."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

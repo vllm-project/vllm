@@ -149,6 +149,9 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        raise NotImplementedError
+
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -222,6 +225,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def unpin_all_pinned_prefixes_async(self) -> int:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1) -> None:
@@ -310,6 +316,9 @@ class InprocClient(EngineCoreClient):
 
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
+
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.engine_core.unpin_all_pinned_prefixes()
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -780,6 +789,9 @@ class SyncMPClient(MPClient):
     def reset_encoder_cache(self) -> None:
         self.call_utility("reset_encoder_cache")
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.call_utility("unpin_all_pinned_prefixes")
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
 
@@ -1001,6 +1013,9 @@ class AsyncMPClient(MPClient):
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
+
+    async def unpin_all_pinned_prefixes_async(self) -> int:
+        return await self.call_utility_async("unpin_all_pinned_prefixes")
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)

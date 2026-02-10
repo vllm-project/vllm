@@ -582,6 +582,8 @@ class EngineArgs:
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    pinned_prefix_cap_ratio: float = CacheConfig.pinned_prefix_cap_ratio
+    enable_pinned_prefix: bool = CacheConfig.enable_pinned_prefix
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
@@ -968,6 +970,12 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        cache_group.add_argument(
+            "--pinned-prefix-cap-ratio", **cache_kwargs["pinned_prefix_cap_ratio"]
+        )
+        cache_group.add_argument(
+            "--enable-pinned-prefix", **cache_kwargs["enable_pinned_prefix"]
         )
 
         # Multimodal related configs
@@ -1451,6 +1459,8 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            pinned_prefix_cap_ratio=self.pinned_prefix_cap_ratio,
+            enable_pinned_prefix=self.enable_pinned_prefix,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,

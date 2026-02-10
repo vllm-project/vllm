@@ -123,6 +123,10 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
+    # Whether the block is pinned and should not be evicted from cache.
+    # Pinned blocks are protected from LRU eviction and will remain in cache
+    # until manually unpinned or freed.
+    is_pinned: bool = False
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
