@@ -6,6 +6,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -49,7 +50,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import has_flashinfer
@@ -74,6 +75,8 @@ class Mxfp4Backend(Enum):
 
     # Triton Backend
     TRITON = 6
+
+    CK = 7
 
 
 def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
@@ -162,9 +165,13 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
     elif current_platform.is_xpu():
         logger.info_once("Using ipex marlin backend on XPU")
         return Mxfp4Backend.MARLIN
-    elif current_platform.is_rocm() and has_triton_kernels():
-        logger.info_once("Using Triton backend")
-        return Mxfp4Backend.TRITON
+    elif current_platform.is_rocm():
+        if rocm_aiter_ops.is_enabled():
+            logger.info_once("Using CK MXFP4 MoE backend (Aiter ROCm)")
+            return Mxfp4Backend.CK
+        elif has_triton_kernels():
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
 
     return Mxfp4Backend.NONE
 
@@ -331,6 +338,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.intermediate_size = intermediate_size_per_partition_after_pad
         self.hidden_size = hidden_size
+        self.hidden_pad = extra_weight_attrs.get("hidden_pad", 0)
+        self.intermediate_pad = (
+            intermediate_size_per_partition_after_pad - intermediate_size_per_partition
+        )
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
@@ -743,46 +754,94 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales_interleaved, requires_grad=False
                 )
-        elif self.mxfp4_backend == Mxfp4Backend.TRITON:
-            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-
+        elif (
+            self.mxfp4_backend == Mxfp4Backend.TRITON
+            or self.mxfp4_backend == Mxfp4Backend.CK
+        ):
             w13_bias = layer.w13_bias.to(torch.float32)
             w2_bias = layer.w2_bias.to(torch.float32)
 
             layer.w13_bias = Parameter(w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
-            # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
-            # (stored in self.fused_experts) to determine if the MoE has a
-            # batched activation format. As self.fused_experts is not
-            # initialized at this point, we resort to checking the MoE config
-            # directly.
-            is_batched_moe = self.moe.use_pplx_kernels or self.moe.use_deepep_ll_kernels
-            if is_batched_moe:
-                num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+            if self.mxfp4_backend == Mxfp4Backend.CK:
+                w13_aiter_weight = layer.w13_weight.contiguous()
+                w13_aiter_scale = layer.w13_weight_scale.contiguous()
+                w2_aiter_weight = layer.w2_weight.contiguous()
+                w2_aiter_scale = layer.w2_weight_scale.contiguous()
+
+                e, n, k = w13_aiter_weight.shape
+                w13_aiter_weight = (
+                    w13_aiter_weight.view(e, n // 2, 2, k)
+                    .permute(0, 2, 1, 3)
+                    .contiguous()
+                    .view(e, n, k)
+                )
+                w13_aiter_scale = (
+                    w13_aiter_scale.view(e, n // 2, 2, -1)
+                    .permute(0, 2, 1, 3)
+                    .contiguous()
+                    .view(e, n, -1)
+                )
+
+                w13_aiter_weight = w13_aiter_weight.view(torch.float4_e2m1fn_x2)
+                w13_aiter_scale = w13_aiter_scale.view(-1, w13_aiter_scale.shape[-1])
+                w2_aiter_weight = w2_aiter_weight.view(torch.float4_e2m1fn_x2)
+                w2_aiter_scale = w2_aiter_scale.view(-1, w2_aiter_scale.shape[-1])
+
+                w13_weight = rocm_aiter_ops.shuffle_weight_a16w4(
+                    w13_aiter_weight, 16, True
+                )
+                w13_weight_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                    w13_aiter_scale, self.num_experts, True
+                )
+                w2_weight = rocm_aiter_ops.shuffle_weight_a16w4(
+                    w2_aiter_weight, 16, False
+                )
+                w2_weight_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                    w2_aiter_scale, self.num_experts, False
+                )
+                w13_bias = (
+                    layer.w13_bias.view(-1, n // 2, 2)
+                    .permute(0, 2, 1)
+                    .contiguous()
+                    .view(-1, n)
+                )
+                replace_parameter(layer, "w13_bias", w13_bias)
             else:
-                num_warps = 8
+                from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
-            w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-                layer.w13_weight, layer.w13_weight_scale, num_warps
-            )
-            w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-                layer.w2_weight, layer.w2_weight_scale, num_warps
-            )
+                # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
+                # (stored in self.fused_experts) to determine if the MoE has a
+                # batched activation format. As self.fused_experts is not
+                # initialized at this point, we resort to checking the MoE config
+                # directly.
+                is_batched_moe = (
+                    self.moe.use_pplx_kernels or self.moe.use_deepep_ll_kernels
+                )
+                if is_batched_moe:
+                    num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+                else:
+                    num_warps = 8
+                w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+                    layer.w13_weight, layer.w13_weight_scale, num_warps
+                )
+                w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+                    layer.w2_weight, layer.w2_weight_scale, num_warps
+                )
 
-            self.w13_precision_config = PrecisionConfig(
-                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
-            )
-            self.w2_precision_config = PrecisionConfig(
-                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
-            )
+                self.w13_precision_config = PrecisionConfig(
+                    weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+                )
+                self.w2_precision_config = PrecisionConfig(
+                    weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+                )
 
-            self.w13_weight = w13_weight
-            self.w2_weight = w2_weight
-            del layer.w13_weight
-            del layer.w2_weight
-            layer.w13_weight = w13_weight
-            layer.w2_weight = w2_weight
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w2_weight", w2_weight)
+            replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
+
         else:
             raise ValueError(
                 f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
@@ -818,7 +877,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
             )
-        elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+        elif (
+            self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]
+            or self.mxfp4_backend == Mxfp4Backend.CK
+        ):
             return mxfp4_w4a16_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
@@ -892,6 +954,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
             or self.mxfp4_backend == Mxfp4Backend.TRITON
+            or self.mxfp4_backend == Mxfp4Backend.CK
         )
 
     def apply(
@@ -1080,6 +1143,27 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]
             return trtllm_gen_output
+        elif self.mxfp4_backend == Mxfp4Backend.CK:
+            topk_weights, topk_ids = rocm_aiter_ops.fused_topk(
+                x, router_logits, layer.top_k, True
+            )
+            output = rocm_aiter_ops.fused_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation_method=rocm_aiter_ops.get_aiter_activation_type("swiglu"),
+                quant_method=rocm_aiter_ops.get_aiter_quant_type("per_1x32"),
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                doweight_stage1=False,
+                hidden_pad=self.hidden_pad // 128 * 128,
+                intermediate_pad=self.intermediate_pad // 64 * 64 * 2,
+                bias1=layer.w13_bias,
+                bias2=layer.w2_bias,
+            )
+            return output
         elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
