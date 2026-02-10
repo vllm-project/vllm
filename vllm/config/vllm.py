@@ -807,8 +807,35 @@ class VllmConfig:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
                 self.compilation_config.pass_config.enable_sp = False
                 self.compilation_config.pass_config.fuse_gemm_comms = False
+            else:
+                # Compute SP threshold early so we can disable enable_sp
+                # before +rms_norm is forced into custom_ops.
+                # If threshold is None (small model), SP would never run,
+                # so disable it to avoid forcing custom ops that no pass
+                # handles.
+                pass_config = self.compilation_config.pass_config
+                if pass_config.sp_min_token_num is None:
+                    from vllm.compilation.passes.fusion.sequence_parallelism import (
+                        get_sequence_parallelism_threshold,
+                    )
 
-            elif "-rms_norm" in self.compilation_config.custom_ops:
+                    tp_size = self.parallel_config.tensor_parallel_size
+                    hidden_size = self.model_config.get_hidden_size()
+                    element_size = self.model_config.dtype.itemsize
+                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                        hidden_size, tp_size, element_size
+                    )
+
+                if pass_config.sp_min_token_num is None:
+                    logger.debug(
+                        "SP threshold is None (model too small for SP), "
+                        "disabling enable_sp"
+                    )
+                    self.compilation_config.pass_config.enable_sp = False
+                    self.compilation_config.pass_config.fuse_gemm_comms = False
+
+        if self.compilation_config.pass_config.enable_sp:
+            if "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
                 )
