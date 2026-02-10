@@ -335,10 +335,27 @@ class EngineCore:
         request(s). Outputs are routed by client_index so the waiting client
         gets the finish.
 
+        Requests in _paused_adds_queue whose request_id is in request_ids are
+        added to the scheduler (and removed from the queue) so they can be
+        aborted and the client notified.
+
         Returns:
             List of request IDs that were actually aborted (were in the
             scheduler).
         """
+        request_ids_set = set(request_ids)
+        # Add any paused-adds that should be aborted into the scheduler, then
+        # remove them from the queue so they are found by finish_requests below.
+        if self._paused_adds_queue:
+            new_queue: deque[tuple[Request, int]] = deque()
+            while self._paused_adds_queue:
+                request, request_wave = self._paused_adds_queue.popleft()
+                if request.request_id in request_ids_set:
+                    self.scheduler.add_request(request)
+                else:
+                    new_queue.append((request, request_wave))
+            self._paused_adds_queue = new_queue
+
         # Get client_index for each request before finish_requests removes them.
         client_indices = self.scheduler.get_request_client_indices(request_ids)
         aborted_ids = self.scheduler.finish_requests(
