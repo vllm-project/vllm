@@ -1,13 +1,19 @@
-# MLA prefill backend comparison (FA3 vs FA4)
+# MLA prefill backend comparison
 #
-# Compares FlashAttention versions for MLA prefill performance.
+# Compares all available MLA prefill backends:
+#   FA backends:  fa2, fa3, fa4 (FlashAttention versions)
+#   Non-FA:       flashinfer, cudnn, trtllm (Blackwell-only, require flashinfer)
+#
 # Uses cutlass_mla as the decode backend for impl construction
 # (only the prefill path is exercised).
+#
+# Backends that aren't available on the current platform will report errors
+# in the results table (e.g., fa3 on Blackwell, cudnn without artifactory).
 #
 # Usage:
 #   python benchmark.py --config configs/mla_prefill.yaml
 
-description: "MLA prefill backend comparison (FA3 vs FA4)"
+description: "MLA prefill backend comparison"
 
 model:
   name: "deepseek-v3"
@@ -44,8 +50,12 @@ decode_backends:
   - cutlass_mla
 
 prefill_backends:
+  - fa2
   - fa3
   - fa4
+  - flashinfer
+  - cudnn
+  - trtllm
 
 device: "cuda:0"
 repeats: 5

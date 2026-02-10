@@ -62,7 +62,7 @@ def create_minimal_vllm_config(
     block_size: int = 128,
     max_num_seqs: int = 256,
     mla_dims: dict | None = None,
-    flash_attn_version: int | None = None,
+    prefill_backend: str | None = None,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -74,10 +74,9 @@ def create_minimal_vllm_config(
         max_num_seqs: Maximum number of sequences
         mla_dims: Optional custom MLA dimensions dict. If not provided, uses
                   setup_mla_dims(model_name)
-        flash_attn_version: Force a specific FlashAttention version (2, 3, or 4).
-                           When set, also disables non-FA prefill backends
-                           (flashinfer, cudnn, trtllm_ragged) to ensure the
-                           FA path is used.
+        prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
+                        "cudnn", "trtllm"). Configures the attention config to
+                        force the specified prefill backend.
 
     Returns:
         VllmConfig for benchmarking
@@ -175,12 +174,21 @@ def create_minimal_vllm_config(
         compilation_config=compilation_config,
     )
 
-    if flash_attn_version is not None:
-        vllm_config.attention_config.flash_attn_version = flash_attn_version
-        # Disable non-FA prefill backends so the FA path is always used
-        vllm_config.attention_config.disable_flashinfer_prefill = True
-        vllm_config.attention_config.use_cudnn_prefill = False
-        vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = False
+    if prefill_backend is not None:
+        prefill_cfg = get_prefill_backend_config(prefill_backend)
+        if prefill_cfg["flash_attn_version"] is not None:
+            vllm_config.attention_config.flash_attn_version = prefill_cfg[
+                "flash_attn_version"
+            ]
+        vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
+            "disable_flashinfer_prefill"
+        ]
+        vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
+            "use_cudnn_prefill"
+        ]
+        vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = prefill_cfg[
+            "use_trtllm_ragged_deepseek_prefill"
+        ]
 
     return vllm_config
 
@@ -189,22 +197,57 @@ def create_minimal_vllm_config(
 # Prefill Backend Configuration
 # ============================================================================
 
-# Maps prefill backend names to FlashAttention version numbers
-_PREFILL_BACKEND_FA_VERSION: dict[str, int] = {
-    "fa2": 2,
-    "fa3": 3,
-    "fa4": 4,
+# Maps prefill backend names to attention config overrides.
+# FA backends set flash_attn_version and disable non-FA paths.
+# Non-FA backends enable their specific path and disable others.
+_PREFILL_BACKEND_CONFIG: dict[str, dict] = {
+    "fa2": {
+        "flash_attn_version": 2,
+        "disable_flashinfer_prefill": True,
+        "use_cudnn_prefill": False,
+        "use_trtllm_ragged_deepseek_prefill": False,
+    },
+    "fa3": {
+        "flash_attn_version": 3,
+        "disable_flashinfer_prefill": True,
+        "use_cudnn_prefill": False,
+        "use_trtllm_ragged_deepseek_prefill": False,
+    },
+    "fa4": {
+        "flash_attn_version": 4,
+        "disable_flashinfer_prefill": True,
+        "use_cudnn_prefill": False,
+        "use_trtllm_ragged_deepseek_prefill": False,
+    },
+    "flashinfer": {
+        "flash_attn_version": None,
+        "disable_flashinfer_prefill": False,
+        "use_cudnn_prefill": False,
+        "use_trtllm_ragged_deepseek_prefill": False,
+    },
+    "cudnn": {
+        "flash_attn_version": None,
+        "disable_flashinfer_prefill": True,
+        "use_cudnn_prefill": True,
+        "use_trtllm_ragged_deepseek_prefill": False,
+    },
+    "trtllm": {
+        "flash_attn_version": None,
+        "disable_flashinfer_prefill": True,
+        "use_cudnn_prefill": False,
+        "use_trtllm_ragged_deepseek_prefill": True,
+    },
 }
 
 
-def get_prefill_backend_fa_version(prefill_backend: str) -> int:
-    """Get the FlashAttention version for a prefill backend name."""
-    if prefill_backend not in _PREFILL_BACKEND_FA_VERSION:
+def get_prefill_backend_config(prefill_backend: str) -> dict:
+    """Get attention config overrides for a prefill backend."""
+    if prefill_backend not in _PREFILL_BACKEND_CONFIG:
         raise ValueError(
             f"Unknown prefill backend: {prefill_backend!r}. "
-            f"Available: {list(_PREFILL_BACKEND_FA_VERSION.keys())}"
+            f"Available: {list(_PREFILL_BACKEND_CONFIG.keys())}"
         )
-    return _PREFILL_BACKEND_FA_VERSION[prefill_backend]
+    return _PREFILL_BACKEND_CONFIG[prefill_backend]
 
 
 # ============================================================================
@@ -763,17 +806,12 @@ def _run_mla_benchmark_batched(
     if mla_dims is None:
         mla_dims = setup_mla_dims("deepseek-v3")
 
-    # Resolve FA version from prefill backend
-    flash_attn_version = None
-    if prefill_backend is not None:
-        flash_attn_version = get_prefill_backend_fa_version(prefill_backend)
-
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
         model_name="deepseek-v3",  # Used only for model path
         block_size=block_size,
         mla_dims=mla_dims,  # Use custom dims from config or default
-        flash_attn_version=flash_attn_version,
+        prefill_backend=prefill_backend,
     )
 
     results = []
@@ -784,18 +822,37 @@ def _run_mla_benchmark_batched(
             backend_cfg, mla_dims, vllm_config, device
         )
 
-        # Verify the actual FA version matches what was requested
+        # Verify the actual prefill backend matches what was requested
         if prefill_backend is not None:
-            actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
-            if actual_fa_version != flash_attn_version:
-                raise RuntimeError(
-                    f"Prefill backend '{prefill_backend}' requested FA version "
-                    f"{flash_attn_version}, but the impl is using FA version "
-                    f"{actual_fa_version}. This is likely due to guards in "
-                    f"get_flash_attn_version() (e.g., head_size > 128 blocking "
-                    f"FA4, or FA3 unsupported on this platform). Check "
-                    f"vllm/v1/attention/backends/fa_utils.py."
-                )
+            prefill_cfg = get_prefill_backend_config(prefill_backend)
+            fa_version = prefill_cfg["flash_attn_version"]
+
+            if fa_version is not None:
+                # FA backend: verify the impl's FA version
+                actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
+                if actual_fa_version != fa_version:
+                    raise RuntimeError(
+                        f"Prefill backend '{prefill_backend}' requested FA "
+                        f"version {fa_version}, but the impl is using FA "
+                        f"version {actual_fa_version}. Check "
+                        f"vllm/v1/attention/backends/fa_utils.py."
+                    )
+            else:
+                # Non-FA backend: verify the builder picked the right path
+                expected_flags = {
+                    "flashinfer": "_use_fi_prefill",
+                    "cudnn": "_use_cudnn_prefill",
+                    "trtllm": "_use_trtllm_ragged_prefill",
+                }
+                flag_name = expected_flags.get(prefill_backend)
+                if flag_name and not getattr(builder_instance, flag_name, False):
+                    raise RuntimeError(
+                        f"Prefill backend '{prefill_backend}' was requested "
+                        f"but the metadata builder did not enable it. This "
+                        f"usually means a dependency is missing (e.g., "
+                        f"flashinfer not installed) or the platform doesn't "
+                        f"support it."
+                    )
 
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
