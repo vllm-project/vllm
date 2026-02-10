@@ -30,11 +30,44 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Length of the suffix appended by InputProcessor.assign_request_id():
+#   f"{external_req_id}-{random_uuid():.8}"
+# The suffix is "-" + 8 hex chars = 9 characters total.
+_INTERNAL_ID_SUFFIX_LEN = 9
+
+
+def _strip_internal_id_suffix(request_id: str) -> str:
+    """Recover the original proxy-generated request ID by stripping the
+    random suffix that InputProcessor.assign_request_id() appended.
+
+    assign_request_id() produces:
+        f"{external_req_id}-{random_uuid():.8}"
+
+    So the internal ID is always: <original_id> + "-" + <8 hex chars>.
+    We strip the last 9 characters to get the original ID back.
+
+    This is critical for P2P disaggregated serving: the Prefill and Decode
+    instances each call assign_request_id() independently, producing
+    different random suffixes. Using the stripped (original) ID as the
+    NCCL send/recv key ensures both sides agree on the same key.
+    """
+    if (
+        len(request_id) > _INTERNAL_ID_SUFFIX_LEN
+        and request_id[-_INTERNAL_ID_SUFFIX_LEN] == "-"
+    ):
+        return request_id[:-_INTERNAL_ID_SUFFIX_LEN]
+    # Fallback: if the format doesn't match, return as-is.
+    return request_id
+
 
 @dataclass
 class ReqMeta:
-    # Request Id
+    # Internal request id (used for scheduler-side tracking)
     request_id: str
+    # Transfer id: the original proxy-generated request id, identical on
+    # both Prefill and Decode instances. Used as the key for P2P NCCL
+    # send/recv matching and for parsing remote addresses.
+    transfer_id: str
     # Request block ids
     block_ids: torch.Tensor
     # Request num tokens
@@ -47,6 +80,7 @@ class ReqMeta:
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
             request_id=request_id,
+            transfer_id=_strip_internal_id_suffix(request_id),
             block_ids=block_ids_tensor,
             num_tokens=len(token_ids),
         )
@@ -201,8 +235,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, False)
+            transfer_id = request.transfer_id
+            ip, port = self.parse_request_id(transfer_id, False)
             remote_address = ip + ":" + str(port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
@@ -217,15 +251,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address
+                    transfer_id + "#" + layer_name, remote_address
                 )
 
                 if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
+                    logger.warning("🚧kv_cache is None, %s", transfer_id)
                     continue
 
                 inject_kv_into_layer(
-                    layer, kv_cache, request.block_ids, request.request_id
+                    layer, kv_cache, request.block_ids, transfer_id
                 )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -297,13 +331,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, True)
+            transfer_id = request.transfer_id
+            ip, port = self.parse_request_id(transfer_id, True)
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
             self.p2p_nccl_engine.send_tensor(
-                request_id + "#" + layer_name, kv_cache, remote_address
+                transfer_id + "#" + layer_name, kv_cache, remote_address
             )
 
     def wait_for_save(self):
