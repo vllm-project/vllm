@@ -491,7 +491,7 @@ def _auto_tune_communication_config(
         # When using batching, num_groups must equal world size
         num_groups = ep_size
 
-        logger.info(
+        logger.debug(
             "EPLB auto-tuning: Enabling experts_batch_size=%d "
             "to meet max_num_experts_transfers=%d "
             "(max_transfers=%d, ep_size=%d)",
@@ -501,7 +501,7 @@ def _auto_tune_communication_config(
             ep_size,
         )
     elif num_groups != communication_config.num_groups:
-        logger.info(
+        logger.debug(
             "EPLB auto-tuning: Adjusted num_groups from %d to %d to meet "
             "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
             communication_config.num_groups,
