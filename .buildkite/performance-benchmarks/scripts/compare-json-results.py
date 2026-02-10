@@ -325,6 +325,85 @@ def _safe_filename(s: str) -> str:
 
 
 # -----------------------------
+# vLLM environment export helper
+# -----------------------------
+def _parse_vllm_env_txt(env_path: Path) -> pd.DataFrame:
+    """Parse vllm_env.txt into a flat table (Section, Key, Value).
+
+    Supports:
+      - section headers as standalone lines (no ':' or '=')
+      - key-value lines like 'OS: Ubuntu ...'
+      - env var lines like 'HF_HOME=/data/hf'
+    """
+    lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    section = "General"
+    rows: list[dict] = []
+
+    def set_section(s: str):
+        nonlocal section
+        s = (s or "").strip()
+        if s:
+            section = s
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        # divider lines like =====
+        if set(stripped) <= {"="}:
+            continue
+
+        # section header heuristic: short standalone line
+        if ":" not in stripped and "=" not in stripped and len(stripped) <= 64:
+            if stripped.lower().startswith("collecting environment information"):
+                continue
+            set_section(stripped)
+            continue
+
+        # env var style: KEY=VALUE (and not a URL with :)
+        if "=" in stripped and ":" not in stripped:
+            k, v = stripped.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if k:
+                rows.append({"Section": section, "Key": k, "Value": v})
+            continue
+
+        # key: value
+        if ":" in stripped:
+            k, v = stripped.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            if k:
+                rows.append({"Section": section, "Key": k, "Value": v})
+            continue
+
+    return pd.DataFrame(rows, columns=["Section", "Key", "Value"])
+
+
+def _load_env_df_for_inputs(args, files: list[str]) -> pd.DataFrame | None:
+    """Load vllm_env.txt next to the *original* input JSON file.
+
+    Note: when only one -f is provided, the script may split JSON into ./splits/...,
+    but vllm_env.txt typically lives next to the original benchmark_results.json.
+    """
+    base_dir: Path | None = None
+    if getattr(args, "file", None):
+        base_dir = Path(args.file[0]).resolve().parent
+    elif files:
+        base_dir = Path(files[0]).resolve().parent
+    if base_dir is None:
+        return None
+
+    env_path = base_dir / "vllm_env.txt"
+    if not env_path.exists():
+        return None
+    df = _parse_vllm_env_txt(env_path)
+    return df
+
+
+
+# -----------------------------
 # Valid max concurrency summary helpers
 # -----------------------------
 def _config_value_columns(df: pd.DataFrame, conc_col: str) -> list[str]:
@@ -885,6 +964,15 @@ def write_report_group_first(
 
     excel_path = args.excel_out or "perf_comparison.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as xw:
+        # ---- Environment sheet (first) ----
+        env_sheet = _sanitize_sheet_name("Environment")
+        env_df = _load_env_df_for_inputs(args, files)
+        if env_df is None or env_df.empty:
+            pd.DataFrame(
+                [{"Section": "Environment", "Key": "vllm_env.txt", "Value": "NOT FOUND (or empty)"}]
+            ).to_excel(xw, sheet_name=env_sheet, index=False)
+        else:
+            env_df.to_excel(xw, sheet_name=env_sheet, index=False)
         with open("perf_comparison.html", "w", encoding="utf-8") as main_fh:
             main_fh.write('<meta charset="utf-8">\n')
             for gkey in group_keys:
