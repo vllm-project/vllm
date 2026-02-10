@@ -985,12 +985,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 self.quant_config.kv_cache_scheme["strategy"]
             )
 
-        if strategy == "attn_head":
-            # Backend selection ensures a compatible backend is chosen when
-            # per-head quant scales are required (via requires_per_head_quant_scales).
-            n_scales = int(layer.num_kv_heads)
-        else:
-            n_scales = 1
+        n_scales = int(layer.num_kv_heads) if strategy == "attn_head" else 1
 
         layer.k_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
