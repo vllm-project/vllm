@@ -760,6 +760,21 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         fps: int = 1,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """
+        Load video frames with dynamic sampling based on duration.
+        Assume that total_num_frames = 10 and fps = 1.
+        The timestamp of frame 0 is 0.0.
+        The timestamp of frame 1 is 1.0.…
+        The timestamp of frame 9 (the last frame) should be 9.0, that is, (total_frames_num – 1) / original_fps.
+
+        Args:
+            data: Raw video bytes
+            num_frames: Not used in dynamic backend
+            fps: Target FPS for sampling (default: 2)
+
+        Returns:
+            Tuple of (frames_array, metadata_dict)
+        """
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -770,7 +785,10 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = float(cap.get(cv2.CAP_PROP_FPS))
         # The timestamp of the rightmost frame, cannot be used to calculate frame 0.
-        total_duration = (total_frames_num - 1) / original_fps
+        if total_frames_num >= 1 and original_fps > 0:
+            total_duration = (total_frames_num - 1) / original_fps
+        else:
+            total_duration = 0
 
         # `fps` is the FPS parameter passed in for sampling,
         # -1 indicates that sampling can be performed directly without FPS limitation.
@@ -783,10 +801,17 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
                 # cannot be calculated for frame 0.
                 total_duration = min(total_duration, (num_frames - 1) / fps)
         elif fps != -1:
-            raise ValueError(f"requires dataset fps is -1 or greater than 0 but got {fps}")
+            raise ValueError(
+                f"requires dataset fps is -1 or greater than 0 but got {fps}"
+            )
 
-        sample_frame_timestamps = np.linspace(0, total_duration, num_frames, dtype=float)
-        frames_indices = [min(total_frames_num - 1, round(t * original_fps)) for t in sample_frame_timestamps]
+        sample_frame_timestamps = np.linspace(
+            0, total_duration, num_frames, dtype=float
+        )
+        frames_indices = [
+            min(total_frames_num - 1, round(t * original_fps))
+            for t in sample_frame_timestamps
+        ]
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -815,7 +840,7 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
                 f"Expected reading {len(frames_indices)} frames,"
                 f"but only loaded {i} frames from video.",
                 UserWarning,
-                stacklevel=2
+                stacklevel=2,
             )
 
         # Use transformers transformers.video_utils.VideoMetadata format
@@ -829,4 +854,3 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
             "sample_frame_timestamps": sample_frame_timestamps,
         }
         return frames, metadata
-        
