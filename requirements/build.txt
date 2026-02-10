@@ -4,7 +4,7 @@ ninja
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
-torch==2.9.1
+torch==2.10.0
 wheel
 jinja2>=3.1.6
 regex
