@@ -330,6 +330,13 @@ def main():
         "--autoawq", action="store_true", help="Compare against AutoAWQ CUDA kernel"
     )
     parser.add_argument(
+        "-M",
+        type=int,
+        default=1,
+        help="Batch size / number of tokens (default: 1). "
+        "M=1 uses GEMV kernels; M>1 uses GEMM path.",
+    )
+    parser.add_argument(
         "--peak-bw",
         type=float,
         default=None,
@@ -528,27 +535,32 @@ def main():
         gpu_profile = f"Unknown ({gpu_name})"
 
     PEAK_BW = args.peak_bw if args.peak_bw is not None else DEFAULT_PEAK_BW
+    M = args.M
     print(f"GPU: {gpu_name}")
     print(f"Performance profile: {gpu_profile}")
     print(
         f"Peak bandwidth: {PEAK_BW} GiB/s"
         f"{' (auto)' if args.peak_bw is None else ' (override)'}"
     )
+    if M > 1:
+        print(f"M={M} (GEMM path)")
+    else:
+        print(f"M={M} (GEMV path)")
 
     # Bandwidth is reported in GiB/s (1 GiB = 1024^3 bytes)
     # Given time in ms: GiB/s = bytes / (ms * 1e-3) / 1024^3
     GIB_DIVISOR = 1024**3 / 1000  # multiply ms by this to get GiB denominator
 
-    def calculate_bytes(K, N, group_size):
+    def calculate_bytes(K, N, group_size, M=1):
         """Calculate bytes moved for bandwidth calculation."""
         num_groups = K // group_size
-        # input + qweight + qzeros + scales + output
+        # input[M,K] + qweight[K,N//8] + qzeros[K//G,N//8] + scales[K//G,N] + output[M,N]
         return (
-            K * 2
+            M * K * 2
             + K * (N // 8) * 4
             + num_groups * (N // 8) * 4
             + num_groups * N * 2
-            + N * 2
+            + M * N * 2
         )
 
     def run_correctness_test(shapes):
@@ -560,7 +572,7 @@ def main():
         3. Increasing: catches ordering/indexing issues
         """
         print("\n" + "=" * 100)
-        print("CORRECTNESS TEST (multiple input patterns)")
+        print(f"CORRECTNESS TEST (multiple input patterns, M={M})")
         print("=" * 100)
         print(
             f"{'N':>6} x {'K':<6} | {'G':>4} | {'Pattern':<12} | {'Config':<20} | {'Max Diff':>10} | {'Rel Err':>10} | {'Status':>8}"
@@ -606,7 +618,7 @@ def main():
                 if pattern_name == "random":
                     # Random data - existing test
                     input_tensor = (
-                        torch.randn(1, K, dtype=torch.float16, device="cuda") * 0.1
+                        torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.1
                     )
                     qweight = torch.randint(
                         0, 2**31, (K, N // 8), dtype=torch.int32, device="cuda"
@@ -623,7 +635,7 @@ def main():
                     # All ones - catches missing contributions
                     import struct
 
-                    input_tensor = torch.ones(1, K, dtype=torch.float16, device="cuda")
+                    input_tensor = torch.ones(M, K, dtype=torch.float16, device="cuda")
                     # Pack all weights as 1 (simple value)
                     packed_val = 0
                     for i in range(8):
@@ -650,10 +662,8 @@ def main():
                     # Increasing activation values - catches ordering issues
                     import struct
 
-                    input_tensor = (
-                        torch.arange(K, dtype=torch.float16, device="cuda").unsqueeze(0)
-                        / K
-                    )
+                    row = torch.arange(K, dtype=torch.float16, device="cuda") / K
+                    input_tensor = row.unsqueeze(0).expand(M, -1).contiguous()
                     # Weights = 1 for all
                     packed_val = 0
                     for i in range(8):
@@ -681,9 +691,9 @@ def main():
                     input_tensor, qweight, scales, qzeros, split_k_iters=8
                 )
 
-                diff = (output[0, :N] - output_ref[0, :N]).abs()
+                diff = (output[:, :N] - output_ref[:, :N]).abs()
                 max_diff = diff.max().item()
-                ref_max = output_ref[0, :N].abs().max().item()
+                ref_max = output_ref[:, :N].abs().max().item()
                 rel_err = max_diff / (ref_max + 1e-6)
 
                 # Use relative error for pass/fail
@@ -703,6 +713,12 @@ def main():
 
     def run_hip_kernel_correctness_test(shapes):
         """Run correctness tests specifically for the HIP GEMV kernel."""
+        if M > 1:
+            print(
+                "\nSkipping HIP kernel correctness test (M>1, HIP GEMV only supports M=1)"
+            )
+            return True
+
         from vllm.platforms import current_platform
 
         if not current_platform.is_rocm():
@@ -881,7 +897,7 @@ def main():
         # from our own correctness tests
 
         print("\n" + "=" * 130)
-        print("BENCHMARK RESULTS (with HIP preprocessing)")
+        print(f"BENCHMARK RESULTS (with HIP preprocessing, M={M})")
         print("=" * 130)
 
         if include_autoawq:
@@ -914,7 +930,7 @@ def main():
             )
 
             num_groups = K // group_size
-            bytes_moved = calculate_bytes(K, N, group_size)
+            bytes_moved = calculate_bytes(K, N, group_size, M)
             split_k, block_n, num_warps = _choose_optimal_config(K, N, group_size)
 
             qweight_orig = torch.randint(
@@ -934,10 +950,10 @@ def main():
             is_padded = padded_K > K
 
             # Create input tensor (potentially padded)
-            input_tensor = torch.randn(1, K, dtype=torch.float16, device="cuda") * 0.01
+            input_tensor = torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01
             if is_padded:
                 input_padded = torch.zeros(
-                    1, padded_K, dtype=torch.float16, device="cuda"
+                    M, padded_K, dtype=torch.float16, device="cuda"
                 )
                 input_padded[:, :K] = input_tensor
                 input_for_bench = input_padded
@@ -1037,6 +1053,12 @@ def main():
 
     def run_exhaustive_search(shapes):
         """Run exhaustive search for optimal configurations."""
+        if M > 1:
+            print(
+                "\nExhaustive GEMV search only supports M=1. Use --gemm-tuning for M>1."
+            )
+            return
+
         print("\n" + "=" * 110)
         print("EXHAUSTIVE SEARCH FOR OPTIMAL CONFIGURATIONS")
         print("=" * 110)
@@ -1047,12 +1069,12 @@ def main():
 
             num_groups = K // group_size
             valid_sk = _get_valid_split_k_values(K, group_size)
-            bytes_moved = calculate_bytes(K, N, group_size)
+            bytes_moved = calculate_bytes(K, N, group_size, M)
 
             print(f"\nShape N={N}, K={K}, group_size={group_size}")
             print(f"  num_groups={num_groups}, valid_split_k={valid_sk}")
 
-            input_tensor = torch.randn(1, K, dtype=torch.float16, device="cuda") * 0.01
+            input_tensor = torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01
             qweight = torch.randint(
                 0, 2**31, (K, N // 8), dtype=torch.int32, device="cuda"
             )
