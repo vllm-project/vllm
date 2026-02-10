@@ -85,7 +85,6 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        is_io_processor_request = isinstance(request, IOProcessorRequest)
         try:
             lora_request = self._maybe_get_adapters(request)
 
@@ -95,7 +94,7 @@ class OpenAIServingPooling(OpenAIServing):
                 )
 
             engine_prompts: Sequence[PromptType | TokPrompt]
-            if is_io_processor_request:
+            if use_io_processor := isinstance(request, IOProcessorRequest):
                 if self.io_processor is None:
                     raise ValueError(
                         "No IOProcessor plugin installed. Please refer "
@@ -141,7 +140,7 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            if is_io_processor_request:
+            if use_io_processor:
                 assert self.io_processor is not None and isinstance(
                     request, IOProcessorRequest
                 )
@@ -165,7 +164,7 @@ class OpenAIServingPooling(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
-                if is_io_processor_request:
+                if use_io_processor:
                     tokenization_kwargs: dict[str, Any] = {}
                 else:
                     tok_params = request.build_tok_params(self.model_config)  # type: ignore
@@ -187,7 +186,7 @@ class OpenAIServingPooling(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        if is_io_processor_request:
+        if use_io_processor:
             assert self.io_processor is not None
             output = await self.io_processor.post_process_async(
                 result_generator,

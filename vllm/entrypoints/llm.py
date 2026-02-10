@@ -1056,9 +1056,7 @@ class LLM:
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
-        io_processor_prompt = False
-        if isinstance(prompts, dict) and "data" in prompts:
-            io_processor_prompt = True
+        if use_io_processor := (isinstance(prompts, dict) and "data" in prompts):
             if self.io_processor is None:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -1101,7 +1099,7 @@ class LLM:
             outputs, PoolingRequestOutput
         )
 
-        if io_processor_prompt:
+        if use_io_processor:
             # get the post-processed model outputs
             assert self.io_processor is not None
             processed_outputs = self.io_processor.post_process(model_outputs)
