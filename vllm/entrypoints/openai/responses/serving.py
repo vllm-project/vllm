@@ -63,7 +63,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -117,13 +116,13 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
-from vllm.inputs.parse import get_prompt_len
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -293,10 +292,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = get_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_prompt)
         if self.max_model_len <= prompt_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
@@ -442,8 +441,8 @@ class OpenAIServingResponses(OpenAIServing):
 
                 default_max_tokens = get_max_tokens(
                     self.max_model_len,
-                    request,
-                    engine_prompt,
+                    request.max_output_tokens,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
                 )
 
@@ -915,114 +914,57 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
-        if self.parser and self.parser.reasoning_parser_cls:
-            try:
-                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in reasoning parser creation.")
-                raise e
-
-            reasoning, content = reasoning_parser.extract_reasoning(
-                final_output.text, request=request
-            )
-        else:
-            reasoning = None
-            content = final_output.text
-
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
-            output_text = ""
-            if content:
-                output_text = content
-            elif reasoning:
-                output_text = f"[reasoning: {reasoning}]"
-
-            if output_text:
-                self.request_logger.log_outputs(
-                    request_id=request.request_id,
-                    outputs=output_text,
-                    output_token_ids=final_output.token_ids,
-                    finish_reason=final_output.finish_reason,
-                    is_streaming=False,
-                    delta=False,
-                )
-
-        reasoning_item = None
-        message_item = None
-        if reasoning:
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
-                ],
-                status=None,  # NOTE: Only the last output item has status.
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=False,
+                delta=False,
             )
-        tool_calls, content = self._parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            content=content,
-            enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.parser.tool_parser_cls if self.parser else None,
-        )
 
-        if content or (self.use_harmony and tool_calls):
-            res_text_part = None
-            if content:
-                res_text_part = ResponseOutputText(
-                    text=content,
-                    annotations=[],  # TODO
-                    type="output_text",
-                    logprobs=(
-                        self._create_response_logprobs(
-                            token_ids=final_output.token_ids,
-                            logprobs=final_output.logprobs,
-                            tokenizer=tokenizer,
-                            top_logprobs=request.top_logprobs,
-                        )
-                        if request.is_include_output_logprobs()
-                        else None
-                    ),
-                )
-            message_item = ResponseOutputMessage(
+        # Compute logprobs if requested
+        logprobs = None
+        if request.is_include_output_logprobs() and final_output.logprobs:
+            logprobs = self._create_response_logprobs(
+                token_ids=final_output.token_ids,
+                logprobs=final_output.logprobs,
+                tokenizer=tokenizer,
+                top_logprobs=request.top_logprobs,
+            )
+
+        # Use parser to extract and create response output items
+        if self.parser:
+            parser = self.parser(tokenizer)
+            return parser.extract_response_outputs(
+                model_output=final_output.text,
+                request=request,
+                enable_auto_tools=self.enable_auto_tools,
+                tool_call_id_type=self.tool_call_id_type,
+                logprobs=logprobs,
+            )
+
+        # Fallback when no parser is configured
+        return [
+            ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[res_text_part] if res_text_part else [],
+                content=[
+                    ResponseOutputText(
+                        text=final_output.text,
+                        annotations=[],
+                        type="output_text",
+                        logprobs=logprobs,
+                    )
+                ]
+                if final_output.text
+                else [],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-        outputs = []
-
-        if reasoning_item:
-            outputs.append(reasoning_item)
-        if message_item:
-            outputs.append(message_item)
-        if tool_calls:
-            # We use a simple counter for history_tool_call_count because
-            # we don't track the history of tool calls in the Responses API yet.
-            # This means that the tool call index will start from 0 for each
-            # request.
-            tool_call_items = []
-            for history_tool_call_cnt, tool_call in enumerate(tool_calls):
-                tool_call_items.append(
-                    ResponseFunctionToolCall(
-                        id=f"fc_{random_uuid()}",
-                        call_id=tool_call.id
-                        if tool_call.id
-                        else make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=history_tool_call_cnt,
-                        ),
-                        type="function_call",
-                        status="completed",
-                        name=tool_call.name,
-                        arguments=tool_call.arguments,
-                    )
-                )
-            outputs.extend(tool_call_items)
-        return outputs
+        ]
 
     def _make_response_output_items_with_harmony(
         self,
