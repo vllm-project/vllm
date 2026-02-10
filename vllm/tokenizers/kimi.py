@@ -15,6 +15,8 @@ from .protocol import TokenizerLike
 
 logger = init_logger(__name__)
 
+KIMI_STOP_TOKENS = ("<|im_msg_end|>", "<|im_kimia_text_eos|>")
+
 
 class KimiTokenizer(TokenizerLike):
     """Tokenizer wrapper for Kimi models using TikTokenTokenizer backend.
@@ -262,6 +264,17 @@ class KimiTokenizer(TokenizerLike):
         if isinstance(ids, int):
             ids = [ids]
         return self._tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+
+    def get_stop_token_ids(self) -> list[int]:
+        stop_token_ids: list[int] = []
+        for token in KIMI_STOP_TOKENS:
+            token_id = self.convert_tokens_to_ids(token)
+            if token_id is None:
+                continue
+            token_id = int(token_id)
+            if token_id not in stop_token_ids:
+                stop_token_ids.append(token_id)
+        return stop_token_ids
 
     def convert_ids_to_tokens(
         self,

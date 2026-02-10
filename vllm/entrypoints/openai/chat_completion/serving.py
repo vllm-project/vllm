@@ -90,8 +90,6 @@ from vllm.v1.sample.logits_processor import validate_logits_processors_parameter
 
 logger = init_logger(__name__)
 
-_KIMI_STOP_TOKENS = ("<|im_msg_end|>", "<|im_kimia_text_eos|>")
-
 
 def _maybe_add_kimi_stop_tokens(
     model_config, tokenizer: TokenizerLike | None, default_sampling_params: dict
@@ -100,11 +98,11 @@ def _maybe_add_kimi_stop_tokens(
         return
     if getattr(model_config.hf_config, "kimia_token_offset", None) is None:
         return
+    get_stop_token_ids = getattr(tokenizer, "get_stop_token_ids", None)
+    if not callable(get_stop_token_ids):
+        return
     stop_token_ids = default_sampling_params.setdefault("stop_token_ids", [])
-    for token in _KIMI_STOP_TOKENS:
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        if token_id is None:
-            continue
+    for token_id in get_stop_token_ids():
         token_id = int(token_id)
         if token_id not in stop_token_ids:
             stop_token_ids.append(token_id)
