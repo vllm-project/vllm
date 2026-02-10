@@ -107,9 +107,6 @@ class EagleSpeculator:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(
             num_tokens=num_tokens,
-            num_reqs=None,
-            uniform=False,
-            has_lora=False,
         )
         with set_forward_context(
             attn_metadata,
