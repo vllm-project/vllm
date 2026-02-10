@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -74,6 +73,7 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        reasoning_ended: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -86,6 +86,8 @@ class Request:
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
         )
+        if self.structured_output_request is not None:
+            self.structured_output_request.reasoning_ended = reasoning_ended
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -161,10 +163,11 @@ class Request:
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
-        if block_hasher is not None:
-            self.get_hash_new_full_blocks = partial(block_hasher, self)
-            self.block_hashes = self.get_hash_new_full_blocks()
+        # Store the block hasher without binding self to avoid creating a
+        # reference cycle (Request -> partial -> Request) that prevents
+        # immediate garbage collection via reference counting.
+        self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
+        self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
@@ -195,6 +198,7 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            reasoning_ended=request.reasoning_ended,
         )
 
     def append_output_token_ids(
@@ -208,8 +212,12 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
-        if self.get_hash_new_full_blocks is not None:
-            self.block_hashes.extend(self.get_hash_new_full_blocks())
+        self.update_block_hashes()
+
+    def update_block_hashes(self) -> None:
+        """Compute block hashes for any new full blocks and append them."""
+        if self._block_hasher is not None:
+            self.block_hashes.extend(self._block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
@@ -256,7 +264,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        return self.mm_features[input_id].mm_position.get_num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
         self,

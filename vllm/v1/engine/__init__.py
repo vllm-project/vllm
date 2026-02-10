@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 import numpy as np
@@ -17,6 +17,12 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+
+# Type for pause_generation mode parameter.
+# - "abort": Abort all in-flight requests immediately (default).
+# - "wait": Wait for in-flight requests to complete before pausing.
+# - "keep": Freeze requests in queue; they resume on resume_generation().
+PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -82,6 +88,8 @@ class EngineCoreRequest(
     # to the request_id field, see InputProcessor.assign_request_id().
     # Used in outputs and to support abort(req_id, internal=False).
     external_req_id: str | None = None
+
+    reasoning_ended: bool | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
