@@ -10,7 +10,7 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
-NUM_HEADS = [(4, 4), (8, 2), (5,1)]
+NUM_HEADS = [(4, 4), (8, 2), (40, 8)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
 
@@ -20,7 +20,9 @@ QDTYPES = (
     if not current_platform.is_rocm()
     else [None, torch.float8_e4m3fnuz]
 )
-FP8_DTYPE = torch.float8_e4m3fn if not current_platform.is_rocm() else torch.float8_e4m3fnuz
+FP8_DTYPE = (
+    torch.float8_e4m3fn if not current_platform.is_rocm() else torch.float8_e4m3fnuz
+)
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
@@ -225,11 +227,11 @@ def test_triton_unified_attn(
     [
         [(1, 1328), (5, 18), (129, 463)],
         [(1, 523), (1, 37), (1, 2011)],
-        # Add specific case from failing test: 533 sequences of length 1
         [(1, 1)] * 533,
+        [(533, 533)] * 533,
     ],
 )
-@pytest.mark.parametrize("num_heads", NUM_HEADS + [(40, 8)])  # Add failing test case
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None, 64, 128, 256])
@@ -280,9 +282,7 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     )
 
     # Use fp8 for output
-    output = torch.empty(
-        sum(query_lens), num_query_heads, head_size, dtype=FP8_DTYPE
-    )
+    output = torch.empty(sum(query_lens), num_query_heads, head_size, dtype=FP8_DTYPE)
 
     # Set output_scale for fp8 quantization
     output_scale = torch.tensor(0.5, dtype=torch.float32)
