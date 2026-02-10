@@ -107,6 +107,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             expand_config = get_config_func(M)
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
+
+        # Override block sizes to match LoRA rank dimensions.
+        # Shrink: N = max_lora_rank, so BLOCK_SIZE_N should match rank.
+        # Expand: K = max_lora_rank, so BLOCK_SIZE_K should match rank.
+        # Without this, the default MoE block sizes (e.g. 64/32) cause
+        # redundant computation when rank < BLOCK_SIZE.
+        shrink_config["BLOCK_SIZE_N"] = min(rank, 64)
+        expand_config["BLOCK_SIZE_K"] = min(rank, 32)
+
         return shrink_config, expand_config
 
     def _inject_lora_into_fused_moe(self):
@@ -411,6 +420,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.w13_lora_b_stacked[1][lora_id][experts_id]
                 )
 
+    def _slice_ep_experts(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Slice per-expert tensor from global to local experts for EP."""
+        if not self.base_layer.use_ep or tensor.ndim < 3:
+            return tensor
+        expert_map = self.base_layer._expert_map
+        if expert_map is None:
+            return tensor
+        # Work on CPU since expert_map is on GPU but tensor may be on CPU
+        expert_map_cpu = expert_map.cpu()
+        # Find global expert indices assigned to this rank, ordered by
+        # local index
+        local_mask = expert_map_cpu >= 0
+        global_indices = local_mask.nonzero(as_tuple=True)[0]
+        local_indices = expert_map_cpu[global_indices]
+        sorted_order = local_indices.argsort()
+        return tensor[global_indices[sorted_order]]
+
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
         """
         Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
@@ -496,6 +522,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # Slice per-expert weights to local experts for EP
+        w1_lora_a = self._slice_ep_experts(w1_lora_a)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
+        w3_lora_a = self._slice_ep_experts(w3_lora_a)
+        w1_lora_b = self._slice_ep_experts(w1_lora_b)
+        w2_lora_b = self._slice_ep_experts(w2_lora_b)
+        w3_lora_b = self._slice_ep_experts(w3_lora_b)
 
         # Handle compact shared MoE LoRA format where some weights are 2D (shared)
         # Expand 2D shared weights to 3D by repeating across experts
@@ -686,19 +720,30 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
 
+        # Use global_num_experts for reshape (correct for both EP and non-EP)
+        actual_num_experts = self.base_layer.global_num_experts
         # (num_experts,rank,input_size)
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
+        w13_lora_a = w13_lora_a.reshape(actual_num_experts, -1,
+                                        w13_lora_a.shape[-1])
+        w2_lora_a = w2_lora_a.reshape(actual_num_experts, -1,
+                                      w2_lora_a.shape[-1])
         # (output_size,num_experts,rank)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
+        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0],
+                                        actual_num_experts, -1)
+        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0],
+                                      actual_num_experts, -1)
         # (num_experts,output_size,rank)
         w13_lora_b = w13_lora_b.permute(1, 0, 2)
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
+
+        # Slice to local experts for EP
+        w13_lora_a = self._slice_ep_experts(w13_lora_a)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
+        w13_lora_b = self._slice_ep_experts(w13_lora_b)
+        w2_lora_b = self._slice_ep_experts(w2_lora_b)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
@@ -1050,6 +1095,11 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
         w3_lora_a = self._extract_shared_weight(w3_lora_a, 2, "w3_lora_a")
         # w2 LoRA B should be (hidden, rank) after extraction
         w2_lora_b = self._extract_shared_weight(w2_lora_b, 2, "w2_lora_b")
+
+        # Slice per-expert weights to local experts for EP
+        w1_lora_b = self._slice_ep_experts(w1_lora_b)
+        w3_lora_b = self._slice_ep_experts(w3_lora_b)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
 
         # Slice shared weights (no expert dim)
         sliced_w1_lora_a = self._slice_w13_a_shared(w1_lora_a)
