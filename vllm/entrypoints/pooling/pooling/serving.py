@@ -203,7 +203,9 @@ class OpenAIServingPooling(OpenAIServing):
                     "around output data from v0.19 onwards.",
                 )
 
-                output.request_id = request_id  # type: ignore
+                if hasattr(output, "request_id") and output.request_id is None:
+                    output.request_id = request_id  # type: ignore
+
                 return output_to_response(output)  # type: ignore
 
             return IOProcessorResponse(request_id=request_id, data=output)
