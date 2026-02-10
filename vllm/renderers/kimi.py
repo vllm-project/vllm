@@ -10,6 +10,7 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi import KimiTokenizer
 
 from .hf import HfRenderer
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -34,7 +35,7 @@ class KimiRenderer(HfRenderer):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__(config)
+        BaseRenderer.__init__(self, config)
 
         # Initialize without calling HfRenderer.__init__ to avoid creating
         # the HF tokenizer. We'll create KimiTokenizer instead.
