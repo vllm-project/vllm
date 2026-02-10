@@ -713,7 +713,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
                             # Warn about non-text content in system messages
                             if part_type and part_type != "text":
-                                logger.warning(
+                                logger.warning_once(
                                     "System messages should only contain text "
                                     "content according to the OpenAI API spec. "
                                     "Found content type: '%s'.",
