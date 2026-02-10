@@ -28,6 +28,7 @@ from contextlib import suppress
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+import regex as re
 import torch
 from scipy.io import wavfile
 from transformers.feature_extraction_utils import BatchFeature
@@ -142,6 +143,70 @@ def _kimia_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         text_input_ids=MultiModalFieldConfig.batched("audio"),
         audio_input_ids=MultiModalFieldConfig.batched("audio"),
     )
+
+
+_CJK_PATTERN = re.compile(r"\p{Han}")
+_CJK_SPACE_PATTERN = re.compile(r"(?<=\p{Han})\s+(?=\p{Han})")
+_INSTRUCTION_PATTERN = re.compile(
+    r"(?:please\s+)?trans\s*cribe\s+the\s+following\s+audio\s*[:：\.]*",
+    flags=re.IGNORECASE,
+)
+_FOLLOWING_AUDIO_PATTERN = re.compile(
+    r"the\s+following\s+audio\s*[:：\.]*", flags=re.IGNORECASE
+)
+_TRANSCRIBE_TOKEN_PATTERN = re.compile(r"\btrans\s*cribe\b", flags=re.IGNORECASE)
+_CRIBE_TOKEN_PATTERN = re.compile(r"\bcribe\b", flags=re.IGNORECASE)
+_AUDIO_LABEL_PATTERN = re.compile(r"\baudio\s*[:：]", flags=re.IGNORECASE)
+_PLEASE_PATTERN = re.compile(r"\bplease\b", flags=re.IGNORECASE)
+_TRAILING_A_PATTERN = re.compile(r"(?:\s*[AＡ]+[\s,，。]*){3,}\s*$")
+_TRAILING_PUNCT_PATTERN = re.compile(r"(?:\s*[,.，。]){3,}\s*$")
+
+
+def _is_chinese_language(language: str | None) -> bool:
+    if not language:
+        return False
+    return language.lower().startswith("zh")
+
+
+def _default_kimia_instruction(language: str | None) -> str:
+    if _is_chinese_language(language):
+        return "请只输出转写文本，不要其他内容。"
+    return "Please transcribe the following audio:"
+
+
+def _cjk_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    cjk = len(_CJK_PATTERN.findall(text))
+    non_space = len(re.findall(r"\S", text))
+    if non_space == 0:
+        return 0.0
+    return cjk / non_space
+
+
+def _cleanup_kimia_output(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+
+    cjk_ratio = _cjk_ratio(text)
+    if cjk_ratio >= 0.3:
+        text = _INSTRUCTION_PATTERN.sub(" ", text)
+        text = _FOLLOWING_AUDIO_PATTERN.sub(" ", text)
+        text = _TRANSCRIBE_TOKEN_PATTERN.sub(" ", text)
+        text = _CRIBE_TOKEN_PATTERN.sub(" ", text)
+        text = _AUDIO_LABEL_PATTERN.sub(" ", text)
+        text = _PLEASE_PATTERN.sub(" ", text)
+
+    text = _TRAILING_A_PATTERN.sub("", text)
+    text = _TRAILING_PUNCT_PATTERN.sub("", text)
+
+    if _cjk_ratio(text) >= 0.3:
+        text = _CJK_SPACE_PATTERN.sub("", text)
+        text = re.sub(r"\s+([，。！？；：])", r"\1", text)
+
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
 
 
 def _has_nonzero_mm_inputs(*items: object) -> bool:
@@ -691,7 +756,7 @@ class KimiAudioForConditionalGeneration(
                 instruction = request_prompt
             else:
                 # Match the upstream Kimi-Audio README ASR example.
-                instruction = "Please transcribe the following audio:"
+                instruction = _default_kimia_instruction(language)
 
             messages = [
                 {
@@ -761,6 +826,11 @@ class KimiAudioForConditionalGeneration(
         finally:
             with suppress(OSError):
                 os.unlink(wav_path)
+
+    @classmethod
+    def post_process_output(cls, text: str) -> str:
+        """Clean Kimi-Audio ASR output by trimming prompt-echo noise."""
+        return _cleanup_kimia_output(text)
 
     def forward(self, *args, **kwargs):  # type: ignore[override]
         # Pull out our extra multimodal tensors
