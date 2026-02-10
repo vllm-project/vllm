@@ -264,7 +264,6 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
     scale = head_size**-0.5
 
-    # Use fp16 for input
     dtype = torch.float16
     query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
     key_cache = torch.randn(
@@ -281,10 +280,8 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
-    # Use fp8 for output
     output = torch.empty(sum(query_lens), num_query_heads, head_size, dtype=FP8_DTYPE)
 
-    # Set output_scale for fp8 quantization
     output_scale = torch.tensor(0.5, dtype=torch.float32)
 
     num_par_softmax_segments = 16
@@ -327,7 +324,6 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         softmax_segm_expsum=softmax_segm_expsum,
     )
 
-    # Compute reference output in fp16
     ref_output = ref_paged_attn(
         query=query,
         key_cache=key_cache,
@@ -340,11 +336,9 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         soft_cap=soft_cap,
     )
 
-    # Convert output back to fp16 for comparison (dequantize)
     output_fp16 = output.to(torch.float32) * output_scale.item()
     output_fp16 = output_fp16.to(torch.float16)
 
-    # Use relaxed tolerances for fp8 output
     atol, rtol = 2e-1, 2e-1
     (
         torch.testing.assert_close(output_fp16, ref_output, atol=atol, rtol=rtol),
