@@ -414,7 +414,6 @@ def _auto_tune_communication_config(
     old_indices: np.ndarray,
     new_indices: np.ndarray,
     ep_size: int,
-    ep_rank: int,
 ) -> tuple[
     EPLBCommunicationConfig,
     list[tuple[list[tuple[int, int]], list[tuple[int, int]]]] | None,
@@ -427,13 +426,14 @@ def _auto_tune_communication_config(
     1. Decrease group_size (increase num_groups) until group_size = 1
     2. If still exceeding, enable experts_batch_size
 
+    If max_num_experts_transfers is None, returns the original configuration unchanged.
+
     Args:
         communication_config: Current communication configuration.
         num_local_experts: Number of local experts per rank.
         old_indices: Current expert assignments.
         new_indices: Desired expert assignments.
         ep_size: Expert parallel world size.
-        ep_rank: Current rank in the expert parallel group.
 
     Returns:
         Tuple of (tuned EPLBCommunicationConfig, rank_transfers).
@@ -446,10 +446,6 @@ def _auto_tune_communication_config(
     # Start with current config
     num_groups = communication_config.num_groups
     experts_batch_size = communication_config.experts_batch_size
-
-    # If experts_batch_size was explicitly set, don't auto-tune
-    if experts_batch_size is not None:
-        return communication_config, None
 
     # Build transfer lists once for all ranks
     rank_transfers = _build_rank_transfer_lists(
@@ -574,7 +570,6 @@ def _build_communication_plan(
         old_indices=old_indices,
         new_indices=new_indices,
         ep_size=ep_size,
-        ep_rank=ep_rank,
     )
 
     # Extract transfer list for current rank if available

@@ -10,6 +10,7 @@ import torch.distributed
 
 from vllm.config.parallel import EPLBCommunicationConfig
 from vllm.distributed.eplb.rebalance_execute import (
+    _auto_tune_communication_config,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -582,6 +583,88 @@ def test_rearrange_with_communication_config(
         num_communication_groups,
         communication_experts_batch_size,
     )
+
+
+@pytest.mark.parametrize(
+    "world_size,num_local_experts,num_logical_experts,"
+    "max_num_experts_transfers,expected_num_groups_min,expected_batch_size",
+    [
+        # 4 GPUs, 2 experts per GPU, 6 logical experts
+        # High limit - should not trigger auto-tuning
+        (4, 2, 6, 100, 1, None),
+        # Low limit - should increase num_groups
+        (4, 2, 6, 2, 2, None),
+        # Very low limit - should enable batching
+        (4, 2, 6, 1, 4, 2),
+        # 2 GPUs, 3 experts per GPU, 4 logical experts
+        # Low limit - should increase num_groups
+        (2, 3, 4, 2, 2, None),
+    ],
+)
+def test_auto_tuning_config(
+    world_size,
+    num_local_experts,
+    num_logical_experts,
+    max_num_experts_transfers,
+    expected_num_groups_min,
+    expected_batch_size,
+):
+    """Test auto-tuning based on max_num_experts_transfers."""
+    total_physical_experts = world_size * num_local_experts
+
+    redundancy_config = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+
+    old_indices = create_expert_indices_with_redundancy(
+        num_layers=1,
+        num_logical_experts=num_logical_experts,
+        total_physical_experts=total_physical_experts,
+        redundancy_config=redundancy_config,
+    )
+
+    new_redundancy_config = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+    new_indices = create_expert_indices_with_redundancy(
+        num_layers=1,
+        num_logical_experts=num_logical_experts,
+        total_physical_experts=total_physical_experts,
+        redundancy_config=new_redundancy_config,
+    )
+
+    comm_config = EPLBCommunicationConfig(
+        num_groups=1,  # Default
+        experts_batch_size=None,  # Default
+        max_num_experts_transfers=max_num_experts_transfers,
+    )
+
+    tuned_config, _ = _auto_tune_communication_config(
+        communication_config=comm_config,
+        num_local_experts=num_local_experts,
+        old_indices=old_indices[0].cpu().numpy(),
+        new_indices=new_indices[0].cpu().numpy(),
+        ep_size=world_size,
+    )
+
+    assert tuned_config.num_groups >= expected_num_groups_min, (
+        f"Expected num_groups >= {expected_num_groups_min}, "
+        f"got {tuned_config.num_groups}"
+    )
+
+    if expected_batch_size is not None:
+        assert tuned_config.experts_batch_size == expected_batch_size, (
+            f"Expected experts_batch_size={expected_batch_size}, "
+            f"got {tuned_config.experts_batch_size}"
+        )
+    else:
+        # If we didn't expect batching, verify it wasn't enabled
+        if tuned_config.num_groups < world_size:
+            # If num_groups didn't reach world_size, batching shouldn't be enabled
+            assert tuned_config.experts_batch_size is None, (
+                f"Expected no batching, got experts_batch_size="
+                f"{tuned_config.experts_batch_size}"
+            )
 
 
 def _test_rearrange_expert_weights_no_change(env, world_size) -> None:

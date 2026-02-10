@@ -67,9 +67,8 @@ class EPLBCommunicationConfig:
     """
     Maximum number of expert transfers per rank per operation in a batch_isend_irecv.
 
-    Used for auto-tuning num_groups and experts_batch_size when those are not explicitly
-    set. If a rank exceeds this limit, group_size is decreased until it reaches 1,
-    then batching is enabled.
+    Used for auto-tuning num_groups and experts_batch_size. If a rank exceeds this 
+    limit, group_size is decreased until it reaches 1, then batching is enabled.
     """
 
 
@@ -136,15 +135,12 @@ class EPLBConfig:
     """
     Maximum number of expert transfers (sends + recvs) per rank per batch_isend_irecv.
 
-    Used for auto-tuning num_communication_groups and 
-    communication_experts_batch_size when those are not explicitly set. If the
-    estimated communication load exceeds this limit, group_size is decreased
-    (increasing num_groups) until it reaches 1, then experts_batch_size is
-    enabled to further split the communication.
+    When set, enables auto-tuning of num_communication_groups and 
+    communication_experts_batch_size. If the estimated communication load exceeds 
+    this limit, group_size is decreased (increasing num_groups) until it reaches 1,
+    then experts_batch_size is enabled to further split the communication.
 
-    - If None (default), no auto-tuning is applied
-    - Only takes effect when num_communication_groups and
-      communication_experts_batch_size are at their default values
+    If None (default), no auto-tuning is applied.
     """
 
     @model_validator(mode="after")
