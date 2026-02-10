@@ -549,7 +549,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     use_audio_in_video_tensor = item["use_audio_in_video"].data
                     if use_audio_in_video_tensor.numel() > 0:
                         use_audio_in_video = bool(use_audio_in_video_tensor.item())
-                        break
+                        if use_audio_in_video:
+                            break
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
