@@ -188,6 +188,8 @@ class KimiTokenizer(TokenizerLike):
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
         """Decode token IDs to text."""
+        if isinstance(ids, int):
+            ids = [ids]
         return self._tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
 
     def convert_ids_to_tokens(

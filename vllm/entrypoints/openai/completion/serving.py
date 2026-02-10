@@ -10,6 +10,7 @@ from typing import cast
 import jinja2
 from fastapi import Request
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.completion.protocol import (
@@ -72,6 +73,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.debug_log_completion_token_ids = envs.VLLM_DEBUG_LOG_COMPLETION_TOKEN_IDS
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
 
@@ -408,6 +410,15 @@ class OpenAIServingCompletion(OpenAIServing):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
+                    self._log_completion_token_ids(
+                        request_id,
+                        prompt_token_ids,
+                        output.token_ids,
+                        prompt_idx=prompt_idx,
+                        output_idx=output.index,
+                        stream=True,
+                    )
+
                     if request.logprobs is not None:
                         assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_completion_logprobs(
@@ -553,6 +564,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     out_logprobs = output.logprobs
                     output_text = output.text
 
+                self._log_completion_token_ids(
+                    request_id,
+                    prompt_token_ids,
+                    output.token_ids,
+                    output_idx=output.index,
+                )
+
                 if request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_completion_logprobs(
@@ -648,7 +666,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             value=True,
                         )
 
-                    token = tokenizer.decode(token_id)
+                    token = tokenizer.decode([token_id])
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
@@ -697,4 +715,28 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
+        )
+
+    def _log_completion_token_ids(
+        self,
+        request_id: str,
+        prompt_token_ids: GenericSequence[int] | None,
+        output_token_ids: GenericSequence[int] | None,
+        *,
+        prompt_idx: int | None = None,
+        output_idx: int | None = None,
+        stream: bool = False,
+    ) -> None:
+        if not self.debug_log_completion_token_ids:
+            return
+
+        logger.info(
+            "Completion token ids request_id=%s prompt_idx=%s output_idx=%s "
+            "stream=%s prompt_token_ids=%s output_token_ids=%s",
+            request_id,
+            prompt_idx,
+            output_idx,
+            stream,
+            as_list(prompt_token_ids) if prompt_token_ids is not None else None,
+            as_list(output_token_ids) if output_token_ids is not None else None,
         )
