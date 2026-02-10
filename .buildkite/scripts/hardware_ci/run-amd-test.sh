@@ -56,7 +56,8 @@ cleanup_network() {
 }
 
 log_diagnostics() {
-  local log_file="gpu_diagnostics.log"
+  local log_file
+  log_file="$(pwd)/gpu_diagnostics.log"
   echo "--- Capturing GPU Diagnostics"
   {
     echo "================================================================"
@@ -78,12 +79,15 @@ log_diagnostics() {
     echo "--- End of Diagnostics ---"
   } > "$log_file"
 
+  echo "--- Diagnostic Log Contents ---"
+  cat "$log_file"
+  echo "--- End of Diagnostic Log Contents ---"
+
   if command -v buildkite-agent >/dev/null 2>&1; then
     echo "--- Uploading $log_file as artifact"
     buildkite-agent artifact upload "$log_file"
   else
     echo "--- buildkite-agent not found, skipping artifact upload"
-    cat "$log_file"
   fi
 }
 
@@ -280,7 +284,9 @@ else
           --name "${container_name}" \
           "${image_name}" \
           /bin/bash -c "${commands}"
+  EXIT_STATUS=$?
 
   # Stop the background monitor
   kill $MONITOR_PID 2>/dev/null || true
+  exit $EXIT_STATUS
 fi
