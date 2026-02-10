@@ -1721,18 +1721,6 @@ steps:
   - tests/compile/test_silu_mul_quant_fusion.py
   - tests/compile/distributed/test_fusion_all_reduce.py
   - tests/compile/fullgraph/test_full_graph.py
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - vllm/model_executor/layers/quantization/
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/attention/attention.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/ # TODO(luka) limit to vllm/compilation/passes
-  - tests/compile/passes/test_fusion_attn.py
-  - tests/compile/passes/test_silu_mul_quant_fusion.py
-  - tests/compile/passes/distributed/test_fusion_all_reduce.py
-  - tests/compile/fullgraph/test_full_graph.py
   commands:
     - rocm-smi
     # we run all backend tests on ROCm
