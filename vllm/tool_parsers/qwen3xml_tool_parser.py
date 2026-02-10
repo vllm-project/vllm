@@ -1316,3 +1316,9 @@ class Qwen3XMLToolParser(ToolParser):
                             tool_call.function.arguments
                         )
         return result
+
+    def parser_should_check_for_unstreamed_tool_arg_tokens(self) -> bool:
+        """
+        Skip unstreamed tool-argument tokens in serving
+        """
+        return False

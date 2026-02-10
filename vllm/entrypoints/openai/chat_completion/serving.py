@@ -1235,11 +1235,8 @@ class OpenAIServingChat(OpenAIServing):
                         else:
                             index = 0
 
-                        if (
-                            self._should_check_for_unstreamed_tool_arg_tokens(
-                                delta_message, output
-                            )
-                            and tool_parser
+                        if self._should_check_for_unstreamed_tool_arg_tokens(
+                            delta_message, output, tool_parser
                         ):
                             latest_delta_len = 0
                             if (
@@ -1892,6 +1889,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         delta_message: DeltaMessage | None,
         output: CompletionOutput,
+        tool_parser: ToolParser | None = None,
     ) -> bool:
         """
         Check to see if we should check for unstreamed tool arguments tokens.
@@ -1910,6 +1908,8 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+            and tool_parser is not None
+            and tool_parser.parser_should_check_for_unstreamed_tool_arg_tokens()
         )
 
     @staticmethod

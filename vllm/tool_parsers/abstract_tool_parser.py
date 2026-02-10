@@ -53,6 +53,12 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    def parser_should_check_for_unstreamed_tool_arg_tokens(self) -> bool:
+        """
+        Whether to check for unstreamed tool-argument tokens in serving
+        """
+        return True
+
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
         Static method that used to adjust the request parameters.
