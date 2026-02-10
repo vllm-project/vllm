@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, field_validator, model_validator
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
@@ -47,6 +48,30 @@ All2AllBackend = Literal[
 ]
 
 
+@dataclass
+class EPLBCommunicationConfig:
+    """Runtime-adjusted communication configuration for EPLB."""
+
+    num_groups: int
+    """Effective number of communication groups."""
+
+    experts_batch_size: int | None
+    """
+    Effective batch size for expert transfers.
+    
+    Represents the number of experts to transfer per batch.
+    The actual number of P2P operations will be experts_batch_size * num_weight_tensors.
+    """
+
+    max_num_experts_transfers: int | None = None
+    """
+    Maximum number of expert transfers per rank per operation in a batch_isend_irecv.
+
+    Used for auto-tuning num_groups and experts_batch_size. If a rank exceeds this 
+    limit, group_size is decreased until it reaches 1, then batching is enabled.
+    """
+
+
 @config
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
@@ -81,6 +106,43 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    num_communication_groups: int = Field(default=1, ge=1)
+    """
+    Number of communication groups for P2P operations during rebalancing.
+    Determines how ranks are divided into groups for hierarchical communication.
+    - Ranks are assigned: group_id = rank // (world_size // num_groups)
+    - Communication rounds determined by XOR of group IDs
+    - Total rounds = next power of 2 >= max_group_id
+    - Default is 1 (all ranks in one group, single communication round)
+    - If communication_batch_size is set, this will be overridden to world size
+    """
+
+    communication_experts_batch_size: int | None = Field(default=None, ge=1)
+    """
+    Maximum number of experts to transfer per batch during rebalancing.
+    
+    Specifies how many experts are transferred in each batch. The actual number
+    of P2P operations will be experts_batch_size * num_weight_tensors (e.g., for a model
+    with 2 weight tensors per expert, experts_batch_size=4 results in 8 P2P operations).
+    
+    - When set, num_communication_groups will be overridden to equal world size
+      (one rank per group), and expert transfers will be split into batches
+    - Helps avoid overwhelming communication system with too many concurrent ops
+    - If None (default), no special batching is applied
+    """
+
+    max_num_experts_transfers: int | None = Field(default=None, ge=1)
+    """
+    Maximum number of expert transfers (sends + recvs) per rank per batch_isend_irecv.
+
+    When set, enables auto-tuning of num_communication_groups and 
+    communication_experts_batch_size. If the estimated communication load exceeds 
+    this limit, group_size is decreased (increasing num_groups) until it reaches 1,
+    then experts_batch_size is enabled to further split the communication.
+
+    If None (default), no auto-tuning is applied.
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
@@ -88,6 +150,57 @@ class EPLBConfig:
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
+
+    def get_communication_config(self, ep_size: int) -> EPLBCommunicationConfig:
+        """
+        Get the communication configuration for a given EP size.
+
+        This method adjusts num_communication_groups and
+        communication_experts_batch_size based on runtime constraints:
+        - If experts_batch_size is set, forces num_groups = ep_size
+        - Caps num_groups at ep_size
+
+        Args:
+            ep_size: Expert parallel world size
+
+        Returns:
+            EPLBCommunicationConfig
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        num_groups = self.num_communication_groups
+        experts_batch_size = self.communication_experts_batch_size
+
+        # If experts_batch_size is set, num_groups must equal world size
+        if experts_batch_size is not None and num_groups != ep_size:
+            logger.warning_once(
+                "EPLB: communication_experts_batch_size is set (%d), "
+                "overriding num_communication_groups from %d to %d "
+                "(must equal world size when experts batch size is specified).",
+                experts_batch_size,
+                num_groups,
+                ep_size,
+            )
+            num_groups = ep_size
+
+        # Cap num_groups at world size
+        if num_groups > ep_size:
+            logger.warning_once(
+                "EPLB: num_communication_groups (%d) is larger than "
+                "world size (%d). Using %d instead.",
+                num_groups,
+                ep_size,
+                ep_size,
+            )
+            num_groups = ep_size
+
+        return EPLBCommunicationConfig(
+            num_groups=num_groups,
+            experts_batch_size=experts_batch_size,
+            max_num_experts_transfers=self.max_num_experts_transfers,
+        )
 
 
 @config
