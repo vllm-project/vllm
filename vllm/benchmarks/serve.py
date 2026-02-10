@@ -26,6 +26,7 @@ import json
 import os
 import random
 import shutil
+import ssl
 import time
 import uuid
 import warnings
@@ -60,11 +61,14 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 
 async def get_first_model_from_server(
-    base_url: str, headers: dict | None = None
+    base_url: str,
+    headers: dict | None = None,
+    ssl_context: ssl.SSLContext | bool | None = None,
 ) -> tuple[str, str]:
     """Fetch the first model from the server's /v1/models endpoint."""
     models_url = f"{base_url}/v1/models"
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    async with aiohttp.ClientSession(connector=connector) as session:
         try:
             async with session.get(models_url, headers=headers) as response:
                 response.raise_for_status()
@@ -193,6 +197,7 @@ class BenchmarkMetrics:
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
+    rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
 
 @dataclass
@@ -412,6 +417,7 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    input_audio_duration = 0.0
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -439,6 +445,7 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
+            input_audio_duration += outputs[i].input_audio_duration
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -583,6 +590,7 @@ def calculate_metrics(
         ],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
+        rtfx=input_audio_duration / dur_s,
     )
 
     return metrics, actual_output_lens
@@ -615,6 +623,7 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    ssl_context: ssl.SSLContext | bool | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -622,6 +631,8 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
+    # Use ssl_context if provided, otherwise default to True for https URLs
+    ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
     connector = aiohttp.TCPConnector(
         limit=max_concurrency or 0,
         limit_per_host=max_concurrency or 0,
@@ -630,7 +641,7 @@ async def benchmark(
         keepalive_timeout=60,
         enable_cleanup_closed=True,
         force_close=False,
-        ssl=("https://" in api_url),
+        ssl=ssl_setting,
     )
 
     session = aiohttp.ClientSession(
@@ -937,6 +948,12 @@ async def benchmark(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
             )
         )
+        if metrics.rtfx > 0.0:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "RTFx (Inverse Real-Time Factor):", metrics.rtfx
+                )
+            )
     print(
         "{:<40} {:<10.2f}".format(
             "Total token throughput (tok/s):", metrics.total_token_throughput
@@ -963,6 +980,7 @@ async def benchmark(
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
+            "rtfx": metrics.rtfx,
         }
     else:
         result = {
@@ -1502,6 +1520,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
     )
 
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=False,
+        help="Disable SSL certificate verification. Use this option when "
+        "connecting to servers with self-signed certificates.",
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1553,10 +1579,21 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
+    # SSL context configuration
+    ssl_context: ssl.SSLContext | bool | None = None
+    if args.insecure:
+        # Disable SSL certificate verification
+        ssl_context = False
+    elif "https://" in base_url:
+        # Use default SSL context for HTTPS
+        ssl_context = True
+
     # Fetch model from server if not specified
     if args.model is None:
         print("Model not specified, fetching first model from server...")
-        model_name, model_id = await get_first_model_from_server(base_url, headers)
+        model_name, model_id = await get_first_model_from_server(
+            base_url, headers, ssl_context
+        )
         print(f"First model name: {model_name}, first model id: {model_id}")
     else:
         model_name = args.served_model_name
@@ -1680,6 +1717,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        ssl_context=ssl_context,
     )
 
     # Save config and results to json

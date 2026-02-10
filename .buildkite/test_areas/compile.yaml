@@ -121,13 +121,10 @@ steps:
   optional: true
   commands:
     - nvidia-smi
-    # Run all models and attn backends but only Inductor partition and native custom ops
-    # -k "inductor_partition and not +rms_norm and not +quant_fp8"
+    # Run all models but only FLASHINFER, Inductor partition and native custom ops
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
-    # -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
-    # Run just llama3 (fp8 & fp4) for all config combinations
-    # -k "llama-3"
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8" -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3" -k "llama-3"
+    # Run just llama3 (fp8 & fp4) for all config combinations (only inductor partition)
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and qwen3) or llama-3)"
 
 - label: Fusion E2E TP2 Quick (H100)
   timeout_in_minutes: 20
@@ -162,7 +159,7 @@ steps:
     - tests/compile/fusions_e2e/
   commands:
     - nvidia-smi
-    # Run just llama3 (fp4 & fp8 & bf16) for all config combinations
+    # Run just llama3 (fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
 
 - label: Fusion E2E TP2 AsyncTP Config Sweep (H100)
@@ -197,7 +194,8 @@ steps:
     - tests/compile/fusions_e2e/
   commands:
     - nvidia-smi
-    # Run all models and attn backends but only Inductor partition and native custom ops
+    # Run all models but only FLASHINFER, Inductor partition and native custom ops
+    # include qwen with +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
     # for ar-rms-quant-fp4, also sweep llama3
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and not +quant_fp8" -k "Llama-3.1-8B-Instruct-FP4"
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and qwen3)) or Llama-3.1-8B-Instruct-FP4"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and qwen3)"
