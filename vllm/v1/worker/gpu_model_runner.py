@@ -562,12 +562,13 @@ class GPUModelRunner(
         self.optimistic_seq_lens_cpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
         )
-        self.num_computed_tokens = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
-        )
-        self.prev_draft_lens_gpu = torch.zeros(
+        self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        self.prev_num_computed_tokens_gpu = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self.prev_num_scheduled_tokens: np.ndarray | None = None
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
@@ -1542,6 +1543,33 @@ class GPUModelRunner(
             out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+
+        # Build the prev→current index mapping once for reuse below.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        current_indices: list[int] = []
+        prev_indices: list[int] = []
+        new_indices: list[int] = []
+        if self.use_async_spec_decode and prev_req_id_to_index:
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                prev_index = prev_req_id_to_index.get(req_id)
+                if prev_index is not None:
+                    current_indices.append(i)
+                    prev_indices.append(prev_index)
+                else:
+                    new_indices.append(i)
+
+        # For async spec decode, bound the error in optimistic_seq_lens_cpu.
+        # The CPU num_computed_tokens drifts because the scheduler
+        # optimistically assumes all draft tokens are accepted. Correct
+        # continuing requests using num_accepted_tokens from the previous
+        # iteration:  correction = prev_scheduled - prev_accepted
+        if current_indices and self.prev_num_scheduled_tokens is not None:
+            prev_sched = self.prev_num_scheduled_tokens[prev_indices]
+            accepted = self.input_batch.num_accepted_tokens_cpu[current_indices]
+            self.optimistic_seq_lens_cpu.numpy()[current_indices] -= (
+                prev_sched - accepted
+            )
+
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1552,36 +1580,25 @@ class GPUModelRunner(
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        self.num_computed_tokens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        self.num_computed_tokens.copy_to_gpu(num_reqs)
-
         self.num_accepted_tokens.np[:num_reqs] = (
             self.input_batch.num_accepted_tokens_cpu[:num_reqs]
         )
         self.num_accepted_tokens.np[num_reqs:].fill(1)
         self.num_accepted_tokens.copy_to_gpu()
 
-        # For async spec decode: correct num_computed_tokens after CPU->GPU copy.
-        # The CPU values are "optimistic" (assume all draft tokens accepted).
-        # We need to subtract rejected tokens to get the actual values.
-        # Formula: actual = scheduler_value - (prev_draft_len - (valid_counts - 1))
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        # Update num_computed_tokens on GPU.
+        # For async spec decode, the CPU values are "optimistic" (assume all
+        # draft tokens accepted) and have unbounded accumulated error. Instead,
+        # we maintain the GPU tensor directly: for continuing requests, add the
+        # actual accepted token count from the previous iteration. For new
+        # requests, initialize from the (correct) CPU value.
+        # For non-async paths, the CPU values are already corrected and can be
+        # copied directly.
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
-            # Build index mapping for continuing requests
-            current_indices = []
-            prev_indices = []
-            for i, req_id in enumerate(self.input_batch.req_ids):
-                prev_index = prev_req_id_to_index.get(req_id)
-                if prev_index is not None:
-                    current_indices.append(i)
-                    prev_indices.append(prev_index)
-
             if current_indices:
                 prev_indices_gpu = torch.tensor(
                     prev_indices, dtype=torch.int64, device=self.device
@@ -1590,13 +1607,35 @@ class GPUModelRunner(
                     current_indices, dtype=torch.int64, device=self.device
                 )
 
-                scheduler_value = self.num_computed_tokens.gpu[current_indices_gpu]
-                prev_draft_lens = self.prev_draft_lens_gpu[prev_indices_gpu]
+                # Additive correction: actual = prev_actual + accepted_tokens.
+                # prev_actual is from the previous iteration's GPU snapshot;
+                # valid_counts is the number of tokens actually accepted
+                # (including bonus token) in the previous iteration.
+                prev_actual = self.prev_num_computed_tokens_gpu[prev_indices_gpu]
                 valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
-                num_rejected = prev_draft_lens - (valid_counts.int() - 1)
-                new_num_computed = scheduler_value - num_rejected
-                self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
+                self.num_computed_tokens[current_indices_gpu] = (
+                    prev_actual + valid_counts.int()
+                )
                 self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+
+            if new_indices:
+                new_indices_gpu = torch.tensor(
+                    new_indices, dtype=torch.int64, device=self.device
+                )
+                new_vals = torch.tensor(
+                    [
+                        int(self.input_batch.num_computed_tokens_cpu[i])
+                        for i in new_indices
+                    ],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self.num_computed_tokens[new_indices_gpu] = new_vals
+        else:
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
 
         req_indices_gpu = torch.from_numpy(req_indices).to(
             self.device, non_blocking=True
@@ -1606,11 +1645,11 @@ class GPUModelRunner(
             self.device, non_blocking=True
         )
         self.positions.gpu[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
         )
         self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
+            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
 
@@ -1636,7 +1675,7 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             mrope_pos = (
                 self.mrope_position_delta.gpu[req_indices_gpu]
-                + self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
             for dim in range(3):
@@ -1644,7 +1683,7 @@ class GPUModelRunner(
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             xdrope_pos = (
-                self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
             for dim in range(self.uses_xdrope_dim):
@@ -1690,9 +1729,8 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.copy_to_gpu()
 
             if self.use_async_spec_decode:
-                self.prev_draft_lens_gpu[:num_reqs] = torch.clamp(
-                    self.num_decode_draft_tokens.gpu[:num_reqs], min=0
-                )
+                self.prev_num_computed_tokens_gpu.copy_(self.num_computed_tokens)
+                self.prev_num_scheduled_tokens = num_scheduled_tokens.copy()
 
         # Hot-Swap lora model
         if self.lora_config:
