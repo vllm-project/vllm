@@ -249,6 +249,7 @@ def maybe_roundup_hidden_size(
         )
 
         current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
+
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -258,6 +259,7 @@ def maybe_roundup_hidden_size(
             current_platform.is_rocm()
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
+            or current_mxfp4_backend == Mxfp4Backend.MARLIN
         ):
             hidden_size = round_up(hidden_size, 256)
 
