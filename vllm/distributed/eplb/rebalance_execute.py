@@ -495,7 +495,7 @@ def _auto_tune_communication_config(
 
         if ep_rank == 0:
             num_batches = (max_transfers + max_limit - 1) // max_limit
-            logger.info(
+            logger.debug(
                 "EPLB auto-tuning: Enabling experts_batch_size=%d "
                 "(num_batches=%d) to meet max_num_experts_transfers=%d "
                 "(max_transfers=%d, ep_size=%d)",
@@ -507,7 +507,7 @@ def _auto_tune_communication_config(
             )
     elif num_groups != communication_config.num_groups:
         if ep_rank == 0:
-            logger.info(
+            logger.debug(
                 "EPLB auto-tuning: Adjusted num_groups from %d to %d to meet "
                 "max_num_experts_transfers=%d (max_transfers=%d, ep_size=%d)",
                 communication_config.num_groups,
