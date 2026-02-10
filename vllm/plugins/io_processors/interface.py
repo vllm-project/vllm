@@ -100,6 +100,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def post_process(
         self,
         model_output: Sequence[PoolingRequestOutput],
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         raise NotImplementedError
@@ -107,6 +108,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     async def post_process_async(
         self,
         model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         # We cannot guarantee outputs are returned in the same order they were
