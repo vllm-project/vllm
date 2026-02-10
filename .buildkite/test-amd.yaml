@@ -185,7 +185,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/instrumentator
-  - PYTHONPATH=/vllm-workspace  pytest -v -s entrypoints/rpc
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 - label: Entrypoints Integration Test (Pooling)
