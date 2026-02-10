@@ -258,9 +258,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     logger.warning("🚧kv_cache is None, %s", transfer_id)
                     continue
 
-                inject_kv_into_layer(
-                    layer, kv_cache, request.block_ids, transfer_id
-                )
+                inject_kv_into_layer(layer, kv_cache, request.block_ids, transfer_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
