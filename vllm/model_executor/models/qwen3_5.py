@@ -867,9 +867,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        # Qwen3.5 uses float32 for mamba cache dtype
+        mamba_ssm_dtype = vllm_config.model_config.hf_text_config.mamba_ssm_dtype
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, torch.float32
+            vllm_config.model_config.dtype, mamba_ssm_dtype
         )
 
     @classmethod
