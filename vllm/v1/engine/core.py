@@ -43,8 +43,6 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
-    DEFERRED_NOT_READY,
-    DeferredUtilityResult,
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -375,7 +373,7 @@ class EngineCore:
         self,
         mode: PauseMode = "abort",
         clear_cache: bool = True,
-    ) -> None | DeferredUtilityResult:
+    ) -> None | Future:
         """Pause generation; behavior depends on mode.
 
         All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
@@ -383,10 +381,10 @@ class EngineCore:
 
         - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), clear caches,
-          then return.
+          then complete the returned Future.
         - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
-          set PAUSE_KEEP, clear caches, return (deferred).
-        - ``keep``: Set PAUSE_KEEP, return immediately.
+          set PAUSE_KEEP, clear caches, complete the returned Future.
+        - ``keep``: Set PAUSE_KEEP, return None immediately.
         """
         if mode == "abort":
             self._scheduler_pause_state = PauseState.PAUSE_ABORT
@@ -399,12 +397,15 @@ class EngineCore:
                 self.reset_mm_cache()
                 self.reset_encoder_cache()
 
-            def _resolve_when_abort_sent() -> Any:
-                if output_queue is None or output_queue.empty():
-                    return None
-                return DEFERRED_NOT_READY
+            future: Future[Any] = Future()
 
-            return DeferredUtilityResult(_resolve_when_abort_sent)
+            def _wait_abort_sent() -> None:
+                while output_queue is not None and not output_queue.empty():
+                    time.sleep(0.01)
+                future.set_result(None)
+
+            threading.Thread(target=_wait_abort_sent, daemon=True).start()
+            return future
         if mode == "keep":
             self._scheduler_pause_state = PauseState.PAUSE_KEEP
             return None
@@ -412,17 +413,20 @@ class EngineCore:
         # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
         self._scheduler_pause_state = PauseState.PAUSE_WAIT
 
-        def _resolve_when_drained() -> Any:
-            if self.scheduler.has_unfinished_requests():
-                return DEFERRED_NOT_READY
+        future = Future()
+
+        def _wait_drained() -> None:
+            while self.scheduler.has_unfinished_requests():
+                time.sleep(0.01)
             self._scheduler_pause_state = PauseState.PAUSE_KEEP
             if clear_cache:
                 self.reset_prefix_cache()
                 self.reset_mm_cache()
                 self.reset_encoder_cache()
-            return None
+            future.set_result(None)
 
-        return DeferredUtilityResult(_resolve_when_drained)
+        threading.Thread(target=_wait_drained, daemon=True).start()
+        return future
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
@@ -800,10 +804,6 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        # Pending deferred utility resolvers: (client_idx, call_id, resolver).
-        # Resolver is called each loop until it returns something other than
-        # DEFERRED_NOT_READY.
-        self._pending_utility_resolvers: list[tuple[int, int, Callable[[], Any]]] = []
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -1138,7 +1138,6 @@ class EngineCoreProc(EngineCore):
             and not self.scheduler.has_requests()
             and not self.batch_queue
             and self._scheduler_pause_state == PauseState.UNPAUSED
-            and not self._pending_utility_resolvers
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1176,36 +1175,7 @@ class EngineCoreProc(EngineCore):
         if not model_executed and self.scheduler.has_unfinished_requests():
             time.sleep(0.001)
 
-        self._process_pending_utility_resolvers()
         return model_executed
-
-    def _process_pending_utility_resolvers(self) -> None:
-        """Run deferred utility resolvers; send and remove any that complete."""
-        current_resolvers = getattr(self, "_pending_utility_resolvers", None)
-        if not current_resolvers:
-            return
-        unfinished_resolvers: list[tuple[int, int, Callable[[], Any]]] = []
-        for client_idx, call_id, resolver in current_resolvers:
-            try:
-                value = resolver()
-            except BaseException as e:
-                logger.exception("Deferred utility resolver failed")
-                output = UtilityOutput(
-                    call_id,
-                    failure_message=f"Deferred utility failed: {str(e)}",
-                )
-                self.output_queue.put_nowait(
-                    (client_idx, EngineCoreOutputs(utility_output=output))
-                )
-                continue
-            if value is DEFERRED_NOT_READY:
-                unfinished_resolvers.append((client_idx, call_id, resolver))
-            else:
-                output = UtilityOutput(call_id, result=UtilityResult(value))
-                self.output_queue.put_nowait(
-                    (client_idx, EngineCoreOutputs(utility_output=output))
-                )
-        self._pending_utility_resolvers = unfinished_resolvers
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1223,16 +1193,25 @@ class EngineCoreProc(EngineCore):
             try:
                 method = getattr(self, method_name)
                 result = method(*self._convert_msgspec_args(method, args))
-                # Deferred: complete later via resolver (only when output_queue exists).
-                if isinstance(result, DeferredUtilityResult):
-                    pending = getattr(self, "_pending_utility_resolvers", None)
-                    if pending is not None:
-                        pending.append((client_idx, call_id, result.resolver))
-                        return
-                    raise ValueError(
-                        "DeferredUtilityResult is only supported when the engine "
-                        "runs with an output queue (e.g. EngineCoreProc)."
-                    )
+                if isinstance(result, Future):
+                    output_queue = self.output_queue
+
+                    def utility_completed(f: Future) -> None:
+                        try:
+                            output.result = UtilityResult(f.result())
+                        except BaseException as e:
+                            logger.exception(
+                                "Invocation of %s method failed", method_name
+                            )
+                            output.failure_message = (
+                                f"Call to {method_name} method failed: {str(e)}"
+                            )
+                        output_queue.put_nowait(
+                            (client_idx, EngineCoreOutputs(utility_output=output))
+                        )
+
+                    result.add_done_callback(utility_completed)
+                    return
                 output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)

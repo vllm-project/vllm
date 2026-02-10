@@ -8,6 +8,7 @@ import os
 import signal
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
 from types import SimpleNamespace
@@ -279,21 +280,18 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
-def deferred_echo(self, value: Any, num_wait_loops: int = 2) -> Any:
-    """Utility that completes after num_wait_loops resolver invocations (tests
-    DeferredUtilityResult).
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
+    """Utility that returns a Future completed by a worker thread after a short delay.
+    num_wait_loops controls delay in 50ms steps.
     """
-    from vllm.v1.engine import DEFERRED_NOT_READY, DeferredUtilityResult
+    future: Future = Future()
 
-    counter = [0]
+    def complete_later() -> None:
+        time.sleep(num_wait_loops * 0.05)
+        future.set_result(value)
 
-    def resolve() -> Any:
-        counter[0] += 1
-        if counter[0] <= num_wait_loops:
-            return DEFERRED_NOT_READY
-        return value
-
-    return DeferredUtilityResult(resolve)
+    Thread(target=complete_later, daemon=True).start()
+    return future
 
 
 # --- Fixtures for subprocess patching ---
@@ -402,17 +400,20 @@ def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def subprocess_deferred_echo_patch(monkeypatch, tmp_path):
-    """Create sitecustomize.py so spawned subprocesses have deferred_echo method."""
+def subprocess_future_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have future_echo method."""
     sc = tmp_path / "sitecustomize.py"
     sc.write_text(
         "\n".join(
             [
+                "from concurrent.futures import Future",
+                "from threading import Thread",
                 "from typing import Any",
+                "import time",
                 "",
                 "from vllm.v1.engine.core import EngineCore",
-                inspect.getsource(deferred_echo),
-                "EngineCore.deferred_echo = deferred_echo",
+                inspect.getsource(future_echo),
+                "EngineCore.future_echo = future_echo",
             ]
         )
     )
@@ -826,15 +827,15 @@ async def test_engine_core_client_util_method_nested_structures(
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_deferred_utility_async(
+async def test_engine_core_client_future_utility_async(
     monkeypatch: pytest.MonkeyPatch,
-    subprocess_deferred_echo_patch,
+    subprocess_future_echo_patch,
 ):
-    """Test that a utility returning DeferredUtilityResult completes after the
-    resolver returns a value (engine runs resolver each loop until ready).
+    """Test that a utility returning a Future completes when the Future is done
+    (worker thread sets result; engine uses add_done_callback to send output).
     """
     with monkeypatch.context() as m:
-        m.setattr(EngineCore, "deferred_echo", deferred_echo, raising=False)
+        m.setattr(EngineCore, "future_echo", future_echo, raising=False)
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
@@ -854,14 +855,14 @@ async def test_engine_core_client_deferred_utility_async(
         try:
             core_client: AsyncMPClient = client
 
-            # Completes after resolver returns (num_wait_loops=2 → 3 resolver calls)
+            # Completes after worker thread sleeps (num_wait_loops=2 → ~100ms delay)
             result = await core_client.call_utility_async(
-                "deferred_echo", "deferred_result", 2
+                "future_echo", "future_result", 2
             )
-            assert result == "deferred_result"
+            assert result == "future_result"
 
-            # None is a valid result once resolver is ready
-            result = await core_client.call_utility_async("deferred_echo", None, 0)
+            # None is a valid result (num_wait_loops=0 → minimal delay)
+            result = await core_client.call_utility_async("future_echo", None, 0)
             assert result is None
         finally:
             client.shutdown()
