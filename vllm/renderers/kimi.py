@@ -37,6 +37,10 @@ class KimiRenderer(HfRenderer):
     ) -> None:
         BaseRenderer.__init__(self, config)
 
+        self.use_unified_vision_chunk = getattr(
+            config.hf_config, "use_unified_vision_chunk", False
+        )
+
         # Initialize without calling HfRenderer.__init__ to avoid creating
         # the HF tokenizer. We'll create KimiTokenizer instead.
 

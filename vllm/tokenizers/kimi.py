@@ -126,7 +126,6 @@ class KimiTokenizer(TokenizerLike):
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
-            return_tensors="pt",
         )
 
     def get_vocab(self) -> dict[str, int]:
@@ -161,11 +160,16 @@ class KimiTokenizer(TokenizerLike):
 
     def apply_chat_template(
         self,
-        messages: list[ChatCompletionMessageParam],
+        messages: list[ChatCompletionMessageParam] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        conversation: list[ChatCompletionMessageParam] | None = None,
         **kwargs,
     ) -> str | list[int]:
         """Apply chat template to messages."""
+        if messages is None:
+            messages = conversation
+        if messages is None:
+            raise ValueError("messages must be provided for chat templating")
         return self._tokenizer.apply_chat_template(messages, tools=tools, **kwargs)
 
     @overload
