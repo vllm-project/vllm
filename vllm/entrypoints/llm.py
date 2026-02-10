@@ -85,7 +85,6 @@ from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.collection_utils import as_iter
 from vllm.utils.counter import Counter
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -95,6 +94,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
 
@@ -1070,29 +1070,38 @@ class LLM:
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+            prompts_seq = prompt_to_seq(prompts)
 
-            pooling_params = [
+            params_seq: Sequence[PoolingParams] = [
                 self.io_processor.merge_pooling_params(param)
-                for param in as_iter(pooling_params)
+                for param in self._params_to_seq(
+                    pooling_params,
+                    len(prompts_seq),
+                )
             ]
-            for p in pooling_params:
+            for p in params_seq:
                 if p.task is None:
                     p.task = "plugin"
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
 
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
+            prompts_seq = prompt_to_seq(prompts)
+            params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
 
-        for param in as_iter(pooling_params):
-            if param.task is None:
-                param.task = pooling_task
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
+            for param in params_seq:
+                if param.task is None:
+                    param.task = pooling_task
+                elif param.task != pooling_task:
+                    msg = (
+                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                    )
+                    raise ValueError(msg)
 
         outputs = self._run_completion(
-            prompts=prompts,
-            params=pooling_params,
+            prompts=prompts_seq,
+            params=params_seq,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
@@ -1651,11 +1660,9 @@ class LLM:
 
     def _params_to_seq(
         self,
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        params: _P | Sequence[_P],
         num_requests: int,
-    ) -> Sequence[SamplingParams | PoolingParams]:
+    ) -> Sequence[_P]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(
