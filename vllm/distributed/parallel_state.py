@@ -884,13 +884,12 @@ class GroupCoordinator:
             ):
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
-            if tensor.is_cuda:
-                tensor.record_stream(torch.cuda.current_stream(tensor.device))
-
             comm_group = metadata_group if tensor.is_cpu else group
             handle = torch.distributed.isend(
                 tensor, dst=self.ranks[dst], group=comm_group
             )
+            if tensor.is_cuda:
+                tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
 
         return handles
