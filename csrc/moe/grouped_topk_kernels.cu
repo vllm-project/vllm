@@ -902,13 +902,15 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
   // Check if we can use the optimized
   // grouped_topk_fused_small_expert_count_kernel
   bool const is_single_group =
-      (n_group <= 1) && (num_experts <= MaxSupportedExpertCount);
+      (n_group <= 1) && (num_experts <= MaxSupportedExpertCount) &&
+      (topk <= DefaultMaxNumTopExperts || topk == MaxSupportedTopExperts);
 
   int64_t const experts_per_group = num_experts / n_group;
   bool const is_multi_group =
       (n_group > 1) && (num_experts <= NumDeepseekExperts) &&
       (experts_per_group <= WARP_SIZE) &&
-      (experts_per_group * topk_group <= MaxNumExpertsUnit);
+      (experts_per_group * topk_group <= MaxNumExpertsUnit) &&
+      (topk <= DefaultMaxNumTopExperts);
 
   if (is_single_group || is_multi_group) {
     auto* kernel_instance =
