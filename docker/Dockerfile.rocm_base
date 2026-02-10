@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-complete
 ARG TRITON_BRANCH="57c693b6"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="89075173"
@@ -142,6 +142,7 @@ ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
+RUN apt-get update && apt-get install -y pkg-config liblzma-dev
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
     && pip install -r requirements.txt && git submodule update --init --recursive \
@@ -239,7 +240,7 @@ RUN pip install pyyaml && cd aiter \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
-    && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install

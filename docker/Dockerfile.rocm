@@ -1,7 +1,7 @@
 # default base image
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
-ARG BASE_IMAGE=rocm/vllm-dev:base
+ARG BASE_IMAGE=rocm/vllm-dev:base_custom_releases_rocm_v0.16.0_20260211
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
