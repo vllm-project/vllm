@@ -53,6 +53,8 @@ class KimiRenderer(HfRenderer):
             )
 
         self._tokenizer = tokenizer
+        self._kimia_prompt_prefix = "<|im_kimia_user_msg_start|>"
+        self._kimia_prompt_suffix = "<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
     @property
     def tokenizer(self) -> KimiTokenizer | None:
@@ -63,3 +65,25 @@ class KimiRenderer(HfRenderer):
         if tokenizer is None:
             raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
         return tokenizer
+
+    def render_prompt(self, prompt):
+        prompt = super().render_prompt(prompt)
+        if (
+            isinstance(prompt, dict)
+            and "prompt" in prompt
+            and "prompt_token_ids" not in prompt
+        ):
+            prompt_text = prompt["prompt"]
+            if isinstance(prompt_text, str) and not self._is_kimia_wrapped(prompt_text):
+                prompt["prompt"] = (
+                    f"{self._kimia_prompt_prefix}{prompt_text}"
+                    f"{self._kimia_prompt_suffix}"
+                )
+        return prompt
+
+    def _is_kimia_wrapped(self, prompt_text: str) -> bool:
+        return (
+            self._kimia_prompt_prefix in prompt_text
+            or "<|im_kimia_assistant_msg_start|>" in prompt_text
+            or "<|im_msg_end|>" in prompt_text
+        )

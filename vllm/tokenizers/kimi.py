@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tokenizer for Kimi-Audio models using TikTokenTokenizer."""
 
+import inspect
 from pathlib import Path
 from typing import Any, overload
 
@@ -120,12 +121,43 @@ class KimiTokenizer(TokenizerLike):
         max_length: int | None = None,
     ) -> BatchEncoding:
         """Tokenize text."""
-        return self._tokenizer(
-            text,
-            text_pair=text_pair,
-            add_special_tokens=add_special_tokens,
-            truncation=truncation,
-            max_length=max_length,
+        if text_pair is not None:
+            return self._tokenizer(
+                text,
+                text_pair=text_pair,
+                add_special_tokens=add_special_tokens,
+                truncation=truncation,
+                max_length=max_length,
+            )
+
+        input_ids: list[int] | list[list[int]]
+        attention_mask: list[int] | list[list[int]]
+
+        if isinstance(text, list):
+            input_ids = [
+                self.encode(
+                    item,
+                    truncation=truncation,
+                    max_length=max_length,
+                    add_special_tokens=add_special_tokens,
+                )
+                for item in text
+            ]
+            attention_mask = [[1] * len(ids) for ids in input_ids]
+        else:
+            input_ids = self.encode(
+                text,
+                truncation=truncation,
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            )
+            attention_mask = [1] * len(input_ids)
+
+        return BatchEncoding(
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+            }
         )
 
     def get_vocab(self) -> dict[str, int]:
@@ -151,12 +183,35 @@ class KimiTokenizer(TokenizerLike):
         add_special_tokens: bool = True,
     ) -> list[int]:
         """Encode text to token IDs."""
-        return self._tokenizer.encode(
-            text,
-            truncation=truncation,
-            max_length=max_length,
-            add_special_tokens=add_special_tokens,
-        )
+        encode_kwargs: dict[str, Any] = {
+            "truncation": truncation,
+            "max_length": max_length,
+            "add_special_tokens": add_special_tokens,
+        }
+        if "<|" in text and "|>" in text:
+            encode_kwargs["allowed_special"] = "all"
+            encode_kwargs["disallowed_special"] = ()
+
+        supported_params = inspect.signature(self._tokenizer.encode).parameters
+        filtered_kwargs = {
+            key: value
+            for key, value in encode_kwargs.items()
+            if key in supported_params
+        }
+        if "bos" in supported_params:
+            filtered_kwargs["bos"] = False
+        if "eos" in supported_params:
+            filtered_kwargs["eos"] = False
+
+        try:
+            return self._tokenizer.encode(text, **filtered_kwargs)
+        except TypeError:
+            fallback_kwargs = {
+                key: value
+                for key, value in filtered_kwargs.items()
+                if key in {"allowed_special", "disallowed_special", "bos", "eos"}
+            }
+            return self._tokenizer.encode(text, **fallback_kwargs)
 
     def apply_chat_template(
         self,
@@ -171,6 +226,17 @@ class KimiTokenizer(TokenizerLike):
         if messages is None:
             raise ValueError("messages must be provided for chat templating")
         return self._tokenizer.apply_chat_template(messages, tools=tools, **kwargs)
+
+    def get_chat_template(
+        self,
+        chat_template: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        if hasattr(self._tokenizer, "get_chat_template"):
+            return self._tokenizer.get_chat_template(chat_template, tools=tools)
+        if chat_template is not None:
+            return chat_template
+        return getattr(self._tokenizer, "chat_template", None)
 
     @overload
     def convert_tokens_to_ids(self, tokens: str) -> int: ...

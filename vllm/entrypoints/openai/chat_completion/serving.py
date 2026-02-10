@@ -90,6 +90,25 @@ from vllm.v1.sample.logits_processor import validate_logits_processors_parameter
 
 logger = init_logger(__name__)
 
+_KIMI_STOP_TOKENS = ("<|im_msg_end|>", "<|im_kimia_text_eos|>")
+
+
+def _maybe_add_kimi_stop_tokens(
+    model_config, tokenizer: TokenizerLike | None, default_sampling_params: dict
+) -> None:
+    if tokenizer is None:
+        return
+    if getattr(model_config.hf_config, "kimia_token_offset", None) is None:
+        return
+    stop_token_ids = default_sampling_params.setdefault("stop_token_ids", [])
+    for token in _KIMI_STOP_TOKENS:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id is None:
+            continue
+        token_id = int(token_id)
+        if token_id not in stop_token_ids:
+            stop_token_ids.append(token_id)
+
 
 class OpenAIServingChat(OpenAIServing):
     def __init__(
@@ -149,6 +168,11 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        _maybe_add_kimi_stop_tokens(
+            self.model_config,
+            self.input_processor.tokenizer,
+            self.default_sampling_params,
+        )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
