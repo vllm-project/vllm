@@ -496,7 +496,7 @@ class LLM:
         seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
 
         if any(param.truncate_prompt_tokens is not None for param in seq_params):
-            engine_prompts = [
+            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
                 for engine_prompt in self._preprocess_completion(
