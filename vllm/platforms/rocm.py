@@ -135,6 +135,8 @@ def on_mi3xx() -> bool:
 
 @cache
 def on_gfx9() -> bool:
+    # Note: gfx906 (MI50/MI60) is NOT included because ROCm Triton does not support
+    # the Vega architecture. Only CDNA (gfx90a+) is supported
     GPU_ARCH = _get_gcn_arch_via_amdsmi()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
