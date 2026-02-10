@@ -4,6 +4,7 @@
 
 import gc
 import os
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
@@ -74,8 +75,8 @@ class AsyncIntermediateTensors(IntermediateTensors):
     def __init__(
         self,
         tensors: dict[str, torch.Tensor],
-        comm_handles: list[Any] | None = None,
-        comm_postprocess: list[Any] | None = None,
+        comm_handles: list[Handle] | None = None,
+        comm_postprocess: list[Callable[[], None]] | None = None,
     ) -> None:
         super().__init__(tensors)
         self._comm_handles = comm_handles
