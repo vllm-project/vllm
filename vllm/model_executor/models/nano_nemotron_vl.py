@@ -1950,6 +1950,27 @@ class NemotronH_Nano_VL_V2(
         input_audio_features = audio_input.input_audio_features
         feature_attention_mask = audio_input.feature_attention_mask
         target_device = next(self.sound_encoder.parameters()).device
+
+        # When cross-request batching combines audio clips with different
+        # time dimensions, _reduce_data returns a list instead of a stacked
+        # tensor. Pad to the max time dim and stack; the attention mask
+        # already marks valid positions so zero-padding is safe.
+        if isinstance(input_audio_features, list):
+            feature_sizes = [f.shape[-2] for f in input_audio_features]
+            max_t = max(feature_sizes)
+            padded_feats = [
+                torch.nn.functional.pad(feat, (0, 0, 0, max_t - feat_size))
+                for feat, feat_size in zip(
+                    input_audio_features, feature_sizes, strict=True
+                )
+            ]
+            padded_masks = [
+                torch.nn.functional.pad(mask, (0, max_t - mask.shape[-1]))
+                for mask in feature_attention_mask
+            ]
+            input_audio_features = torch.stack(padded_feats)
+            feature_attention_mask = torch.stack(padded_masks)
+
         input_audio_features = input_audio_features.to(
             dtype=self.llm_dtype, device=target_device
         )
