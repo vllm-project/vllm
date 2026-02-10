@@ -176,7 +176,7 @@ For the full and up-to-date list of models validated on CPU platforms, please se
 
 ### How to find benchmark configuration examples for supported CPU models?
 
-For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
+For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu.json). Full test cases for Text-only models, Multi-Modal models and Embedded models are in [cpu Text-Only test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu-text.json), [cpu Multi-Modal test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu-multimodal.json) and [cpu Embedded test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu-embed.json).  
 For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
 To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
@@ -189,6 +189,8 @@ ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmar
 The benchmark results will be saved in `./benchmark/results/`.
 In the directory, the generated `.commands` files contain all example commands for the benchmark.
 
+
+
 We recommend configuring tensor-parallel-size to match the number of NUMA nodes on your system. Note that the current release does not support tensor-parallel-size=6.
 To determine the number of NUMA nodes available, use the following command:
 
@@ -198,6 +200,26 @@ lscpu | grep "NUMA node(s):" | awk '{print $3}'
 
 For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
 , which publishes default-model CPU results produced using the same Benchmark Suite.
+
+#### Dry-Run
+For users only need to get the optimized runtime configurations without running benchmark, a Dry-Run mode is provided.
+By adding --dry-run with run-performance-benchmarks.sh, all commands will be generated under `./benchmark/results/`.
+
+```bash
+ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
+```
+
+By providing different JSON file, users can get runtime configurations for different models such as Embedded Models.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
+```
+
+By providing Model ID and Data Type, only commands for related model ID and Data Type will be generated.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run --model Qwen/Qwen3-8B --dtype bfloat16
+```
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
