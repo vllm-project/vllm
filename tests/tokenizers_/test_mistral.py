@@ -10,6 +10,7 @@ from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _prepare_apply_chat_template_tools_and_messages,
+    maybe_serialize_tool_calls,
 )
 
 
@@ -2407,3 +2408,93 @@ class TestMistralTokenizer:
         assert actual_tokens == expected_tokens
 
         assert mistral_tokenizer.convert_ids_to_tokens([]) == []
+
+
+class TestMaybeSerializeToolCalls:
+    """Tests for maybe_serialize_tool_calls validation."""
+
+    @staticmethod
+    def _make_request(messages):
+        """Create a mock request with the given messages."""
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.messages = messages
+        return request
+
+    def test_valid_tool_calls_list(self):
+        """Valid list of tool call dicts should be serialized."""
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "foo", "arguments": "{}"},
+                    }
+                ],
+            }
+        ]
+        request = self._make_request(messages)
+        maybe_serialize_tool_calls(request)
+        assert request.messages[0]["tool_calls"] == [
+            {
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "foo", "arguments": "{}"},
+            }
+        ]
+
+    def test_no_tool_calls_key(self):
+        """Assistant message without tool_calls should be skipped."""
+        messages = [{"role": "assistant", "content": "Hello"}]
+        request = self._make_request(messages)
+        maybe_serialize_tool_calls(request)
+        assert "tool_calls" not in request.messages[0]
+
+    def test_tool_calls_none(self):
+        """tool_calls=None should be skipped."""
+        messages = [{"role": "assistant", "tool_calls": None}]
+        request = self._make_request(messages)
+        maybe_serialize_tool_calls(request)
+        assert request.messages[0]["tool_calls"] is None
+
+    def test_tool_calls_string_raises(self):
+        """Malformed tool_calls (string) should raise ValueError."""
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": "should_be_list_but_its_str",
+            }
+        ]
+        request = self._make_request(messages)
+        with pytest.raises(ValueError, match="must be a list of tool call objects"):
+            maybe_serialize_tool_calls(request)
+
+    def test_tool_calls_int_raises(self):
+        """Malformed tool_calls (int) should raise ValueError."""
+        messages = [{"role": "assistant", "tool_calls": 42}]
+        request = self._make_request(messages)
+        with pytest.raises(ValueError, match="got int"):
+            maybe_serialize_tool_calls(request)
+
+    def test_non_assistant_messages_ignored(self):
+        """Non-assistant messages should not be processed."""
+        messages = [
+            {
+                "role": "user",
+                "content": "hi",
+                "tool_calls": "malformed",
+            }
+        ]
+        request = self._make_request(messages)
+        # Should not raise — user messages are skipped
+        maybe_serialize_tool_calls(request)
+
+    def test_empty_tool_calls_list(self):
+        """Empty list should result in empty list."""
+        messages = [{"role": "assistant", "tool_calls": []}]
+        request = self._make_request(messages)
+        maybe_serialize_tool_calls(request)
+        assert request.messages[0]["tool_calls"] == []
