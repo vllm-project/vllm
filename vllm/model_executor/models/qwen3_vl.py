@@ -81,7 +81,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -113,7 +113,11 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import Qwen2VLMultiModalDataParser, Qwen2VLProcessingInfo
+from .qwen2_vl import (
+    Qwen2VLMultiModalDataParser,
+    Qwen2VLProcessingInfo,
+    _create_qwen2vl_field_factory,
+)
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
@@ -321,7 +325,11 @@ class Qwen3_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
         self.temporal_patch_size = vision_config.temporal_patch_size
-        self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
+        self.deepstack_visual_indexes = (
+            vision_config.deepstack_visual_indexes
+            if hasattr(vision_config, "deepstack_visual_indexes")
+            else []
+        )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
         # NOTE: This is used for creating empty tensor for all_gather for
@@ -613,6 +621,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def _get_vision_info(
         self,
         *,
@@ -890,12 +905,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size,
-            video_needs_metadata=True,
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -978,28 +987,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_grid_sizes = image_grid_thw.prod(-1)
-
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_grid_sizes = video_grid_thw.prod(-1)
-
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes
-            ),
-            image_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes
-            ),
-            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes
-            ),
-            video_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes
-            ),
-            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-        )
+        return _create_qwen2vl_field_factory(
+            self.info.get_hf_config().vision_config.spatial_merge_size
+        )(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -1117,17 +1107,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 class Qwen3LLMModel(Qwen3Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        if not get_pp_group().is_first_rank:
-            assert self.start_layer >= len(
-                vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
-            ), (
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        if not get_pp_group().is_first_rank and hasattr(
+            vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
                 "start_layer should be greater than or equal to "
                 "len(deepstack_visual_indexes)"
             )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2009,7 +2000,7 @@ class Qwen3VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

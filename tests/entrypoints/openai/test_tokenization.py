@@ -302,26 +302,6 @@ async def test_tokenizer_info_schema(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_tokenizer_info_added_tokens_structure(
-    server: RemoteOpenAIServer,
-):
-    """Test added_tokens_decoder structure if present."""
-    response = requests.get(server.url_for("tokenizer_info"))
-    response.raise_for_status()
-    result = response.json()
-    added_tokens = result.get("added_tokens_decoder")
-    if added_tokens:
-        for token_id, token_info in added_tokens.items():
-            assert isinstance(token_id, str), "Token IDs should be strings"
-            assert isinstance(token_info, dict), "Token info should be a dict"
-            assert "content" in token_info, "Token info should have content"
-            assert "special" in token_info, "Token info should have special flag"
-            assert isinstance(token_info["special"], bool), (
-                "Special flag should be boolean"
-            )
-
-
-@pytest.mark.asyncio
 async def test_tokenizer_info_consistency_with_tokenize(
     server: RemoteOpenAIServer,
 ):

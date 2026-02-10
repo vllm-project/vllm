@@ -16,7 +16,8 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.tokenizers import get_tokenizer
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -35,6 +36,7 @@ class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
 
     model: str = MODEL_NAME
+    runner_type = "generate"
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
     tokenizer_mode: str = "auto"
@@ -50,6 +52,7 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -85,14 +88,20 @@ def register_mock_resolver():
         del LoRAResolverRegistry.resolvers[MOCK_RESOLVER_NAME]
 
 
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer(
+        model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
 @pytest.fixture
 def mock_serving_setup():
     """Provides a mocked engine and serving completion instance."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
-
-    tokenizer = get_tokenizer(MODEL_NAME)
-    mock_engine.get_tokenizer = AsyncMock(return_value=tokenizer)
 
     async def mock_add_lora_side_effect(lora_request: LoRARequest):
         """Simulate engine behavior when adding LoRAs."""
@@ -118,6 +127,7 @@ def mock_serving_setup():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
         engine_client=mock_engine,
@@ -126,10 +136,6 @@ def mock_serving_setup():
 
     serving_completion = OpenAIServingCompletion(
         mock_engine, models, request_logger=None
-    )
-
-    serving_completion._process_inputs = AsyncMock(
-        return_value=(MagicMock(name="engine_request"), {})
     )
 
     return mock_engine, serving_completion

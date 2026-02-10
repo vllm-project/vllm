@@ -233,8 +233,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
 
-        if pooler_config.softmax is None:
-            pooler_config.softmax = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -582,6 +582,13 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.is_causal = False
+        model_config.hf_config.embedding_size = model_config.hf_config.num_labels
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -603,4 +610,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
+    "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
 }
