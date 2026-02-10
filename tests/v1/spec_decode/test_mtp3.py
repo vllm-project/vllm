@@ -94,7 +94,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 12, 13],
         "target_positions": [0, 1, 2, 3],
-        "last_token_indices": [3],
+        "token_indices_to_sample": [3],
         "common_attn_metadata": {
             "query_start_loc": [0, 4],
             "seq_lens": [4],
@@ -106,7 +106,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 12, 13],
             "prev_positions": [0, 1, 2, 3],
-            "last_token_indices": [3],
+            "token_indices_to_sample": [3],
             "seq_lens": [4],
             "slot_mapping": [100, 101, 102, 103],
             "cached": [
@@ -138,7 +138,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 20],
         "target_positions": [0, 1, 0],
-        "last_token_indices": [1, 2],
+        "token_indices_to_sample": [1, 2],
         "common_attn_metadata": {
             "query_start_loc": [0, 2, 3],
             "seq_lens": [2, 1],
@@ -150,7 +150,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 20],
             "prev_positions": [0, 1, 0],
-            "last_token_indices": [1, 2],
+            "token_indices_to_sample": [1, 2],
             "seq_lens": [2, 1],
             "slot_mapping": [100, 101, 200],
             "cached": [
@@ -188,7 +188,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 20],
         "target_positions": [1, 2, 0],
-        "last_token_indices": [0, 2],
+        "token_indices_to_sample": [0, 2],
         "common_attn_metadata": {
             "query_start_loc": [0, 2, 3],
             "seq_lens": [2, 1],
@@ -200,7 +200,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [99, 10, 20],
             "prev_positions": [0, 1, 0],
-            "last_token_indices": [1, 2],
+            "token_indices_to_sample": [1, 2],
             "seq_lens": [1, 1],
             "slot_mapping": [999, 100, 200],
             "cached": [
@@ -232,7 +232,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [7, 8],
         "target_positions": [0, 1],
-        "last_token_indices": [0],
+        "token_indices_to_sample": [0],
         "common_attn_metadata": {
             "query_start_loc": [0, 2],
             "seq_lens": [2],
@@ -244,7 +244,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [7, 8],
             "prev_positions": [0, 1],
-            "last_token_indices": [0],
+            "token_indices_to_sample": [0],
             "seq_lens": [2],
             "slot_mapping": [1000, 1001],
             "cached": [
@@ -270,7 +270,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [7, 8],
         "target_positions": [1, 2],
-        "last_token_indices": [0],
+        "token_indices_to_sample": [0],
         "common_attn_metadata": {
             "query_start_loc": [0, 2],
             "seq_lens": [2],
@@ -282,7 +282,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [6, 7],
             "prev_positions": [0, 1],
-            "last_token_indices": [1],
+            "token_indices_to_sample": [1],
             "seq_lens": [1],
             "slot_mapping": [999, 1000],
             "cached": [
@@ -308,7 +308,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 12, 13],
         "target_positions": [0, 2, 3, 4],
-        "last_token_indices": [1],
+        "token_indices_to_sample": [1],
         "common_attn_metadata": {
             "query_start_loc": [0, 4],
             "seq_lens": [4],
@@ -320,7 +320,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 12, 13],
             "prev_positions": [0, 2, 3, 4],
-            "last_token_indices": [1],
+            "token_indices_to_sample": [1],
             "seq_lens": [4],
             "slot_mapping": [100, 101, 102, 103],
             "cached": [
@@ -346,7 +346,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 12, 13, 14],
         "target_positions": [0, 1, 2, 3, 4],
-        "last_token_indices": [1],
+        "token_indices_to_sample": [1],
         "common_attn_metadata": {
             "query_start_loc": [0, 5],
             "seq_lens": [5],
@@ -358,7 +358,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 12, 13, 14],
             "prev_positions": [0, 1, 2, 3, 4],
-            "last_token_indices": [1],
+            "token_indices_to_sample": [1],
             "seq_lens": [5],
             "slot_mapping": [100, 101, 102, 103, 104],
             "cached": [
@@ -384,7 +384,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 12, 13, 14],
         "target_positions": [0, 1, 2, 3, 4],
-        "last_token_indices": [2],
+        "token_indices_to_sample": [2],
         "common_attn_metadata": {
             "query_start_loc": [0, 5],
             "seq_lens": [5],
@@ -396,7 +396,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 12, 13, 14],
             "prev_positions": [0, 1, 2, 3, 4],
-            "last_token_indices": [2],
+            "token_indices_to_sample": [2],
             "seq_lens": [5],
             "slot_mapping": [100, 101, 102, 103, 104],
             "cached": [
@@ -422,7 +422,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [20, 21, 22, 23, 24],
         "target_positions": [0, 3, 4, 5, 6],
-        "last_token_indices": [1],
+        "token_indices_to_sample": [1],
         "common_attn_metadata": {
             "query_start_loc": [0, 5],
             "seq_lens": [5],
@@ -434,7 +434,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [20, 21, 22, 23, 24],
             "prev_positions": [0, 3, 4, 5, 6],
-            "last_token_indices": [1],
+            "token_indices_to_sample": [1],
             "seq_lens": [5],
             "slot_mapping": [100, 101, 102, 103, 104],
             "cached": [
@@ -466,7 +466,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 12, 13, 20, 21, 22],
         "target_positions": [0, 1, 2, 3, 0, 1, 2],
-        "last_token_indices": [1, 5],
+        "token_indices_to_sample": [1, 5],
         "common_attn_metadata": {
             "query_start_loc": [0, 4, 7],
             "seq_lens": [4, 3],
@@ -478,7 +478,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 12, 13, 20, 21, 22],
             "prev_positions": [0, 1, 2, 3, 0, 1, 2],
-            "last_token_indices": [1, 5],
+            "token_indices_to_sample": [1, 5],
             "seq_lens": [4, 3],
             "slot_mapping": [100, 101, 102, 103, 200, 201, 202],
             "cached": [
@@ -528,7 +528,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [10, 11, 20, 21, 22, 30, 31, 32, 33, 40, 41, 42],
         "target_positions": [0, 1, 1, 2, 3, 0, 2, 3, 4, 0, 1, 2],
-        "last_token_indices": [1, 2, 6, 10],
+        "token_indices_to_sample": [1, 2, 6, 10],
         "common_attn_metadata": {
             "query_start_loc": [0, 2, 5, 9, 12],
             "seq_lens": [2, 3, 4, 3],
@@ -553,7 +553,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [10, 11, 19, 20, 21, 30, 31, 32, 33, 40, 41, 42],
             "prev_positions": [0, 1, 0, 1, 2, 0, 2, 3, 4, 0, 1, 2],
-            "last_token_indices": [1, 3, 6, 10],
+            "token_indices_to_sample": [1, 3, 6, 10],
             "seq_lens": [2, 2, 4, 3],
             "slot_mapping": [
                 100,
@@ -616,7 +616,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [30, 31, 32, 40, 41, 42, 43],
         "target_positions": [0, 1, 2, 0, 3, 4, 5],
-        "last_token_indices": [2, 4],
+        "token_indices_to_sample": [2, 4],
         "common_attn_metadata": {
             "query_start_loc": [0, 3, 7],
             "seq_lens": [3, 4],
@@ -628,7 +628,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [30, 31, 32, 40, 41, 42, 43],
             "prev_positions": [0, 1, 2, 0, 3, 4, 5],
-            "last_token_indices": [2, 4],
+            "token_indices_to_sample": [2, 4],
             "seq_lens": [3, 4],
             "slot_mapping": [100, 101, 102, 200, 201, 202, 203],
             "cached": [
@@ -660,7 +660,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [100, 101, 102, 103, 104],
         "target_positions": [10, 11, 12, 13, 14],
-        "last_token_indices": [3],
+        "token_indices_to_sample": [3],
         "common_attn_metadata": {
             "query_start_loc": [0, 5],
             "seq_lens": [5],
@@ -672,7 +672,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [72, 100, 101, 102, 103],
             "prev_positions": [9, 10, 11, 12, 13],
-            "last_token_indices": [4],
+            "token_indices_to_sample": [4],
             "seq_lens": [4],
             "slot_mapping": [172, 200, 201, 202, 203],
             "cached": [
@@ -698,7 +698,7 @@ LAYER3_CASES = [
         ],
         "target_token_ids": [300, 301, 302, 303, 304, 305, 306],
         "target_positions": [30, 31, 32, 33, 34, 35, 36],
-        "last_token_indices": [3],
+        "token_indices_to_sample": [3],
         "common_attn_metadata": {
             "query_start_loc": [0, 7],
             "seq_lens": [7],
@@ -710,7 +710,7 @@ LAYER3_CASES = [
         "expected": {
             "prev_token_ids": [270, 271, 272, 300, 301, 302, 303],
             "prev_positions": [27, 28, 29, 30, 31, 32, 33],
-            "last_token_indices": [6],
+            "token_indices_to_sample": [6],
             "seq_lens": [4],
             "slot_mapping": [370, 371, 372, 400, 401, 402, 403],
             "cached": [
@@ -780,7 +780,7 @@ LAYER3_CASES = [
             24,
             25,
         ],
-        "last_token_indices": [3, 7, 12],
+        "token_indices_to_sample": [3, 7, 12],
         "common_attn_metadata": {
             "query_start_loc": [0, 4, 9, 15],
             "seq_lens": [4, 5, 6],
@@ -840,7 +840,7 @@ LAYER3_CASES = [
                 22,
                 23,
             ],
-            "last_token_indices": [3, 8, 14],
+            "token_indices_to_sample": [3, 8, 14],
             "seq_lens": [4, 4, 4],
             "slot_mapping": [
                 100,
@@ -923,8 +923,8 @@ def _run_adjust_input_case(proposer_stub, case, layer_num):
     target_hidden_states = torch.arange(
         0, target_token_ids.numel() * HIDDEN_SIZE, dtype=torch.float32, device=device
     ).reshape(-1, HIDDEN_SIZE)
-    last_token_indices = torch.tensor(
-        case["last_token_indices"], dtype=torch.int32, device=device
+    token_indices_to_sample = torch.tensor(
+        case["token_indices_to_sample"], dtype=torch.int32, device=device
     )
 
     multi_layer_eagle_metadata = _make_multi_layer_eagle_metadata(
@@ -938,7 +938,7 @@ def _run_adjust_input_case(proposer_stub, case, layer_num):
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
-        last_token_indices=last_token_indices,
+        token_indices_to_sample=token_indices_to_sample,
         common_attn_metadata=common_attn_metadata,
         multi_layer_eagle_metadata=multi_layer_eagle_metadata,
     )
@@ -947,7 +947,7 @@ def _run_adjust_input_case(proposer_stub, case, layer_num):
     assert len(expected["cached"]) == batch_size
     assert prev_token_ids.cpu().tolist() == expected["prev_token_ids"]
     assert prev_positions.cpu().tolist() == expected["prev_positions"]
-    assert last_token_indices.cpu().tolist() == expected["last_token_indices"]
+    assert token_indices_to_sample.cpu().tolist() == expected["token_indices_to_sample"]
     assert common_attn_metadata.seq_lens.cpu().tolist() == expected["seq_lens"]
     assert common_attn_metadata.slot_mapping.cpu().tolist() == expected["slot_mapping"]
 

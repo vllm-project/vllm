@@ -83,6 +83,7 @@ def parse_args():
     parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--parallel-drafting", action="store_true")
     parser.add_argument("--allowed-local-media-path", type=str, default="")
+    parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
 
 
