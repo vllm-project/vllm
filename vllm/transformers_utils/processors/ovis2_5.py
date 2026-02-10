@@ -24,14 +24,10 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[cal
             "padding": False,
         },
         "images_kwargs": {
-            "convert_to_rgb": True,
-            "min_pixels": MIN_PIXELS,
-            "max_pixels": MAX_PIXELS,
+            "do_convert_rgb": True,
         },
         "videos_kwargs": {
-            "convert_to_rgb": True,
-            "min_pixels": MIN_PIXELS,
-            "max_pixels": MAX_PIXELS,
+            "do_convert_rgb": True,
         },
     }
 
@@ -160,6 +156,9 @@ class Ovis2_5Processor(ProcessorMixin):
                 - **second_per_grid_ts** -- list of video seconds per time grid.
                   Returned when `videos` is not `None`.
         """
+        min_pixels = kwargs.pop("min_pixels", MIN_PIXELS)
+        max_pixels = kwargs.pop("max_pixels", MAX_PIXELS)
+
         output_kwargs = self._merge_kwargs(
             Ovis2_5ProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -175,7 +174,10 @@ class Ovis2_5Processor(ProcessorMixin):
             # Process each image
             for image in images if isinstance(images, list) else [images]:
                 pixel_values, image_placeholders, grid = self.preprocess_multidata(
-                    images=image, **output_kwargs["images_kwargs"]
+                    images=image,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
+                    **output_kwargs["images_kwargs"],
                 )
                 processed_images.append(pixel_values)
                 image_placeholders_list.append(image_placeholders)
@@ -194,7 +196,10 @@ class Ovis2_5Processor(ProcessorMixin):
             # Process each video
             for video in videos if isinstance(videos, list) else [videos]:
                 pixel_values, video_placeholders, grid = self.preprocess_multidata(
-                    video=video, **output_kwargs["videos_kwargs"]
+                    video=video,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
+                    **output_kwargs["videos_kwargs"],
                 )
                 processed_videos.append(pixel_values)
                 videos_placeholders_list.append(video_placeholders)
@@ -378,7 +383,7 @@ class Ovis2_5Processor(ProcessorMixin):
         self,
         images: PIL.Image.Image | list[PIL.Image.Image] | None = None,
         video: list[PIL.Image.Image] | np.ndarray | None = None,
-        convert_to_rgb: bool | None = True,
+        do_convert_rgb: bool | None = True,
         min_pixels: int = MIN_PIXELS,
         max_pixels: int = MAX_PIXELS,
         return_tensors: str | None = "pt",
@@ -404,7 +409,7 @@ class Ovis2_5Processor(ProcessorMixin):
             min_pixels if min_pixels is not None else MIN_PIXELS,
         )
         images = [
-            image.convert("RGB") if convert_to_rgb and image.mode != "RGB" else image
+            image.convert("RGB") if do_convert_rgb and image.mode != "RGB" else image
             for image in images
         ]
 
@@ -420,9 +425,9 @@ class Ovis2_5Processor(ProcessorMixin):
                 max_pixels=max_pixels,
             )
             new_size = dict(height=resized_height, width=resized_width)
-            image_pt = self.image_processor.preprocess(
-                image, size=new_size, return_tensors="np"
-            )["pixel_values"][0]
+            image_pt = self.image_processor.preprocess(image, size=new_size)[
+                "pixel_values"
+            ][0]
 
             processed_images.append(image_pt)
 

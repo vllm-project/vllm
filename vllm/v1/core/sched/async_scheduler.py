@@ -17,33 +17,22 @@ class AsyncScheduler(Scheduler):
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
-        has_structured_output_requests = False
-        pending_structured_output_tokens = False
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            has_structured_output_requests |= request.use_structured_output
-            pending_structured_output_tokens |= (
+            if request.is_prefill_chunk:
+                continue
+
+            scheduler_output.pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
             )
+            # The request will generate a new token plus num_spec_tokens
+            # in this scheduling step.
             cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
-            if (
-                request.num_computed_tokens
-                == request.num_tokens
-                + request.num_output_placeholders
-                + cur_num_spec_tokens
-            ):
-                # The request will generate a new token plus num_spec_tokens
-                # in this scheduling step.
-                request.num_output_placeholders += 1 + cur_num_spec_tokens
-                # Add placeholders for the new draft/spec tokens.
-                # We will update the actual spec token ids in the worker process.
-                request.spec_token_ids = self._spec_token_placeholders
-
-        scheduler_output.has_structured_output_requests = has_structured_output_requests
-        scheduler_output.pending_structured_output_tokens = (
-            pending_structured_output_tokens
-        )
+            request.num_output_placeholders += 1 + cur_num_spec_tokens
+            # Add placeholders for the new draft/spec tokens.
+            # We will update the actual spec token ids in the worker process.
+            request.spec_token_ids = self._spec_token_placeholders
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]

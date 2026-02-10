@@ -37,6 +37,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
+    "qwen3_5_mtp",
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
@@ -116,9 +117,16 @@ class SpeculativeConfig:
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
+    # Alternative drafting strategies
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
     """
+    parallel_drafting: bool = False
+    """Enable parallel drafting, where all speculative tokens are generated
+    in parallel rather than sequentially. This can improve performance but
+    requires the speculative model be trained to support parallel drafting.
+    Only compatible with EAGLE and draft model methods."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -174,7 +182,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
+        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -256,6 +264,16 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
 
+        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
+            is_moe = hf_config.model_type == "qwen3_5_moe"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
