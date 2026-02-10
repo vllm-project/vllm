@@ -21,6 +21,7 @@ python openai_chat_completion_client_for_multimodal.py --chat-type audio
 """
 
 import base64
+import os
 
 import requests
 from openai import OpenAI
@@ -51,6 +52,16 @@ def encode_base64_content_from_url(content_url: str) -> str:
     return result
 
 
+def encode_base64_content_from_file(file_path: str) -> str:
+    """Encode a local file content to base64 format."""
+
+    with open(file_path, "rb") as file:
+        file_content = file.read()
+        result = base64.b64encode(file_content).decode("utf-8")
+
+    return result
+
+
 # Text-only inference
 def run_text_only(model: str, max_completion_tokens: int) -> None:
     chat_completion = client.chat.completions.create(
@@ -66,7 +77,8 @@ def run_text_only(model: str, max_completion_tokens: int) -> None:
 # Single-image input inference
 def run_single_image(model: str, max_completion_tokens: int) -> None:
     ## Use image url in the payload
-    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    image_file = "/path/to/image.jpg"  # local file
     chat_completion_from_url = client.chat.completions.create(
         messages=[
             {
@@ -86,6 +98,30 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
 
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from image url:\n", result)
+
+    ## Use local image url in the payload
+    # Launch the API server/engine with the --allowed-local-media-path argument.
+    if os.path.exists(image_file):
+        chat_completion_from_local_image_url = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What's in this image?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{image_file}"},
+                        },
+                    ],
+                }
+            ],
+            model=model,
+            max_completion_tokens=max_completion_tokens,
+        )
+        result = chat_completion_from_local_image_url.choices[0].message.content
+        print("Chat completion output from local image file:\n", result)
+    else:
+        print(f"Local image file not found at {image_file}, skipping local file test.")
 
     ## Use base64 encoded image in the payload
     image_base64 = encode_base64_content_from_url(image_url)
@@ -109,11 +145,38 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded image:", result)
 
+    ## Use base64 encoded local image in the payload
+    if os.path.exists(image_file):
+        local_image_base64 = encode_base64_content_from_file(image_file)
+        chat_completion_from_local_image_base64 = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What's in this image?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{local_image_base64}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            model=model,
+            max_completion_tokens=max_completion_tokens,
+        )
+
+        result = chat_completion_from_local_image_base64.choices[0].message.content
+        print("Chat completion output from base64 encoded local image:", result)
+    else:
+        print(f"Local image file not found at {image_file}, skipping local file test.")
+
 
 # Multi-image input inference
 def run_multi_image(model: str, max_completion_tokens: int) -> None:
-    image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
-    image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+    image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
+    image_url_lion = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg"
     chat_completion_from_url = client.chat.completions.create(
         messages=[
             {

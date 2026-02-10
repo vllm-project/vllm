@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-else:
-    _Backend = Any
+from vllm.utils.hashing import safe_hash
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @dataclass
@@ -55,7 +51,6 @@ DummyOptions: TypeAlias = (
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
@@ -112,6 +107,12 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_encoder_only: bool = False
+    """
+    When enabled, skips the language component of the model.
+
+    This is usually only valid in disaggregated Encoder process.
+    """
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).
@@ -125,10 +126,10 @@ class MultiModalConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
-    mm_encoder_attn_backend: _Backend | None = None
+    mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
-    `vllm.attention.backends.registry._Backend` (e.g. `FLASH_ATTN`)."""
+    `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -167,26 +168,22 @@ class MultiModalConfig:
 
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
-    def _validate_mm_encoder_attn_backend(cls, value: object) -> _Backend | None:
-        from vllm.attention.backends.registry import (
-            _Backend as BackendEnum,
-        )
-        from vllm.attention.backends.registry import (
-            backend_name_to_enum,
-        )
+    def _validate_mm_encoder_attn_backend(
+        cls, value: str | AttentionBackendEnum | None
+    ) -> AttentionBackendEnum | None:
+        if isinstance(value, str) and value.upper() == "XFORMERS":
+            raise ValueError(
+                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+                "details). Please select a supported attention backend."
+            )
 
-        if value is None or isinstance(value, BackendEnum):
+        if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
-        if isinstance(value, str):
-            candidate = backend_name_to_enum(value.upper())
-            if candidate is not None:
-                return candidate
-
-        valid_backends = ", ".join(sorted(BackendEnum.__members__.keys()))
-        raise ValueError(
-            f"Invalid mm encoder attention backend. Expected one of: {valid_backends}."
+        assert isinstance(value, str), (
+            "mm_encoder_attn_backend must be a string or an AttentionBackendEnum."
         )
+        return AttentionBackendEnum[value.upper()]
 
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
@@ -215,9 +212,10 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:

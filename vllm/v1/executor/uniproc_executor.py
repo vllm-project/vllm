@@ -13,9 +13,10 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -25,7 +26,7 @@ logger = init_logger(__name__)
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
             vllm_config=self.vllm_config,
@@ -58,32 +59,63 @@ class UniProcExecutor(Executor):
     def max_concurrent_batches(self) -> int:
         return 2 if self.scheduler_config.async_scheduling else 1
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: bool = False,
-    ) -> list[Any]:
+        single_value: bool = False,
+    ) -> Any:
         if kwargs is None:
             kwargs = {}
 
         if not non_block:
-            return [run_method(self.driver_worker, method, args, kwargs)]
+            result = run_method(self.driver_worker, method, args, kwargs)
+            return result if single_value else [result]
 
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
                 if (async_thread := self.async_output_thread) is not None:
-                    return [async_thread.submit(result.get_output)]
+                    if single_value:
+                        return async_thread.submit(result.get_output)
+
+                    def get_output_list() -> list[Any]:
+                        return [result.get_output()]
+
+                    return async_thread.submit(get_output_list)
                 result = result.get_output()
             future = Future[Any]()
-            future.set_result(result)
+            future.set_result(result if single_value else [result])
         except Exception as e:
             future = Future[Any]()
             future.set_exception(e)
-        return [future]
+        return future
+
+    def execute_model(  # type: ignore[override]
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        return self.collective_rpc(
+            "execute_model",
+            args=(scheduler_output,),
+            non_block=non_block,
+            single_value=True,
+        )
+
+    def sample_tokens(  # type: ignore[override]
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        return self.collective_rpc(
+            "sample_tokens",
+            args=(grammar_output,),
+            non_block=non_block,
+            single_value=True,
+        )
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        return self.collective_rpc("take_draft_token_ids", single_value=True)
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
@@ -124,11 +156,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        if envs.VLLM_USE_V1:
-            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
-                "To get deterministic execution in V1, "
-                "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
-            )
+        assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+            "To get deterministic execution, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
+        )
         super()._init_executor()
 
     def _distributed_args(self) -> tuple[str, int, int]:

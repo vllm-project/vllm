@@ -3,16 +3,25 @@
 
 import math
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
+    try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import _Backend
 from vllm.config import ParallelConfig, SpeculativeConfig
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+if not is_flash_attn_varlen_func_available():
+    pytest.skip(
+        "This test requires flash_attn_varlen_func, but it's not available.",
+        allow_module_level=True,
+    )
 
 
 class MockAttentionLayer(torch.nn.Module):
@@ -35,7 +44,7 @@ def forward_attention(
     block_table: torch.Tensor,
     slot_mapping: torch.Tensor,
     seqlen_k: int,
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     spec_token_tree: str | None = None,
     num_spec_tokens: int = 0,
 ) -> torch.Tensor:
@@ -80,8 +89,8 @@ def forward_attention(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.cpu(),
-        num_computed_tokens_cpu=context_lens.cpu(),
+        _seq_lens_cpu=seq_lens.cpu(),
+        _num_computed_tokens_cpu=context_lens.cpu(),
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
@@ -112,6 +121,14 @@ def forward_attention(
     key = k.view(-1, num_kv_heads, dim_per_head)
     value = v.view(-1, num_kv_heads, dim_per_head)
     output = torch.empty_like(query)
+    if not try_backend_includes_kv_cache_update(backend):
+        instance.do_kv_cache_update(
+            layer=layer,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            slot_mapping=attn_metadata.slot_mapping,
+        )
     return instance.forward(
         layer=layer,
         query=query,
@@ -241,7 +258,7 @@ def test_tree_attn_correctness() -> None:
                         block_table=block_table,
                         slot_mapping=tree_slot_mapping,
                         seqlen_k=seqlen_k,
-                        backend=_Backend.TREE_ATTN,
+                        backend=AttentionBackendEnum.TREE_ATTN,
                         spec_token_tree=spec_token_tree,
                         num_spec_tokens=tree_size_q - 1,
                     ).view(batch_size, -1, num_heads, dim_per_head)
@@ -278,7 +295,7 @@ def test_tree_attn_correctness() -> None:
                             block_table=block_table,
                             slot_mapping=branch_slot_mapping,
                             seqlen_k=sequence_position + q_len,
-                            backend=_Backend.FLASH_ATTN,
+                            backend=AttentionBackendEnum.FLASH_ATTN,
                         ).view(batch_size, -1, num_heads, dim_per_head)
 
                         # Compare the outputs.

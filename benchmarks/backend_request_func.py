@@ -620,7 +620,7 @@ def get_tokenizer(
         kwargs["use_fast"] = False
     if tokenizer_mode == "mistral":
         try:
-            from vllm.transformers_utils.tokenizer import MistralTokenizer
+            from vllm.tokenizers.mistral import MistralTokenizer
         except ImportError as e:
             raise ImportError(
                 "MistralTokenizer requires vllm package.\n"

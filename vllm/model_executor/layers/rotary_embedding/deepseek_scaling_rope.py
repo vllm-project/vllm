@@ -6,6 +6,7 @@ import math
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 from .base import RotaryEmbeddingBase
 from .common import (
@@ -56,6 +57,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
             * attn_factor
         )
+        self.use_flashinfer = (
+            self.enabled()
+            and dtype in (torch.float16, torch.bfloat16)
+            and current_platform.is_cuda()
+            and has_flashinfer()
+            and head_size in [64, 128, 256, 512]
+        )
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
@@ -67,7 +75,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 self.rotary_dim,
                 2,
                 dtype=torch.float,
-                device=current_platform.device_type,
             )
             / self.rotary_dim
         )
@@ -96,7 +103,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
-            device=current_platform.device_type,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -114,14 +120,14 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         query_rot = query[..., : self.rotary_dim]
         key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
 
-        cos_sin = self.cos_sin_cache[
+        cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -146,7 +152,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             key = key_rot
         return query, key
 
-    def forward_cuda(
+    def forward_hip(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -154,3 +160,23 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                torch.add(positions, offsets) if offsets is not None else positions,
+                query,
+                key,
+                self.head_size,
+                self.cos_sin_cache,
+                self.is_neox_style,
+            )
+            return query, key
+        else:
+            return self.forward_native(positions, query, key, offsets)

@@ -77,41 +77,21 @@ This complicates the process as we cannot use the out-of-the-box
     - `.buildkite/release-pipeline.yaml`
     - `.buildkite/scripts/upload-wheels.sh`
 
-## Address long vLLM build time
+## Manually running vLLM builds on BuildKiteCI
 
-When building vLLM with a new PyTorch/CUDA version, no cache will exist
-in the vLLM sccache S3 bucket, causing the build job on CI to potentially take more than 5 hours
-and timeout. Additionally, since vLLM's fastcheck pipeline runs in read-only mode,
-it doesn't populate the cache, so re-running it to warm up the cache
-is ineffective.
+When building vLLM with a new PyTorch/CUDA version, the vLLM sccache S3 bucket
+will not have any cached artifacts, which can cause CI build jobs to exceed 5 hours.
+Furthermore, vLLM's fastcheck pipeline operates in read-only mode and does not
+populate the cache, making it ineffective for cache warm-up purposes.
 
-While ongoing efforts like <https://github.com/vllm-project/vllm/issues/17419>
-address the long build time at its source, the current workaround is to set `VLLM_CI_BRANCH`
-to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/long_build`)
-when manually triggering a build on Buildkite. This branch accomplishes two things:
+To address this, manually trigger a build on Buildkite to accomplish two objectives:
 
-1. Increase the timeout limit to 10 hours so that the build doesn't time out.
-2. Allow the compiled artifacts to be written to the vLLM sccache S3 bucket
-to warm it up so that future builds are faster.
+1. Run the complete test suite against the PyTorch RC build by setting the environment variables: `RUN_ALL=1` and `NIGHTLY=1`
+2. Populate the vLLM sccache S3 bucket with compiled artifacts, enabling faster subsequent builds
 
 <p align="center" width="100%">
-    <img width="60%" src="https://github.com/user-attachments/assets/a8ff0fcd-76e0-4e91-b72f-014e3fdb6b94">
+<img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/3b07f71b-bb18-4ca3-aeaf-da0fe79d315f" />
 </p>
-
-## Update dependencies
-
-Several vLLM dependencies like xFormers depend on PyTorch and need
-to be updated accordingly. Rather than waiting for all of them to publish new
-releases (which would take too much time), they can be built from
-source to unblock the update process.
-
-### xFormers
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
-```
 
 ## Update all the different vLLM platforms
 

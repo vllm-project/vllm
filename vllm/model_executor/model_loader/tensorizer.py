@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
@@ -323,7 +323,7 @@ class TensorizerConfig(MutableMapping):
                 " is unstable and may lead to errors."
             )
 
-    def open_stream(self, tensorizer_args: Optional["TensorizerArgs"] = None):
+    def open_stream(self, tensorizer_args: "TensorizerArgs | None" = None):
         if tensorizer_args is None:
             tensorizer_args = self._construct_tensorizer_args()
 
@@ -726,8 +726,6 @@ def tensorize_vllm_model(
         ) as stream:
             stream.write(encryption_params.key)
 
-    assert envs.VLLM_USE_V1
-
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine = LLMEngine.from_vllm_config(engine_config)
@@ -764,9 +762,12 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     if tensor_path.endswith(".safetensors"):
         tensors = safetensors.torch.load_file(tensor_path)
     elif tensor_path.endswith(".bin"):
-        tensors = torch.load(tensor_path)
+        tensors = torch.load(tensor_path, weights_only=True)
     else:
-        raise ValueError("Unsupported file: %s", tensor_path)
+        raise ValueError(
+            f"Unsupported adapter model file: {tensor_path}. "
+            f"Must be a .safetensors or .bin file."
+        )
 
     with open(config_path) as f:
         config = json.load(f)

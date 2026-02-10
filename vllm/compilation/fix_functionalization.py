@@ -26,7 +26,7 @@ class FixFunctionalizationPass(VllmInductorPass):
     """
 
     @VllmInductorPass.time_and_log
-    def __call__(self, graph: torch.fx.Graph):
+    def __call__(self, graph: torch.fx.Graph) -> None:
         # XPU does not support auto-functionalization yet.
         # Will enable this when switch to vllm-xpu-kernels.
         if current_platform.is_xpu():
@@ -103,6 +103,19 @@ class FixFunctionalizationPass(VllmInductorPass):
             ]:
                 mutated_args = {1: "result"}
                 self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "flashinfer_trtllm_fused_allreduce_norm")
+                and at_target
+                == torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            ):
+                mutated_args = {
+                    1: "allreduce_in",
+                    2: "residual",
+                    3: "norm_out",
+                    4: "quant_out",
+                    5: "scale_out",
+                }
+                self.defunctionalize(graph, node, mutated_args)
             # For some reason we need to specify the args for both
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.
@@ -132,6 +145,23 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
+            # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
+            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+                mutated_args = {1: "qkv"}
+                args = (
+                    "qkv",
+                    "num_heads_q",
+                    "num_heads_k",
+                    "num_heads_v",
+                    "head_dim",
+                    "eps",
+                    "q_weight",
+                    "k_weight",
+                    "cos_sin_cache",
+                    "is_neox",
+                    "position_ids",
+                )
+                self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             else:
                 continue  # skip the count
 
@@ -149,7 +179,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         )
         self.nodes_to_remove.clear()
 
-    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]):
+    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
         """
         Stage a node (or nodes) for removal at the end of the pass.
         """
@@ -164,7 +194,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         node: torch.fx.Node,
         mutated_args: dict[int, torch.fx.Node | str],
         args: tuple[torch.fx.Node | str, ...] | None = None,
-    ):
+    ) -> None:
         """
         De-functionalize a node by replacing it with a call to the original.
         It also replaces the getitem users with the mutated arguments.
@@ -176,7 +206,7 @@ class FixFunctionalizationPass(VllmInductorPass):
 
     def replace_users_with_mutated_args(
         self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
-    ):
+    ) -> None:
         """
         Replace all getitem users of the auto-functionalized node with the
         mutated arguments.
@@ -207,7 +237,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         graph: torch.fx.Graph,
         node: torch.fx.Node,
         args: tuple[torch.fx.Node | str, ...] | None = None,
-    ):
+    ) -> None:
         """
         Insert a new defunctionalized node into the graph before node.
         If one of the kwargs is 'out', provide args directly,

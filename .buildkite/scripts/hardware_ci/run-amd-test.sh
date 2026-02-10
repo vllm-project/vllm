@@ -44,6 +44,17 @@ cleanup_docker() {
   fi
 }
 
+cleanup_network() {
+  for node in $(seq 0 $((NUM_NODES-1))); do
+    if docker pr -a -q -f name="node${node}" | grep -q .; then
+      docker stop "node${node}"
+    fi
+  done
+  if docker network ls | grep docker-net; then
+    docker network rm docker-net
+  fi
+}
+
 # Call the cleanup docker function
 cleanup_docker
 
@@ -59,7 +70,7 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
+echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
@@ -76,19 +87,15 @@ mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
 commands=$@
-echo "Commands:$commands"
+echo "Raw commands: $commands"
 
-if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"pytest -v -s basic_correctness/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
   commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
 fi
 
-if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"pytest -v -s compile/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s lora"* ]]; then
   commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
@@ -145,7 +152,6 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_audio.py \
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
-  --ignore=entrypoints/openai/test_sleep.py \
   --ignore=entrypoints/openai/test_models.py \
   --ignore=entrypoints/openai/test_lora_adapters.py \
   --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
@@ -163,6 +169,9 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
+commands=$(echo "$commands" | sed 's/ \\ / /g')
+echo "Final commands: $commands"
+
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
 # --ignore=entrypoints/openai/test_embedding.py \
 # --ignore=entrypoints/openai/test_oot_registration.py
@@ -170,48 +179,44 @@ fi
 # --ignore=entrypoints/openai/test_models.py <= Fails on MI250 but passes on MI300 as of 2025-03-13
 
 
-PARALLEL_JOB_COUNT=8
 MYPYTHONPATH=".."
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
-if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used   
-  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
-  for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
-    # assign shard-id for each shard
-    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
-    echo "Shard ${GPU} commands:$commands_gpu"
-    echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
-    docker run \
-        --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
-        --group-add $(getent group render | cut -d: -f3) \
-        --network=host \
-        --shm-size=16gb \
-        --rm \
-        -e HIP_VISIBLE_DEVICES="${GPU}" \
-        -e HF_TOKEN \
-        -e AWS_ACCESS_KEY_ID \
-        -e AWS_SECRET_ACCESS_KEY \
-        -v "${HF_CACHE}:${HF_MOUNT}" \
-        -e "HF_HOME=${HF_MOUNT}" \
-        -e "PYTHONPATH=${MYPYTHONPATH}" \
-        --name "${container_name}_${GPU}" \
-        "${image_name}" \
-        /bin/bash -c "${commands_gpu}" \
-        |& while read -r line; do echo ">>Shard $GPU: $line"; done &
-    PIDS+=($!)
-  done
-  #wait for all processes to finish and collect exit codes
-  for pid in "${PIDS[@]}"; do
-    wait "${pid}"
-    STATUS+=($?)
-  done
-  for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
-      echo "One of the processes failed with $st"
-      exit "${st}"
-    fi
-  done
+# Test that we're launching on the machine that has
+# proper access to GPUs
+render_gid=$(getent group render | cut -d: -f3)
+if [[ -z "$render_gid" ]]; then
+  echo "Error: 'render' group not found. This is required for GPU access." >&2
+  exit 1
+fi
+
+if [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
+
+  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+
+  if [[ "$commands" =~ ^(.*)"["(.*)"] && ["(.*)"]"$ ]]; then
+      prefix=$( echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+      echo "PREFIX: ${prefix}"
+      export composite_command="(command rocm-smi || true)"
+      myIFS=$IFS
+      IFS=','
+      read -ra node0 <<< ${BASH_REMATCH[2]}
+      read -ra node1 <<< ${BASH_REMATCH[3]}
+      IFS=$myIFS
+      for i in "${!node0[@]}";do 
+        command_node_0=$(echo ${node0[i]} | sed 's/\"//g')
+        command_node_1=$(echo ${node1[i]} | sed 's/\"//g')
+        
+        export commands="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+        echo "COMMANDS: ${commands}"
+        composite_command=$(echo "${composite_command} && ${commands}")
+      done
+      /bin/bash -c "${composite_command}"
+      cleanup_network
+  else
+      echo "Failed to parse node commands! Exiting."
+      cleanup_network
+      exit 111
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
@@ -219,6 +224,7 @@ else
           --group-add $(getent group render | cut -d: -f3) \
           --network=host \
           --shm-size=16gb \
+          --group-add "$render_gid" \
           --rm \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \

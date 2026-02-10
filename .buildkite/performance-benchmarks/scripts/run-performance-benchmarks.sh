@@ -25,9 +25,9 @@ check_gpus() {
     echo "Need at least 1 GPU to run benchmarking."
     exit 1
   fi
-  
+
   declare -g arch_suffix=''
-  
+
   if command -v nvidia-smi; then
     declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
   elif command -v amd-smi; then
@@ -49,7 +49,11 @@ check_cpus() {
     echo "Need at least 1 NUMA to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type="cpu"
+  if [[ "$(uname -m)" == "aarch64" ]] || [[ "$(uname -m)" == "arm64" ]]; then
+    declare -g gpu_type="arm64-cpu"
+  else
+    declare -g gpu_type="cpu"
+  fi
   echo "GPU type is $gpu_type"
 }
 
@@ -110,7 +114,8 @@ json2envs() {
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  timeout 1200 bash -c '
+  local timeout_val="1200"
+  timeout "$timeout_val" bash -c '
     until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
@@ -176,19 +181,20 @@ upload_to_buildkite() {
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
-run_latency_tests() {
-  # run latency tests using `vllm bench latency` command
-  # $1: a json file specifying latency test cases
+run_benchmark_tests() {
+  # run benchmark tests using `vllm bench <test_type>` command
+  # $1: test type (latency or throughput)
+  # $2: a json file specifying test cases
 
-  local latency_test_file
-  latency_test_file=$1
+  local test_type=$1
+  local test_file=$2
 
-  # Iterate over latency tests
-  jq -c '.[]' "$latency_test_file" | while read -r params; do
+  # Iterate over tests
+  jq -c '.[]' "$test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
-    if [[ ! "$test_name" =~ ^latency_ ]]; then
-      echo "In latency-test.json, test_name must start with \"latency_\"."
+    if [[ ! "$test_name" =~ ^${test_type}_ ]]; then
+      echo "In ${test_type}-test.json, test_name must start with \"${test_type}_\"."
       exit 1
     fi
 
@@ -199,15 +205,15 @@ run_latency_tests() {
     fi
 
     # get arguments
-    latency_params=$(echo "$params" | jq -r '.parameters')
-    latency_args=$(json2args "$latency_params")
-    latency_environment_variables=$(echo "$params" | jq -r '.environment_variables')
-    latency_envs=$(json2envs "$latency_environment_variables")
+    bench_params=$(echo "$params" | jq -r '.parameters')
+    bench_args=$(json2args "$bench_params")
+    bench_environment_variables=$(echo "$params" | jq -r '.environment_variables')
+    bench_envs=$(json2envs "$bench_environment_variables")
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
+    tp=$(echo "$bench_params" | jq -r '.tensor_parallel_size')
+    if [[ "$ON_CPU" == "1" ]]; then
+      pp=$(echo "$bench_params" | jq -r '.pipeline_parallel_size // 1')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -220,108 +226,85 @@ run_latency_tests() {
       fi
     fi
 
-    latency_command=" $latency_envs vllm bench latency \
+    bench_command=" $bench_envs vllm bench $test_type \
       --output-json $RESULTS_FOLDER/${test_name}.json \
-      $latency_args"
+      $bench_args"
 
     echo "Running test case $test_name"
-    echo "Latency command: $latency_command"
+    echo "${test_type^} command: $bench_command"
 
-    # recoding benchmarking command ang GPU command
+    # recording benchmarking command and GPU command
     jq_output=$(jq -n \
-      --arg latency "$latency_command" \
+      --arg command "$bench_command" \
       --arg gpu "$gpu_type" \
+      --arg test_type "$test_type" \
       '{
-        latency_command: $latency,
+        ($test_type + "_command"): $command,
         gpu_type: $gpu
       }')
     echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval "$latency_command"
+    eval "$bench_command"
 
     kill_gpu_processes
 
   done
 }
 
+run_latency_tests() {
+  run_benchmark_tests "latency" "$1"
+}
+
+run_startup_tests() {
+  run_benchmark_tests "startup" "$1"
+}
+
 run_throughput_tests() {
-  # run throughput tests using `vllm bench throughput`
-  # $1: a json file specifying throughput test cases
-
-  local throughput_test_file
-  throughput_test_file=$1
-
-  # Iterate over throughput tests
-  jq -c '.[]' "$throughput_test_file" | while read -r params; do
-    # get the test name, and append the GPU type back to it.
-    test_name=$(echo "$params" | jq -r '.test_name')
-    if [[ ! "$test_name" =~ ^throughput_ ]]; then
-      echo "In throughput-test.json, test_name must start with \"throughput_\"."
-      exit 1
-    fi
-
-    # if TEST_SELECTOR is set, only run the test cases that match the selector
-    if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
-      echo "Skip test case $test_name."
-      continue
-    fi
-
-    # get arguments
-    throughput_params=$(echo "$params" | jq -r '.parameters')
-    throughput_args=$(json2args "$throughput_params")
-    throughput_environment_variables=$(echo "$params" | jq -r '.environment_variables')
-    throughput_envs=$(json2envs "$throughput_environment_variables")
-
-    # check if there is enough GPU to run the test
-    tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
-      world_size=$(($tp*$pp))
-      if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
-        echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
-        continue
-      fi
-    else
-      if [[ $gpu_count -lt $tp ]]; then
-        echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
-        continue
-      fi
-    fi
-
-    throughput_command=" $throughput_envs vllm bench throughput \
-      --output-json $RESULTS_FOLDER/${test_name}.json \
-      $throughput_args"
-
-    echo "Running test case $test_name"
-    echo "Throughput command: $throughput_command"
-    # recoding benchmarking command ang GPU command
-    jq_output=$(jq -n \
-      --arg command "$throughput_command" \
-      --arg gpu "$gpu_type" \
-      '{
-        throughput_command: $command,
-        gpu_type: $gpu
-      }')
-    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
-
-    # run the benchmark
-    eval "$throughput_command"
-
-    kill_gpu_processes
-
-  done
+  run_benchmark_tests "throughput" "$1"
 }
 
 run_serving_tests() {
   # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
+  #
+  # Supported JSON formats:
+  # 1) Plain format: top-level array
+  #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #
+  # 2) Default parameters field + plain format tests
+  #    {
+  #      "defaults": { ... },
+  #      "tests": [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #    }
 
   local serving_test_file
   serving_test_file=$1
 
   # Iterate over serving tests
-  jq -c '.[]' "$serving_test_file" | while read -r params; do
+  jq -c '
+    if type == "array" then
+      # Plain format: test cases array
+      .[]
+    elif (type == "object" and has("tests")) then
+      # merge the default parameters into each test cases
+      . as $root
+      | ($root.defaults // {}) as $d
+      | ($root.tests // [])[]
+      # default qps / max_concurrency from defaults if missing
+      | .qps_list = (.qps_list // $d.qps_list)
+      | .max_concurrency_list = (.max_concurrency_list // $d.max_concurrency_list)
+      # merge envs / params: test overrides defaults
+      | .server_environment_variables =
+          (($d.server_environment_variables // {}) + (.server_environment_variables // {}))
+      | .server_parameters =
+          (($d.server_parameters // {}) + (.server_parameters // {}))
+      | .client_parameters =
+          (($d.client_parameters // {}) + (.client_parameters // {}))
+    else
+      error("Unsupported serving test file format: must be array or object with .tests")
+    end
+  ' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -335,28 +318,33 @@ run_serving_tests() {
       continue
     fi
 
-    # get client and server arguments
+    # get client and server arguments (after merged the default parameters)
     server_params=$(echo "$params" | jq -r '.server_parameters')
     server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
+
     server_args=$(json2args "$server_params")
     server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
+
+    # qps_list
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
+
+    # max_concurrency_list (fallback to num_prompts if missing)
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
     if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
-        num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
-        max_concurrency_list="[$num_prompts]"
+      num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
+      max_concurrency_list="[$num_prompts]"
     fi
     max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     echo "Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
+    if [[ "$ON_CPU" == "1" ]]; then
+      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size // 1')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -405,6 +393,11 @@ run_serving_tests() {
       fi
     fi
 
+    # save the compilation mode and optimization level on the serving results
+    # whenever they are set
+    compilation_config_mode=$(echo "$server_params" | jq -r '."compilation_config.mode" // empty')
+    optimization_level=$(echo "$server_params" | jq -r '.optimization_level // empty')
+
     # iterate over different QPS
     for qps in $qps_list; do
       # remove the surrounding single quote from qps
@@ -418,15 +411,15 @@ run_serving_tests() {
       for max_concurrency in $max_concurrency_list; do
         new_test_name=$test_name"_qps_"$qps"_concurrency_"$max_concurrency
         echo " new test name $new_test_name"
-        # pass the tensor parallel size to the client so that it can be displayed
-        # on the benchmark dashboard
+        # pass the tensor parallel size, the compilation mode, and the optimization
+        # level to the client so that they can be used on the benchmark dashboard
         client_command="vllm bench serve \
           --save-result \
           --result-dir $RESULTS_FOLDER \
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
           --max-concurrency $max_concurrency \
-          --metadata "tensor_parallel_size=$tp" \
+          --metadata tensor_parallel_size=$tp compilation_config.mode=$compilation_config_mode optimization_level=$optimization_level \
           $client_args $client_remote_args "
 
         echo "Running test case $test_name with qps $qps"
@@ -458,9 +451,9 @@ run_serving_tests() {
 main() {
   local ARCH
   ARCH=''
-  if [ "$ON_CPU" == "1" ];then
-     check_cpus
-     ARCH='-cpu'
+  if [[ "$ON_CPU" == "1" ]]; then
+    check_cpus
+    ARCH="-$gpu_type"
   else
      check_gpus
      ARCH="$arch_suffix"
@@ -492,6 +485,7 @@ main() {
   # benchmarking
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
+  run_startup_tests $QUICK_BENCHMARK_ROOT/tests/"${STARTUP_JSON:-startup-tests$ARCH.json}"
   run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
 
   # postprocess benchmarking results

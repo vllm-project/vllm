@@ -8,12 +8,15 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+)
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -30,8 +33,9 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     mock_model_config = MagicMock(spec=ModelConfig)
     mock_model_config.max_model_len = 2048
     mock_engine_client.model_config = mock_model_config
-    mock_engine_client.processor = MagicMock()
+    mock_engine_client.input_processor = MagicMock()
     mock_engine_client.io_processor = MagicMock()
+    mock_engine_client.renderer = MagicMock()
 
     serving_models = OpenAIServingModels(
         engine_client=mock_engine_client,

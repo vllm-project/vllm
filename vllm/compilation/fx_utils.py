@@ -7,29 +7,15 @@ from collections.abc import Iterable, Iterator
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload, OpOverloadPacket
+from torch.fx.node import Target
 
 
-def is_func(node: fx.Node, target) -> bool:
-    return node.op == "call_function" and node.target == target
+def is_func(node: fx.Node, target: Target) -> bool:
+    return bool(node.op == "call_function" and node.target == target)
 
 
 def is_auto_func(node: fx.Node, op: OpOverload) -> bool:
     return is_func(node, auto_functionalized) and node.args[0] == op
-
-
-# Returns the first specified node with the given op (if it exists)
-def find_specified_fn_maybe(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node | None:
-    for node in nodes:
-        if node.target == op:
-            return node
-    return None
-
-
-# Returns the first specified node with the given op
-def find_specified_fn(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node:
-    node = find_specified_fn_maybe(nodes, op)
-    assert node is not None, f"Could not find {op} in nodes {nodes}"
-    return node
 
 
 # Returns the first auto_functionalized node with the given op (if it exists)
@@ -75,8 +61,8 @@ def find_op_nodes(
         return
 
     assert isinstance(op, OpOverload)
-    if not op._schema.is_mutable:
-        yield from graph.find_nodes(op="call_function", target=op)
+
+    yield from graph.find_nodes(op="call_function", target=op)
 
     for n in graph.find_nodes(op="call_function", target=auto_functionalized):
         if n.args[0] == op:

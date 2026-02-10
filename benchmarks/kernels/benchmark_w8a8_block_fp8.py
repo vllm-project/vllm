@@ -22,8 +22,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
 
-assert current_platform.is_cuda(), (
-    "Only support tune w8a8 block fp8 kernel on CUDA device."
+assert current_platform.is_cuda() or current_platform.is_rocm(), (
+    "Only support tune w8a8 block fp8 kernel on CUDA/ROCm device."
 )
 
 DTYPE_MAP = {
@@ -183,8 +183,8 @@ def benchmark_config(
         run()
     torch.cuda.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):

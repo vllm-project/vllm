@@ -39,6 +39,7 @@ def ops_impl(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_silu_and_mul(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,

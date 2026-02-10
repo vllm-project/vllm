@@ -3,15 +3,17 @@
 import os
 import platform
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
+from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
@@ -37,6 +39,18 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
+        # Torch profiler. Enabled and configured through profiler_config.
+        self.profiler: Any | None = None
+        profiler_config = vllm_config.profiler_config
+        if profiler_config.profiler == "torch":
+            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
+            self.profiler = TorchProfilerWrapper(
+                profiler_config,
+                worker_name=worker_name,
+                local_rank=self.local_rank,
+                activities=["CPU"],
+            )
+
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
@@ -47,24 +61,29 @@ class CPUWorker(Worker):
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4]
                 )
-            elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+            elif cpu_arch == CpuArchEnum.X86:
                 # For x86 SMT-2, use 1 CPU per core
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
+            elif cpu_arch == CpuArchEnum.ARM:
+                # For AArch64, no SMT
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(lambda cpus: cpus)
             else:
-                self.local_omp_cpuid = "all"
+                self.local_omp_cpuid = "nobind"
+        elif omp_cpuids == "nobind":
+            self.local_omp_cpuid = "nobind"
         else:
             local_dp_rank = self.parallel_config.data_parallel_rank_local
-            omp_cpuids = omp_cpuids.split("|")
+            omp_cpuids_list = omp_cpuids.split("|")
             if local_dp_rank is not None:
                 world_size = self.parallel_config.world_size
-                omp_cpuids = omp_cpuids[
+                omp_cpuids_list = omp_cpuids_list[
                     local_dp_rank * world_size : (local_dp_rank + 1) * world_size
                 ]
-            self.local_omp_cpuid = omp_cpuids[self.rank]
+            self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
-        if self.local_omp_cpuid != "all":
+        if self.local_omp_cpuid != "nobind":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
@@ -96,7 +115,7 @@ class CPUWorker(Worker):
         pass
 
     def determine_available_memory(self) -> int:
-        return self.cache_config.cpu_kvcache_space_bytes  # type: ignore
+        return self.cache_config.cpu_kvcache_space_bytes or 0
 
     def compile_or_warm_up_model(self) -> None:
         # Reset the seed to ensure that the random state is not affected by
@@ -117,22 +136,38 @@ class CPUWorker(Worker):
             the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
             returned.
         """
+        # simulate multiple numa nodes, for testing
+        sim_multi_numa_nodes = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
 
         allowed_numa_nodes, logical_cpu_list = (
             CpuPlatform.get_allowed_cpu_core_node_list()
         )
-        assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
-            f"No enough allowed NUMA nodes to bind threads of "
+        assert (
+            len(allowed_numa_nodes) >= self.parallel_config.world_size
+            or sim_multi_numa_nodes
+        ), (
+            f"Not enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             "Please try to bind threads manually."
         )
 
-        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
-        selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.numa_node == selected_numa_node
-        ]
+        if not sim_multi_numa_nodes:
+            # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
+            selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
+            logical_cpu_list = [
+                x for x in logical_cpu_list if x.numa_node == selected_numa_node
+            ]
+        else:
+            assert len(logical_cpu_list) >= self.parallel_config.world_size
+            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
+            sim_cpu_num_per_node = (
+                len(logical_cpu_list) // self.parallel_config.world_size
+            )
+            start_idx = self.local_rank * sim_cpu_num_per_node
+            logical_cpu_list = logical_cpu_list[
+                start_idx : (start_idx + sim_cpu_num_per_node)
+            ]
 
         # Select CPUs from each physical core via cpu_selector
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
@@ -166,3 +201,11 @@ class CPUWorker(Worker):
             [(x.id, x.physical_core) for x in logical_cpu_list],
         )
         return ",".join([str(x.id) for x in logical_cpu_list])
+
+    def profile(self, is_start: bool = True):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        if is_start:
+            self.profiler.start()
+        else:
+            self.profiler.stop()

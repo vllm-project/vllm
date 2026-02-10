@@ -5,10 +5,10 @@ import pytest
 import torch
 
 from vllm._custom_ops import merge_attn_states as merge_attn_states_cuda
-from vllm.attention.ops.triton_merge_attn_states import (
+from vllm.platforms import current_platform
+from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
-from vllm.platforms import current_platform
 
 
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -150,8 +150,8 @@ def test_merge_attn_states(
     output_torch = output.clone()
     output_lse_torch = output_lse.clone()
     total_time_torch_kernel = 0
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
 
     # 0. Run the Torch kernel
     prefix_lse_torch = prefix_lse.clone()
@@ -188,8 +188,8 @@ def test_merge_attn_states(
     output_lse_ref_triton = output_lse.clone()
 
     total_time_triton_kernel = 0
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
 
     for _ in range(warmup_times):
         merge_attn_states_triton(

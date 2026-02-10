@@ -34,12 +34,14 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "chameleon": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "clip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "deepseek_ocr": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
+    "deepseek_ocr2": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
     "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
     "minicpmv": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
     "siglip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }
 
 

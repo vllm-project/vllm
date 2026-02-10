@@ -17,7 +17,8 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="fastsafetensors requires CUDA/NVIDIA GPUs"
+    not current_platform.is_cuda_alike(),
+    reason="fastsafetensors requires NVIDIA/AMD GPUs",
 )
 def test_fastsafetensors_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:

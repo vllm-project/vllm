@@ -1,0 +1,61 @@
+suite: test job
+templates:
+  - job.yaml
+tests:
+  - it: should create job when modelDownload is enabled
+    set:
+      extraInit:
+        modelDownload:
+          enabled: true
+          image:
+            repository: "amazon/aws-cli"
+            tag: "2.6.4"
+            pullPolicy: "IfNotPresent"
+          waitContainer:
+            command: [ "/bin/bash" ]
+            args: [ "-c", "wait" ]
+          downloadJob:
+            command: [ "/bin/bash" ]
+            args:
+              - "-eucx"
+              - "aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data"
+        pvcStorage: "1Gi"
+        s3modelpath: "relative_s3_model_path/opt-125m"
+        awsEc2MetadataDisabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: job-download-model
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: amazon/aws-cli:2.6.4
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: OnFailure
+
+  - it: should not create job when modelDownload is disabled
+    set:
+      extraInit:
+        modelDownload:
+          enabled: false
+          image:
+            repository: "amazon/aws-cli"
+            tag: "2.6.4"
+            pullPolicy: "IfNotPresent"
+          waitContainer:
+            command: [ "/bin/bash" ]
+            args: [ "-c", "wait" ]
+          downloadJob:
+            command: [ "/bin/bash" ]
+            args: [ "-c", "download" ]
+        initContainers:
+          - name: llm-d-routing-proxy
+            image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+        pvcStorage: "10Gi"
+    asserts:
+      - hasDocuments:
+          count: 0
