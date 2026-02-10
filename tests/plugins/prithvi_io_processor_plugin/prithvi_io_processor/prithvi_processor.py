@@ -247,7 +247,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
         if isinstance(data, dict):
             return ImagePrompt(**data)
 
-        raise ValueError("Unable to parse request")
+        raise ValueError("Prompt data should be an `ImagePrompt`")
 
     def pre_process(
         self,
