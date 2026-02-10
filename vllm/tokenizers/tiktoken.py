@@ -41,13 +41,13 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> "TikTokenTokenizer":
         if not Path(path_or_repo_id).exists():
-            assert len(path_or_repo_id.split("/")) == 2, (
+            assert len(str(path_or_repo_id).split("/")) == 2, (
                 "You have either provided a non-existent path: "
                 "{path_or_repo_id} or an invalid HF Hub repo id."
             )
-            return cls(path_or_repo_id, revision=revision)
+            return cls(str(path_or_repo_id), revision=revision)
         else:
-            return cls(path_or_repo_id)
+            return cls(str(path_or_repo_id))
 
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
@@ -96,6 +96,10 @@ class TikTokenTokenizer(PreTrainedTokenizer):
     @property
     def pad_token_id(self) -> int:
         return self.pad_id
+
+    @property
+    def max_token_id(self) -> int:
+        return self.vocab_size - 1
 
     @property
     def truncation_side(self) -> str:

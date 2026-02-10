@@ -45,11 +45,11 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers.activations import ACT2FN
-from transformers.models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2RMSNorm
+from transformers.models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -99,7 +99,7 @@ class MoonshotMLP(nn.Module):
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
-        self.act_fn = ACT2FN[hidden_act]
+        self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -360,7 +360,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
         )
 
         if get_pp_group().is_last_rank:
-            self.mimo_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.mimo_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.mimo_norm = PPMissingLayer()
 
@@ -394,14 +394,30 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
             mimo_hidden_states = intermediate_tensors.get("mimo_hidden_states")
             mimo_residual = intermediate_tensors.get("mimo_residual")
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
+            # Check if we need to branch out to MIMO stream
+            # The branch happens AFTER the layer specified by index
+            if i == self.kimia_mimo_transformer_from_layer_index:
+                mimo_hidden_states = hidden_states
+                mimo_residual = None
 
-        for layer in self.mimo_layers[self.mimo_start_layer : self.mimo_end_layer]:
+        for i in range(self.mimo_start_layer, self.mimo_end_layer):
+            layer = self.mimo_layers[i]
+            # If mimo_hidden_states is None here, it means we missed the branch point
+            # or logic is wrong. However, if this rank is supposed to run MIMO layers,
+            # input must be ready.
+
+            # Skip if input is None (this shouldn't happen in correct PP setup unless
+            # MIMO stream starts later?)
+            if mimo_hidden_states is None:
+                continue
+
             mimo_hidden_states, mimo_residual = layer(
                 positions,
                 mimo_hidden_states,
