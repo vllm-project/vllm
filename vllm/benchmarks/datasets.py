@@ -39,6 +39,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -56,11 +57,6 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -1443,6 +1439,20 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Maximum distance for blazedit dataset. Min: 0, Max: 1.0",
     )
 
+    asr_group = parser.add_argument_group("asr dataset options")
+    asr_group.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio length in seconds for ASR dataset.",
+    )
+    asr_group.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio length in seconds for ASR dataset.",
+    )
+
     random_group = parser.add_argument_group("random dataset options")
     add_random_dataset_base_args(random_group)
 
@@ -1744,27 +1754,27 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = VisionArenaDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
             args.hf_subset = None
         elif (
             args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MMVUDataset
-            args.hf_split = "validation"
+            args.hf_split = args.hf_split if args.hf_split else "validation"
             args.hf_subset = None
         elif (
             args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = InstructCoderDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MTBenchDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MTBenchDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
@@ -1780,22 +1790,26 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = AIMODataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS  # noqa: E501
             or args.hf_name in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = NextEditPredictionDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = ASRDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
+            hf_kwargs = {
+                "asr_min_audio_len_sec": args.asr_min_audio_len_sec,
+                "asr_max_audio_len_sec": args.asr_max_audio_len_sec,
+            }
         elif args.dataset_path in BlazeditDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = BlazeditDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
             hf_kwargs = {
                 "min_distance": args.blazedit_min_distance,
                 "max_distance": args.blazedit_max_distance,
@@ -1805,13 +1819,13 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in MLPerfDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MLPerfDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MMStarDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MMStarDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MMStarDataset
-            args.hf_split = "val"
+            args.hf_split = args.hf_split if args.hf_split else "val"
             args.hf_subset = None
         else:
             supported_datasets = set(
@@ -1847,6 +1861,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_stream=args.no_stream,
             hf_name=args.hf_name,
             disable_shuffle=args.disable_shuffle,
+            trust_remote_code=args.trust_remote_code,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -2405,6 +2420,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         no_stream: bool = False,
         dataset_subset: str | None = None,
         hf_name: str | None = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -2413,6 +2429,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.dataset_subset = dataset_subset
         self.load_stream = not no_stream
         self.hf_name = hf_name or dataset_path
+        self.trust_remote_code = trust_remote_code
         self.load_data()
 
     def load_data(self) -> None:
@@ -2422,6 +2439,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             name=self.dataset_subset,
             split=self.dataset_split,
             streaming=self.load_stream,
+            trust_remote_code=self.trust_remote_code,
         )
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
@@ -3071,12 +3089,8 @@ class ASRDataset(HuggingFaceDataset):
         "kensho/spgispeech",
     }
 
-    DEFAULT_OUTPUT_LEN = 128
+    DEFAULT_OUTPUT_LEN = 1024
     IS_MULTIMODAL = True
-
-    # TODO Whisper-specific. Abstract interface when more models are supported.
-    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
-    skip_long_audios: bool = True
 
     def sample(
         self,
@@ -3088,22 +3102,28 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        if "openai" in tokenizer.name_or_path:
+            prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+        else:
+            prompt = ""
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests = []
         ind = 0
         skipped = 0
+        asr_min_audio_len_sec = kwargs.get("asr_min_audio_len_sec")
+        asr_max_audio_len_sec = kwargs.get("asr_max_audio_len_sec")
+        durations = []
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
             duration_s = librosa.get_duration(y=y, sr=sr)
-            # Whisper max supported duration
-            if self.skip_long_audios and duration_s > 30:
+            if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1
                 continue
 
+            durations.append(duration_s)
             mm_content = {"audio": (y, sr)}
             sampled_requests.append(
                 SampleRequest(
@@ -3122,6 +3142,20 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
+
+        logger.info("Number of audio samples: %d", len(durations))
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        min_duration = min(durations) if durations else 0
+        max_duration = max(durations) if durations else 0
+        median_duration = np.median(durations) if durations else 0
+        logger.info(
+            "Audio duration statistics (s): avg=%.2f, min=%.2f, max=%.2f, median=%.2f",
+            avg_duration,
+            min_duration,
+            max_duration,
+            median_duration,
+        )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
