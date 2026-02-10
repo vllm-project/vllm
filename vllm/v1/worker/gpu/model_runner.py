@@ -321,9 +321,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
         dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
-        expanded_local_pos = torch.zeros(
-            num_reqs, dtype=torch.int32, device=self.device
-        )
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
@@ -334,7 +331,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np,
             pos,
             dummy_input_ids,
-            expanded_local_pos,
         )
 
     @torch.inference_mode()
@@ -525,9 +521,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device
-            )
         else:
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
@@ -543,7 +536,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             max_expand_len = self.num_speculative_steps + 1
-            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+            expanded_idx_mapping = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
@@ -646,7 +639,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
-            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
@@ -713,7 +705,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.cu_num_logits_np,
             sample_pos,
             input_ids,
-            input_batch.expanded_local_pos,
         )
 
         if input_batch.num_draft_tokens == 0:
