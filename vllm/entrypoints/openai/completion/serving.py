@@ -186,14 +186,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     )
 
                     if request.stream and request.stream_options:
-                        if request.stream_options.stream_interval is not None:
-                            sampling_params.stream_interval = (
-                                request.stream_options.stream_interval
-                            )
-                        if request.stream_options.stream_interval_ms is not None:
-                            sampling_params.stream_interval_ms = (
-                                request.stream_options.stream_interval_ms
-                            )
+                        request.stream_options.apply_to_sampling_params(sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
