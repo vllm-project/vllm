@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.platforms import current_platform
 
 from ...utils import multi_gpu_test
 from .common import (
@@ -16,6 +17,8 @@ from .common import (
 )
 from .models import (
     FLASHINFER_ATTN,
+    ROCM_AITER_UNIFIED_ATTN,
+    ROCM_ATTN,
     TRITON_ATTN,
     llama3_8b,
     llama3_8b_fp8,
@@ -29,9 +32,14 @@ from .models import (
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b_fp8, llama4_scout_fp8],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [TRITON_ATTN, FLASHINFER_ATTN]
+    if current_platform.is_cuda()
+    else [TRITON_ATTN, ROCM_ATTN, ROCM_AITER_UNIFIED_ATTN],
+)
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
+@pytest.mark.parametrize("custom_ops", list(custom_ops_combos("quant_fp8", "rms_norm")))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 def test_tp2_async_tp_fp8_fusions(
     model_name: str,
@@ -96,7 +104,7 @@ def test_tp2_async_tp_fp8_fusions(
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
+@pytest.mark.parametrize("custom_ops", list(custom_ops_combos("rms_norm")))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 def test_tp2_async_tp_fusions(
     model_name: str,
