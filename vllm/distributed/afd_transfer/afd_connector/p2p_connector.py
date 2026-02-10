@@ -57,10 +57,6 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     print("begin afd_p2p_send_impl", flush=True)
     comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
     print("end afd_p2p_send_impl", flush=True)
-    if not torch.cuda.is_current_stream_capturing():
-        print("jcz before synchronize afd_p2p_send_impl", flush=True)
-        torch.cuda.synchronize()
-        print("jcz after synchronize afd_p2p_send_impl", flush=True)
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     print("afd_p2p_send_fake", flush=True)
@@ -74,7 +70,6 @@ direct_register_custom_op(
 )
 
 # --- Recv Op ---
-
 def afd_p2p_recv_impl(
     out: torch.Tensor,
     src: int,
@@ -86,10 +81,6 @@ def afd_p2p_recv_impl(
     print("begin afd_p2p_recv_impl", flush=True)
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
     print("end afd_p2p_recv_impl", flush=True)
-    if not torch.cuda.is_current_stream_capturing():
-        print("jcz before synchronize afd_p2p_recv_impl", flush=True)
-        torch.cuda.synchronize()
-        print("jcz after synchronize afd_p2p_recv_impl", flush=True)
 
 
 def afd_p2p_recv_fake(
@@ -149,6 +140,10 @@ class P2PAFDConnector(AFDConnectorBase):
         self.dst_list = []
         # Fixed recv buffers for FFN side when graph capturing; key = (stage_idx, size)
         self._recv_attn_buffers: dict[tuple[int, tuple[int, ...]], torch.Tensor] = {}
+        # Fixed recv buffers for ATTN side when graph capturing; key = (stage_idx, size)
+        # This avoids reusing the same tensor for both send source and recv
+        # destination in compiled graphs.
+        self._recv_ffn_buffers: dict[tuple[int, tuple[int, ...]], torch.Tensor] = {}
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -365,10 +360,10 @@ class P2PAFDConnector(AFDConnectorBase):
                 torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
             )
 
-        # Pre-allocate fixed recv buffers (FFN side only) so each recv writes into
-        # the same buffer (required for CUDA graph capture; also used in eager).
+        # Pre-allocate fixed recv buffers so each recv writes into the same
+        # buffer (required for CUDA graph capture; also used in eager).
         # Key is (stage_idx, meta.size) so different shapes get separate buffers.
-        if self.config.afd_config.afd_role == "ffn":
+        if self.config.afd_config.afd_role == "ffn" and not self.config.model_config.enforce_eager:
             for stage_idx in range(num_of_stages):
                 meta = self._tensor_metadata_list[stage_idx]
                 buffer_key = (stage_idx, tuple(meta.size))
@@ -381,6 +376,24 @@ class P2PAFDConnector(AFDConnectorBase):
                 ):
                     continue
                 self._recv_attn_buffers[buffer_key] = torch.empty(
+                    tuple(meta.size),
+                    dtype=meta.dtype,
+                    device=meta.device,
+                )
+        elif self.config.afd_config.afd_role == "attention" and is_graph_capturing \
+            and not self.config.model_config.enforce_eager:
+            for stage_idx in range(num_of_stages):
+                meta = self._tensor_metadata_list[stage_idx]
+                buffer_key = (stage_idx, tuple(meta.size))
+                existing = self._recv_ffn_buffers.get(buffer_key)
+                if (
+                    existing is not None
+                    and existing.shape == meta.size
+                    and existing.dtype == meta.dtype
+                    and existing.device == meta.device
+                ):
+                    continue
+                self._recv_ffn_buffers[buffer_key] = torch.empty(
                     tuple(meta.size),
                     dtype=meta.dtype,
                     device=meta.device,
@@ -414,6 +427,14 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         ubatch_idx = get_forward_context().afd_metadata.afd_stage_idx
         src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
+        if not self.config.model_config.enforce_eager and self.is_graph_capturing:
+            meta = self._tensor_metadata_list[ubatch_idx]
+            buffer_key = (ubatch_idx, tuple(meta.size))
+            recv_buffer = self._recv_ffn_buffers.get(buffer_key)
+            # Prefer fixed preallocated buffer to avoid aliasing with the send
+            # source tensor in compiled/fullgraph execution.
+            if recv_buffer is not None:
+                ref_tensor = recv_buffer
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,

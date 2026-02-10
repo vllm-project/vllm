@@ -160,7 +160,6 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 dp_metadata = dp_metadata_list.get(
                     recv_metadata.stage_idx, None
                 )
-                print(f"jcz _ffn_forward 1 layer_idx:{layer_idx} ubatch_idx:{ubatch_idx}", flush=True)
                 if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
                     for work in recv_metadata.recv_handle_list:
                         work.wait()
@@ -172,12 +171,9 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, layer_idx
                     )
-                print(f"jcz _ffn_forward 2 layer_idx:{layer_idx} ubatch_idx:{ubatch_idx}", flush=True)
 
                 recv_metadata.recv_handle_list = None
                 self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
-                print(f"jcz _ffn_forward 3 layer_idx:{layer_idx} ubatch_idx:{ubatch_idx}", flush=True)
-        print(f"jcz _ffn_forward end", flush=True)
         self._execute_model_count += 1
         return rank_ffn_output
 
