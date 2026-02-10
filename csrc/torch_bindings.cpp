@@ -102,8 +102,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Activation ops
   // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
+  // Functional variant (default overload) - enables torch.compile decompose
+  // pass
+  ops.def("silu_and_mul(Tensor input) -> Tensor");
+  ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul_func);
+
+  // Out variant with kwarg-only out arg (PyTorch standard convention)
+  ops.def("silu_and_mul.out(Tensor input, *, Tensor! out) -> Tensor");
+  ops.impl("silu_and_mul.out", torch::kCUDA, &silu_and_mul_out);
 
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");

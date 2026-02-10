@@ -247,16 +247,16 @@ def _fused_moe_gguf(
     activation: str,
 ) -> torch.Tensor:
     def act(x: torch.Tensor):
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         if activation == "silu":
-            torch.ops._C.silu_and_mul(out, x)
+            return torch.ops._C.silu_and_mul(x)
         elif activation == "gelu":
+            d = x.shape[-1] // 2
+            output_shape = x.shape[:-1] + (d,)
+            out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
             torch.ops._C.gelu_and_mul(out, x)
+            return out
         else:
             raise ValueError(f"Unsupported activation: {activation}")
-        return out
 
     # lazy import to avoid triggering triton import in CPU backend
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size

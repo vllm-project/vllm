@@ -164,8 +164,8 @@ def torch_batched_moe(
     for expert in range(num_experts):
         num = tokens_per_expert[expert]
         if num > 0:
-            torch.ops._C.silu_and_mul(
-                tmp[:num], b_a[expert, :num, :] @ w1[expert].transpose(0, 1)
+            tmp[:num] = torch.ops._C.silu_and_mul(
+                b_a[expert, :num, :] @ w1[expert].transpose(0, 1)
             )
             out[expert, :num, :] = tmp[:num] @ w2[expert].transpose(0, 1)
 

@@ -116,14 +116,11 @@ class FixFunctionalizationPass(VllmInductorPass):
                     5: "scale_out",
                 }
                 self.defunctionalize(graph, node, mutated_args)
-            # For some reason we need to specify the args for both
-            # silu_and_mul and silu_and_mul_quant. The kwargs
-            # pathway gets the wrong answer.
-            elif at_target == torch.ops._C.silu_and_mul.default:
-                mutated_args = {1: "result"}
-                self.defunctionalize(
-                    graph, node, mutated_args, args=("result", "input")
-                )
+            # silu_and_mul.default is now functional (returns Tensor),
+            # silu_and_mul.out is the out variant with kwarg-only out
+            elif at_target == torch.ops._C.silu_and_mul.out:
+                mutated_args = {1: "out"}
+                self.defunctionalize(graph, node, mutated_args, args=("input", "out"))
             elif at_target == torch.ops._C.silu_and_mul_quant.default:
                 mutated_args = {1: "result"}
                 self.defunctionalize(

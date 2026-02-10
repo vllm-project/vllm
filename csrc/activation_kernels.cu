@@ -317,11 +317,30 @@ packed_gelu_tanh_kernel(const packed_t& val) {
     });                                                                     \
   }
 
-void silu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void silu_and_mul(torch::Tensor& out,          // [..., d]
+                  const torch::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
                                 true);
+}
+
+// Functional variant: allocates output and calls silu_and_mul
+torch::Tensor silu_and_mul_func(const torch::Tensor& input)  // [..., 2 * d]
+{
+  // Input has shape [..., 2*d], output has shape [..., d]
+  auto sizes = input.sizes().vec();
+  sizes.back() /= 2;
+  auto out = torch::empty(sizes, input.options());
+  silu_and_mul(out, input);
+  return out;
+}
+
+// Out variant with PyTorch standard signature: (input, *, out) -> Tensor
+torch::Tensor silu_and_mul_out(const torch::Tensor& input,  // [..., 2 * d]
+                               torch::Tensor& out)          // [..., d]
+{
+  silu_and_mul(out, input);
+  return out;
 }
 
 void mul_and_silu(torch::Tensor& out,    // [..., d]
