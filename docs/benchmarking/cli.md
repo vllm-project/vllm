@@ -924,6 +924,11 @@ The benchmark measures the following stages for each request:
 | `prompt_update_time` | Time updating prompt tokens |
 | `preprocessor_total_time` | Total preprocessing time |
 | `encoder_forward_time` | Encoder model forward pass |
+| `num_encoder_calls` | Number of encoder invocations per request |
+
+The benchmark also reports end-to-end latency (TTFT + decode time) per
+request. Use `--metric-percentiles` to select which percentiles to report
+(default: p99) and `--output-json` to save results.
 
 #### Basic Example with Synthetic Data (random-mm)
 

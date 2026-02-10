@@ -36,10 +36,11 @@ vllm bench mm-processor \
 | `prompt_update_time` | Time spent updating prompt tokens |
 | `preprocessor_total_time` | Total preprocessing time |
 | `encoder_forward_time` | Time spent in the encoder model forward pass |
+| `num_encoder_calls` | Number of encoder invocations per request |
 
-The benchmark also reports `num_encoder_calls` per request and end-to-end
-latency (TTFT + decode time). Use `--metric-percentiles` to select which
-percentiles to report (default: p99) and `--output-json` to save results.
+The benchmark also reports end-to-end latency (TTFT + decode time) per
+request. Use `--metric-percentiles` to select which percentiles to report
+(default: p99) and `--output-json` to save results.
 
 For more examples (HF datasets, warmup, JSON output), see
 [Benchmarking CLI — Multimodal Processor Benchmark](../../benchmarking/cli.md#multimodal-processor-benchmark).
