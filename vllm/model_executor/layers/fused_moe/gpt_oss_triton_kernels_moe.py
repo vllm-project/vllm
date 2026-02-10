@@ -9,23 +9,52 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
+use_legacy_triton_kernels = False
+
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing, routing_from_bitmatrix
-        from triton_kernels.tensor import Bitmatrix
+        from triton_kernels.matmul_ogs import (
+            FnSpecs,
+            FusedActivation,
+            GatherIndx,
+            RoutingData,
+            ScatterIndx,
+            matmul_ogs,
+        )
+        from triton_kernels.tensor import (
+            BIT,
+            Bitmatrix,
+        )
+        from triton_kernels.topk import topk
+
+        try:
+            from triton_kernels.tensor import (
+                SparseMatrix,
+                make_ragged_tensor_metadata,
+            )
+        except ImportError:
+            if current_platform.is_rocm():
+                logger.warning_once("Using legacy triton_kernels on ROCm")
+                use_legacy_triton_kernels = True
+            else:
+                raise
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -74,6 +103,68 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
+def legacy_routing_from_bitmatrix(
+    bitmatrix: "Bitmatrix",
+    expt_scal: torch.Tensor,
+    expt_indx: torch.Tensor,
+    n_expts_tot: int,
+    n_expts_act: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Replacement for the removed triton_kernels.routing.routing_from_bitmatrix.
+    Creates routing data from a bitmatrix representation.
+    """
+    if use_legacy_triton_kernels:
+        from triton_kernels.routing import routing_from_bitmatrix
+
+        return routing_from_bitmatrix(
+            bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act
+        )
+    sparse_logits = SparseMatrix(indx=expt_indx, vals=expt_scal, mask=bitmatrix)
+    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    ragged_batch_metadata = make_ragged_tensor_metadata(
+        sparse_logits.mask_metadata.col_sum,
+        dispatch_indx.shape[0],
+    )
+    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    routing_data = RoutingData(
+        gate_scal,
+        ragged_batch_metadata.block_sizes,
+        n_expts_tot,
+        n_expts_act,
+        ragged_batch_metadata,
+    )
+    gather_idx = GatherIndx(combine_indx, dispatch_indx)
+    scatter_idx = ScatterIndx(dispatch_indx, combine_indx)
+    return routing_data, gather_idx, scatter_idx
+
+
+def legacy_routing(
+    logits: torch.Tensor,
+    n_expts_act: int,
+    sm_first: bool = False,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Replacement for the removed triton_kernels.routing.routing function.
+    Computes routing data from gating logits.
+    """
+    if use_legacy_triton_kernels:
+        from triton_kernels.routing import routing
+
+        return routing(logits, n_expts_act, sm_first=sm_first)
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    sparse_logits = topk(logits, n_expts_act, apply_softmax=not sm_first)
+    return legacy_routing_from_bitmatrix(
+        sparse_logits.mask,
+        sparse_logits.vals,
+        sparse_logits.indx,
+        logits.shape[-1],
+        n_expts_act,
+    )
+
+
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -87,7 +178,7 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = routing(
+    routing_data, gather_idx, scatter_idx = legacy_routing(
         gating_output, topk, sm_first=not renormalize
     )
 
@@ -163,10 +254,22 @@ def triton_kernel_fused_experts(
     )
     output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
-    act = FusedActivation(
-        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
-        (swiglu_alpha, swiglu_limit),
-        2,
+    act = (
+        FusedActivation(
+            FnSpecs(
+                "swiglu",
+                triton_kernels.swiglu.swiglu_fn,
+                ("alpha", "limit"),
+                reduction_n=2,
+            ),
+            (swiglu_alpha, swiglu_limit),
+        )
+        if not use_legacy_triton_kernels
+        else FusedActivation(
+            FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
+            (swiglu_alpha, swiglu_limit),
+            2,
+        )
     )
     gammas = routing_data.gate_scal if routing_data else None
 
@@ -227,13 +330,22 @@ def make_routing_data(
 
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
-    bitmatrix = Bitmatrix(
-        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
+    bitmatrix = (
+        Bitmatrix(
+            bitmatrix, dtype=BIT, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max
+        )
+        if not use_legacy_triton_kernels
+        else Bitmatrix(
+            bitmatrix,
+            shape=bitmatrix_shape,
+            shape_max=bitmatrix_shape_max,
+            scratchpad=None,
+        )
     )
 
     # matmul_ogs expects invalid topk_weights to be -1s
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
-    routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
+    routing_data, gather_indx, scatter_indx = legacy_routing_from_bitmatrix(
         bitmatrix, topk_weights, topk_ids, num_local_experts, num_topk
     )
 
@@ -241,8 +353,43 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_expert_map(self) -> bool:
         return True
@@ -297,19 +444,9 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -323,10 +460,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (0, 0)
-        workspace2 = (M * topk, N // 2)
+        workspace2 = (M * topk, activation_out_dim)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -389,19 +528,9 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
 
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -415,9 +544,11 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M * topk, N // 2)
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M * topk, activation_out_dim)
         workspace2 = (M * topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -443,8 +574,10 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        if self.quant_config is None:
-            self.quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+        # Use local variable to help mypy narrow the type after None check
+        quant_config = self.quant_config
+        if quant_config is None:
+            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
@@ -462,12 +595,10 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         # type check, uint8 means mxfp4
         assert hidden_states.dtype == torch.bfloat16
         assert (
-            self.quant_config.w1_bias is None
-            or self.quant_config.w1_bias.dtype == torch.float32
+            quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
         )
         assert (
-            self.quant_config.w2_bias is None
-            or self.quant_config.w2_bias.dtype == torch.float32
+            quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
         )
 
         # Shape check, only check non-mxfp4
@@ -485,38 +616,41 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         # Note that the output tensor might be in workspace13
         intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
         intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
-        intermediate_cache2 = _resize_cache(workspace13, (M * topk, N // 2))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
 
         gammas = routing_data.gate_scal if routing_data else None
 
         matmul_ogs(
             hidden_states,
             w1,
-            self.quant_config.w1_bias,
+            quant_config.w1_bias,
             routing_data,
             gather_indx=gather_indx,
-            precision_config=self.quant_config.w1_precision,
+            precision_config=quant_config.w1_precision,
             gammas=gammas if apply_router_weight_on_input else None,
             fused_activation=None,
             y=intermediate_cache1,
         )
 
         self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N)[gather_indx.dst_indx],
         )
 
         # matmul_ogs grouped reduction fuse sum across multiple experts:
-        # y[dst_ind // n_expts_act, :] += x[src_ind, :]
+        # y[dst_indx // n_expts_act, :] += x
         # Need to set n_expts_act to 1 to unfuse moe_sum
         routing_data.n_expts_act = 1
 
         matmul_ogs(
-            intermediate_cache2,
+            intermediate_cache2[gather_indx.src_indx],
             w2,
-            self.quant_config.w2_bias,
+            quant_config.w2_bias,
             routing_data,
             scatter_indx=scatter_indx,
-            precision_config=self.quant_config.w2_precision,
+            precision_config=quant_config.w2_precision,
             gammas=None if apply_router_weight_on_input else gammas,
             y=intermediate_cache3,
         )

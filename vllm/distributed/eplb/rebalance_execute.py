@@ -6,9 +6,10 @@ The actual execution of the rearrangement.
 This involves the exchange of expert weights between GPUs.
 """
 
-from collections.abc import Iterable, MutableSequence, Sequence
-from functools import partial
+from collections.abc import Sequence
+from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch.distributed import (
     P2POp,
@@ -18,213 +19,317 @@ from torch.distributed import (
     get_global_rank,
 )
 
+from vllm.logger import init_logger
 
-def idx_local_to_global(
-    local_idx: int,
-    local_cnt: int,
-    ep_rank: int,
-) -> int:
-    """
-    Convert a local expert index to a global expert index.
-    """
-    return ep_rank * local_cnt + local_idx
+logger = init_logger(__name__)
 
 
-def idx_global_to_local(
-    global_idx: int,
-    local_cnt: int,
-    ep_rank: int,
-) -> int:
-    """
-    Convert a global expert index to a local expert index.
-    """
-    return global_idx - ep_rank * local_cnt
+@dataclass
+class RecvMetadata:
+    """Metadata describing remote receives during EPLB rebalancing."""
+
+    recv_primary_mask: np.ndarray
+    """Mask of (num_local_experts,) indicating primary experts received."""
+    recv_count: int
+    """Number of received experts for the layer."""
+    recv_expert_ids: np.ndarray
+    """Expert ids (num_local_experts,) of remote primary experts."""
+    recv_dst_rows: np.ndarray
+    """Target expert indices (num_local_experts,) in local tensors to send."""
 
 
-def global_idx_to_rank(
-    global_idx: int,
-    local_cnt: int,
-) -> int:
-    """
-    Convert a global expert index to a rank index.
-    """
-    return global_idx // local_cnt
+# Type alias for the result of move_to_buffer or transfer_layer
+MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 
 
-def get_ep_ranks_with_expert(
-    idx: int,
+def get_ep_ranks_with_experts_batch(
+    expert_ids: np.ndarray,
     num_local_experts: int,
-    old_indices: Sequence[int],
-    new_indices: Sequence[int],
-) -> tuple[MutableSequence[int], MutableSequence[int]]:
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
     """
     Get the ranks of the experts that need to be exchanged.
 
     Args:
-        idx: The index of the expert.
+        expert_ids: 1D array of expert indices to query.
         num_local_experts: The number of local experts.
         old_indices: The old indices of the experts.
         new_indices: The new indices of the experts.
 
     Returns:
-        A tuple of two lists:
-        - The ranks of the experts that need to be sent.
-        - The ranks of the experts that need to be received.
+        A tuple of two dictionaries mapping expert_id to:
+        - ranks_to_send: The ranks that have this expert and need to send.
+        - ranks_to_recv: The ranks that need to receive this expert.
     """
-    global2rank = partial(
-        global_idx_to_rank,
-        local_cnt=num_local_experts,
-    )
+    ranks_to_send_map: dict[int, list[int]] = {}
+    ranks_to_recv_map: dict[int, list[int]] = {}
 
-    ranks_to_send: list[int] = []
-    ranks_to_recv: list[int] = []
+    # Fast path: if no experts, return empty dicts
+    if expert_ids.size == 0:
+        return ranks_to_send_map, ranks_to_recv_map
 
-    for i, e in enumerate(old_indices):
-        if e == idx:
-            rank = global2rank(i)
-            if not ranks_to_send or ranks_to_send[-1] != rank:
-                ranks_to_send.append(rank)
+    unique_experts = np.unique(expert_ids)
+    num_positions = len(old_indices)
+    position_indices = np.arange(num_positions, dtype=np.int32)
 
-    for i, e in enumerate(new_indices):
-        if e == idx:
-            rank = global2rank(i)
-            if not ranks_to_recv or ranks_to_recv[-1] != rank:
-                ranks_to_recv.append(rank)
+    # Vectorized approach: find all positions matching any query expert in one pass
+    # Use np.isin to get boolean masks for all relevant positions at once
+    old_relevant_mask = np.isin(old_indices, unique_experts)
+    new_relevant_mask = np.isin(new_indices, unique_experts)
 
-    # Remove those ranks that can get this expert locally.
-    ranks_to_send_set = set(ranks_to_send)
-    ranks_to_recv_actual = [
-        rank for rank in ranks_to_recv if rank not in ranks_to_send_set
-    ]
+    # Process old_indices (send ranks)
+    if np.any(old_relevant_mask):
+        old_relevant_positions = position_indices[old_relevant_mask]
+        old_relevant_experts = old_indices[old_relevant_mask]
+        old_relevant_ranks = old_relevant_positions // num_local_experts
 
-    return ranks_to_send, ranks_to_recv_actual
+        # Sort by expert first, then by position (to maintain first-appearance order)
+        sort_order = np.lexsort((old_relevant_positions, old_relevant_experts))
+        sorted_experts = old_relevant_experts[sort_order]
+        sorted_ranks = old_relevant_ranks[sort_order]
+
+        # Find boundaries where expert changes
+        expert_boundaries = np.concatenate(
+            [[0], np.where(np.diff(sorted_experts) != 0)[0] + 1, [len(sorted_experts)]]
+        )
+
+        # For each expert, extract unique ranks in order of first appearance
+        for i in range(len(expert_boundaries) - 1):
+            start, end = expert_boundaries[i], expert_boundaries[i + 1]
+            expert = int(sorted_experts[start])
+            expert_ranks = sorted_ranks[start:end]
+
+            # Get unique ranks preserving order
+            _, unique_idx = np.unique(expert_ranks, return_index=True)
+            unique_ranks = expert_ranks[np.sort(unique_idx)]
+            ranks_to_send_map[expert] = unique_ranks.tolist()
+
+    # Process new_indices (recv ranks)
+    if np.any(new_relevant_mask):
+        new_relevant_positions = position_indices[new_relevant_mask]
+        new_relevant_experts = new_indices[new_relevant_mask]
+        new_relevant_ranks = new_relevant_positions // num_local_experts
+
+        # Sort by expert first, then by position
+        sort_order = np.lexsort((new_relevant_positions, new_relevant_experts))
+        sorted_experts = new_relevant_experts[sort_order]
+        sorted_ranks = new_relevant_ranks[sort_order]
+
+        # Find boundaries where expert changes
+        expert_boundaries = np.concatenate(
+            [[0], np.where(np.diff(sorted_experts) != 0)[0] + 1, [len(sorted_experts)]]
+        )
+
+        # For each expert, extract unique ranks and exclude local copies
+        for i in range(len(expert_boundaries) - 1):
+            start, end = expert_boundaries[i], expert_boundaries[i + 1]
+            expert = int(sorted_experts[start])
+            expert_ranks = sorted_ranks[start:end]
+
+            # Get unique ranks preserving order
+            _, unique_idx = np.unique(expert_ranks, return_index=True)
+            unique_ranks = expert_ranks[np.sort(unique_idx)]
+
+            # Remove ranks that have local copies (in send map)
+            send_ranks_set = set(ranks_to_send_map.get(expert, []))
+            recv_ranks_actual = [
+                int(r) for r in unique_ranks if r not in send_ranks_set
+            ]
+            ranks_to_recv_map[expert] = recv_ranks_actual
+
+    # Handle experts that only appear in old (send only) or new (recv only)
+    for expert in unique_experts:
+        expert = int(expert)
+        if expert not in ranks_to_send_map:
+            ranks_to_send_map[expert] = []
+        if expert not in ranks_to_recv_map:
+            ranks_to_recv_map[expert] = []
+
+    return ranks_to_send_map, ranks_to_recv_map
 
 
 def move_to_buffer(
     num_local_experts: int,
-    old_indices: Sequence[int],
-    new_indices: Sequence[int],
-    expert_weights: Iterable[torch.Tensor],
-    expert_weights_buffer: Sequence[torch.Tensor],
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
-) -> tuple[list[bool], list[bool], dict[int, int]]:
+) -> MoveToBufferResult:
     """
-    Perform expert weights rearrangement of one layer.
+    Rearranges expert weights during EPLB rebalancing.
+
+    Args:
+        num_local_experts: Number of local experts.
+        old_indices: (num_experts_total,) ndarray of current (old)
+            global-to-local expert assignments.
+        new_indices: (num_experts_total,) ndarray of desired (new)
+            global-to-local assignments after rebalance.
+        expert_weights: Original expert weights for the layer.
+        expert_weights_buffers: Intermediate buffers (one per tensor).
+        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        ep_group: Distributed process group for expert parallel comms.
+
+    Returns:
+        is_unchanged (np.ndarray): (num_local_experts,), True where an expert row
+            is unchanged after rebalance.
+        is_received_locally (np.ndarray): (num_local_experts,), True where a row
+            can be updated from local data.
+        RecvMetadata: Metadata needed for completing remote weight transfers.
     """
+    assert old_indices.shape == new_indices.shape
     ep_rank = ep_group.rank()
-    local2global = partial(
-        idx_local_to_global,
-        local_cnt=num_local_experts,
-        ep_rank=ep_rank,
+
+    recv_primary_mask = np.zeros((num_local_experts,), dtype=np.bool_)
+    send_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
+    send_src_rows = np.full((num_local_experts,), -1, dtype=np.int32)
+    recv_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
+    recv_dst_rows = np.full((num_local_experts,), -1, dtype=np.int32)
+
+    base = ep_rank * num_local_experts
+    local_rows = np.arange(num_local_experts, dtype=np.int32)
+    local_global = base + local_rows
+
+    old_local_expert_ids = old_indices[local_global]
+    new_local_expert_ids = new_indices[local_global]
+
+    # Unchanged mask
+    is_unchanged = old_local_expert_ids == new_local_expert_ids
+
+    # Local receive eligibility
+    new_valid = new_local_expert_ids != -1
+    can_recv_local = np.isin(
+        new_local_expert_ids, old_local_expert_ids, assume_unique=False
+    )
+    is_received_locally = np.logical_or(
+        is_unchanged, np.logical_and(new_valid, can_recv_local)
     )
 
-    # 0. Do nothing for experts that did not change.
-    is_unchanged = [
-        old_indices[local2global(i)] == new_indices[local2global(i)]
-        for i in range(num_local_experts)
-    ]
+    # Send map: first src row per unique expert present locally in old mapping
+    send_count = 0
+    valid_old = old_local_expert_ids != -1
+    if np.any(valid_old):
+        uniq_experts, first_idx = np.unique(
+            old_local_expert_ids[valid_old], return_index=True
+        )
+        filtered_rows = local_rows[valid_old]
+        src_rows = filtered_rows[first_idx]
+        send_count = int(uniq_experts.shape[0])
+        send_expert_ids[:send_count] = uniq_experts
+        send_src_rows[:send_count] = src_rows
 
-    # 1. Perform weight copy inside the local rank.
-    is_received_locally = is_unchanged[:]
-    for src in range(num_local_experts):
-        src_global = local2global(src)
-        for dst in range(num_local_experts):
-            dst_global = local2global(dst)
-            if is_received_locally[dst]:
-                continue
-            if old_indices[src_global] == -1 or new_indices[dst_global] == -1:
-                continue
-            if old_indices[src_global] == new_indices[dst_global]:
-                is_received_locally[dst] = True
-                for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                    with torch.cuda.stream(cuda_stream):
-                        buffer[dst].copy_(weight[src], non_blocking=True)
+    # Recv map: primary dst per unique expert needed remotely
+    recv_count = 0
+    need_recv_mask = np.logical_and(~is_received_locally, new_valid)
+    if np.any(need_recv_mask):
+        desired_experts = new_local_expert_ids[need_recv_mask]
+        desired_dsts = local_rows[need_recv_mask]
+        uniq_recv_experts, uniq_indices = np.unique(desired_experts, return_index=True)
+        dst_rows = desired_dsts[uniq_indices]
+        recv_count = int(uniq_recv_experts.shape[0])
+        recv_expert_ids[:recv_count] = uniq_recv_experts
+        recv_dst_rows[:recv_count] = dst_rows
+        recv_primary_mask[dst_rows] = True
+
+    eligible_local_buffer_mask = np.logical_and(~is_unchanged, is_received_locally)
+
+    # 1. Local moves into tmp buffers
+    if bool(eligible_local_buffer_mask.any()) and send_count > 0:
+        dest_indices = np.nonzero(eligible_local_buffer_mask)[0].tolist()
+        expert_to_src_map = dict(
+            zip(send_expert_ids[:send_count], send_src_rows[:send_count])
+        )
+        for dst in dest_indices:
+            expert = new_local_expert_ids[dst]
+            src_local = expert_to_src_map.get(expert, -1)
+            if src_local != -1:
+                for w, b in zip(expert_weights, expert_weights_buffers):
+                    b[dst].copy_(w[src_local], non_blocking=True)
 
     p2p_ops: list[P2POp] = []
 
-    # 2. Initiate sending of weights.
-    experts_send_loc: dict[int, int] = {}
-    for src in range(num_local_experts):
-        expert = old_indices[local2global(src)]
-        if expert == -1:
-            continue
-        if expert in experts_send_loc:
-            continue
-        experts_send_loc[expert] = src
+    # Pre-compute global ranks mapping
+    ep_size = ep_group.size()
+    rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
 
-    # We need to sort here to match send/recv
-    for expert, src in sorted(experts_send_loc.items()):
-        ranks_to_send, ranks_to_recv = get_ep_ranks_with_expert(
-            expert,
+    # 2. Post sends
+    if send_count > 0:
+        experts = send_expert_ids[:send_count]
+        srcs = send_src_rows[:send_count]
+        order = np.argsort(experts, kind="stable")
+        experts = experts[order]
+        srcs = srcs[order]
+
+        send_map, recv_map = get_ep_ranks_with_experts_batch(
+            experts,
             num_local_experts,
             old_indices,
             new_indices,
         )
 
-        # Calculate the ranks to send by this rank
-        num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-        sender_pos = ranks_to_send.index(ep_rank)
-        recv_begin = sender_pos * num_dst_per_sender
-        recv_end = recv_begin + num_dst_per_sender
-        recv_ranks = ranks_to_recv[recv_begin:recv_end]
+        for expert, src in zip(experts.tolist(), srcs.tolist()):
+            ranks_to_send = send_map[expert]
+            ranks_to_recv = recv_map[expert]
+            if not ranks_to_send or not ranks_to_recv:
+                continue
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            sender_pos = ranks_to_send.index(ep_rank)
+            recv_begin = sender_pos * num_dst_per_sender
+            recv_end = recv_begin + num_dst_per_sender
+            recv_ranks = ranks_to_recv[recv_begin:recv_end]
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            recver_pos = remainder_start + sender_pos
+            if recver_pos < len(ranks_to_recv):
+                recv_ranks.append(ranks_to_recv[recver_pos])
+            for dst in recv_ranks:
+                dst_global = rank_to_global[dst]
+                p2p_ops += [
+                    P2POp(
+                        torch.distributed.isend,
+                        w[src],
+                        dst_global,
+                    )
+                    for w in expert_weights
+                ]
 
-        # Tackle remainders
-        remainder_start = len(ranks_to_send) * num_dst_per_sender
-        recver_pos = remainder_start + sender_pos
-        if recver_pos < len(ranks_to_recv):
-            recv_ranks.append(ranks_to_recv[recver_pos])
+    # 3. Post recvs
+    if recv_count > 0:
+        experts = recv_expert_ids[:recv_count]
+        dsts = recv_dst_rows[:recv_count]
+        order = np.argsort(experts, kind="stable")
+        experts = experts[order]
+        dsts = dsts[order]
 
-        for dst in recv_ranks:
-            dst_global = get_global_rank(ep_group, dst)
+        send_map, recv_map = get_ep_ranks_with_experts_batch(
+            experts,
+            num_local_experts,
+            old_indices,
+            new_indices,
+        )
+
+        for expert, dst in zip(experts.tolist(), dsts.tolist()):
+            ranks_to_send = send_map[expert]
+            ranks_to_recv = recv_map[expert]
+            if not ranks_to_send or not ranks_to_recv:
+                continue
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            recver_pos = ranks_to_recv.index(ep_rank)
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            if recver_pos < remainder_start:
+                src = ranks_to_send[recver_pos // num_dst_per_sender]
+            else:
+                src = ranks_to_send[recver_pos - remainder_start]
+            src_global = rank_to_global[src]
             p2p_ops += [
                 P2POp(
-                    torch.distributed.isend,
-                    weight[src],
-                    dst_global,
+                    torch.distributed.irecv,
+                    b[dst],
+                    src_global,
                 )
-                for weight in expert_weights
+                for b in expert_weights_buffers
             ]
-
-    # 3. Initiate receiving of weights.
-    experts_recv_loc: dict[int, int] = {}
-    for dst in range(num_local_experts):
-        if is_received_locally[dst]:
-            continue
-        expert = new_indices[local2global(dst)]
-        if expert == -1:
-            continue
-        if expert in experts_recv_loc:
-            continue
-        experts_recv_loc[expert] = dst
-
-    # We need to sort here to match send/recv
-    for expert, dst in sorted(experts_recv_loc.items()):
-        ranks_to_send, ranks_to_recv = get_ep_ranks_with_expert(
-            expert,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
-
-        # Calculate the rank to recv by this rank
-        num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-        recver_pos = ranks_to_recv.index(ep_rank)
-        remainder_start = len(ranks_to_send) * num_dst_per_sender
-        if recver_pos < remainder_start:
-            src = ranks_to_send[recver_pos // num_dst_per_sender]
-        else:
-            src = ranks_to_send[recver_pos - remainder_start]
-
-        src_global = get_global_rank(ep_group, src)
-        p2p_ops += [
-            P2POp(
-                torch.distributed.irecv,
-                weight[dst],
-                src_global,
-            )
-            for weight in expert_weights_buffer
-        ]
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
@@ -237,51 +342,108 @@ def move_to_buffer(
         for req in reqs:
             req.wait()
     # wait for the communication to finish
-    return is_unchanged, is_received_locally, experts_recv_loc
+    return (
+        is_unchanged,
+        is_received_locally,
+        RecvMetadata(
+            recv_primary_mask=recv_primary_mask,
+            recv_count=recv_count,
+            recv_expert_ids=recv_expert_ids,
+            recv_dst_rows=recv_dst_rows,
+        ),
+    )
 
 
 def move_from_buffer(
-    expert_weights: Iterable[torch.Tensor],
-    expert_weights_buffer: list[torch.Tensor],
-    is_unchanged: list[bool],
-    is_received_locally: list[bool],
-    experts_recv_loc: dict[int, int],
-    new_indices: Sequence[int],
-    ep_group: ProcessGroup,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: list[torch.Tensor],
+    is_unchanged: np.ndarray,
+    is_received_locally: np.ndarray,
+    recv_metadata: RecvMetadata,
+    new_indices: np.ndarray,
+    ep_rank: int,
 ) -> None:
-    ep_rank = ep_group.rank()
-    num_local_experts = len(is_unchanged)
+    """
+    Copies expert weights from communication buffers back to the target weight tensors
+    after EPLB rebalancing.
 
-    local2global = partial(
-        idx_local_to_global, local_cnt=num_local_experts, ep_rank=ep_rank
+    Args:
+        expert_weights: List of the actual MoE layer weights used in the execution.
+        expert_weights_buffers: Intermediate buffers containing the experts weights
+            after the transfer is completed.
+        is_unchanged: (num_local_experts,), True where an expert row is unchanged.
+        is_received_locally: (num_local_experts,), True where a row is updated locally.
+        recv_metadata: RecvMetadata containing remote receive metadata.
+        new_indices: (num_experts_total,) mapping from local rows to desired
+            (possibly global) expert id, after rebalance.
+        ep_rank: Rank of the process in the expert parallel group.
+    """
+    recv_primary_mask = recv_metadata.recv_primary_mask
+    recv_count = recv_metadata.recv_count
+    recv_expert_ids = recv_metadata.recv_expert_ids
+    recv_dst_rows = recv_metadata.recv_dst_rows
+    num_local_experts = is_unchanged.shape[0]
+
+    # Mask for rows to copy back from buffers:
+    # copy if locally received OR remote primary recv
+    copy_mask = np.logical_or(is_received_locally, recv_primary_mask)
+    dest_mask_np = np.logical_and(~is_unchanged, copy_mask)
+    if bool(dest_mask_np.any()):
+        dest_indices = np.nonzero(dest_mask_np)[0].tolist()
+        for dst in dest_indices:
+            for w, b in zip(expert_weights, expert_weights_buffers):
+                w[dst].copy_(b[dst], non_blocking=True)
+
+    if recv_count == 0:
+        return
+
+    # Duplicate remote received rows to non-primary duplicate dsts
+    base = ep_rank * num_local_experts
+    local_experts = new_indices[base + np.arange(num_local_experts, dtype=np.int32)]
+    duplicate_mask = np.logical_and(
+        np.logical_and(~is_unchanged, ~is_received_locally),
+        np.logical_and(~recv_primary_mask, local_experts != -1),
     )
+    # All received experts are unique in the destination, so no need to copy duplicates
+    if not bool(duplicate_mask.any()):
+        return
 
-    for dst in range(num_local_experts):
-        if is_unchanged[dst]:
-            continue
-        if is_received_locally[dst]:
-            for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                weight[dst].copy_(buffer[dst], non_blocking=True)
-        else:
-            expert = new_indices[local2global(dst)]
-            if expert == -1:
-                continue
-            src = experts_recv_loc[expert]
-            for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                weight[dst].copy_(buffer[src], non_blocking=True)
+    dup_dst_rows = np.nonzero(duplicate_mask)[0]
+    dup_experts = local_experts[dup_dst_rows]
+
+    prim_experts = recv_expert_ids[:recv_count]
+    prim_dsts = recv_dst_rows[:recv_count]
+    order = np.argsort(prim_experts, kind="stable")
+    prim_experts_sorted = prim_experts[order]
+    prim_dsts_sorted = prim_dsts[order]
+    pos = np.searchsorted(prim_experts_sorted, dup_experts)
+    valid = np.logical_and(
+        pos < prim_experts_sorted.shape[0],
+        prim_experts_sorted[np.minimum(pos, prim_experts_sorted.shape[0] - 1)]
+        == dup_experts,
+    )
+    if not bool(valid.any()):
+        return
+
+    matched_dst_rows = dup_dst_rows[valid]
+    matched_src_rows = prim_dsts_sorted[pos[valid]]
+
+    for dst, src in zip(matched_dst_rows.tolist(), matched_src_rows.tolist()):
+        for w in expert_weights:
+            w[dst].copy_(w[src], non_blocking=True)
 
 
 async def transfer_layer(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Iterable[torch.Tensor]],
+    expert_weights: Sequence[Sequence[torch.Tensor]],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
     layer: int = 0,
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
-) -> tuple[list[bool], list[bool], dict[int, int]]:
+) -> MoveToBufferResult:
     """
     Rearranges the expert weights in place according to the new expert indices.
 
@@ -299,6 +461,13 @@ async def transfer_layer(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
+
+    Returns:
+        is_unchanged (np.ndarray): (1, num_local_experts), True where expert
+            is left unchanged.
+        is_received_locally (np.ndarray): (1, num_local_experts), True where expert
+            can be received locally.
+        RecvMetadata: Metadata needed for completing remote weight transfers.
     """
     ep_size = ep_group.size()
     if rank_mapping is not None:
@@ -319,26 +488,30 @@ async def transfer_layer(
     assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
-    num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
+    assert len(expert_weights[0]) >= 1
+    num_local_physical_experts = expert_weights[0][0].shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
     assert num_physical_experts == ep_size * num_local_physical_experts
 
-    is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
+    old_global_expert_indices_np = old_global_expert_indices.cpu().numpy()
+    new_global_expert_indices_np = new_global_expert_indices.cpu().numpy()
+
+    is_unchanged, is_received_locally, recv_metadata = move_to_buffer(
         num_local_experts=num_local_physical_experts,
-        old_indices=old_global_expert_indices[layer].tolist(),
-        new_indices=new_global_expert_indices[layer].tolist(),
+        old_indices=old_global_expert_indices_np[layer],
+        new_indices=new_global_expert_indices_np[layer],
         expert_weights=expert_weights[layer],
-        expert_weights_buffer=expert_weights_buffer,
+        expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,
     )
-    return is_unchanged, is_received_locally, experts_recv_loc
+    return is_unchanged, is_received_locally, recv_metadata
 
 
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Iterable[torch.Tensor]],
+    expert_weights: Sequence[Sequence[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
@@ -381,26 +554,25 @@ def rearrange_expert_weights_inplace(
 
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
+    assert len(expert_weights[0]) >= 1
 
-    num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
+    num_local_physical_experts = expert_weights[0][0].shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_size = ep_group.size()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
-    # A buffer to hold the expert weights in one layer during the exchange.
+    first_layer_weights = list(expert_weights[0])
+    # Buffers to hold the expert weights during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    expert_weights_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-
+    weights_buffer: list[torch.Tensor] = [
+        torch.empty_like(w) for w in first_layer_weights
+    ]
     if is_profile:
-        # Maximum send size is to send all local experts to all ranks,
-        # So we use a dummy `all_gather` to reserve enough communication buffer
-        for weight, buffer in zip(expert_weights[0], expert_weights_buffer):
-            # A `/dev/null`-like buffer to avoid real memory allocation
+        # Reserve communication buffers via a minimal dummy all_gather on first layer
+        for weight, buffer in zip(expert_weights[0], weights_buffer):
             dummy_recv_buffer = [buffer for _ in range(ep_size)]
-            # NOTE(bowen): Needed this barrier to avoid OOM during actual
-            # execution. I'm not very sure why this is needed
             torch.distributed.barrier()
             all_gather(
                 dummy_recv_buffer,
@@ -409,32 +581,32 @@ def rearrange_expert_weights_inplace(
             )
         return
 
-    old_global_expert_indices_cpu = old_global_expert_indices.cpu()
-    new_global_expert_indices_cpu = new_global_expert_indices.cpu()
-
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
     torch.cuda.synchronize()
 
-    for layer in range(num_moe_layers):
-        is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
+    old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
+    new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()
+
+    for layer_idx in range(num_moe_layers):
+        is_unchanged, is_received_locally, recv_metadata = move_to_buffer(
             num_local_experts=num_local_physical_experts,
-            old_indices=old_global_expert_indices_cpu[layer].tolist(),
-            new_indices=new_global_expert_indices_cpu[layer].tolist(),
-            expert_weights=expert_weights[layer],
-            expert_weights_buffer=expert_weights_buffer,
+            old_indices=old_global_expert_indices_cpu[layer_idx],
+            new_indices=new_global_expert_indices_cpu[layer_idx],
+            expert_weights=expert_weights[layer_idx],
+            expert_weights_buffers=weights_buffer,
             cuda_stream=None,
             ep_group=ep_group,
         )
 
         move_from_buffer(
-            expert_weights=expert_weights[layer],
-            expert_weights_buffer=expert_weights_buffer,
+            expert_weights=expert_weights[layer_idx],
+            expert_weights_buffers=weights_buffer,
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
-            experts_recv_loc=experts_recv_loc,
-            new_indices=new_global_expert_indices[layer].tolist(),
-            ep_group=ep_group,
+            recv_metadata=recv_metadata,
+            new_indices=new_global_expert_indices_cpu[layer_idx],
+            ep_rank=ep_group.rank(),
         )
 
 
@@ -526,4 +698,4 @@ def _map_new_expert_indices_with_rank_mapping(
     return mapped_expert_indices
 
 
-__all__ = ["transfer_layer", "move_from_buffer"]
+__all__ = ["transfer_layer", "move_from_buffer", "RecvMetadata"]

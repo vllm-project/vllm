@@ -10,9 +10,10 @@ import torch
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
+from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
@@ -38,34 +39,22 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # Torch profiler. Enabled and configured through profiler_config.
         self.profiler: Any | None = None
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        profiler_config = vllm_config.profiler_config
+        if profiler_config.profiler == "torch":
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
+            self.profiler = TorchProfilerWrapper(
+                profiler_config,
+                worker_name=worker_name,
+                local_rank=self.local_rank,
+                activities=["CPU"],
             )
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                ],
-                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=False
-                ),
-            )
-        else:
-            self.profiler = None
 
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        # Under numa binding some cores reserved for kv transfer in nixl_connector.py
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
@@ -78,6 +67,9 @@ class CPUWorker(Worker):
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
+            elif cpu_arch == CpuArchEnum.ARM:
+                # For AArch64, no SMT
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(lambda cpus: cpus)
             else:
                 self.local_omp_cpuid = "nobind"
         elif omp_cpuids == "nobind":
@@ -145,22 +137,38 @@ class CPUWorker(Worker):
             the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
             returned.
         """
+        # simulate multiple numa nodes, for testing
+        sim_multi_numa_nodes = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
 
         allowed_numa_nodes, logical_cpu_list = (
             CpuPlatform.get_allowed_cpu_core_node_list()
         )
-        assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
-            f"No enough allowed NUMA nodes to bind threads of "
+        assert (
+            len(allowed_numa_nodes) >= self.parallel_config.world_size
+            or sim_multi_numa_nodes
+        ), (
+            f"Not enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             "Please try to bind threads manually."
         )
 
-        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
-        selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.numa_node == selected_numa_node
-        ]
+        if not sim_multi_numa_nodes:
+            # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
+            selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
+            logical_cpu_list = [
+                x for x in logical_cpu_list if x.numa_node == selected_numa_node
+            ]
+        else:
+            assert len(logical_cpu_list) >= self.parallel_config.world_size
+            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
+            sim_cpu_num_per_node = (
+                len(logical_cpu_list) // self.parallel_config.world_size
+            )
+            start_idx = self.local_rank * sim_cpu_num_per_node
+            logical_cpu_list = logical_cpu_list[
+                start_idx : (start_idx + sim_cpu_num_per_node)
+            ]
 
         # Select CPUs from each physical core via cpu_selector
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
@@ -202,9 +210,3 @@ class CPUWorker(Worker):
             self.profiler.start()
         else:
             self.profiler.stop()
-            if self.local_rank == 0:
-                logger.info(
-                    self.profiler.key_averages().table(
-                        sort_by="self_cpu_time_total", row_limit=50
-                    )
-                )

@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -53,7 +54,6 @@ from vllm.multimodal.parse import (
     ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     PromptReplacement,
@@ -65,6 +65,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
     MiniCPMV2_6,
+    MiniCPMV4_5,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVMultiModalDataParser,
     MiniCPMVMultiModalProcessor,
@@ -74,6 +75,47 @@ from .minicpmv import (
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
+
+if os.getenv("USE_FLAGOS") == "1":
+    import flag_gems
+
+    FLAG_GEMS_CONFIG = [
+        "sort",
+        "sort_stable",
+        "layer_norm",
+        "clamp_",
+        "cos",
+        "embedding",
+        "exp",
+        "exponential_",
+        "full",
+        "gather",
+        "gelu",
+        "index",
+        "le",
+        "lt",
+        "lt_scalar",
+        "masked_fill_",
+        "max",
+        "ones",
+        "pow_scalar",
+        "prod_dim",
+        "rand_like",
+        "reciprocal",
+        "repeat",
+        "scatter",
+        "scatter_",
+        "sin",
+        "sub",
+        "true_divide",
+        "true_divide_",
+        "uniform_",
+        "where_scalar_self",
+        "where_self_out",
+        "zeros",
+        "zeros_like",
+    ]
+    flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
@@ -174,6 +216,12 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
+    def get_data_parser(self):
+        return MiniCPMOMultiModalDataParser(
+            target_sr=self.get_default_audio_sampling_rate(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {**super().get_supported_mm_limits(), "audio": None}
 
@@ -192,7 +240,9 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         )
 
     def get_default_audio_pool_step(self) -> int:
-        return 2
+        hf_config = self.get_hf_config()
+        # MiniCPM-o 4.5 uses pool_step=5, older versions use 2
+        return getattr(hf_config, "audio_pool_step", 2)
 
     def get_default_audio_sampling_rate(self) -> int:
         return 16000
@@ -274,11 +324,6 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
 
 
 class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMOMultiModalDataParser(
-            target_sr=self.info.get_default_audio_sampling_rate()
-        )
-
     def get_audio_prompt_texts(
         self,
         audio_lens: int,
@@ -300,10 +345,9 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if (audios := mm_data.get("audios")) is None:
             return {}
 
-        parsed_audios = (
-            self._get_data_parser()
-            .parse_mm_data({"audio": audios})
-            .get_items("audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems))
+        mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
+        parsed_audios = mm_items.get_items(
+            "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
         )
 
         if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
@@ -522,12 +566,9 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    MiniCPMOMultiModalProcessor,
-    info=MiniCPMOProcessingInfo,
-    dummy_inputs=MiniCPMODummyInputsBuilder,
-)
-class MiniCPMO(MiniCPMV2_6):
+class MiniCPMOBaseModel:
+    """Base mixin class for MiniCPM-O models with audio support."""
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -553,9 +594,11 @@ class MiniCPMO(MiniCPMV2_6):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.apm = self.init_audio_module(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
-        )
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.apm = self.init_audio_module(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+            )
 
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily
@@ -766,3 +809,82 @@ class MiniCPMO(MiniCPMV2_6):
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
+
+
+class MiniCPMO2_6(MiniCPMOBaseModel, MiniCPMV2_6):
+    """MiniCPM-O 2.6 model with Qwen2 backbone."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.apm = self.init_audio_module(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+            )
+
+
+class MiniCPMO4_5(MiniCPMOBaseModel, MiniCPMV4_5):
+    """MiniCPM-O 4.5 model with Qwen3 backbone."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.apm = self.init_audio_module(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+            )
+
+
+_MINICPMO_SUPPORT_VERSION = {
+    (2, 6): MiniCPMO2_6,
+    (4, 5): MiniCPMO4_5,
+}
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMOMultiModalProcessor,
+    info=MiniCPMOProcessingInfo,
+    dummy_inputs=MiniCPMODummyInputsBuilder,
+)
+class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
+    """
+    MiniCPM-O model with audio support.
+    Different versions use different LLM backbones:
+    - Version 2.6: Uses Qwen2
+    - Version 4.5: Uses Qwen3
+    """
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+
+        # Determine version from config
+        if hasattr(config, "version"):
+            try:
+                version_str = str(config.version)
+                version_parts = version_str.split(".")
+                version = tuple(int(x) for x in version_parts[:2])
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid model version format in config: {config.version}. "
+                    "Expected a dot-separated version string like '4.5'."
+                ) from e
+        else:
+            # Default to 2.6 for backward compatibility
+            version = (2, 6)
+
+        # Dispatch class based on version
+        instance_cls = _MINICPMO_SUPPORT_VERSION.get(version)
+        if instance_cls is None:
+            supported_versions = ", ".join(
+                [f"{v[0]}.{v[1]}" for v in sorted(_MINICPMO_SUPPORT_VERSION.keys())]
+            )
+            raise ValueError(
+                f"Currently, MiniCPMO only supports versions "
+                f"{supported_versions}. Got version: {version}"
+            )
+
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # This __init__ won't be called due to __new__ returning a different class
+        pass

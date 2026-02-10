@@ -24,6 +24,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
@@ -31,11 +32,16 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -219,14 +225,14 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         mm_inputs = super().apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -250,7 +256,9 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
     info=PaliGemmaProcessingInfo,
     dummy_inputs=PaliGemmaDummyInputsBuilder,
 )
-class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class PaliGemmaForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -287,30 +295,33 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = PaliGemmaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            projection_dim=config.vision_config.projection_dim,
-        )
-
         self.quant_config = quant_config
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = PaliGemmaMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                projection_dim=config.vision_config.projection_dim,
+            )
 
         if config.text_config.model_type == "gemma":
             config.text_config.architectures = ["GemmaForCausalLM"]
         else:
             config.text_config.architectures = ["Gemma2ForCausalLM"]
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.language_model.logits_processor.scale *= logit_scale
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -359,7 +370,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        assert self.vision_tower is not None
         pixel_values = image_input["data"]
         image_features = self._image_pixels_to_features(
             self.vision_tower,
@@ -367,9 +377,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         )
 
         return self.multi_modal_projector(image_features)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -382,7 +389,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -406,3 +413,16 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        return num_vision_tokens

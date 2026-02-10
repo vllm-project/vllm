@@ -8,15 +8,19 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.protocol import (
+    from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.engine.protocol import (
         DeltaMessage,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
         ResponsesRequest,
     )
     from vllm.tokenizers import TokenizerLike
@@ -47,7 +51,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -62,6 +66,31 @@ class ReasoningParser:
         bool
             True if the reasoning content ends in the input_ids.
         """
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids on a
+        decode step.
+
+        It is used in structured engines like `xgrammar` to check if the
+        reasoning content ends in the model output during a decode step.
+        `input_ids` the entire model output and `delta_ids` are the last few
+        computed tokens of the model output (like during a decode step).
+
+        Parameters:
+        input_ids: list[int]
+            The entire model output.
+        delta_ids: list[int]
+            The last few computed tokens of the model output at the current decode step.
+
+        Returns:
+        bool
+            True if the reasoning content ends in the `delta_ids` on a
+            decode step.
+        """
+        return self.is_reasoning_end(input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

@@ -4,25 +4,25 @@
 
 import ast
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -69,7 +69,7 @@ class TreeAttentionBackend(AttentionBackend):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class TreeAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
@@ -87,11 +87,11 @@ class TreeAttentionMetadata:
     tree_attn_bias: torch.Tensor | None = None
 
     # Cached Prefill/decode metadata.
-    _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["TreeAttentionMetadata"] = None
+    _cached_prefill_metadata: "TreeAttentionMetadata | None" = None
+    _cached_decode_metadata: "TreeAttentionMetadata | None" = None
 
     @property
-    def prefill_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def prefill_metadata(self) -> "TreeAttentionMetadata | None":
         if self.num_prefills == 0:
             return None
 
@@ -116,7 +116,7 @@ class TreeAttentionMetadata:
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def decode_metadata(self) -> "TreeAttentionMetadata | None":
         if self.num_decode_tokens == 0:
             return None
 
@@ -155,7 +155,9 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
-        spec_token_tree = (spec := spec_config) and spec.speculative_token_tree
+        spec_token_tree: str | None = None
+        if spec := spec_config:
+            spec_token_tree = spec.speculative_token_tree
         tree_choices: list[tuple[int, ...]] = (
             ast.literal_eval(spec_token_tree) if spec_token_tree is not None else [(0,)]
         )

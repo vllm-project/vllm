@@ -5,8 +5,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
-      "token_expert_indices, Tensor gating_output, bool renormalize) -> ()");
+      "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
+      "bias) -> ()");
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
+
+  // Apply topk sigmoid to the gating outputs.
+  m.def(
+      "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
+      "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
+      "bias) -> ()");
+  m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
@@ -47,7 +55,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor !experts_ids,"
       "                     Tensor !num_tokens_post_pad,"
       "                     Tensor !adapter_enabled,"
-      "                     Tensor !lora_ids) -> () ");
+      "                     Tensor !lora_ids,"
+      "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM
@@ -70,7 +79,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor sorted_token_ids,"
       "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
       "Tensor! topk_weights, int moe_block_size, int top_k, "
-      "bool mul_topk_weights, bool is_ep, int b_type_id,"
+      "bool mul_topk_weights, int b_type_id,"
       "int size_m, int size_n, int size_k,"
       "bool is_full_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float,"
@@ -90,9 +99,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
-      "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
+      "int topk, Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
-      "permuted_idx, Tensor! m_indices)->()");
+      "permuted_idx)->()");
 
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"

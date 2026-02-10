@@ -10,7 +10,7 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -31,8 +31,12 @@ else:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class XgrammarBackend(StructuredOutputBackend):
+    disable_any_whitespace: bool = field(init=False)
+    compiler: Any = field(init=False)
+    num_speculative_tokens: int = field(init=False)
+
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
@@ -128,7 +132,7 @@ class XgrammarBackend(StructuredOutputBackend):
         del self.compiler
 
 
-@dataclass
+@dataclass(slots=True)
 class XgrammarGrammar(StructuredOutputGrammar):
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
@@ -246,13 +250,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 
@@ -310,17 +308,17 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         else:
             schema = so_params.json
 
+        if has_xgrammar_unsupported_json_features(schema):
+            raise ValueError(
+                "The provided JSON schema contains features not supported by xgrammar."
+            )
+
         try:
             xgr.Grammar.from_json_schema(schema)
         except Exception as err:
             raise ValueError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
-
-        if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
         return
 
     if so_params.grammar:

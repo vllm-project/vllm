@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+
+from .utils import make_dummy_moe_config
 
 MNK = [
     (1, 512, 384),
@@ -173,11 +176,15 @@ def oai_triton_moe_impl(
     )
 
     if unfused:
-        fused_experts = UnfusedOAITritonExperts(quant_config)
+        fused_experts = UnfusedOAITritonExperts(make_dummy_moe_config(), quant_config)
     else:
-        fused_experts = OAITritonExperts(quant_config)
+        fused_experts = OAITritonExperts(make_dummy_moe_config(), quant_config)
 
-    mk = FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), fused_experts)
+    mk = FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        fused_experts,
+        inplace=False,
+    )
 
     return mk.forward(
         hidden_states=x,
@@ -185,7 +192,6 @@ def oai_triton_moe_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=True,
         activation="swigluoai",
         global_num_experts=num_experts,
         expert_map=None,
@@ -209,8 +215,9 @@ def test_oai_triton_moe(
     num_experts: int,
     topk: int,
     unfused: bool,
+    workspace_init,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     (
         w1,
         w2,

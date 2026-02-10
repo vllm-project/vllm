@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 
 from vllm.pooling_params import PoolingParams
@@ -11,7 +12,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 pin_memory = is_pin_memory_available()
 
 
-@dataclass
+@dataclass(slots=True)
 class PoolingCursor:
     index: list[int]
     first_token_indices_gpu: torch.Tensor
@@ -46,7 +47,7 @@ class PoolingStates:
         self.hidden_states_cache.clear()
 
 
-@dataclass
+@dataclass(slots=True)
 class PoolingMetadata:
     """Tensors for pooling."""
 
@@ -55,6 +56,7 @@ class PoolingMetadata:
     pooling_params: list[PoolingParams]
     pooling_states: list[PoolingStates]
     pooling_cursor: PoolingCursor | None = None
+    tasks: list[PoolingTask] = field(init=False)
 
     def __post_init__(self) -> None:
         pooling_params = self.pooling_params
@@ -89,38 +91,35 @@ class PoolingMetadata:
 
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
+    def get_pooling_cursor(self) -> PoolingCursor:
+        pooling_cursor = self.pooling_cursor
+        assert pooling_cursor is not None, "Should call `build_pooling_cursor` first"
+
+        return pooling_cursor
+
     def build_pooling_cursor(
         self,
-        num_scheduled_tokens: list[int],
+        num_scheduled_tokens_np: np.ndarray,
         seq_lens_cpu: torch.Tensor,
         device: torch.device,
     ):
-        self.pooling_cursor = build_pooling_cursor(
-            num_scheduled_tokens, seq_lens_cpu, self.prompt_lens, device
+        n_seq = len(num_scheduled_tokens_np)
+        prompt_lens = self.prompt_lens
+
+        assert len(prompt_lens) == n_seq
+
+        index = list(range(n_seq))
+        num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
+        cumsum = torch.zeros(
+            n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
         )
-
-
-def build_pooling_cursor(
-    num_scheduled_tokens: list[int],
-    seq_lens_cpu: torch.Tensor,
-    prompt_lens: torch.Tensor,
-    device: torch.device,
-):
-    assert len(prompt_lens) == len(num_scheduled_tokens)
-
-    n_seq = len(num_scheduled_tokens)
-    index = list(range(n_seq))
-    num_scheduled_tokens_cpu = torch.tensor(num_scheduled_tokens, device="cpu")
-    cumsum = torch.zeros(
-        n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
-    )
-    torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
-    cumsum = cumsum.to(device, non_blocking=True)
-    return PoolingCursor(
-        index=index,
-        first_token_indices_gpu=cumsum[:n_seq],
-        last_token_indices_gpu=cumsum[1:] - 1,
-        prompt_lens_cpu=prompt_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
-    )
+        torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
+        cumsum = cumsum.to(device, non_blocking=True)
+        self.pooling_cursor = PoolingCursor(
+            index=index,
+            first_token_indices_gpu=cumsum[:n_seq],
+            last_token_indices_gpu=cumsum[1:] - 1,
+            prompt_lens_cpu=prompt_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+        )

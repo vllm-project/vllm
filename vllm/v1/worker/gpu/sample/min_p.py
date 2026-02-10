@@ -9,12 +9,14 @@ from vllm.triton_utils import tl, triton
 def _min_p_kernel(
     logits_ptr,
     logits_stride,
+    idx_mapping_ptr,
     min_p_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    min_p = tl.load(min_p_ptr + req_idx).to(tl.float32)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    min_p = tl.load(min_p_ptr + req_state_idx).to(tl.float32)
     if min_p == 0.0:
         return
 
@@ -39,14 +41,15 @@ def _min_p_kernel(
         tl.store(logits_ptr + req_idx * logits_stride + block, logits, mask=mask)
 
 
-def apply_min_p(logits: torch.Tensor, min_p: torch.Tensor | None) -> None:
-    if min_p is None:
-        return
+def apply_min_p(
+    logits: torch.Tensor, idx_mapping: torch.Tensor, min_p: torch.Tensor
+) -> None:
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     _min_p_kernel[(num_reqs,)](
         logits,
         logits.stride(0),
+        idx_mapping,
         min_p,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,

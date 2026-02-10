@@ -48,6 +48,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
+    Qwen3MoeDecoderLayer,
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
     Qwen3MoeSparseMoeBlock,
@@ -82,19 +83,30 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        if not get_pp_group().is_first_rank:
-            assert self.start_layer >= len(
-                vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
-            ), (
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = Qwen3MoeDecoderLayer,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=decoder_layer_type,
+        )
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        if not get_pp_group().is_first_rank and hasattr(
+            vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
                 "start_layer should be greater than or equal to "
                 "len(deepstack_visual_indexes)"
             )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -110,9 +122,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -132,6 +149,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_fused_expert_weights(
@@ -419,23 +439,44 @@ class Qwen3VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
 
-        if not multimodal_config.get_limit_per_prompt(
-            "image"
-        ) and not multimodal_config.get_limit_per_prompt("video"):
-            self.visual = None
-        else:
+        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
             )
 
-        self.language_model = Qwen3MoeLLMForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
-        )
+            # register buffer for deepstack
+            if self.use_deepstack:
+                self.deepstack_input_embeds = [
+                    torch.zeros(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        config.text_config.hidden_size,
+                    )
+                    for _ in range(self.deepstack_num_level)
+                ]
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3MoeLLMForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         # Whether to include the gate_up_proj mapping is determined by
         # the language model.
         self.packed_modules_mapping = (
@@ -445,26 +486,6 @@ class Qwen3VLMoeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
-        self.deepstack_num_level = (
-            len(config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        # register buffer for deepstack
-        if self.use_deepstack and self.visual is not None:
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.hidden_size,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
-        else:
-            self.deepstack_input_embeds = None
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         # Set MoE hyperparameters
         self.set_moe_parameters()

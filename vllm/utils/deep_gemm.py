@@ -16,6 +16,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
@@ -32,15 +35,34 @@ class DeepGemmQuantScaleFMT(Enum):
     # element contains 4 scale values.
     UE8M0 = 2
 
-    @staticmethod
-    def from_oracle() -> "DeepGemmQuantScaleFMT":
-        if not is_deep_gemm_e8m0_used():
-            return DeepGemmQuantScaleFMT.FLOAT32
-        return (
-            DeepGemmQuantScaleFMT.UE8M0
-            if current_platform.is_device_capability(100)
-            else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+    @classmethod
+    def init_oracle_cache(cls) -> None:
+        """Initialize the oracle decision and store it in the class cache"""
+        cached = getattr(cls, "_oracle_cache", None)
+        if cached is not None:
+            return
+
+        use_e8m0 = (
+            envs.VLLM_USE_DEEP_GEMM_E8M0
+            and is_deep_gemm_supported()
+            and (_fp8_gemm_nt_impl is not None)
         )
+        if not use_e8m0:
+            cls._oracle_cache = cls.FLOAT32  # type: ignore
+            return
+
+        cls._oracle_cache = (  # type: ignore
+            cls.UE8M0
+            if current_platform.is_device_capability_family(100)
+            else cls.FLOAT32_CEIL_UE8M0
+        )
+
+    @classmethod
+    def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
+        """Return the pre-initialized oracle decision"""
+        cached = getattr(cls, "_oracle_cache", None)
+        assert cached is not None, "DeepGemmQuantScaleFMT oracle cache not initialized"
+        return cached
 
 
 @functools.cache
@@ -50,7 +72,7 @@ def is_deep_gemm_supported() -> bool:
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
-        or current_platform.is_device_capability(100)
+        or current_platform.is_device_capability_family(100)
     )
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
@@ -69,14 +91,16 @@ def is_deep_gemm_e8m0_used() -> bool:
     _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
-        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
+        logger.info_once(
+            "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found", scope="local"
+        )
         return False
 
     if envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.", scope="local")
         return True
 
-    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.", scope="local")
     return False
 
 
@@ -149,6 +173,7 @@ def _lazy_init() -> None:
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
     )
+    DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
 def get_num_sms() -> int:
@@ -219,6 +244,7 @@ def fp8_mqa_logits(
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
+    clean_logits: bool,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits for a single sequence without KV paging.
 
@@ -226,13 +252,14 @@ def fp8_mqa_logits(
         q: Query tensor of shape [M, H, D]. Casted to
             `torch.float8_e4m3fn` by caller.
         kv: Tuple `(k_fp8, k_scales)` where `k_fp8` has shape [N, D] with
-            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N] (or
-            [N, 1]) with dtype `torch.float32`.
+            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N])
+            with dtype `torch.float32`.
         weights: weights of shape [M, H], dtype `torch.float32`.
         cu_seqlen_ks: Start indices (inclusive) for valid K per query position,
             shape [M], dtype int32.
         cu_seqlen_ke: End indices (exclusive) for valid K per query position,
             shape [M], dtype int32.
+        clean_logits: Whether to clean the unfilled logits into `-inf`.
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
@@ -240,7 +267,9 @@ def fp8_mqa_logits(
     _lazy_init()
     if _fp8_mqa_logits_impl is None:
         return _missing()
-    return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+    return _fp8_mqa_logits_impl(
+        q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=clean_logits
+    )
 
 
 def get_paged_mqa_logits_metadata(
@@ -272,6 +301,7 @@ def fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    clean_logits: bool,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -289,6 +319,7 @@ def fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
+        clean_logits: Whether to clean the unfilled logits into `-inf`.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -305,7 +336,7 @@ def fp8_paged_mqa_logits(
         block_tables,
         schedule_metadata,
         max_model_len,
-        clean_logits=True,
+        clean_logits=clean_logits,
     )
 
 
@@ -315,6 +346,11 @@ def _ceil_to_ue8m0(x: torch.Tensor):
 
 def _align(x: int, y: int) -> int:
     return cdiv(x, y) * y
+
+
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
+def get_tma_aligned_size(x: int, element_size: int):
+    return _align(x, 16 // element_size)
 
 
 DEFAULT_BLOCK_SIZE = [128, 128]
@@ -335,7 +371,8 @@ def per_block_cast_to_fp8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    sf = x_amax / 224.0 if current_platform.is_fp8_fnuz() else x_amax / 448.0
+    _, fp8_max = get_fp8_min_max()
+    sf = x_amax / fp8_max
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x_view * (1.0 / sf)).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
@@ -369,7 +406,7 @@ def should_use_deepgemm_for_fp8_linear(
 
     # Verify DeepGEMM N/K dims requirements
     # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
-    # test inside kernels/quatization/test_block_fp8.py
+    # test inside kernels/quantization/test_block_fp8.py
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
@@ -381,24 +418,9 @@ def should_use_deepgemm_for_fp8_linear(
     )
 
 
-def should_use_deepgemm_for_fp8_linear_for_nk(
-    output_dtype: torch.dtype,
-    shape0: int,
-    shape1: int,
-    supports_deep_gemm: bool | None = None,
-):
-    if supports_deep_gemm is None:
-        supports_deep_gemm = is_deep_gemm_supported()
-    return (
-        supports_deep_gemm
-        and output_dtype == torch.bfloat16
-        and shape0 % 128 == 0
-        and shape1 % 128 == 0
-    )
-
-
 __all__ = [
     "calc_diff",
+    "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
@@ -410,7 +432,6 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
-    "should_use_deepgemm_for_fp8_linear_for_nk",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
 ]

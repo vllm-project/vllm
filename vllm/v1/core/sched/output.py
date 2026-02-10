@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from typing_extensions import deprecated
-
 from vllm._bc_linter import bc_linter_include
 
 if TYPE_CHECKING:
@@ -32,7 +30,7 @@ else:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class NewRequestData:
     req_id: str
     prompt_token_ids: list[int] | None
@@ -93,10 +91,14 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
+        prefill_token_ids_len = (
+            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
+            f"prefill_token_ids_len={prefill_token_ids_len},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -108,7 +110,7 @@ class NewRequestData:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class CachedRequestData:
     req_ids: list[str]
     # For request ids not in resumed_req_ids, new_block_ids will be appended to
@@ -125,22 +127,44 @@ class CachedRequestData:
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
+    # Version of dataclass repr with token IDs obfuscated.
+    def anon_repr(self) -> str:
+        new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
+        all_token_ids_lens = {
+            req_id: len(toks) for req_id, toks in self.all_token_ids.items()
+        }
+        return (
+            f"CachedRequestData("
+            f"req_ids={self.req_ids},"
+            f"resumed_req_ids={self.resumed_req_ids},"
+            f"new_token_ids_lens={new_token_ids_lens},"
+            f"all_token_ids_lens={all_token_ids_lens},"
+            f"new_block_ids={self.new_block_ids},"
+            f"num_computed_tokens={self.num_computed_tokens},"
+            f"num_output_tokens={self.num_output_tokens}"
+            f")"
+        )
+
+    def __repr__(self) -> str:
+        return self.anon_repr()
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
     @cached_property
-    @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
-    def resumed_from_preemption(self) -> list[bool]:
-        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
+    def _req_id_to_num_output_tokens(self) -> dict[str, int]:
+        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
 
-    @cached_property
-    @deprecated("This will be removed in v0.14, use `all_token_ids` instead.")
-    def resumed_req_token_ids(self) -> list[list[int] | None]:
-        return [
-            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
-            for req_id in self.req_ids
-        ]
+        This cached property is safe because CachedRequestData instances
+        are created fresh each scheduling iteration and not mutated during
+        computation of iteration details.
+        """
+        return dict(zip(self.req_ids, self.num_output_tokens))
+
+    def is_context_phase(self, req_id: str) -> bool:
+        num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
+        return num_output_tokens is not None and num_output_tokens == 0
 
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
@@ -156,7 +180,7 @@ class CachedRequestData:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -197,9 +221,16 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
+    # Whether any of the scheduled requests use structured output.
+    # Set only in async scheduling case.
+    has_structured_output_requests: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
+
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
@@ -222,7 +253,7 @@ class SchedulerOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

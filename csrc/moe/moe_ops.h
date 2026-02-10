@@ -4,7 +4,13 @@
 
 void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
-                  torch::Tensor& gating_output, bool renormalize);
+                  torch::Tensor& gating_output, bool renormalize,
+                  std::optional<torch::Tensor> bias);
+
+void topk_sigmoid(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
+                  torch::Tensor& token_expert_indices,
+                  torch::Tensor& gating_output, bool renormalize,
+                  std::optional<torch::Tensor> bias);
 
 void moe_sum(torch::Tensor& input, torch::Tensor& output);
 
@@ -27,7 +33,7 @@ void moe_lora_align_block_size(
     int64_t max_num_tokens_padded, int64_t max_num_m_blocks,
     torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
     torch::Tensor num_tokens_post_pad, torch::Tensor adapter_enabled,
-    torch::Tensor lora_ids);
+    torch::Tensor lora_ids, std::optional<torch::Tensor> maybe_expert_map);
 #ifndef USE_ROCM
 torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              torch::Tensor b_qweight, torch::Tensor b_scales,

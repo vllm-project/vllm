@@ -8,7 +8,7 @@ import importlib
 import json
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from regex import escape as regex_escape
@@ -47,8 +47,11 @@ else:
     import sre_parse
 
 
-@dataclass
+@dataclass(slots=True)
 class OutlinesBackend(StructuredOutputBackend):
+    vocabulary: OutlinesVocabulary = field(init=False)
+    cache: dict[str, Any] = field(init=False)
+
     def __post_init__(self):
         self.vocabulary = get_outlines_vocabulary(self.tokenizer)
         self.cache = get_outlines_cache()
@@ -103,7 +106,7 @@ class OutlinesBackend(StructuredOutputBackend):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class OutlinesGrammar(StructuredOutputGrammar):
     vocab_size: int
     guide: oc.Guide = field(hash=False)
@@ -122,7 +125,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns False if the FSM failed to advance.
         """
         if self.guide.accepts_tokens(tokens):
-            # Advance cannot fail because we checked Guide.accepts_tokens()
+            # Advance can fail when the next state reached after advancing with
+            # the current tokens is a dead state. This is because Guide.accepts_tokens()
+            # only checks whether the current tokens can be accepted,
+            # whereas guide.advance() additionally checks the next state
+            # after all tokens are accepted.
+            # We need to be aware that the FSM must be prepared without dead states.
             for t in tokens:
                 self.guide.advance(t)
                 self.num_processed_tokens += 1

@@ -10,8 +10,10 @@ On the client side, run:
     vllm bench serve \
         --backend <backend or endpoint type. Default 'openai'> \
         --label <benchmark result label. Default using backend> \
-        --model <your_model> \
+        --model <your_model. Optional, defaults to first model from server> \
         --dataset-name <dataset_name. Default 'random'> \
+        --input-len <general input length. Optional, maps to dataset-specific args> \
+        --output-len <general output length. Optional, maps to dataset-specific args> \
         --request-rate <request_rate. Default inf> \
         --num-prompts <num_prompts. Default 1000>
 """
@@ -57,6 +59,103 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 )
 
 
+async def get_first_model_from_server(
+    base_url: str, headers: dict | None = None
+) -> tuple[str, str]:
+    """Fetch the first model from the server's /v1/models endpoint."""
+    models_url = f"{base_url}/v1/models"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(models_url, headers=headers) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if "data" in data and len(data["data"]) > 0:
+                    return data["data"][0]["id"], data["data"][0]["root"]
+                else:
+                    raise ValueError(
+                        f"No models found on the server at {base_url}. "
+                        "Make sure the server is running and has models loaded."
+                    )
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to fetch models from server at {models_url}. "
+                "Check that:\n"
+                "1. The server is running\n"
+                "2. The server URL is correct\n"
+                f"Error: {e}"
+            ) from e
+
+
+@dataclass
+class SpecDecodeMetrics:
+    """Speculative decoding metrics from the server's Prometheus endpoint."""
+
+    num_drafts: int
+    num_draft_tokens: int
+    num_accepted_tokens: int
+    accepted_per_pos: dict[int, int]
+
+
+async def fetch_spec_decode_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> SpecDecodeMetrics | None:
+    """Fetch speculative decoding metrics from the server's Prometheus endpoint.
+
+    Returns None if speculative decoding is not enabled or metrics are not available.
+    """
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+
+            num_drafts = 0
+            num_draft_tokens = 0
+            num_accepted_tokens = 0
+            accepted_per_pos: dict[int, int] = {}
+            found_spec_decode = False
+
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.startswith("vllm:spec_decode"):
+                    found_spec_decode = True
+                    parts = line.split()
+                    if parts:
+                        with contextlib.suppress(ValueError):
+                            if "num_drafts" in line:
+                                num_drafts += int(float(parts[-1]))
+                            elif "num_draft_tokens" in line:
+                                num_draft_tokens += int(float(parts[-1]))
+                            elif "num_accepted_tokens_per_pos" in line:
+                                pos_label = 'position="'
+                                if pos_label in line:
+                                    start = line.index(pos_label) + len(pos_label)
+                                    end = line.index('"', start)
+                                    pos = int(line[start:end])
+                                    val = int(float(parts[-1]))
+                                    accepted_per_pos[pos] = (
+                                        accepted_per_pos.get(pos, 0) + val
+                                    )
+                            elif "num_accepted_tokens" in line:
+                                num_accepted_tokens += int(float(parts[-1]))
+
+            if not found_spec_decode:
+                return None
+
+            return SpecDecodeMetrics(
+                num_drafts=num_drafts,
+                num_draft_tokens=num_draft_tokens,
+                num_accepted_tokens=num_accepted_tokens,
+                accepted_per_pos=accepted_per_pos,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
 class TaskType(Enum):
     GENERATION = "generation"
     POOLING = "pooling"
@@ -94,6 +193,7 @@ class BenchmarkMetrics:
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
+    rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
 
 @dataclass
@@ -235,7 +335,9 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput], dur_s: float, selected_percentiles: list[float]
+    outputs: list[RequestFuncOutput],
+    dur_s: float,
+    selected_percentiles: list[float],
 ) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
@@ -311,6 +413,7 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    input_audio_duration = 0.0
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -338,6 +441,7 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
+            input_audio_duration += outputs[i].input_audio_duration
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -381,6 +485,12 @@ def calculate_metrics(
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
     failed_outputs = [output for output in outputs if not output.success]
+
+    if len(failed_outputs) > 0:
+        print("Failed requests during benchmark run detected (capping to 10):")
+        for i, err in enumerate(failed_outputs[:10]):
+            print(f"Error {i}: {err.error}")
+
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
         max_end_time = max(
@@ -476,6 +586,7 @@ def calculate_metrics(
         ],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
+        rtfx=input_audio_duration / dur_s,
     )
 
     return metrics, actual_output_lens
@@ -648,6 +759,8 @@ async def benchmark(
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
+    spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
+
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     semaphore = (
@@ -731,6 +844,48 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
+    spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
+    spec_decode_stats: dict[str, Any] | None = None
+    if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
+        delta_drafts = (
+            spec_decode_metrics_after.num_drafts - spec_decode_metrics_before.num_drafts
+        )
+        delta_draft_tokens = (
+            spec_decode_metrics_after.num_draft_tokens
+            - spec_decode_metrics_before.num_draft_tokens
+        )
+        delta_accepted = (
+            spec_decode_metrics_after.num_accepted_tokens
+            - spec_decode_metrics_before.num_accepted_tokens
+        )
+        per_pos_rates: list[float] = []
+        if delta_drafts > 0:
+            positions = sorted(
+                set(spec_decode_metrics_before.accepted_per_pos.keys())
+                | set(spec_decode_metrics_after.accepted_per_pos.keys())
+            )
+            for pos in positions:
+                before_val = spec_decode_metrics_before.accepted_per_pos.get(pos, 0)
+                after_val = spec_decode_metrics_after.accepted_per_pos.get(
+                    pos, before_val
+                )
+                delta_pos = after_val - before_val
+                per_pos_rates.append(delta_pos / delta_drafts)
+
+        if delta_draft_tokens > 0:
+            acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
+            acceptance_length = (
+                1 + delta_accepted / delta_drafts if delta_drafts > 0 else 0.0
+            )
+            spec_decode_stats = {
+                "num_drafts": delta_drafts,
+                "draft_tokens": delta_draft_tokens,
+                "accepted_tokens": delta_accepted,
+                "acceptance_rate": acceptance_rate,
+                "acceptance_length": acceptance_length,
+                "per_position_acceptance_rates": per_pos_rates,
+            }
+
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -786,9 +941,15 @@ async def benchmark(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
             )
         )
+        if metrics.rtfx > 0.0:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "RTFx (Inverse Real-Time Factor):", metrics.rtfx
+                )
+            )
     print(
         "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
+            "Total token throughput (tok/s):", metrics.total_token_throughput
         )
     )
 
@@ -807,10 +968,12 @@ async def benchmark(
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
             "itls": [output.itl for output in outputs],
+            "start_times": [output.start_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
+            "rtfx": metrics.rtfx,
         }
     else:
         result = {
@@ -825,6 +988,18 @@ async def benchmark(
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
+
+    if spec_decode_stats is not None:
+        result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]
+        result["spec_decode_acceptance_length"] = spec_decode_stats["acceptance_length"]
+        result["spec_decode_num_drafts"] = int(spec_decode_stats["num_drafts"])
+        result["spec_decode_draft_tokens"] = int(spec_decode_stats["draft_tokens"])
+        result["spec_decode_accepted_tokens"] = int(
+            spec_decode_stats["accepted_tokens"]
+        )
+        result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
+            "per_position_acceptance_rates", []
+        )
 
     def process_one_metric(
         # E.g., "ttft"
@@ -870,6 +1045,35 @@ async def benchmark(
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+
+    if spec_decode_stats is not None:
+        print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Acceptance length:", spec_decode_stats["acceptance_length"]
+            )
+        )
+        print("{:<40} {:<10}".format("Drafts:", int(spec_decode_stats["num_drafts"])))
+        print(
+            "{:<40} {:<10}".format(
+                "Draft tokens:", int(spec_decode_stats["draft_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
+        per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])
+        if per_pos:
+            print("Per-position acceptance (%):")
+            for i, rate in enumerate(per_pos):
+                print("{:<40} {:<10.2f}".format(f"  Position {i}:", rate * 100))
 
     print("=" * 50)
 
@@ -1023,8 +1227,26 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
-        help="Name of the model.",
+        required=False,
+        default=None,
+        help="Name of the model. If not specified, will fetch the first model "
+        "from the server's /v1/models endpoint.",
+    )
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None,
+        help="General input length for datasets. Maps to dataset-specific "
+        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        "If not specified, uses dataset defaults.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="General output length for datasets. Maps to dataset-specific "
+        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
         "--tokenizer",
@@ -1097,8 +1319,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--save-result",
@@ -1109,7 +1330,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--save-detailed",
         action="store_true",
         help="When saving the results, whether to include per request "
-        "information such as response, error, ttfs, tpots, etc.",
+        "information such as response, error, ttfts, tpots, etc.",
     )
     parser.add_argument(
         "--append-result",
@@ -1209,8 +1430,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=float,
         default=None,
         help="Temperature sampling parameter. Only has effect on "
-        "openai-compatible backends. If not specified, default to greedy "
-        "decoding (i.e. temperature==0.0).",
+        "openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--frequency-penalty",
@@ -1232,12 +1452,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Repetition penalty sampling parameter. Only has effect on "
         "openai-compatible backends.",
-    )
-    sampling_group.add_argument(
-        "--common-prefix-len",
-        type=int,
-        default=None,
-        help="Common prefix length shared by all prompts (used by random dataset)",
     )
 
     parser.add_argument(
@@ -1285,10 +1499,9 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--ready-check-timeout-sec",
         type=int,
-        default=600,
+        default=0,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
-        "the ready check will be skipped.",
+        "in seconds. Ready check will be skipped by default.",
     )
 
     parser.add_argument(
@@ -1331,10 +1544,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
 
     label = args.label
-    model_id = args.model
-    model_name = args.served_model_name
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
-    tokenizer_mode = args.tokenizer_mode
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -1355,6 +1564,18 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
+    # Fetch model from server if not specified
+    if args.model is None:
+        print("Model not specified, fetching first model from server...")
+        model_name, model_id = await get_first_model_from_server(base_url, headers)
+        print(f"First model name: {model_name}, first model id: {model_id}")
+    else:
+        model_name = args.served_model_name
+        model_id = args.model
+
+    tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
+    tokenizer_mode = args.tokenizer_mode
+
     tokenizer = get_tokenizer(
         tokenizer_id,
         tokenizer_mode=tokenizer_mode,
@@ -1366,6 +1587,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # Map general --input-len and --output-len to all dataset-specific arguments
+    if args.input_len is not None:
+        args.random_input_len = args.input_len
+        args.sonnet_input_len = args.input_len
+
+    if args.output_len is not None:
+        args.random_output_len = args.output_len
+        args.sonnet_output_len = args.output_len
+        args.sharegpt_output_len = args.output_len
+        args.custom_output_len = args.output_len
+        args.hf_output_len = args.output_len
+        args.spec_bench_output_len = args.output_len
+        args.prefix_repetition_output_len = args.output_len
 
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length
@@ -1409,7 +1644,12 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             )
 
         if "temperature" not in sampling_params:
-            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+            print(
+                "WARNING: vllm bench serve no longer sets temperature==0 (greedy) "
+                "in requests by default. The default will be determined on the "
+                "server side and can be model/API specific. "
+                "For the old behavior, include --temperature=0."
+            )
 
         default_percentile_metrics = "ttft,tpot,itl"
     else:
@@ -1497,6 +1737,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         for field in [
             "input_lens",
             "output_lens",
+            "start_times",
             "ttfts",
             "itls",
             "generated_texts",

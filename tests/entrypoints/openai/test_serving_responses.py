@@ -13,15 +13,16 @@ from openai.types.responses.tool import (
     Tool,
 )
 
-from vllm.entrypoints.context import ConversationContext
-from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
-from vllm.entrypoints.openai.serving_responses import (
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.responses.context import ConversationContext
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 
 
 class MockConversationContext(ConversationContext):
@@ -130,6 +131,7 @@ class TestInitializeToolSessions:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -216,6 +218,7 @@ class TestValidateGeneratorInput:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -237,7 +240,7 @@ class TestValidateGeneratorInput:
         """Test _validate_generator_input with valid prompt length"""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=valid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=valid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)
@@ -247,7 +250,7 @@ class TestValidateGeneratorInput:
 
         # create an invalid engine prompt
         invalid_prompt_token_ids = list(range(200))  # 100 tokens >= 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)

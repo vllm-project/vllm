@@ -30,7 +30,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -38,6 +37,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -59,7 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -100,9 +100,6 @@ class MiniMaxM2MoE(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             scoring_func=config.scoring_func,
-            use_grouped_topk=True,
-            num_expert_group=1,
-            topk_group=1,
             e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -110,6 +107,7 @@ class MiniMaxM2MoE(nn.Module):
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            router_logits_dtype=torch.float32,
         )
 
         self.gate = ReplicatedLinear(
@@ -199,9 +197,13 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        if (
+            rope_parameters is not None
+            and "partial_rotary_factor" not in rope_parameters
+        ):
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -230,8 +232,9 @@ class MiniMaxM2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q, k = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -359,7 +362,7 @@ class MiniMaxM2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -387,6 +390,7 @@ class MiniMaxM2Model(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
@@ -481,7 +485,15 @@ class MiniMaxM2Model(nn.Module):
         return loaded_params
 
 
-class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
+class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -509,7 +521,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
