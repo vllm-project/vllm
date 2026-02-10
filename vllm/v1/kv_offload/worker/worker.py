@@ -136,7 +136,7 @@ class OffloadingWorker:
         if not success:
             logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
-            logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
+            logger.debug("Submitted %r transfer %d: %r, num blocks: %d", transfer_type, job_id, spec, len(spec[0].block_ids))
 
         return success
 

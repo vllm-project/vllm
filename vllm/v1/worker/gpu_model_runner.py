@@ -12,7 +12,7 @@ from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
-
+from vllm.model_executor.models.utils import PPMissingLayer
 import numpy as np
 import torch
 import torch.distributed
@@ -1636,6 +1636,16 @@ class GPUModelRunner(
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        
+        if not hasattr(self, "rotate"):
+                if not isinstance(self.model.model.layers[0], PPMissingLayer):
+                    self.rotate = self.model.model.layers[0].self_attn.rotary_emb
+                else:
+                    for lay in self.model.model.layers:
+                        if not isinstance(lay, PPMissingLayer):
+                            self.rotate = lay.self_attn.rotary_emb
+                            break
+                        
         if self.model_config.enable_return_routed_experts:
             self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
         cm_base = CommonAttentionMetadata(
@@ -1653,6 +1663,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            cos_sin_cache=self.rotate.cos_sin_cache,
         )
 
         if self.dcp_world_size > 1:

@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
-
 import numpy as np
 
 from vllm import envs
@@ -755,9 +754,12 @@ class Scheduler(SchedulerInterface):
 
                 computed_token_gaps = self.connector.get_computed_token_gaps(request)
                 if not computed_token_gaps:
+                    print("No computed token gaps...")
                     continue
-
+                reqs_to_prepend = []
+                print("Processing computed_token_gaps...")
                 for start, end in computed_token_gaps:
+                    print(f"Gap: ({start},{end})")
                     nrd_copy = replace(nrd)
                     nrd_copy.req_id = nrd_copy.req_id + "." + str(start)
                     nrd_copy.num_computed_tokens = start
@@ -770,6 +772,7 @@ class Scheduler(SchedulerInterface):
                         else None
                     )
                     new_reqs_data.append(nrd_copy)
+                
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1301,6 +1304,7 @@ class Scheduler(SchedulerInterface):
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
+            print(f"Inserted {len(failed_kv_load_req_ids)} failed_kv_load_req_ids.")
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
                 outputs[request.client_index].append(
@@ -1472,7 +1476,9 @@ class Scheduler(SchedulerInterface):
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
+        print(f"Added request {request.request_id}. BEFORE, self.requests is: {self.requests}")
         self.requests[request.request_id] = request
+        print(f"AFTER, self.requests is: {self.requests}")
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 

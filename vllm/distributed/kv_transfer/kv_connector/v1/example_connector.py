@@ -153,7 +153,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
-                num_pages = dst_kv_cache_layer_shape[1]
+                num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     2, num_pages * page_size, -1
@@ -243,7 +243,7 @@ class ExampleConnector(KVConnectorBase_V1):
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
+            num_pages, page_size = layer.shape[0], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
         connector_metadata = self._get_connector_metadata()
@@ -456,4 +456,4 @@ class ExampleConnector(KVConnectorBase_V1):
 
 def align_to_block_size(num_tokens: int, block_size) -> int:
     """Align the number of tokens to the block size."""
-    return (num_tokens - 1) // block_size * block_size
+    return (num_tokens // block_size) * block_size  

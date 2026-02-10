@@ -397,8 +397,11 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
+        # Remove duplicates while preserving order
+        dedup_bl = list({block.block_id: block for
+                              block in blocks_list}.values())
         self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
+            [block for block in dedup_bl if block.ref_cnt == 0 and not block.is_null]
         )
 
     def evict_blocks(self, block_ids: set[int]) -> None:

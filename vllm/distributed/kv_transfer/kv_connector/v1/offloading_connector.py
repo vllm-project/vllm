@@ -277,6 +277,8 @@ class OffloadingConnectorScheduler:
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+            if self._request_block_ids.get(req_id) is None:
+                continue
             if preempted:
                 self._request_block_ids[req_id] = []
 
@@ -356,6 +358,9 @@ class OffloadingConnectorScheduler:
         # NOTE (orozery): we should move this logic to update_connector_output
         # once KVConnectorOutput allows us to report completed transfers
         for req_id in scheduler_output.preempted_req_ids or ():
+            if req_id not in self._requests:
+                continue
+
             block_hashes = self._reqs_being_stored.get(req_id)
             if block_hashes:
                 self.manager.complete_store(block_hashes)

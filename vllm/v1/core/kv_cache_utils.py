@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from typing import Union
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -546,10 +547,36 @@ def hash_block_tokens(
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
+    if envs.VLLM_V1_SPANS_ENABLED:
+        if envs.VLLM_V1_SPANS_TOKEN_PLUS == -1:
+            raise Exception(
+                '[SPANS -> kv_cache_utils]: span separator token undefined!')
+        # if a block starts with the span separator token, then its hash
+        # should be independent of previous tokens
+        firstok = curr_block_token_ids[0]
+        if firstok == envs.VLLM_V1_SPANS_TOKEN_PLUS:
+            if envs.VLLM_V1_SPANS_DEBUG:
+                print(f'[SPANS -> kv_cache_utils] detected span separator " \
+                        "token {envs.VLLM_V1_SPANS_TOKEN_PLUS} -> enable fan-in'
+                      )
+            parent_block_hash = NONE_HASH
+            
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHash(
         hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))
     )
+
+
+def recompute_token_handler(
+        block_first_token: int, tokens_up_to_block: list[int],
+        extra_keys: Union[tuple[Any, ...],
+                          None]) -> Union[tuple[Any, ...], None]:
+    if envs.VLLM_V1_SPANS_ENABLED and \
+        block_first_token == envs.VLLM_V1_SPANS_TOKEN_CROSS:
+        tok_tuple = tuple(tokens_up_to_block)
+        extra_keys = (*extra_keys, tok_tuple) if extra_keys \
+            else tok_tuple
+    return extra_keys
 
 
 def get_request_block_hasher(
@@ -593,6 +620,10 @@ def get_request_block_hasher(
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            
+            extra_keys = recompute_token_handler(
+                block_tokens[0], block_tokens[:start_token_idx], extra_keys)
+            
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
