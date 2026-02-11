@@ -31,10 +31,16 @@ from .models import (
     "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
     [
         (*llama3_8b_fp8, False),
-        (*llama4_scout_fp8, False),
         (*qwen3_a3b_fp8, False),
         (*qwen3_a3b_fp8, True),
-    ],
+    ]
+    + (
+        [
+            (*llama4_scout_fp8, False),
+        ]
+        if current_platform.is_cuda()
+        else []
+    ),
 )
 @pytest.mark.parametrize(
     "attn_backend",

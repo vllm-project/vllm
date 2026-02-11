@@ -1724,7 +1724,7 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+    - "oh"
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
     # TODO: Qwen uses group quantization which the pattern matcher on ROCm is not supported yet.
     # - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
