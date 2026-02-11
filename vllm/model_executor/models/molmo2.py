@@ -1869,9 +1869,9 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
         *,
         image_height: int,
         image_width: int,
-        processor: Molmo2ProcessorWrapper | None,
+        processor: Molmo2ProcessorWrapper,
     ) -> int:
-        hf_processor = processor.processor  # type: ignore
+        hf_processor = processor.processor
 
         resize_nrows, resize_cols = processor.get_base_grid_size(is_video=False)
         # start/end tokens + image patch token + col tokens
