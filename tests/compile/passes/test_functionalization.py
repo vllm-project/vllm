@@ -198,11 +198,26 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
         return [torch.ops.aten.slice_scatter.default]
 
 
+class TestRotaryEmbeddingDupSplit(TestRotaryEmbeddingSliceScatter):
+    def forward(self, positions, hidden_states):
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split(
+            [self.hidden_size, self.hidden_size, self.hidden_size], dim=-1
+        )
+        q, k = self.rotary_emb(positions, q, k)
+
+        q = q.view(-1, self.num_heads, self.head_dim)
+        k = k.view(-1, self.num_heads, self.head_dim)
+        v = v.view(-1, self.num_heads, self.head_dim)
+        return q, k, v
+
+
 MODELS = [
     TestSiluMul,
     TestFusedAddRMSNorm,
     TestRotaryEmbedding,
     TestRotaryEmbeddingSliceScatter,
+    TestRotaryEmbeddingDupSplit,
 ]
 
 
@@ -231,12 +246,12 @@ def test_fix_functionalization(
     with set_current_vllm_config(vllm_config):
         assert RMSNorm.enabled()
         noop_pass = NoOpEliminationPass(vllm_config)
-        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        norm_quant_fusion_pass = RMSNormQuantFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
         act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
         passes = (
-            [noop_pass, fusion_pass, act_quant_fusion_pass, cleanup_pass]
+            [noop_pass, norm_quant_fusion_pass, act_quant_fusion_pass, cleanup_pass]
             if do_fusion
             else [noop_pass, cleanup_pass]
         )
@@ -265,3 +280,10 @@ def test_fix_functionalization(
                     found[op] = True
         assert all(found[op] for op in model.ops_in_model(do_fusion))
         assert all(not found.get(op) for op in model.ops_not_in_model())
+
+        if model_class == TestRotaryEmbeddingDupSplit:
+            split_op = torch.ops.aten.split_with_sizes.default
+            splits_before = backend_func.op_count(split_op, before=True)
+            splits_after = backend_func.op_count(split_op, before=False)
+            assert splits_before > splits_after
+            assert splits_after == 1
