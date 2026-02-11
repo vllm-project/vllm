@@ -232,7 +232,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         """Check if chunked processing should be used for this request."""
         return (
             isinstance(request, (EmbeddingCompletionRequest, EmbeddingChatRequest))
-            and self.pooler_config.supports_chunked_processing
+            and self.pooler_config.enable_chunked_processing
         )
 
     async def _process_chunked_request(
