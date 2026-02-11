@@ -796,6 +796,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -828,7 +829,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 target_num_frames = min(target_num_frames, num_frames_override)
         target_num_frames = max(target_num_frames, 2)
 
-        video_processor = self.info.get_video_processor()
+        video_processor = self.info.get_video_processor(**(mm_processor_kwargs or {}))
         video_max_pixels = video_processor.size["longest_edge"]
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
