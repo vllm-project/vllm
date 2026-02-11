@@ -36,8 +36,16 @@ def make_query_prompt(question: str) -> str:
 
 
 def make_caption_prompt() -> str:
-    """Create a caption prompt for Moondream3."""
-    return "<|endoftext|><image> \n\nDescribe this image.\n\n"
+    """Create a caption prompt for Moondream3.
+
+    Uses moondream3's native caption format with reserved tokens:
+    <|md_reserved_0|> = skill delimiter start
+    <|md_reserved_1|> = skill parameter delimiter
+    <|md_reserved_2|> = skill delimiter end
+    """
+    return (  # noqa: E501
+        "<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>normal<|md_reserved_2|>"
+    )
 
 
 @pytest.fixture(scope="module")

@@ -54,7 +54,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
-    _merge_multimodal_embeddings,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -136,17 +135,41 @@ class Moondream3VisionConfig:
 
 
 @dataclass
+class Moondream3RegionConfig:
+    """Configuration for Moondream3 region module (point/detect)."""
+
+    dim: int = 2048
+    coord_feat_dim: int = 256
+    coord_out_dim: int = 1024
+    size_feat_dim: int = 512
+    size_out_dim: int = 2048
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Moondream3RegionConfig":
+        region_cfg = d.get("region", d)
+        return cls(
+            dim=region_cfg.get("dim", 2048),
+            coord_feat_dim=region_cfg.get("coord_feat_dim", 256),
+            coord_out_dim=region_cfg.get("coord_out_dim", 1024),
+            size_feat_dim=region_cfg.get("size_feat_dim", 512),
+            size_out_dim=region_cfg.get("size_out_dim", 2048),
+        )
+
+
+@dataclass
 class Moondream3Config:
     """Combined configuration for Moondream3 model."""
 
     text: Moondream3TextConfig
     vision: Moondream3VisionConfig
+    region: Moondream3RegionConfig
 
     @classmethod
     def from_dict(cls, d: dict) -> "Moondream3Config":
         return cls(
             text=Moondream3TextConfig.from_dict(d),
             vision=Moondream3VisionConfig.from_dict(d),
+            region=Moondream3RegionConfig.from_dict(d),
         )
 
 
@@ -463,6 +486,36 @@ class Moondream3VisionProjection(nn.Module):
         x = self.act(x)
         x, _ = self.fc2(x)
         return x
+
+
+class Moondream3RegionModule(nn.Module):
+    """Region module for coordinate encoding/decoding (point/detect).
+
+    This module handles Fourier feature encoding of coordinates and sizes
+    for the point and detect capabilities. The weights are loaded for
+    completeness, but point/detect generation requires a custom decoding
+    loop that is incompatible with vLLM's standard serving pipeline.
+
+    The module is small (~14M params) and uses plain nn.Linear layers
+    (replicated on all TP ranks, no parallelization needed).
+    """
+
+    def __init__(self, config: Moondream3RegionConfig, prefix: str = ""):
+        super().__init__()
+        # Fourier frequency matrices for coordinate/size encoding
+        self.coord_features = nn.Parameter(torch.empty(1, config.coord_feat_dim // 2))
+        self.size_features = nn.Parameter(torch.empty(2, config.size_feat_dim // 2))
+
+        # Coordinate encoder/decoder
+        self.coord_encoder = nn.Linear(config.coord_feat_dim, config.dim)
+        self.coord_decoder = nn.Linear(config.dim, config.coord_out_dim)
+
+        # Size encoder/decoder
+        self.size_encoder = nn.Linear(config.size_feat_dim, config.dim)
+        self.size_decoder = nn.Linear(config.dim, config.size_out_dim)
+
+        # Layer norm
+        self.ln = nn.LayerNorm(config.dim)
 
 
 # ============================================================================
@@ -1042,7 +1095,32 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     dummy_inputs=Moondream3DummyInputsBuilder,
 )
 class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """Moondream3 multimodal model for causal language modeling."""
+    """Moondream3 multimodal model for causal language modeling.
+
+    Moondream3 has four capabilities:
+
+    **Supported (via standard autoregressive generation):**
+
+    - **query** (visual question answering):
+      ``<|endoftext|><image>\\n\\nQuestion: {question}\\n\\nAnswer:``
+    - **caption** (image description):
+      ``<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>``
+      ``normal<|md_reserved_2|>``
+
+    **Not supported (requires custom generation loop):**
+
+    - **point**: Locates objects by decoding (x, y) coordinates from hidden
+      states and encoding them back as embeddings for the next step.
+    - **detect**: Locates objects by iteratively decoding bounding boxes
+      (x1, y1, x2, y2) from hidden states.
+
+    Point and detect are architecturally incompatible with vLLM's standard
+    ``embed_input_ids -> forward -> compute_logits -> sample`` pipeline
+    because they require decoding coordinates from hidden states and feeding
+    encoded coordinate embeddings back as the next input, rather than
+    sampling from the vocabulary. The region module weights are loaded for
+    completeness and potential future extensions.
+    """
 
     supports_multimodal = True
     packed_modules_mapping = {
@@ -1066,37 +1144,47 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.config = Moondream3Config.from_dict(config_dict)
 
-        # Vision encoder
-        self.vision = Moondream3VisionEncoder(
-            config=self.config.vision,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            # Vision encoder
+            self.vision = Moondream3VisionEncoder(
+                config=self.config.vision,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision"),
+            )
 
-        # Vision projection
-        self.vision_proj = Moondream3VisionProjection(
-            input_dim=self.config.vision.enc_dim,
-            inner_dim=self.config.vision.proj_inner_dim,
-            output_dim=self.config.text.dim,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_proj"),
-        )
+            # Vision projection
+            self.vision_proj = Moondream3VisionProjection(
+                input_dim=self.config.vision.enc_dim,
+                inner_dim=self.config.vision.proj_inner_dim,
+                output_dim=self.config.text.dim,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_proj"),
+            )
 
-        # Text decoder
-        self.text = Moondream3TextModel(
-            config=self.config.text,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text"),
-        )
+        with self._mark_language_model(vllm_config):
+            # Text decoder
+            self.text = Moondream3TextModel(
+                config=self.config.text,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text"),
+            )
 
-        # LM head (with bias - Moondream3 has lm_head bias)
-        self.lm_head = ParallelLMHead(
-            self.config.text.vocab_size,
-            self.config.text.dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
+            # LM head (with bias - Moondream3 has lm_head bias)
+            self.lm_head = ParallelLMHead(
+                self.config.text.vocab_size,
+                self.config.text.dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+
+        # Region module for point/detect coordinate encoding/decoding.
+        # Weights are loaded but the generation loop for point/detect
+        # is not implemented (see class docstring).
+        self.region = Moondream3RegionModule(
+            config=self.config.region,
+            prefix=maybe_prefix(prefix, "region"),
         )
 
         self.logits_processor = LogitsProcessor(self.config.text.vocab_size)
@@ -1116,50 +1204,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         return num_vision_tokens
-
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        """Embed input IDs with multimodal embedding merging.
-
-        This method handles both text-only and multimodal inputs:
-        - For text-only: Simply embed the input IDs using the text embedding layer
-        - For multimodal: Embed text tokens and merge with vision embeddings
-
-        Args:
-            input_ids: Token IDs to embed
-            multimodal_embeddings: Vision embeddings from embed_multimodal()
-            is_multimodal: Boolean mask indicating which positions are multimodal
-            handle_oov_mm_token: Whether to handle out-of-vocabulary MM tokens
-
-        Returns:
-            Combined embeddings tensor
-        """
-        # Get text embeddings using the text model's embedding layer
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.text.wte,  # Use text embedding layer
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
-        )
-
-        # If no multimodal embeddings, return text embeddings only
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        # Merge multimodal embeddings with text embeddings
-        merged = _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
-
-        return merged
 
     def _split_pixel_values(
         self,
@@ -1344,10 +1388,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # Get expert intermediate size for fc1 splitting
 
         for name, loaded_weight in weights:
-            # Skip region weights (not implemented in MVP)
-            if ".region." in name:
-                continue
-
             # Map from HF naming to vLLM naming
             # model.vision.* -> vision.*
             # model.text.* -> text.*
