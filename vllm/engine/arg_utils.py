@@ -540,6 +540,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    use_flashinfer_rope: bool = get_field(KernelConfig, "use_flashinfer_rope")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1181,6 +1182,10 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--use-flashinfer-rope",
+            **kernel_kwargs["use_flashinfer_rope"],
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1757,6 +1762,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.use_flashinfer_rope is not None:
+            kernel_config.use_flashinfer_rope = self.use_flashinfer_rope
 
         load_config = self.create_load_config()
 

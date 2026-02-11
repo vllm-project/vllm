@@ -232,7 +232,6 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
-    VLLM_USE_FLASHINFER_ROPE: bool = False
 
 
 def get_default_cache_root():
@@ -1548,10 +1547,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
-    # If set to 1, use the FlashInfer's rotary embedding kernel
-    "VLLM_USE_FLASHINFER_ROPE": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_ROPE", "0"))
-    ),
 }
 
 

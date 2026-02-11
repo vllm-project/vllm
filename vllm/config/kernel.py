@@ -17,6 +17,9 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = Field(default=None)
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    use_flashinfer_rope: bool = Field(default=False)
+    """If True, use FlashInfer's rotary embedding kernel."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

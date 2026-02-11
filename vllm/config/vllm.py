@@ -785,6 +785,14 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+        if (
+            self.kernel_config.use_flashinfer_rope
+            and not self.compilation_config.is_custom_op_enabled("rotary_embedding")
+        ):
+            logger.warning(
+                "rotary_embedding custom op is not enabled, "
+                "use_flashinfer_rope will have no effect."
+            )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()

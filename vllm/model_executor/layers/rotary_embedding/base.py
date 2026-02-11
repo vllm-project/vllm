@@ -4,8 +4,8 @@
 
 import torch
 
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -40,16 +40,17 @@ class RotaryEmbeddingBase(CustomOp):
 
         # Check if use_flashinfer is already set
         if not hasattr(self, "use_flashinfer"):
-            # TODO(mgoin): VLLM_USE_FLASHINFER_ROPE is disabled for now due to failures
+            # TODO(mgoin): use_flashinfer_rope is disabled for now due to failures
             # Flashinfer only supports head_size=64, 128, 256, 512.
             # https://github.com/flashinfer-ai/flashinfer/blob/ebfd655efe830048dba5d582aaa61d61d1cf9a87/include/flashinfer/utils.cuh#L174-L202
+            vllm_config = get_current_vllm_config()
             self.use_flashinfer = (
                 self.enabled()
                 and dtype in (torch.float16, torch.bfloat16)
                 and current_platform.is_cuda()
                 and has_flashinfer()
                 and self.head_size in [64, 128, 256, 512]
-                and envs.VLLM_USE_FLASHINFER_ROPE
+                and vllm_config.kernel_config.use_flashinfer_rope
             )
 
         if init_cache:
