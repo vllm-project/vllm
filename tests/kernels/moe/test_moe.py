@@ -765,7 +765,7 @@ def test_mixtral_moe(
                 requires_grad=False,
             )
             torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
         # FIXME (zyongye) fix this after we move self.kernel
         # assignment in FusedMoE.__init__
