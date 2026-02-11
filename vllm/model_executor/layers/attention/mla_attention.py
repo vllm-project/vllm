@@ -1877,7 +1877,7 @@ def reorg_kvcache(
     toks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
+    reorg and unpad kvcache after dcp local gather to tp layout for attn kernel.
     e.g.
     allgatered_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T1_0, T1_1, ...,
                               T0_4, T0_5, pad, pad, T1_2, pad, ...]
@@ -1885,10 +1885,10 @@ def reorg_kvcache(
                                   T1_0, T1_1, T1_2, ...]
     Args:
         padded_local_chunk_seq_lens_lst: local chunk context lengths
-            under current CP rank.
-        local_context_lens_allranks: local context lengths on each CP rank.
-        sum_seq_len: the sum of cp_chunk_seq_lens_lst.
-        max_seq_len: the max value of cp_chunk_seq_lens_lst.
+            under current DCP rank.
+        local_context_lens_allranks: local context lengths on each DCP rank.
+        sum_seq_len: the sum of dcp_chunk_seq_lens_lst.
+        max_seq_len: the max value of dcp_chunk_seq_lens_lst.
         chunk_size: the local padded max context chunk from
             chunked_context_metadata building.
         chunk_idx: chunk idx of chunked_prefill.
@@ -2494,7 +2494,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
             # workspace
-            # |------- N tokens --------|--------- N*cp_size tokens ----------|
+            # |------- N tokens --------|-------- N*dcp_size tokens ----------|
             # |<- use for loca_gather ->|<--------- use for allgather -------->|
             allgather_offset = workspace.shape[0] // (dcp_world_size + 1)
             assert allgather_offset * (dcp_world_size + 1) == workspace.shape[0]

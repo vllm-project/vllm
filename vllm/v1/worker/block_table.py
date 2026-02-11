@@ -139,7 +139,7 @@ class BlockTable:
         if dcp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
-            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
+            # always stored on the GPU whose dcp_rank equals i % dcp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
