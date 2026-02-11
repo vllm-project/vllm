@@ -313,10 +313,7 @@ def flashinfer_trtllm_fp4_moe(
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
 
-    # Ensure we have bf16 bias (required by kernel).
-    if e_score_correction_bias is not None:
-        assert e_score_correction_bias.dtype == torch.bfloat16
-
+    # Cast to Fp32 (required by kernel).
     router_logits = (
         router_logits.to(torch.float32)
         if routing_method_type == RoutingMethodType.DeepSeekV3
@@ -509,17 +506,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         layer.a1_gscale = 1.0 / a13_scale
         layer.g1_alphas = a13_scale * w13_scale_2
         layer.g2_alphas = a2_scale * w2_scale_2
-
-        # Cast e-score bias to bfloat16 so we avoid type change
-        # on the hotpath (kernel expects bf16 for routing_bias).
-        bias = getattr(layer.runner.router, "e_score_correction_bias", None)
-        # NOTE(rob): update this to check for monolithic kernel once
-        # we land the TRTLLM MK PR. EPLB currently uses non-monolithic kernel.
-        # FIXME: there are multiple copies of the e_score_correction_bias
-        # held by different layers right now (@bnell: need to fix this), so
-        # we apply the cast inplace to get around this.
-        if bias is not None and not layer.enable_eplb:
-            layer.runner.router.e_score_correction_bias.data = bias.to(torch.bfloat16)
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
