@@ -177,10 +177,10 @@ def get_max_tokens(
     max_tokens: int | None,
     input_length: int,
     default_sampling_params: dict,
+    override_max_tokens: int | None = None,
 ) -> int:
     model_max_tokens = max_model_len - input_length
     platform_max_tokens = current_platform.get_max_output_tokens(input_length)
-    # Use generation_config max_tokens as fallback, not as a ceiling
     fallback_max_tokens = (
         max_tokens
         if max_tokens is not None
@@ -192,6 +192,7 @@ def get_max_tokens(
         for val in (
             model_max_tokens,
             fallback_max_tokens,
+            override_max_tokens,
             platform_max_tokens,
         )
         if val is not None
