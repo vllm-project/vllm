@@ -713,6 +713,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
     ),
+    "FunASRForConditionalGeneration": _HfExamplesInfo(
+        "allendou/Fun-ASR-Nano-2512-vllm",
+        is_available_online=False,
+    ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
     ),
@@ -1043,10 +1047,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},
-    ),
-    "FunASRForConditionalGeneration": _HfExamplesInfo(
-        "allendou/Fun-ASR-Nano-2512-vllm",
-        is_available_online=False,
     ),
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),
