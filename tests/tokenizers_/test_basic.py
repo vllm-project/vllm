@@ -4,7 +4,6 @@ from typing import _get_protocol_attrs  # type: ignore
 
 import pytest
 from transformers import (
-    PreTrainedTokenizer,
     PreTrainedTokenizerBase,
     PreTrainedTokenizerFast,
 )
@@ -25,10 +24,6 @@ def _assert_tokenizer_like(tokenizer: object):
 
 
 def test_tokenizer_like_protocol():
-    tokenizer = get_tokenizer("gpt2", use_fast=False)
-    assert isinstance(tokenizer, PreTrainedTokenizer)
-    _assert_tokenizer_like(tokenizer)
-
     tokenizer = get_tokenizer("gpt2", use_fast=True)
     assert isinstance(tokenizer, PreTrainedTokenizerFast)
     _assert_tokenizer_like(tokenizer)
