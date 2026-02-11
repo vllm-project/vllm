@@ -1146,8 +1146,6 @@ def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
 
 
 def use_flashinfer_prefill() -> bool:
-    # For blackwell default to flashinfer prefill if it's available since
-    # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
