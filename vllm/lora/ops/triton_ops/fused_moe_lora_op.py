@@ -1273,10 +1273,10 @@ def _fused_moe_lora_shrink_expand_fused(
     offset: int = 0,
 ) -> None:
     """
-    Fused shrink+expand wrapper. Launches a persistent kernel that keeps
-    the intermediate (BLOCK_M x rank) in registers instead of writing
-    to global memory. A fixed number of CTAs each process multiple
-    contiguous M-blocks, improving L2 cache locality for lora weights.
+    Fused shrink+expand wrapper. Launches a kernel that keeps the
+    intermediate (BLOCK_M x rank) in registers instead of writing
+    to global memory, eliminating one kernel launch and global memory
+    round-trip.
     """
     a_ptr_table = _get_ptr(lora_a_stacked, device)
     b_ptr_table = _get_ptr(lora_b_stacked, device)
@@ -1292,12 +1292,10 @@ def _fused_moe_lora_shrink_expand_fused(
     use_gdc = supports_pdl(qcurr_hidden_states.device)
 
     num_pid_m = triton.cdiv(EM, block_size_m)
-    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
-    num_ctas = min(num_sms, num_pid_m) if num_pid_m > 0 else 1
 
-    grid = (num_ctas, num_slices)
+    grid = (num_pid_m, num_slices)
 
-    _fused_moe_lora_persistent_se_kernel[grid](
+    _fused_moe_lora_fused_se_kernel[grid](
         qcurr_hidden_states,
         a_ptr_table,
         b_ptr_table,
