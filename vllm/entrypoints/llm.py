@@ -85,7 +85,6 @@ from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -95,6 +94,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
 
@@ -1056,9 +1056,7 @@ class LLM:
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
-        io_processor_prompt = False
-        if isinstance(prompts, dict) and "data" in prompts:
-            io_processor_prompt = True
+        if use_io_processor := (isinstance(prompts, dict) and "data" in prompts):
             if self.io_processor is None:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -1068,40 +1066,42 @@ class LLM:
                 )
 
             # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_request(prompts)
+            validated_prompt = self.io_processor.parse_data(prompts)
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+            prompts_seq = prompt_to_seq(prompts)
 
-        if io_processor_prompt:
-            assert self.io_processor is not None
-            if is_list_of(pooling_params, PoolingParams):
-                validated_pooling_params: list[PoolingParams] = []
-                for param in as_iter(pooling_params):
-                    validated_pooling_params.append(
-                        self.io_processor.validate_or_generate_params(param)
-                    )
-                pooling_params = validated_pooling_params
-            else:
-                assert not isinstance(pooling_params, Sequence)
-                pooling_params = self.io_processor.validate_or_generate_params(
-                    pooling_params
+            params_seq: Sequence[PoolingParams] = [
+                self.io_processor.merge_pooling_params(param)
+                for param in self._params_to_seq(
+                    pooling_params,
+                    len(prompts_seq),
                 )
+            ]
+            for p in params_seq:
+                if p.task is None:
+                    p.task = "plugin"
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
 
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
+            prompts_seq = prompt_to_seq(prompts)
+            params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
 
-        for param in as_iter(pooling_params):
-            if param.task is None:
-                param.task = pooling_task
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
+            for param in params_seq:
+                if param.task is None:
+                    param.task = pooling_task
+                elif param.task != pooling_task:
+                    msg = (
+                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                    )
+                    raise ValueError(msg)
 
         outputs = self._run_completion(
-            prompts=prompts,
-            params=pooling_params,
+            prompts=prompts_seq,
+            params=params_seq,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
@@ -1111,12 +1111,10 @@ class LLM:
             outputs, PoolingRequestOutput
         )
 
-        if io_processor_prompt:
+        if use_io_processor:
             # get the post-processed model outputs
             assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(
-                model_output=model_outputs
-            )
+            processed_outputs = self.io_processor.post_process(model_outputs)
 
             return [
                 PoolingRequestOutput[Any](
@@ -1662,11 +1660,9 @@ class LLM:
 
     def _params_to_seq(
         self,
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        params: _P | Sequence[_P],
         num_requests: int,
-    ) -> Sequence[SamplingParams | PoolingParams]:
+    ) -> Sequence[_P]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(

@@ -52,6 +52,7 @@ def make_dummy_moe_config(
         hidden_dim=hidden_dim,
         intermediate_size_per_partition=intermediate_size_per_partition,
         num_local_experts=num_experts,
+        num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation="silu",
         in_dtype=in_dtype,

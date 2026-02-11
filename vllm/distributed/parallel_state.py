@@ -1143,6 +1143,18 @@ def get_ep_group() -> GroupCoordinator:
     return _EP
 
 
+_EPLB: GroupCoordinator | None = None
+
+
+def get_eplb_group() -> GroupCoordinator:
+    assert _EPLB is not None, (
+        "EPLB group is not initialized. "
+        "EPLB group is only created for MoE models when EPLB is enabled. "
+        "Ensure parallel_config.enable_eplb is True."
+    )
+    return _EPLB
+
+
 _PCP: GroupCoordinator | None = None
 
 
@@ -1440,12 +1452,29 @@ def initialize_model_parallel(
         _EP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="ep"
         )
+
+        # Create EPLB group with the same ranks as EP if EPLB is enabled.
+        # This is a separate process group to isolate EPLB communications
+        # from MoE forward pass collectives and prevent deadlocks when
+        # using torch.distributed in execution with torch.distributed in EPLB.
+        global _EPLB
+        assert _EPLB is None, "EPLB group is already initialized"
+        if (
+            config is not None
+            and config.parallel_config is not None
+            and config.parallel_config.enable_eplb
+        ):
+            # Reuse the same group_ranks from EP
+            _EPLB = init_model_parallel_group(
+                group_ranks, get_world_group().local_rank, backend, group_name="eplb"
+            )
     # If no EP group needed, _EP remains None
+    # If no EPLB group needed, _EPLB remains None
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
-        "TP rank %s, EP rank %s",
+        "TP rank %s, EP rank %s, EPLB rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
@@ -1453,6 +1482,7 @@ def initialize_model_parallel(
         _PCP.rank_in_group,
         _TP.rank_in_group,
         _EP.rank_in_group if _EP is not None else "N/A",
+        _EPLB.rank_in_group if _EPLB is not None else "N/A",
     )
 
 
@@ -1514,6 +1544,8 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _DP.prepare_communication_buffer_for_model(model)
     if _EP is not None:
         _EP.prepare_communication_buffer_for_model(model)
+    if _EPLB is not None:
+        _EPLB.prepare_communication_buffer_for_model(model)
 
 
 def model_parallel_is_initialized():
@@ -1607,6 +1639,11 @@ def destroy_model_parallel():
     if _EP:
         _EP.destroy()
     _EP = None
+
+    global _EPLB
+    if _EPLB:
+        _EPLB.destroy()
+    _EPLB = None
 
 
 def destroy_distributed_environment():

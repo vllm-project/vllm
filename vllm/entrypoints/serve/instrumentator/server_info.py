@@ -7,7 +7,7 @@ import functools
 from typing import Annotated, Literal
 
 import pydantic
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 import vllm.envs as envs
@@ -57,9 +57,3 @@ async def show_server_info(
         "system_env": await asyncio.to_thread(_get_system_env_info_cached),
     }
     return JSONResponse(content=server_info)
-
-
-def attach_router(app: FastAPI):
-    if not envs.VLLM_SERVER_DEV_MODE:
-        return
-    app.include_router(router)

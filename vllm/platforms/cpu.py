@@ -345,7 +345,6 @@ class CpuPlatform(Platform):
                 ld_preload_str += pytorch_libgomp_so
                 os.environ["LD_PRELOAD"] = ld_preload_str
 
-        # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size
         )

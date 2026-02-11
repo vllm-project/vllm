@@ -5,13 +5,8 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
-
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [

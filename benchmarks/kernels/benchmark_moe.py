@@ -265,9 +265,10 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
+            inplace = not disable_inplace()
             if use_deep_gemm:
                 return deep_gemm_experts(
-                    x, w1, w2, topk_weights, topk_ids, inplace=True
+                    x, w1, w2, topk_weights, topk_ids, inplace=inplace
                 )
             return fused_experts(
                 x,
@@ -275,7 +276,7 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=True,
+                inplace=inplace,
                 quant_config=quant_config,
             )
 

@@ -20,7 +20,6 @@ def _build_input_processor(
 ) -> InputProcessor:
     model_config = ModelConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
-        skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
     )

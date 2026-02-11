@@ -168,3 +168,19 @@ class QuantizationConfig(ABC):
         Interface to update values after config initialization.
         """
         pass
+
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        Determine if mxfp4 quantization will be used for this config.
+
+        This allows hidden_size rounding to happen before moe_config creation
+        without needing to instantiate quant_method first.
+
+        Args:
+            prefix: The layer prefix/name in the model
+            layer: The layer module
+
+        Returns:
+            True if this config uses MXFP4 quantization, False otherwise
+        """
+        return False
