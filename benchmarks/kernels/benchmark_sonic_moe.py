@@ -20,23 +20,13 @@ SHAPES = [
 
 
 def _bench_us(fn, warmup: int, iters: int, graph_calls: int) -> tuple[float, str]:
-    # Prefer CUDA graphs for stable timings, but fall back to eager if capture fails.
+    # Keep benchmarking in eager mode for stability. In this SonicMoE setup,
+    # repeated graph capture can leave CUDA in a bad state ("Offset increment
+    # outside graph capture"), which skews/aborts perf runs.
     divisor = 1
     mode = "eager"
     if graph_calls > 1:
-        try:
-            divisor = graph_calls
-            stream = torch.cuda.Stream()
-            graph = torch.cuda.CUDAGraph()
-            fn()
-            torch.cuda.synchronize()
-            with torch.cuda.graph(graph, stream=stream):
-                for _ in range(divisor):
-                    fn()
-            fn = graph.replay
-            mode = "cudagraph"
-        except Exception:
-            mode = "eager"
+        mode = "eager(graph-disabled)"
 
     for _ in range(warmup):
         fn()
