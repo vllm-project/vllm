@@ -28,7 +28,7 @@ from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -57,6 +57,8 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        renderer: BaseRenderer | None = None,
+        *,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -69,6 +71,7 @@ class InputProcessor:
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
+        self.renderer = renderer or renderer_from_config(model_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
@@ -86,20 +89,17 @@ class InputProcessor:
         self.input_preprocessor = InputPreprocessor(
             model_config,
             self.observability_config,
-            mm_registry,
+            renderer=renderer,
+            mm_registry=mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
-        return self.input_preprocessor.tokenizer
+        return self.renderer.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        return self.input_preprocessor.get_tokenizer()
-
-    @property
-    def renderer(self) -> BaseRenderer:
-        return self.input_preprocessor.renderer
+        return self.renderer.get_tokenizer()
 
     def _validate_logprobs(
         self,
