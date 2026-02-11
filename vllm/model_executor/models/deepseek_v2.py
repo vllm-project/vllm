@@ -270,14 +270,14 @@ class DeepSeekV2Gate(ReplicatedLinear):
     def forward(
         self,
         x: torch.Tensor,
-        out_dtype: torch.dtype,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, None]:
         """
         Use specialized GEMM for low batch size for DSV3 and KIMI.
         """
         if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
-            # NOTE: this sets the topk output to be float32
-            return ops.dsv3_router_gemm(x, self.weight, torch.float32), None
+            return ops.dsv3_router_gemm(
+                hidden_states=x, router_weight=self.weight, output_dtype=self.out_dtype
+            ), None
         else:
             return super().forward(x)
 
