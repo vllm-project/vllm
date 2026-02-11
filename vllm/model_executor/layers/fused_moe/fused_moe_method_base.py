@@ -121,17 +121,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def is_monolithic(self) -> bool:
         return False
 
-    # @abstractmethod
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
-    # @abstractmethod
     def apply_monolithic(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
