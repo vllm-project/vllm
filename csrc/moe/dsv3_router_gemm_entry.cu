@@ -125,7 +125,7 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
               "output must be float32 or bf16");
 
   auto const sm = getSMVersion();
-  TORCH_CHECK(sm >= 90, "required CUDA ARCH >= SM_90");
+  TORCH_CHECK(sm >= 90 && sm <= 103, "required SM_103 >= CUDA ARCH >= SM_90");
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
