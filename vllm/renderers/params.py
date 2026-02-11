@@ -229,23 +229,53 @@ class TokenizeParams:
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
+        elif max_length is None and self.max_input_tokens is not None:
+            # This prevents tokenization from taking up more resources than necessary
+            # while still failing `self._token_len_check` as expected by users
+            max_length = self.max_input_tokens + 1
 
         return dict(
-            truncation=self.truncate_prompt_tokens is not None,
+            truncation=max_length is not None,
             max_length=max_length,
             add_special_tokens=self.add_special_tokens,
         )
 
-    def _apply_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
-        if self.do_lower_case:
-            text = text.lower()
+    def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
+        """Apply length checks to prompt text if necessary."""
+        max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return text
+
+        if self.truncate_prompt_tokens is None and tokenizer is not None:
+            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+
+            if len(text) > max_input_chars:
+                # To save resources, fail the request outright without even
+                # attempting tokenization
+                raise VLLMValidationError(
+                    f"You passed {len(text)} input characters "
+                    f"and requested {self.max_output_tokens} output tokens. "
+                    f"However, the model's context length is only "
+                    f"{self.max_total_tokens} tokens, resulting in a maximum "
+                    f"input length of {max_input_tokens} tokens "
+                    f"(at most {max_input_chars} characters). "
+                    f"Please reduce the length of the input prompt.",
+                    parameter="input_text",
+                    value=len(text),
+                )
 
         return text
 
+    def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
+        """Apply lowercase to prompt text if necessary."""
+        return text.lower() if self.do_lower_case else text
+
     def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
-        # TODO: Implement https://github.com/vllm-project/vllm/pull/31366
-        for validator in (self._apply_lowercase,):
+        for validator in (
+            self._text_len_check,
+            self._text_lowercase,
+        ):
             text = validator(tokenizer, text)
 
         return text
@@ -265,8 +295,8 @@ class TokenizeParams:
 
         return prompt
 
-    def _apply_padding(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply padding to a token sequence."""
+    def _token_padding(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply padding to prompt tokens if necessary."""
         pad_length = self.pad_prompt_tokens
         if pad_length is not None and pad_length < 0:
             pad_length = self.max_input_tokens
@@ -281,8 +311,8 @@ class TokenizeParams:
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
-    def _apply_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply truncation to a token sequence."""
+    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to prompt tokens if necessary."""
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
@@ -297,18 +327,20 @@ class TokenizeParams:
 
         return tokens[:max_length]
 
-    def _apply_length_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply length checks to a token sequence."""
+    def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply length checks to prompt tokens if necessary."""
         max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return tokens
 
-        if max_input_tokens is not None and len(tokens) > max_input_tokens:
+        if len(tokens) > max_input_tokens:
             raise VLLMValidationError(
-                f"You passed {len(tokens)} input tokens and "
-                f"requested {self.max_output_tokens} output tokens. "
+                f"You passed {len(tokens)} input tokens "
+                f"and requested {self.max_output_tokens} output tokens. "
                 f"However, the model's context length is only "
-                f"{self.max_total_tokens}, resulting in a maximum "
-                f"input length of {max_input_tokens}. "
-                f"Please reduce the length of the input messages.",
+                f"{self.max_total_tokens} tokens, resulting in a maximum "
+                f"input length of {max_input_tokens} tokens. "
+                f"Please reduce the length of the input prompt.",
                 parameter="input_tokens",
                 value=len(tokens),
             )
@@ -318,9 +350,9 @@ class TokenizeParams:
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
         for validator in (
-            self._apply_padding,
-            self._apply_truncation,
-            self._apply_length_check,
+            self._token_padding,
+            self._token_truncation,
+            self._token_len_check,
         ):
             tokens = validator(tokenizer, tokens)
 

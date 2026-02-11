@@ -820,9 +820,6 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def _get_continuous_audio_features(
         self,
         input_features: torch.Tensor,

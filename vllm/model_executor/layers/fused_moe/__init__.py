@@ -100,6 +100,10 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
     )
+    from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        XPUExperts,
+        XPUExpertsFp8,
+    )
 
     __all__ += [
         "AiterExperts",
@@ -117,6 +121,8 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
+        "XPUExperts",
+        "XPUExpertsFp8",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders
