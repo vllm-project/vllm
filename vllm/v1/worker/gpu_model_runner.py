@@ -585,7 +585,8 @@ class GPUModelRunner(
         self.prev_num_computed_tokens_gpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self.prev_num_scheduled_tokens: np.ndarray | None = None
+        self.prev_num_draft_tokens: np.ndarray | None = None
+
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
@@ -1596,19 +1597,34 @@ class GPUModelRunner(
         # For async spec decode, bound the error in optimistic_seq_lens_cpu.
         # The CPU num_computed_tokens drifts because the scheduler
         # optimistically assumes all draft tokens are accepted. Correct
-        # continuing requests using num_accepted_tokens from the previous
-        # iteration:  correction = prev_scheduled - prev_accepted
-        if current_indices and self.prev_num_scheduled_tokens is not None:
+        # using the actual valid counts from the previous iteration.
+        # drift = (num_draft_tokens + 1) - valid_counts per request.
+        # Prefill requests have num_draft_tokens=0 and valid_counts=1,
+        # so their correction is 0.
+        # The event query is non-blocking: if the async GPU→CPU copy of
+        # valid counts hasn't finished yet, we skip the correction this
+        # iteration. The error stays bounded since the copy will be ready
+        # by the next iteration.
+        if (
+            current_indices
+            and self.prev_num_draft_tokens is not None
+            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_event is not None
+            and self.valid_sampled_token_count_event.query()
+        ):
+            assert self.valid_sampled_token_count_cpu is not None
+            valid_counts_cpu = self.valid_sampled_token_count_cpu.numpy()
             if batch_index_mapping.indices_match:
                 self.optimistic_seq_lens_cpu.numpy()[:num_reqs] -= (
-                    self.prev_num_scheduled_tokens[:num_reqs]
-                    - self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    self.prev_num_draft_tokens[:num_reqs]
+                    + 1
+                    - valid_counts_cpu[:num_reqs]
                 )
             else:
-                prev_sched = self.prev_num_scheduled_tokens[prev_indices]
-                accepted = self.input_batch.num_accepted_tokens_cpu[current_indices]
+                prev_draft = self.prev_num_draft_tokens[prev_indices]
+                prev_valid = valid_counts_cpu[prev_indices]
                 self.optimistic_seq_lens_cpu.numpy()[current_indices] -= (
-                    prev_sched - accepted
+                    prev_draft + 1 - prev_valid
                 )
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
@@ -1786,7 +1802,7 @@ class GPUModelRunner(
 
             if self.use_async_spec_decode:
                 self.prev_num_computed_tokens_gpu.copy_(self.num_computed_tokens)
-                self.prev_num_scheduled_tokens = num_scheduled_tokens.copy()
+                self.prev_num_draft_tokens = num_draft_tokens.copy()
 
         # Hot-Swap lora model
         if self.lora_config:
