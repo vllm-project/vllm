@@ -1302,16 +1302,17 @@ async def test_system_prompt_override(client: OpenAI, model_name: str):
         # Message structure may vary, skip this specific check
         pass
 
+    custom_system_prompt_2 = (
+        "You are a helpful assistant that always responds in exactly 5 words."
+    )
+
     # Test 3: Test with different custom system prompt
     response_2 = await client.responses.create(
         model=model_name,
         input=[
             {
                 "role": "system",
-                "content": (
-                    "You are a helpful assistant that always "
-                    "responds in exactly 5 words."
-                ),
+                "content": custom_system_prompt_2,
             },
             {"role": "user", "content": "What is the weather like?"},
         ],
@@ -1327,4 +1328,28 @@ async def test_system_prompt_override(client: OpenAI, model_name: str):
     # Allow some flexibility (4-7 words) since the model might not be perfectly precise
     assert 3 <= word_count <= 8, (
         f"Expected around 5 words, got {word_count} words: {response_2.output_text}"
+    )
+
+    # Test 4: Test with structured content
+    response_3 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": custom_system_prompt_2}],
+            },
+            {"role": "user", "content": "What is the weather like?"},
+        ],
+        temperature=0.0,
+    )
+
+    assert response_3 is not None
+    assert response_3.status == "completed"
+    assert response_3.output_text is not None
+
+    # Count words in response (approximately, allowing for punctuation)
+    word_count = len(response_3.output_text.split())
+    # Allow some flexibility (4-7 words) since the model might not be perfectly precise
+    assert 3 <= word_count <= 8, (
+        f"Expected around 5 words, got {word_count} words: {response_3.output_text}"
     )
