@@ -10,7 +10,7 @@ import regex as re
 _TORCH_CUDA_RE = re.compile(r"\btorch\.cuda\.empty_cache\b")
 
 
-ALLOWED_FILES = {"vllm/platforms/"}
+ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
 
 
 def scan_file(path: str) -> int:
