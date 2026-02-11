@@ -716,7 +716,8 @@ void cpu_fused_moe(
   const int32_t topk_num = topk_id.size(1);
   const FusedMOEAct act_type = get_act_type(act);
   cpu_utils::ISA isa_type = cpu_utils::get_isa(isa);
-  TORCH_CHECK(skip_weighted && topk_num == 1);
+  TORCH_CHECK(!skip_weighted || topk_num == 1,
+              "skip_weighted is only supported for topk=1 on CPU");
 
   VLLM_DISPATCH_FLOATING_TYPES(w13.scalar_type(), "cpu_fused_moe", [&]() {
     CPU_ISA_DISPATCH_IMPL(isa_type, [&]() {
