@@ -54,12 +54,9 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    print("begin afd_p2p_send_impl", flush=True)
     comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
-    print("end afd_p2p_send_impl", flush=True)
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
-    print("afd_p2p_send_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -78,9 +75,7 @@ def afd_p2p_recv_impl(
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
-    print("begin afd_p2p_recv_impl", flush=True)
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
-    print("end afd_p2p_recv_impl", flush=True)
 
 def afd_p2p_recv_fake(
     out: torch.Tensor,
