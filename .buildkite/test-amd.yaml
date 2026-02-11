@@ -1726,11 +1726,10 @@ steps:
     # we run all backend tests on ROCm
     - "pytest -v -s tests/compile/passes/test_fusion_attn.py"
     - "pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py"
+    - "pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile"
     # TODO: this test is not supported on ROCm, there are aiter kernels for this.
     # - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
-    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
-    # TODO: this test is not supported on ROCm
-    # - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
+    
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion E2E Quick (MI325)

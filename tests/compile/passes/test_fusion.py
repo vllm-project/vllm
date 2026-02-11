@@ -87,16 +87,15 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    # 
+    #
     # Blockwise group shapes (no kernel abstraction)
     # (None, GroupShape(1, 128)),
     # (None, GroupShape(1, 64)),
-    #     
-    # ^ This is not supported yet: See 
+    #
+    # ^ This is not supported yet: See
     # PR https://github.com/vllm-project/vllm/pull/30845
     # TODO: enable Blockwise group shapes
-    # 
-
+    #
 ]
 
 KERNEL_GROUPSHAPE_COMBINATIONS = (
@@ -106,7 +105,7 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 )
 
 # For Aiter tests we toggle use_aiter_quant_op
-AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [ 
+AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
