@@ -254,7 +254,10 @@ class Llama4VisionAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         self.attn = MMEncoderAttention(
-            self.num_local_heads, self.head_dim, self.scaling
+            self.num_local_heads,
+            self.head_dim,
+            self.scaling,
+            prefix=f"{prefix}.attn",
         )
 
         if use_data_parallel:

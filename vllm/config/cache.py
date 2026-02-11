@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -37,11 +36,10 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
-@dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens. On CUDA devices,
     only block sizes up to 32 are supported.
 

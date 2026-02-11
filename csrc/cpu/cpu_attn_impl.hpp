@@ -816,14 +816,10 @@ struct VecTypeTrait<float> {
   using vec_t = vec_op::FP32Vec16;
 };
 
-// ARM only supports BF16 with ARMv8.6-A extension
-#if (defined(__aarch64__) && !defined(ARM_BF16_SUPPORT))
-#else
 template <>
 struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
-#endif
 
 #if !defined(__powerpc__) && !defined(__s390x__)
 template <>
@@ -1111,7 +1107,8 @@ class AttentionMainLoop {
           if (sliding_window_left != -1) {
             pos = std::max(pos, curr_token_pos - sliding_window_left);
           }
-          return pos;
+          // Clamp to tile end to avoid OOB when window starts past the tile
+          return std::min(pos, kv_tile_end_pos);
         }();
 
         int32_t right_kv_pos = [&]() {
@@ -1585,17 +1582,10 @@ class AttentionMainLoop {
 
               if (use_sink) {
                 alignas(64) float s_aux_fp32[16];
-#if defined(__aarch64__) && !defined(ARM_BF16_SUPPORT)
-                // ARM without native BF16 support: manual conversion
-                for (int i = 0; i < 16; ++i) {
-                  s_aux_fp32[i] = static_cast<float>(curr_s_aux[i]);
-                }
-#else
                 // All other platforms have BF16Vec16 available
                 vec_op::BF16Vec16 vec_bf16(curr_s_aux);
                 vec_op::FP32Vec16 vec_fp32(vec_bf16);
                 vec_fp32.save(s_aux_fp32);
-#endif
 
                 float* __restrict__ curr_sum_buffer = sum_buffer;
                 float* __restrict__ curr_max_buffer = max_buffer;

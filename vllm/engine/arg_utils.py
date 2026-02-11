@@ -40,6 +40,7 @@ from vllm.config import (
     DeviceConfig,
     ECTransferConfig,
     EPLBConfig,
+    KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -54,6 +55,7 @@ from vllm.config import (
     SpeculativeConfig,
     StructuredOutputsConfig,
     VllmConfig,
+    WeightTransferConfig,
     get_attr_docs,
 )
 from vllm.config.cache import (
@@ -360,7 +362,7 @@ class EngineArgs:
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
-    tokenizer: str = ModelConfig.tokenizer
+    tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
@@ -416,7 +418,7 @@ class EngineArgs:
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
-    disable_nccl_for_dp_synchronization: bool = (
+    disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
@@ -458,6 +460,7 @@ class EngineArgs:
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
@@ -536,11 +539,15 @@ class EngineArgs:
     )
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
+    enable_flashinfer_autotune: bool = get_field(
+        KernelConfig, "enable_flashinfer_autotune"
+    )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -576,7 +583,7 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool = SchedulerConfig.async_scheduling
+    async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -587,6 +594,13 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    weight_transfer_config: WeightTransferConfig | None = get_field(
+        VllmConfig,
+        "weight_transfer_config",
+    )
+
+    fail_on_environ_validation: bool = False
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -595,8 +609,14 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.kernel_config, dict):
+            self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.weight_transfer_config, dict):
+            self.weight_transfer_config = WeightTransferConfig(
+                **self.weight_transfer_config
+            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -965,6 +985,9 @@ class EngineArgs:
             description=MultiModalConfig.__doc__,
         )
         multimodal_group.add_argument(
+            "--language-model-only", **multimodal_kwargs["language_model_only"]
+        )
+        multimodal_group.add_argument(
             "--limit-mm-per-prompt", **multimodal_kwargs["limit_per_prompt"]
         )
         multimodal_group.add_argument(
@@ -1159,6 +1182,17 @@ class EngineArgs:
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
 
+        # Kernel arguments
+        kernel_kwargs = get_kwargs(KernelConfig)
+        kernel_group = parser.add_argument_group(
+            title="KernelConfig",
+            description=KernelConfig.__doc__,
+        )
+        kernel_group.add_argument(
+            "--enable-flashinfer-autotune",
+            **kernel_kwargs["enable_flashinfer_autotune"],
+        )
+
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
@@ -1185,6 +1219,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
@@ -1194,6 +1229,9 @@ class EngineArgs:
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
+        )
+        vllm_group.add_argument(
+            "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
         )
 
         # Other arguments
@@ -1208,6 +1246,14 @@ class EngineArgs:
             action="store_true",
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
+        )
+
+        parser.add_argument(
+            "--fail-on-environ-validation",
+            help="If set, the engine will raise an error if "
+            "environment validation fails.",
+            default=False,
+            action=argparse.BooleanOptionalAction,
         )
         return parser
 
@@ -1241,7 +1287,7 @@ class EngineArgs:
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
-            tokenizer=self.tokenizer,
+            tokenizer=self.tokenizer,  # type: ignore[arg-type]
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1265,6 +1311,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
+            language_model_only=self.language_model_only,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
@@ -1365,6 +1412,8 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
+        envs.validate_environ(self.fail_on_environ_validation)
+
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
@@ -1413,7 +1462,7 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
-            cache_dtype=resolved_cache_dtype,
+            cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
@@ -1645,6 +1694,9 @@ class EngineArgs:
         assert self.enable_chunked_prefill is not None, (
             "enable_chunked_prefill must be set by this point"
         )
+        assert model_config.max_model_len is not None, (
+            "max_model_len must be set by this point"
+        )
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -1721,6 +1773,17 @@ class EngineArgs:
             else:
                 attention_config.backend = self.attention_backend
 
+        # Kernel config overrides
+        kernel_config = copy.deepcopy(self.kernel_config)
+        if self.enable_flashinfer_autotune is not None:
+            if kernel_config.enable_flashinfer_autotune is not None:
+                raise ValueError(
+                    "enable_flashinfer_autotune and "
+                    "kernel_config.enable_flashinfer_autotune "
+                    "are mutually exclusive"
+                )
+            kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1771,6 +1834,7 @@ class EngineArgs:
             device_config=device_config,
             load_config=load_config,
             attention_config=attention_config,
+            kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,
@@ -1782,6 +1846,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            weight_transfer_config=self.weight_transfer_config,
         )
 
         return config
@@ -2002,6 +2067,9 @@ class EngineArgs:
             )
 
         if orig_max_num_batched_tokens is None:
+            assert model_config.max_model_len is not None, (
+                "max_model_len must be set by this point"
+            )
             if not self.enable_chunked_prefill:
                 # If max_model_len is too short, use the default for higher throughput.
                 self.max_num_batched_tokens = max(

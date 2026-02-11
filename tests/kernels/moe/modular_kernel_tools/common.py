@@ -150,10 +150,7 @@ class Config:
             "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
         }
 
-        backend = self.all2all_backend()
-        vllm_config.parallel_config.all2all_backend = backend
-        if backend is not None:
-            env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
+        vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
@@ -623,6 +620,7 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
+        inplace=False,
     )
 
     return modular_kernel

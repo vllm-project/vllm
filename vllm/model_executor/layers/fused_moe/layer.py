@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    disable_inplace,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -218,12 +221,14 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     )
 
 
+# TODO(rob): move this down to the kernel.
 def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
-    quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
     is_lora_enabled: bool,
+    model_type: str | None,
+    is_mxfp4_quant: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -232,11 +237,12 @@ def maybe_roundup_hidden_size(
     Args:
         hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
         is_lora_enabled: True if the engine is enabled with LoRA. This
             is used in the case of mxfp4 quantization in selecting the
             MxFP4Backend.
+        model_type: for checking if gpt-oss
+        is_mxfp4_quant: whether the layer is quantized with mxfp4
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -251,7 +257,7 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
+    if model_type == "gpt_oss" and is_mxfp4_quant:
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -332,6 +338,7 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
+        has_shared_experts: bool = False,
     ):
         super().__init__()
 
@@ -393,15 +400,6 @@ class FusedMoE(CustomOp):
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
-
-        # Round up hidden size if needed.
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size,
-            moe_in_dtype,
-            quant_config,
-            self.moe_parallel_config,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
-        )
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -504,7 +502,6 @@ class FusedMoE(CustomOp):
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
-        self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
@@ -544,6 +541,24 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        # Round up hidden size before creating moe_config.
+        # This way moe_config is created with the correct hidden_size from the start.
+        hidden_size = maybe_roundup_hidden_size(
+            hidden_size=hidden_size,
+            act_dtype=moe_in_dtype,
+            moe_parallel_config=self.moe_parallel_config,
+            is_lora_enabled=vllm_config.lora_config is not None,
+            model_type=(
+                self.vllm_config.model_config.hf_config.model_type
+                if self.vllm_config.model_config is not None
+                else None
+            ),
+            is_mxfp4_quant=(
+                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
+            ),
+        )
+        self.hidden_size = hidden_size
+
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -560,6 +575,8 @@ class FusedMoE(CustomOp):
             activation=activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            # TODO: in_dtype == out_dtype?
+            disable_inplace=disable_inplace() or has_shared_experts,
         )
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -650,7 +667,11 @@ class FusedMoE(CustomOp):
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
             self.quant_method = FusedMoEModularMethod.make(
-                self, self.quant_method, prepare_finalize, self.shared_experts
+                self,
+                self.quant_method,
+                prepare_finalize,
+                self.shared_experts,
+                inplace=not self.moe_config.disable_inplace,
             )
 
     @property
