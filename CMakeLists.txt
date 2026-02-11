@@ -1086,7 +1086,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # DeepSeek V3 router GEMM kernel - requires SM90+
   cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
-    set(DSV3_ROUTER_GEMM_SRC "csrc/moe/dsv3_router_gemm.cu")
+    set(DSV3_ROUTER_GEMM_SRC
+      "csrc/moe/dsv3_router_gemm_entry.cu"
+      "csrc/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
     set_gencode_flags_for_srcs(
       SRCS "${DSV3_ROUTER_GEMM_SRC}"
       CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
