@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProcessor
+from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -94,16 +95,22 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     ) -> int:
         image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        do_pan_and_scan = mm_kwargs.get(
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **mm_kwargs,
+        )["images_kwargs"]
+
+        do_pan_and_scan = images_kwargs.get(
             "do_pan_and_scan", image_processor.do_pan_and_scan
         )
-        pan_and_scan_min_crop_size = mm_kwargs.get(
+        pan_and_scan_min_crop_size = images_kwargs.get(
             "pan_and_scan_min_crop_size", image_processor.pan_and_scan_min_crop_size
         )
-        pan_and_scan_max_num_crops = mm_kwargs.get(
+        pan_and_scan_max_num_crops = images_kwargs.get(
             "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
         )
-        pan_and_scan_min_ratio_to_activate = mm_kwargs.get(
+        pan_and_scan_min_ratio_to_activate = images_kwargs.get(
             "pan_and_scan_min_ratio_to_activate",
             image_processor.pan_and_scan_min_ratio_to_activate,
         )
@@ -206,7 +213,14 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        max_num_crops = image_processor.pan_and_scan_max_num_crops
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+        )["images_kwargs"]
+
+        max_num_crops = images_kwargs.get(
+            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
+        )
 
         vision_config = self.get_hf_config().vision_config
         native_size = vision_config.image_size
