@@ -745,7 +745,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             model_type=model_type,
         )
         return maybe_roundup_hidden_size_for_fused_moe(
-            hidden_size, self.ocp_mx_scheme, self.fp4_dtype
+            hidden_size, model_type, self.mxfp4_backend
         )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
