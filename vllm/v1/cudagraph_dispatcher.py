@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from itertools import product
 
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -180,12 +181,14 @@ class CudagraphDispatcher:
             for bs, num_active_loras in product(
                 self.compilation_config.cudagraph_capture_sizes, lora_cases
             ):
-                self.add_cudagraph_key(
-                    cudagraph_mode.mixed_mode(),
-                    self._create_padded_batch_descriptor(
-                        bs, False, num_active_loras > 0, num_active_loras
-                    ).relax_for_mixed_batch_cudagraphs(),
+                batch_desc = self._create_padded_batch_descriptor(
+                    bs, False, num_active_loras > 0, num_active_loras
                 )
+                # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
+                # because FA3's scheduler_metadata computation depends on it.
+                if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+                    batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
+                self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -264,21 +267,23 @@ class CudagraphDispatcher:
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
         )
-        relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
-        if not disable_full:
-            # check if key exists for full cudagraph
-            if batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, batch_desc
-
-            # otherwise, check if the relaxed key exists
-            if relaxed_batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, relaxed_batch_desc
+        # check if key exists for full cudagraph
+        # For pure FULL mode, keys are registered with uniform=False.
+        batch_desc_to_check = batch_desc
+        if self.cudagraph_mode == CUDAGraphMode.FULL:
+            batch_desc_to_check = replace(batch_desc, uniform=False)
+        if (
+            not disable_full
+            and batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]
+        ):
+            return CUDAGraphMode.FULL, batch_desc_to_check
 
         # also check if the relaxed key exists for more "general"
         # piecewise cudagraph
-        if relaxed_batch_desc in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, relaxed_batch_desc
+        batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
+        if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+            return CUDAGraphMode.PIECEWISE, batch_desc_to_check
 
         # finally, just return no cudagraphs and a trivial batch descriptor
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
