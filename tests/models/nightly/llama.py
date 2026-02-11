@@ -8,8 +8,7 @@ import time
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-from ....utils import large_gpu_mark
-from ...registry import HF_EXAMPLE_MODELS
+from tests.models.registry import HF_EXAMPLE_MODELS
 
 
 AITER_MODEL_LIST = [
@@ -157,7 +156,7 @@ def test_online_serving(
         
         assert repeat_outputs[0].outputs[0].text == all_outputs[0].outputs[0].text, \
             "Low temperature outputs should be deterministic"
-        print("✓ Deterministic generation verified")
+        print("Deterministic generation verified")
         print(f"{'='*60}")
 
     # Cleanup for ROCm
@@ -165,6 +164,6 @@ def test_online_serving(
         torch.cuda.synchronize()
         
     print(f"\n{'='*60}")
-    print("✅ All assertions passed!")
+    print("All assertions passed!")
     print("Online serving test completed successfully!")
     print(f"{'='*60}\n")
