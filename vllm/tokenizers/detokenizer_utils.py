@@ -60,12 +60,15 @@ def _convert_tokens_to_string_with_added_encoders(
         segments.append((convert_tokens_to_string(current_sub_text), False))
 
     if spaces_between_special_tokens and segments:
-        texts, flags = zip(*segments)
-        return texts[0] + "".join(
-            (" " if (a or b) else "") + t
-            for (a, b), t in zip(zip(flags, flags[1:]), texts[1:])
-        )
-    return "".join(s[0] for s in segments)
+        parts: list[str] = [segments[0][0]]
+        prev_special = segments[0][1]
+        for text, is_special in segments[1:]:
+            if prev_special or is_special:
+                parts.append(" ")
+            parts.append(text)
+            prev_special = is_special
+        return "".join(parts)
+    return "".join(text for text, _ in segments)
 
 
 # 5 is an arbitrary value that should work for all
