@@ -42,15 +42,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/tool_use
-  - tests/entrypoints/sleep
-  - tests/entrypoints/instrumentator
   - tests/entrypoints/rpc
+  - tests/entrypoints/instrumentator
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s entrypoints/instrumentator
-  - pytest -v -s entrypoints/sleep
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 - label: Entrypoints Integration (Pooling)

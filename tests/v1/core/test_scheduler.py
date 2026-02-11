@@ -1136,7 +1136,7 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
         prompt_logprobs_dict={},
         pooler_output=[],
     )
-    scheduler.update_from_output(output, EMPTY_OUTPUT)
+    initial_ecos = scheduler.update_from_output(output, EMPTY_OUTPUT)
 
     # Simulate KV transfer completion using KVConnectorOutput.finished_recving
     output = scheduler.schedule()
@@ -1155,6 +1155,8 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
     for req_id in req_ids:
         assert req_id in scheduler.finished_recving_kv_req_ids
+
+    return initial_ecos
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -1286,29 +1288,72 @@ def test_kv_connector_basic(is_async: bool):
 
 
 @pytest.mark.parametrize("is_async", [False, True])
-def test_external_prefix_cache_metrics(is_async: bool):
+@pytest.mark.parametrize("local_cache_hits", [False, True])
+def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
     """
     Verify connector prefix cache metrics are updated
     correctly when the scheduler processes requests with KV connector hits.
     """
 
+    BLOCK_SIZE = 16
+    if local_cache_hits:
+        NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2  # 32 tokens
+        NUM_LOCAL_HITS = NUM_MATCHED_NEW_TOKENS * 2  # 64 tokens
+        NUM_REQUESTS = 1
+        NUM_TOKENS = NUM_LOCAL_HITS * 2  # 128 tokens
+    else:
+        NUM_MATCHED_NEW_TOKENS = 4
+        NUM_LOCAL_HITS = 0
+        NUM_REQUESTS = 2
+        NUM_TOKENS = 8  # 8 tokens
+
     # Setup Scheduler.
-    NUM_MATCHED_NEW_TOKENS = 4
     scheduler = create_scheduler(
-        enable_prefix_caching=False,
+        enable_prefix_caching=local_cache_hits,
         use_kv_connector=mock_kv(
             matched_tokens=NUM_MATCHED_NEW_TOKENS, is_async=is_async
         ),
+        block_size=BLOCK_SIZE,
     )
 
-    # --- Prepare simple requests ---
-    NUM_REQUESTS = 2
-    NUM_TOKENS = 8
+    if local_cache_hits:
+        # First, establish local cache by running a request to completion
+        requests = create_requests(
+            num_requests=1,
+            num_tokens=NUM_LOCAL_HITS,
+            max_tokens=2,
+            block_size=BLOCK_SIZE,
+        )
+        req_ids = []
+        req_to_index = {}
+        for i, request in enumerate(requests):
+            scheduler.add_request(request)
+            req_ids.append(request.request_id)
+            req_to_index[request.request_id] = i
+
+        if is_async:
+            _step_until_kv_transfer_finished(scheduler, req_ids)
+
+        # Run first request to completion to establish local cache
+        output = scheduler.schedule()
+        MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_to_index,
+            sampled_token_ids=[[1000]] * len(req_ids),
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        _step_until_done(scheduler, output, MODEL_RUNNER_OUTPUT)
+        _ = scheduler.schedule()
+
+    # --- Prepare test requests ---
     MAX_TOKENS = 2
     requests = create_requests(
         num_requests=NUM_REQUESTS,
         num_tokens=NUM_TOKENS,
         max_tokens=MAX_TOKENS,
+        block_size=BLOCK_SIZE,
     )
     req_ids = []
     req_to_index = {}
@@ -1317,8 +1362,9 @@ def test_external_prefix_cache_metrics(is_async: bool):
         req_ids.append(request.request_id)
         req_to_index[request.request_id] = i
 
+    initial_ecos = None
     if is_async:
-        _step_until_kv_transfer_finished(scheduler, req_ids)
+        initial_ecos = _step_until_kv_transfer_finished(scheduler, req_ids)
 
     # --- Trigger scheduling and simulate model output ---
     output = scheduler.schedule()
@@ -1338,10 +1384,23 @@ def test_external_prefix_cache_metrics(is_async: bool):
     assert ecos is not None and len(ecos) > 0
     assert ecos[0].scheduler_stats is not None
 
-    external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
+    if local_cache_hits:
+        # For async, local cache stats come from the first step
+        if initial_ecos:
+            local_stats = initial_ecos[0].scheduler_stats.prefix_cache_stats
+        else:
+            local_stats = ecos[0].scheduler_stats.prefix_cache_stats
+        assert local_stats is not None
+        assert local_stats.queries == NUM_TOKENS * NUM_REQUESTS
+        assert local_stats.hits == NUM_LOCAL_HITS * NUM_REQUESTS
+
+    if initial_ecos:
+        external_stats = initial_ecos[0].scheduler_stats.connector_prefix_cache_stats
+    else:
+        external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
     assert external_stats is not None
 
-    assert external_stats.queries == NUM_TOKENS * NUM_REQUESTS
+    assert external_stats.queries == (NUM_TOKENS - NUM_LOCAL_HITS) * NUM_REQUESTS
     assert external_stats.hits == NUM_MATCHED_NEW_TOKENS * NUM_REQUESTS
     assert external_stats.requests == NUM_REQUESTS
     assert external_stats.preempted_requests == 0
@@ -3616,3 +3675,72 @@ def test_abort_request_finished_recving():
     # verify request is deleted
     assert request.request_id not in scheduler.requests
     assert not scheduler.finished_recving_kv_req_ids
+
+
+def test_eagle3_mm_encoder_cache_with_shift():
+    """Test EAGLE3 encoder scheduling accounts for shift_computed_tokens.
+
+    Regression test for issue #32469: When EAGLE3 is enabled with
+    disable_chunked_mm_input=True, ensure encoder inputs are scheduled
+    when tokens overlap the MM range, properly accounting for
+    shift_computed_tokens in the boundary calculation.
+
+    Without the fix, the scheduler would fail to schedule encoder inputs
+    at the boundary, causing "Encoder cache miss" errors.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+        num_speculative_tokens=4,  # This enables EAGLE with shift=1
+    )
+
+    mm_start_pos = 100
+    mm_length = 576
+
+    mm_positions = [
+        [PlaceholderRange(offset=mm_start_pos, length=mm_length)],
+    ]
+
+    requests = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length + 100,
+        mm_positions=mm_positions,
+    )
+
+    # Start with some tokens already computed to simulate decoding
+    request = requests[0]
+    request.num_computed_tokens = 0
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output is not None
+    shift_computed_tokens = 1
+    req_id = request.request_id
+
+    assert req_id in output.num_scheduled_tokens
+    num_scheduled = output.num_scheduled_tokens[req_id]
+
+    mm_feature = request.mm_features[0]
+    start_pos = mm_feature.mm_position.offset
+    tokens_end = request.num_computed_tokens + num_scheduled
+    scheduled_end_with_shift = tokens_end + shift_computed_tokens
+
+    # Assert that we scheduled into the MM range (test setup verification)
+    assert scheduled_end_with_shift > start_pos, (
+        f"Test setup error: expected to schedule into MM range. "
+        f"scheduled_end_with_shift={scheduled_end_with_shift}, "
+        f"start_pos={start_pos}"
+    )
+
+    # The key assertion: when scheduled tokens overlap MM range
+    # (accounting for EAGLE's shift), encoder MUST be scheduled.
+    # Without the fix, this would fail at the boundary case.
+    assert req_id in output.scheduled_encoder_inputs, (
+        f"Encoder input missing: scheduled {num_scheduled} tokens "
+        f"(computed={request.num_computed_tokens}, end={tokens_end}, "
+        f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
+        f"{start_pos}. The fix must schedule encoder inputs."
+    )

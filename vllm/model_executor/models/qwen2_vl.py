@@ -1016,11 +1016,15 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        mm_processor_kwargs = mm_processor_kwargs or {}
+        target_width, target_height = self.info.get_image_size_with_most_features(
+            max_pixels=mm_processor_kwargs.get("max_pixels", None)
+        )
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
