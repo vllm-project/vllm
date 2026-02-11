@@ -115,7 +115,7 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Field(default=None)
     """Fuse the custom attention + quant ops."""
-    eliminate_noops: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
     """Enable sequence parallelism."""
@@ -194,7 +194,6 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "eliminate_noops",
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
@@ -593,7 +592,7 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
-    fast_moe_cold_start = True
+    fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
 
     This is a bit of a hack that assumes that:
@@ -604,8 +603,14 @@ class CompilationConfig:
     When the above two conditions hold, this option greatly decreases cold start
     time for MOE models.
 
-    If the above two conditions don't hold, then this option will lead to silent
-    incorrectness. The only condition in which this doesn't hold is speculative
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on usually but off for speculative decoding
+
+    If conditions 1&2 don't hold then this option will lead to silent
+    incorrectness.
+    The only condition in which this doesn't hold is speculative
     decoding, where there is a draft model that may have MOEs in them.
 
     NB: We're working on a longer-term solution that doesn't need these assumptions.
