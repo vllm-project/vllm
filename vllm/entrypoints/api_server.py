@@ -29,6 +29,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
+from vllm.v1.serial_utils import serialize_method_call
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -74,10 +75,12 @@ async def process_fault_tolerance_instruction(request: Request) -> Response:
     fault_tolerance_timeout = request_dict.get("fault_tolerance_timeout")
     kwargs = request_dict.get("fault_tolerance_params", {})
     assert engine is not None
-    success = await engine.handle_fault(
-        fault_tolerance_instruction, fault_tolerance_timeout, **kwargs
+    kwargs["timeout"] = fault_tolerance_timeout
+    serialized_instruction = serialize_method_call(
+        fault_tolerance_instruction, **kwargs
     )
-    if success:
+    success = await engine.handle_fault(serialized_instruction)
+    if success == "True":
         return JSONResponse(
             status_code=200,
             content={"message": "Instruction executed successfully."},

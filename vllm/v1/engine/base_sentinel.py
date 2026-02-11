@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import json
 from abc import abstractmethod
 
@@ -39,7 +38,7 @@ class BaseSentinel:
         self,
         upstream_cmd_addr: str | None,
         downstream_cmd_addr: str | None,
-        dealer_socket_identity: bytes | None,
+        sentinel_identity: bytes | None,
         sentinel_tag: str | None,
         fault_tolerance_config: FaultToleranceConfig,
     ):
@@ -49,13 +48,13 @@ class BaseSentinel:
         self.logger = self._make_logger()
         self.ft_config = fault_tolerance_config
         if upstream_cmd_addr is not None:
-            assert dealer_socket_identity is not None
+            assert sentinel_identity is not None
             self.upstream_cmd_socket = make_zmq_socket(
                 self.ctx,
                 upstream_cmd_addr,
                 zmq.DEALER,
                 bind=False,
-                identity=dealer_socket_identity,
+                identity=sentinel_identity,
             )
         if downstream_cmd_addr is not None:
             self.downstream_cmd_socket = make_zmq_socket(

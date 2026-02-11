@@ -12,6 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.logger import init_logger
+from vllm.v1.serial_utils import serialize_method_call
 
 logger = init_logger(__name__)
 
@@ -43,7 +44,7 @@ async def process_fault_tolerance_instruction(raw_request: Request):
 
     fault_tolerance_instruction = body.get("fault_tolerance_instruction")
     fault_tolerance_timeout = body.get("fault_tolerance_timeout")
-    dynamic_fault_tolerance_params = body.get("fault_tolerance_params", {})
+    fault_tolerance_params = body.get("fault_tolerance_params", {})
 
     if fault_tolerance_instruction is None or fault_tolerance_timeout is None:
         raise HTTPException(
@@ -69,12 +70,12 @@ async def process_fault_tolerance_instruction(raw_request: Request):
             detail="'fault_tolerance_timeout' must be a positive integer.",
         )
     try:
-        success = await client.handle_fault(
-            fault_tolerance_instruction,
-            fault_tolerance_timeout,
-            **dynamic_fault_tolerance_params,
+        fault_tolerance_params["timeout"] = fault_tolerance_timeout
+        serialized_instruction = serialize_method_call(
+            fault_tolerance_instruction, **fault_tolerance_params
         )
-        if success:
+        success = await client.handle_fault(serialized_instruction)
+        if success == "True":
             return JSONResponse(
                 {
                     "message": "Instruction executed successfully.",

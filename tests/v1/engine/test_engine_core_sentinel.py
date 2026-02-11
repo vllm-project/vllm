@@ -20,7 +20,7 @@ from vllm.v1.serial_utils import serialize_method_call
 CLIENT_CMD_ADDR = "tcp://127.0.0.1:8844"
 WORKER_CMD_ADDR = "tcp://127.0.0.1:8845"
 ENGINE_FAULT_SOCKET_ADDR = "tcp://127.0.0.1:8846"
-DEALER_SOCKET_IDENTITY = b"engine_sentinel_0"
+SENTINEL_IDENTITY = b"engine_sentinel_0"
 
 
 def create_engine_core_sentinel(
@@ -35,7 +35,7 @@ def create_engine_core_sentinel(
         client_cmd_addr=CLIENT_CMD_ADDR,
         worker_cmd_addr=WORKER_CMD_ADDR,
         engine_fault_socket_addr=ENGINE_FAULT_SOCKET_ADDR,
-        dealer_socket_identity=DEALER_SOCKET_IDENTITY,
+        sentinel_identity=SENTINEL_IDENTITY,
         tp_size=1,
         pp_size=1,
         dp_size=1,
@@ -98,7 +98,7 @@ def test_run_handle_instruction(instruction):
         param["new_stateless_dp_group_port"] = 23456
     serial_instruction = serialize_method_call(instruction, **param)
     client_socket.send_multipart(
-        [DEALER_SOCKET_IDENTITY, b"", serial_instruction.encode("utf-8")]
+        [SENTINEL_IDENTITY, b"", serial_instruction.encode("utf-8")]
     )
     fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
     if instruction == "retry":

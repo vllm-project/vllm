@@ -104,7 +104,7 @@ class EngineCoreSentinel(BaseSentinel):
         client_cmd_addr: str,
         worker_cmd_addr: str,
         engine_fault_socket_addr: str,
-        dealer_socket_identity: bytes,
+        sentinel_identity: bytes,
         tp_size: int,
         pp_size: int,
         dp_size: int,
@@ -114,7 +114,7 @@ class EngineCoreSentinel(BaseSentinel):
         super().__init__(
             upstream_cmd_addr=client_cmd_addr,
             downstream_cmd_addr=worker_cmd_addr,
-            dealer_socket_identity=dealer_socket_identity,
+            sentinel_identity=sentinel_identity,
             sentinel_tag=f"DP_{engine_index}",
             fault_tolerance_config=fault_tolerance_config,
         )
@@ -133,7 +133,7 @@ class EngineCoreSentinel(BaseSentinel):
             engine_fault_socket_addr,
             zmq.DEALER,
             bind=False,
-            identity=dealer_socket_identity,
+            identity=sentinel_identity,
         )
 
         self.poller = zmq.Poller()
@@ -1087,7 +1087,7 @@ class EngineCoreProc(EngineCore):
                 engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
                 assert engine_core_sentinel_ids is not None
                 assert addresses.engine_fault_socket_addr is not None
-                assert addresses.client_cmd_addr is not None
+                assert addresses.engine_core_sentinel_cmd_addr is not None
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
                 self.engine_core_sentinel = EngineCoreSentinel(
@@ -1097,9 +1097,9 @@ class EngineCoreProc(EngineCore):
                     busy_loop_active=self.busy_loop_active,
                     engine_input_q=self.input_queue,
                     engine_fault_socket_addr=addresses.engine_fault_socket_addr,
-                    client_cmd_addr=addresses.client_cmd_addr,
+                    client_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
                     worker_cmd_addr=worker_cmd_addr,
-                    dealer_socket_identity=engine_core_sentinel_ids[self.engine_index],
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                     dp_size=vllm_config.parallel_config.data_parallel_size,

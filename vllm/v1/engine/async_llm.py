@@ -1000,11 +1000,9 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
-    async def handle_fault(
-        self, instruction: str, timeout: int = 300, **kwargs
-    ) -> bool:
+    async def handle_fault(self, serialized_instruction: str) -> str:
         """send fault tolerance instruction to the engine"""
-        return await self.engine_core.handle_fault(instruction, timeout, **kwargs)
+        return await self.engine_core.handle_fault(serialized_instruction)
 
     async def get_fault_info(self):
         """report exception in engine core"""

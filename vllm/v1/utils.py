@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import contextlib
+import json
 import multiprocessing
 import time
 import weakref
@@ -173,6 +174,11 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        engine_fault_socket_addr: str | None = None,
+        client_sentinel_cmd_addr: str | None = None,
+        engine_core_sentinel_cmd_addr: str | None = None,
+        engine_core_sentinel_identities: dict[int, bytes] | None = None,
+        fault_pub_socket_addr: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -205,6 +211,19 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if engine_fault_socket_addr is not None:
+                client_config["engine_fault_socket_addr"] = engine_fault_socket_addr
+                client_config["client_sentinel_cmd_addr"] = client_sentinel_cmd_addr
+                client_config["engine_core_sentinel_cmd_addr"] = (
+                    engine_core_sentinel_cmd_addr
+                )
+                client_config["engine_core_sentinel_identities"] = json.dumps(
+                    {
+                        k: v.decode("utf-8")
+                        for k, v in engine_core_sentinel_identities.items()
+                    }
+                )
+                client_config["fault_pub_socket_addr"] = fault_pub_socket_addr
 
             proc = spawn_context.Process(
                 target=target_server_fn,

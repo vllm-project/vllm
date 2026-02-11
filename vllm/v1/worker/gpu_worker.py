@@ -125,7 +125,7 @@ class WorkerSentinel(BaseSentinel):
         super().__init__(
             upstream_cmd_addr=vllm_config.fault_tolerance_config.worker_cmd_addr,
             downstream_cmd_addr=None,
-            dealer_socket_identity=identity.encode(),
+            sentinel_identity=identity.encode(),
             sentinel_tag=f"{self.dp_rank}_{identity}",
             fault_tolerance_config=vllm_config.fault_tolerance_config,
         )
