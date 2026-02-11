@@ -816,10 +816,14 @@ class Worker(WorkerBase):
             for module in moe_modules:
                 module.moe_config.num_experts = num_local_experts * new_ep_size
                 module.global_num_experts = module.moe_config.num_experts
+                tp_size = get_tp_group().world_size
+                is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+                sp_size = tp_size if is_sequence_parallel else 1
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
-                    tp_size_=get_tp_group().world_size,
+                    tp_size_=tp_size,
                     pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
+                    sp_size_=sp_size,
                     vllm_parallel_config=parallel_config,
                 )
                 module.moe_config.moe_parallel_config = module.moe_parallel_config
