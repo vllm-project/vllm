@@ -63,6 +63,7 @@ def _moe_forward(
     layer_name: str,
 ) -> torch.Tensor:
     layer = get_layer_from_name(layer_name)
+    layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
         layer, hidden_states, router_logits, shared_experts_input
     )
@@ -84,6 +85,7 @@ def _moe_forward_shared(
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(layer_name)
+    layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
         layer, hidden_states, router_logits, shared_experts_input
     )

@@ -1457,7 +1457,6 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        self.ensure_moe_quant_config_init()
         return self.runner.forward(
             hidden_states,
             router_logits,
