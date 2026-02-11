@@ -623,14 +623,16 @@ class SamplingParams(
 
         if tokenizer is not None:
             vocab_size = len(tokenizer)
-            oov_token_ids = [
-                tid for tid in allowed_token_ids if not (0 <= tid < vocab_size)
+            invalid_token_ids = [
+                token_id
+                for token_id in allowed_token_ids
+                if token_id < 0 or token_id >= vocab_size
             ]
-            if oov_token_ids:
+            if invalid_token_ids:
                 raise VLLMValidationError(
                     "allowed_token_ids contains out-of-vocab token id!",
                     parameter="allowed_token_ids",
-                    value=oov_token_ids,
+                    value=invalid_token_ids,
                 )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
@@ -668,11 +670,11 @@ class SamplingParams(
             return
 
         vocab_size = model_config.get_vocab_size()
-        invalid_token_ids = []
-
-        for token_id in self.logit_bias:
-            if token_id < 0 or token_id >= vocab_size:
-                invalid_token_ids.append(token_id)
+        invalid_token_ids = [
+            token_id
+            for token_id in self.logit_bias
+            if token_id < 0 or token_id >= vocab_size
+        ]
 
         if invalid_token_ids:
             raise VLLMValidationError(
