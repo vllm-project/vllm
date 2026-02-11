@@ -823,6 +823,32 @@ def int8_w8a16_moe_quant_config(
     )
 
 
+def mxfp4_w4a4_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        "mxfp4",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=block_shape,
+    )
+
+
 def int4_w4afp8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,

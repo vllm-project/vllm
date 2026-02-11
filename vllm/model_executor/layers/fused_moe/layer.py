@@ -543,16 +543,18 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
+        unpadded_hidden_size = hidden_size
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
         hidden_size = maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
+            model_type=self.model_type,
             is_mxfp4_quant=(
                 quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
@@ -626,6 +628,7 @@ class FusedMoE(CustomOp):
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
+            "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
@@ -1158,16 +1161,43 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        if self.quant_config is not None:
+            if self.quant_config.get_name() == "mxfp4":
+                # (FIXME) for gpt-oss all experts are combined
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            elif (
+                self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss"
+            ):
+                # When self._is_mxfp4 is true, model_dtype must be gpt_oss
+                expert_data = param.data[expert_id]
+                if "input_scale" in weight_name:
+                    assert loaded_weight.numel() == 1
+                    expert_data.data.copy_(loaded_weight)
+                    return True if return_success else None
+
+                shard_dim = (
+                    0 if shard_id in ("w1", "w3") or "bias" in weight_name else 1
+                )
+                if shard_id == "w2":
+                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                    loaded_weight = loaded_weight.narrow(
+                        shard_dim, shard_size * self.tp_rank, shard_size
+                    )
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[0]
+                    expert_data.data[:dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[0]
+                    dim2 = loaded_weight.shape[1]
+                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
