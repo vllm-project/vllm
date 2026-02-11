@@ -1707,10 +1707,20 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
 
+        full_shared_experts_input = self._shared_experts_input
+
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
+
+            # Slice _shared_experts_input to match this chunk.
+            staged_shared_experts_input = (
+                full_shared_experts_input[chunk_start:chunk_end, :]
+                if full_shared_experts_input is not None
+                else None
+            )
+            self._shared_experts_input = staged_shared_experts_input
 
             assert self.batched_hidden_states is not None
             assert self.batched_router_logits is not None
@@ -1762,7 +1772,11 @@ class FusedMoE(CustomOp):
                 assert not isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is not None
 
-                shared_output = self.shared_experts(staged_hidden_states)
+                shared_output = self.shared_experts(
+                    staged_shared_experts_input
+                    if staged_shared_experts_input is not None
+                    else staged_hidden_states
+                )
 
                 final_hidden_states = (
                     shared_output,
