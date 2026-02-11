@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -15,19 +14,18 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    swizzle_blockscale,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
-    swizzle_blockscale,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutlass_fused_moe,
-)
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -36,8 +34,6 @@ logger = init_logger(__name__)
 
 
 __all__ = [
-    "is_flashinfer_fp4_cutlass_moe_available",
-    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
 ]
 
@@ -87,8 +83,12 @@ def _supports_routing_method(
 
 
 def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """Supports EP."""
-    return True
+    """
+    TRTLLM is a monolithic kernel that requires dispatch_router_logits() for
+    the naive dispatch/combine path. DeepEP HT only implements dispatch() for
+    the modular kernel path, so TRTLLM is incompatible with DeepEP HT.
+    """
+    return not moe_parallel_config.use_deepep_ht_kernels
 
 
 def is_supported_config_trtllm(
@@ -120,26 +120,6 @@ def is_supported_config_trtllm(
         return False, _make_reason("activation format")
 
     return True, None
-
-
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
-
-
-def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-    )
 
 
 def reorder_w1w3_to_w3w1(
@@ -337,11 +317,7 @@ def flashinfer_trtllm_fp4_moe(
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
 
-    # Prepare routing bias
-    routing_bias = e_score_correction_bias
-    if routing_bias is not None:
-        routing_bias = routing_bias.to(torch.bfloat16)
-
+    # Cast to Fp32 (required by kernel).
     router_logits = (
         router_logits.to(torch.float32)
         if routing_method_type == RoutingMethodType.DeepSeekV3
@@ -351,7 +327,7 @@ def flashinfer_trtllm_fp4_moe(
     # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
         routing_logits=router_logits,
-        routing_bias=routing_bias,
+        routing_bias=e_score_correction_bias,
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
@@ -468,7 +444,7 @@ def flashinfer_trtllm_fp4_routed_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: torch.nn.Module,
+    layer: "FusedMoE",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,

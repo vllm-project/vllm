@@ -20,7 +20,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -151,6 +152,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
             logprobs_mode=self.model_config.logprobs_mode,
+            num_speculative_tokens=self.num_speculative_steps + 1,
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
@@ -167,6 +169,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
+        # Draft tokens propagation - for spec-dec + struct outputs.
+        self.draft_tokens_handler = DraftTokensHandler(self.device)
+
+        # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -268,6 +274,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+            max_query_len=input_batch.num_scheduled_tokens.max().item(),
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
@@ -313,10 +320,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+        dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+        expanded_local_pos = torch.zeros(
+            num_reqs, dtype=torch.int32, device=self.device
+        )
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        self.sampler(logits, idx_mapping, idx_mapping_np, pos)
+        self.sampler(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            idx_mapping_np,
+            pos,
+            dummy_input_ids,
+            expanded_local_pos,
+        )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -339,7 +358,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def reset_mm_cache(self) -> None:
-        pass
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_mm_cache()
+
+    def reset_encoder_cache(self) -> None:
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
@@ -399,10 +423,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
-        if scheduler_output.preempted_req_ids:
-            finished_req_ids = finished_req_ids.union(
-                scheduler_output.preempted_req_ids
-            )
+        preempted_req_ids = scheduler_output.preempted_req_ids
+        if preempted_req_ids:
+            finished_req_ids = finished_req_ids.union(preempted_req_ids)
         for req_id in finished_req_ids:
             self.req_states.remove_request(req_id)
             if self.supports_mm_inputs:
@@ -474,28 +497,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
     def prepare_inputs(
-        self,
-        scheduler_output: SchedulerOutput,
-        num_tokens_after_padding: int,
+        self, scheduler_output: SchedulerOutput, num_tokens_after_padding: int
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
         assert num_tokens > 0
-        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
 
         # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(
-            scheduler_output.num_scheduled_tokens.keys(),
-            key=lambda k: scheduler_output.num_scheduled_tokens[k],
-        )
-        num_scheduled_tokens = np.array(
-            [scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32
-        )
+        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        numtoks_iter = map(num_tokens_per_req.get, req_ids)
+        num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
-        idx_mapping_list = [
-            self.req_states.req_id_to_index[req_id] for req_id in req_ids
-        ]
-        idx_mapping_np = np.array(idx_mapping_list, dtype=np.int32)
+        idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
+        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
@@ -509,6 +525,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
             expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(
+                num_reqs, dtype=torch.int32, device=self.device
+            )
         else:
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
@@ -524,7 +543,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             max_expand_len = self.num_speculative_steps + 1
-            expanded_idx_mapping = expand_idx_mapping(
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
@@ -543,6 +562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        max_query_len = num_scheduled_tokens.max().item()
 
         # Get prefill tokens.
         prepare_prefill_inputs(
@@ -606,6 +626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
@@ -625,6 +646,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
@@ -641,6 +663,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
         )
 
     @torch.inference_mode()
@@ -671,6 +694,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         sample_pos = input_batch.positions[input_batch.logits_indices]
+        input_ids = input_batch.input_ids[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -686,7 +710,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits,
             input_batch.expanded_idx_mapping,
             input_batch.idx_mapping_np,
+            input_batch.cu_num_logits_np,
             sample_pos,
+            input_ids,
+            input_batch.expanded_local_pos,
         )
 
         if input_batch.num_draft_tokens == 0:
@@ -696,7 +723,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             # Rejection sampling for spec decoding.
-            input_ids = input_batch.input_ids[input_batch.logits_indices]
             sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
                 input_ids,
@@ -885,8 +911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def sample_tokens(
-        self,
-        grammar_output: GrammarOutput | None,
+        self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput:
         assert self.execute_model_state is not None
         hidden_states, input_batch, kv_connector_output = self.execute_model_state
@@ -941,7 +966,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_rejected,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        return self.draft_tokens_handler.get_draft_tokens()

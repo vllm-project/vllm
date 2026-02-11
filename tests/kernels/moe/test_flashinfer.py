@@ -135,6 +135,8 @@ class TestData:
                 layer.w2_input_scale,
             )
         layer.custom_routing_function = Llama4MoE.custom_routing_function
+        layer.routing_method_type = RoutingMethodType.Llama4
+        layer.renormalize = False
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
@@ -299,6 +301,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=False,
         )
 
         flashinfer_cutlass_output = kernel(
@@ -307,7 +310,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             td.layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,

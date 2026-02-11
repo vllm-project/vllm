@@ -27,7 +27,3 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
-
-
-def attach_router(app):
-    app.include_router(router)
