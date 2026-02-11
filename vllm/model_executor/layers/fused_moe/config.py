@@ -928,10 +928,6 @@ class FusedMoEParallelConfig:
         return self.dp_size > 1 and self.use_ep
 
     @property
-    def use_pplx_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "pplx"
-
-    @property
     def use_deepep_ht_kernels(self):
         return (
             self.use_all2all_kernels
@@ -950,7 +946,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_pplx_kernels
+        return self.use_deepep_ll_kernels
 
     @property
     def use_naive_all2all_kernels(self):
@@ -1208,10 +1204,6 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_pplx_kernels(self):
-        return self.moe_parallel_config.use_pplx_kernels
 
     @property
     def use_deepep_ht_kernels(self):
