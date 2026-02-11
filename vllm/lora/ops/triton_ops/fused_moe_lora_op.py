@@ -481,6 +481,196 @@ def _fused_moe_lora_merged_kernel(
         tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
 
 
+@triton.jit(
+    do_not_specialize=[
+        "num_valid_tokens",
+        "EM",
+        "K_input",
+        "output_dim",
+        "offset",
+    ]
+)
+def _fused_moe_lora_fused_se_kernel(
+    # Input (qcurr_hidden_states)
+    input_ptr,
+    # Weight pointer tables (from _get_ptr)
+    lora_a_ptr_table,
+    lora_b_ptr_table,
+    # Output (final output, 2D view: M*top_k x total_output_dim)
+    output_ptr,
+    # Routing weights
+    topk_weights_ptr,
+    # Merged indexing
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    block_adapter_map_ptr,
+    # Dimensions
+    K_input,
+    output_dim,
+    EM,
+    num_valid_tokens,
+    # Input strides
+    stride_input_m,
+    stride_input_k,
+    # lora_A strides: shape (max_loras, num_experts, rank, K)
+    # passed as (adapter, expert, K, rank) following existing convention
+    stride_a_l,
+    stride_a_e,
+    stride_a_k,
+    stride_a_n,
+    # lora_B strides: shape (max_loras, num_experts, output_dim, rank)
+    # passed as (adapter, expert, rank, output_dim)
+    stride_b_l,
+    stride_b_e,
+    stride_b_k,
+    stride_b_n,
+    # Output strides (2D flattened)
+    stride_out_m,
+    stride_out_n,
+    # Column offset in output
+    offset,
+    # Constexprs
+    RANK: tl.constexpr,
+    top_k: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_K_SHRINK: tl.constexpr,
+    BLOCK_N_EXPAND: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """
+    Fused shrink+expand kernel for MoE LoRA.
+
+    Combines the shrink (input @ lora_A) and expand (intermediate @ lora_B)
+    phases into a single kernel launch. The intermediate tensor
+    (BLOCK_SIZE_M x RANK) stays in registers, eliminating global memory
+    traffic and one kernel launch.
+
+    Each program handles one (M-block, slice) pair:
+    1. Shrink: iterate over K_input, accumulate intermediate in fp32
+    2. Cast intermediate to compute dtype, apply routing weight
+    3. Expand: loop over N-tiles of output_dim, write directly to output
+    """
+    pid_m = tl.program_id(axis=0)
+    slice_id = tl.program_id(axis=1)
+
+    # Look up adapter and expert for this M-block
+    lora_id = tl.load(block_adapter_map_ptr + pid_m)
+    if lora_id == -1:
+        return
+    expert_id = tl.load(expert_ids_ptr + pid_m)
+    if expert_id == -1:
+        return
+
+    # Load token IDs for this M-block
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(
+        tl.int64
+    )
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    token_mask = offs_token < num_valid_tokens
+
+    # Load lora_A base pointer for this slice
+    cur_lora_a_ptr = tl.load(lora_a_ptr_table + slice_id).to(
+        tl.pointer_type(input_ptr.dtype.element_ty)
+    )
+
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+
+    # ===== Shrink phase =====
+    # intermediate[BLOCK_M, RANK] = input[BLOCK_M, K] @ lora_A[K, RANK]
+    intermediate = tl.zeros((BLOCK_SIZE_M, RANK), dtype=tl.float32)
+
+    offs_rank = tl.arange(0, RANK).to(tl.int64)
+    offs_k = tl.arange(0, BLOCK_K_SHRINK)
+
+    # Base pointers for input (indexed by base token = offs_token // top_k)
+    input_ptrs = input_ptr + (
+        offs_token[:, None] // top_k * stride_input_m
+        + offs_k[None, :] * stride_input_k
+    )
+
+    # Base pointers for lora_A weight
+    a_weight_ptrs = (
+        cur_lora_a_ptr
+        + lora_id * stride_a_l
+        + expert_id * stride_a_e
+        + offs_k[:, None] * stride_a_k
+        + offs_rank[None, :] * stride_a_n
+    )
+
+    grid_k = tl.cdiv(K_input, BLOCK_K_SHRINK)
+    for k in range(0, grid_k):
+        k_remaining = K_input - k * BLOCK_K_SHRINK
+        # Load input tile [BLOCK_M, BLOCK_K]
+        a_tile = tl.load(
+            input_ptrs,
+            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+            other=0.0,
+        )
+        # Load lora_A tile [BLOCK_K, RANK]
+        w_tile = tl.load(
+            a_weight_ptrs,
+            mask=offs_k[:, None] < k_remaining,
+            other=0.0,
+        )
+        intermediate += tl.dot(a_tile, w_tile)
+        input_ptrs += BLOCK_K_SHRINK * stride_input_k
+        a_weight_ptrs += BLOCK_K_SHRINK * stride_a_k
+
+    # Cast intermediate to compute dtype
+    intermediate = intermediate.to(output_ptr.dtype.element_ty)
+
+    # Apply routing weight to intermediate (cheaper than per-N-tile)
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(
+            topk_weights_ptr + offs_token, mask=token_mask, other=0
+        )
+        intermediate = intermediate * moe_weight[:, None]
+
+    # ===== Expand phase =====
+    # Loop over N-tiles: output += intermediate[BLOCK_M, RANK] @ lora_B[RANK, BLOCK_N]
+    cur_lora_b_ptr = tl.load(lora_b_ptr_table + slice_id).to(
+        tl.pointer_type(output_ptr.dtype.element_ty)
+    )
+
+    # Output column start for this slice
+    output_col_start = slice_id * output_dim + offset
+
+    # Base pointer for lora_B weight (adapter + expert offset)
+    b_weight_base = (
+        cur_lora_b_ptr + lora_id * stride_b_l + expert_id * stride_b_e
+    )
+
+    for n_start in range(0, output_dim, BLOCK_N_EXPAND):
+        offs_bn = (n_start + tl.arange(0, BLOCK_N_EXPAND)).to(tl.int64)
+        n_mask = offs_bn < output_dim
+
+        # Load lora_B tile [RANK, BLOCK_N]
+        b_weight_ptrs = (
+            b_weight_base
+            + offs_rank[:, None] * stride_b_k
+            + offs_bn[None, :] * stride_b_n
+        )
+        b_tile = tl.load(b_weight_ptrs, mask=n_mask[None, :], other=0.0)
+
+        # Compute output tile [BLOCK_M, BLOCK_N]
+        result = tl.dot(intermediate, b_tile)
+        result = result.to(output_ptr.dtype.element_ty)
+
+        # Load-add-store to output
+        out_col = output_col_start + offs_bn
+        out_ptrs = (
+            output_ptr
+            + offs_token[:, None] * stride_out_m
+            + out_col[None, :] * stride_out_n
+        )
+        out_mask = token_mask[:, None] & n_mask[None, :]
+        existing = tl.load(out_ptrs, mask=out_mask, other=0.0)
+        tl.store(out_ptrs, existing + result, mask=out_mask)
+
+
 @torch.inference_mode()
 def _fused_moe_lora_shrink(
     a_intermediate_cache1: torch.Tensor,
@@ -847,6 +1037,98 @@ def _fused_moe_lora_expand_merged(
 
 
 @torch.inference_mode()
+def _fused_moe_lora_shrink_expand_fused(
+    output: torch.Tensor,  # (num_tokens, top_k_num, total_output_dim)
+    qcurr_hidden_states: torch.Tensor,  # (num_tokens, K)
+    lora_a_stacked: list[torch.Tensor],
+    lora_b_stacked: list[torch.Tensor],
+    topk_weights: torch.Tensor,
+    merged_sorted_token_ids: torch.Tensor,  # flat
+    merged_expert_ids: torch.Tensor,  # flat
+    block_adapter_map: torch.Tensor,  # flat
+    top_k_num: int,
+    device: torch.device,
+    M: int,
+    EM: int,
+    num_tokens: int,
+    num_slices: int,
+    max_lora_rank: int,
+    w1_output_dim_size: int,
+    block_size_m: int,
+    block_size_k_shrink: int,
+    block_size_n_expand: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    mul_routed_weight: bool = False,
+    offset: int = 0,
+) -> None:
+    """
+    Fused shrink+expand wrapper. Launches a single kernel that keeps
+    the intermediate (BLOCK_M x rank) in registers instead of writing
+    to global memory.
+    """
+    a_ptr_table = _get_ptr(lora_a_stacked, device)
+    b_ptr_table = _get_ptr(lora_b_stacked, device)
+
+    w1_lora_a_stacked = lora_a_stacked[0]
+    w1_lora_b_stacked = lora_b_stacked[0]
+
+    # View output as 2D for stride calculation
+    output_2d = output.view(-1, output.shape[-1])
+
+    K_input = qcurr_hidden_states.shape[1]
+
+    use_gdc = supports_pdl(qcurr_hidden_states.device)
+
+    grid = (triton.cdiv(EM, block_size_m), num_slices)
+
+    _fused_moe_lora_fused_se_kernel[grid](
+        qcurr_hidden_states,
+        a_ptr_table,
+        b_ptr_table,
+        output_2d,
+        topk_weights,
+        merged_sorted_token_ids,
+        merged_expert_ids,
+        block_adapter_map,
+        K_input,
+        w1_output_dim_size,
+        EM,
+        num_tokens,
+        # Input strides
+        qcurr_hidden_states.stride(0),
+        qcurr_hidden_states.stride(1),
+        # lora_A strides: (adapter, expert, K, rank)
+        w1_lora_a_stacked.stride(0),
+        w1_lora_a_stacked.stride(1),
+        w1_lora_a_stacked.stride(3),
+        w1_lora_a_stacked.stride(2),
+        # lora_B strides: (adapter, expert, rank, output_dim)
+        w1_lora_b_stacked.stride(0),
+        w1_lora_b_stacked.stride(1),
+        w1_lora_b_stacked.stride(3),
+        w1_lora_b_stacked.stride(2),
+        # Output strides
+        output_2d.stride(0),
+        output_2d.stride(1),
+        # Column offset
+        offset,
+        # Constexprs
+        RANK=max_lora_rank,
+        top_k=1 if mul_routed_weight else top_k_num,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_K_SHRINK=block_size_k_shrink,
+        BLOCK_N_EXPAND=block_size_n_expand,
+        USE_GDC=use_gdc,
+        launch_pdl=use_gdc,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+
+@torch.inference_mode()
 def _fused_moe_lora(
     output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
     qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
@@ -934,84 +1216,122 @@ def _fused_moe_lora(
     )
     EM = total_m_blocks * shrink_block_size_m
 
-    a_intermediate_cache1 = torch.zeros(
-        (num_slices, M, top_k_num, max_lora_rank),
-        dtype=output.dtype,
-        device=device,
+    # Use fused shrink+expand when possible (keeps intermediate in registers)
+    can_fuse = (
+        not fully_sharded
+        and max_lora_rank >= 16
+        and shrink_split_k == 1
     )
 
-    b_intermediate_cache1 = torch.zeros(
-        (num_slices, M, top_k_num, w1_output_dim_size),
-        dtype=output.dtype,
-        device=device,
-    )
+    if can_fuse:
+        _fused_moe_lora_shrink_expand_fused(
+            output,
+            qcurr_hidden_states,
+            lora_a_stacked,
+            lora_b_stacked,
+            topk_weights,
+            merged_sorted,
+            merged_experts,
+            block_adapter_map,
+            top_k_num,
+            device,
+            M,
+            EM,
+            num_tokens,
+            num_slices,
+            max_lora_rank,
+            w1_output_dim_size,
+            shrink_block_size_m,
+            shrink_block_size_k,
+            expand_block_size_n,
+            shrink_group_size_m,
+            shrink_num_warps,
+            shrink_num_stages,
+            mul_routed_weight,
+            offset,
+        )
+    else:
+        # Fallback: separate shrink and expand kernels
+        # (needed for fully_sharded which requires all_reduce between phases,
+        #  rank < 16 which doesn't meet tl.dot minimum, or split_k > 1)
+        a_intermediate_cache1 = torch.zeros(
+            (num_slices, M, top_k_num, max_lora_rank),
+            dtype=output.dtype,
+            device=device,
+        )
 
-    _fused_moe_lora_shrink_merged(
-        a_intermediate_cache1,
-        qcurr_hidden_states,
-        lora_a_stacked,
-        topk_weights,
-        merged_sorted,
-        merged_experts,
-        block_adapter_map,
-        top_k_num,
-        device,
-        N,
-        M,
-        EM,
-        K,
-        num_tokens,
-        num_slices,
-        shrink_block_size_m,
-        shrink_block_size_n,
-        shrink_block_size_k,
-        shrink_group_size_m,
-        shrink_num_warps,
-        shrink_num_stages,
-        shrink_split_k,
-        mul_routed_weight,
-    )
+        b_intermediate_cache1 = torch.zeros(
+            (num_slices, M, top_k_num, w1_output_dim_size),
+            dtype=output.dtype,
+            device=device,
+        )
 
-    if fully_sharded:
-        if max_lora_rank == w1_lora_b_stacked.shape[-1]:
-            a_intermediate_cache1 = tensor_model_parallel_all_reduce(
-                a_intermediate_cache1
-            )
-        else:
-            a_intermediate_cache1 = tensor_model_parallel_all_gather(
-                a_intermediate_cache1
-            )
-            max_lora_rank = a_intermediate_cache1.shape[-1]
+        _fused_moe_lora_shrink_merged(
+            a_intermediate_cache1,
+            qcurr_hidden_states,
+            lora_a_stacked,
+            topk_weights,
+            merged_sorted,
+            merged_experts,
+            block_adapter_map,
+            top_k_num,
+            device,
+            N,
+            M,
+            EM,
+            K,
+            num_tokens,
+            num_slices,
+            shrink_block_size_m,
+            shrink_block_size_n,
+            shrink_block_size_k,
+            shrink_group_size_m,
+            shrink_num_warps,
+            shrink_num_stages,
+            shrink_split_k,
+            mul_routed_weight,
+        )
 
-    _fused_moe_lora_expand_merged(
-        output,
-        a_intermediate_cache1,
-        b_intermediate_cache1,
-        lora_b_stacked,
-        topk_weights,
-        merged_sorted,
-        merged_experts,
-        block_adapter_map,
-        top_k_num,
-        device,
-        N,
-        M,
-        EM,
-        K,
-        num_tokens,
-        num_slices,
-        max_lora_rank,
-        w1_output_dim_size,
-        expand_block_size_m,
-        expand_block_size_n,
-        expand_block_size_k,
-        expand_group_size_m,
-        expand_num_warps,
-        expand_num_stages,
-        expand_split_k,
-        mul_routed_weight,
-        offset,
-    )
+        if fully_sharded:
+            if max_lora_rank == w1_lora_b_stacked.shape[-1]:
+                a_intermediate_cache1 = tensor_model_parallel_all_reduce(
+                    a_intermediate_cache1
+                )
+            else:
+                a_intermediate_cache1 = tensor_model_parallel_all_gather(
+                    a_intermediate_cache1
+                )
+                max_lora_rank = a_intermediate_cache1.shape[-1]
+
+        _fused_moe_lora_expand_merged(
+            output,
+            a_intermediate_cache1,
+            b_intermediate_cache1,
+            lora_b_stacked,
+            topk_weights,
+            merged_sorted,
+            merged_experts,
+            block_adapter_map,
+            top_k_num,
+            device,
+            N,
+            M,
+            EM,
+            K,
+            num_tokens,
+            num_slices,
+            max_lora_rank,
+            w1_output_dim_size,
+            expand_block_size_m,
+            expand_block_size_n,
+            expand_block_size_k,
+            expand_group_size_m,
+            expand_num_warps,
+            expand_num_stages,
+            expand_split_k,
+            mul_routed_weight,
+            offset,
+        )
 
 
 def _fused_moe_lora_fake(
