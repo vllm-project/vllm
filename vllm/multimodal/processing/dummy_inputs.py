@@ -94,10 +94,16 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             seq_len: Sequence length
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
-            mm_processor_kwargs: Additional keyword arguments for the multimodal processor (optional)
+            mm_processor_kwargs: Additional keyword arguments
+                                for hf_processor (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options, mm_processor_kwargs=mm_processor_kwargs)
+        dummy_mm_data = self.get_dummy_mm_data(
+            seq_len,
+            mm_counts,
+            mm_options,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         tokenization_kwargs = {"truncation": False}
