@@ -57,7 +57,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
@@ -219,64 +219,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
-
-
-# TODO(rob): move this down to the kernel.
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    moe_parallel_config: FusedMoEParallelConfig,
-    is_lora_enabled: bool,
-    model_type: str | None,
-    is_mxfp4_quant: bool,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-        model_type: for checking if gpt-oss
-        is_mxfp4_quant: whether the layer is quantized with mxfp4
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            hidden_size = round_up(hidden_size, 256)
-
-    return hidden_size
 
 
 # --8<-- [start:fused_moe]
@@ -541,9 +483,28 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        self.quant_config = quant_config
+
+        def _get_quant_method() -> FusedMoEMethodBase:
+            """
+            Helper method to ensure self.quant_method is never None and
+            of the proper type.
+            """
+            quant_method = None
+            if self.quant_config is not None:
+                quant_method = self.quant_config.get_quant_method(self, prefix)
+            if quant_method is None:
+                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+            assert isinstance(quant_method, FusedMoEMethodBase)
+            return quant_method
+
+        # Note: get_quant_method will look at the layer's local_num_experts
+        # for heuristic purposes, so it must be initialized first.
+        self.quant_method: FusedMoEMethodBase = _get_quant_method()
+
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size = maybe_roundup_hidden_size(
+        hidden_size = self.quant_method.maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
@@ -552,9 +513,6 @@ class FusedMoE(CustomOp):
                 self.vllm_config.model_config.hf_config.model_type
                 if self.vllm_config.model_config is not None
                 else None
-            ),
-            is_mxfp4_quant=(
-                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
         )
         self.hidden_size = hidden_size
@@ -586,25 +544,6 @@ class FusedMoE(CustomOp):
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
-
-        self.quant_config = quant_config
-
-        def _get_quant_method() -> FusedMoEMethodBase:
-            """
-            Helper method to ensure self.quant_method is never None and
-            of the proper type.
-            """
-            quant_method = None
-            if self.quant_config is not None:
-                quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None:
-                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
-            assert isinstance(quant_method, FusedMoEMethodBase)
-            return quant_method
-
-        # Note: get_quant_method will look at the layer's local_num_experts
-        # for heuristic purposes, so it must be initialized first.
-        self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(

@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
@@ -30,6 +31,9 @@ from vllm.model_executor.layers.quantization.mxfp4 import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    maybe_roundup_hidden_size_for_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -724,6 +728,25 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             logger.warning_once(
                 "The current mode supports native MoE MXFP4 computation"
             )
+
+    def maybe_roundup_hidden_size(
+        self,
+        hidden_size: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+        is_lora_enabled: bool,
+        model_type: str | None,
+    ) -> int:
+        hidden_size = super().maybe_roundup_hidden_size(
+            hidden_size=hidden_size,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+            is_lora_enabled=is_lora_enabled,
+            model_type=model_type,
+        )
+        return maybe_roundup_hidden_size_for_fused_moe(
+            hidden_size, self.ocp_mx_scheme, self.fp4_dtype
+        )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "mxfp4":

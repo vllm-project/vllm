@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
     get_padding_alignment,
+    maybe_roundup_hidden_size_for_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -251,6 +253,25 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
+    def maybe_roundup_hidden_size(
+        self,
+        hidden_size: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+        is_lora_enabled: bool,
+        model_type: str | None,
+    ) -> int:
+        hidden_size = super().maybe_roundup_hidden_size(
+            hidden_size=hidden_size,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+            is_lora_enabled=is_lora_enabled,
+            model_type=model_type,
+        )
+        return maybe_roundup_hidden_size_for_fused_moe(
+            hidden_size, model_type, self.mxfp4_backend
+        )
 
     def create_weights(
         self,
