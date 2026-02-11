@@ -700,7 +700,7 @@ class FusedMoE(CustomOp):
 
     @property
     def gate(self) -> torch.nn.Module | None:
-        return self._gate
+        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -725,7 +725,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self._gate is not None
+        return self.gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,
