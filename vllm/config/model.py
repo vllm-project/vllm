@@ -1119,6 +1119,9 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
             "gemma3",
             "molmo2",
@@ -1554,6 +1557,7 @@ class ModelConfig:
 
     @property
     def attn_type(self) -> AttnTypeStr:
+        """Determine the attention type based on model configuration."""
         if self.pooler_config is not None:
             seq_pooling_type = self._model_info.default_seq_pooling_type
             if seq_pooling_type == "CLS":
