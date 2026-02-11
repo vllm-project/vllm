@@ -21,6 +21,7 @@ This is a native integration:
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import tempfile
@@ -63,6 +64,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.context import get_current_request_id
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -169,6 +171,60 @@ def _flatten_feature_inputs(value: object) -> torch.Tensor | None:
         if len(elems) == 1:
             return elems[0]
         return torch.cat(elems, dim=0)
+    return None
+
+
+def _summarize_tensor(value: object) -> tuple[int | None, str | None]:
+    if value is None:
+        return None, None
+    if isinstance(value, torch.Tensor):
+        flat = value.detach().reshape(-1)
+        length = int(flat.numel())
+        if length == 0:
+            return 0, "empty"
+        sample = flat[: min(64, length)]
+        if sample.device.type != "cpu":
+            sample = sample.to("cpu")
+        digest = hashlib.sha1(sample.numpy().tobytes()).hexdigest()[:8]
+        return length, digest
+    if isinstance(value, np.ndarray):
+        flat = value.reshape(-1)
+        length = int(flat.size)
+        if length == 0:
+            return 0, "empty"
+        sample = flat[: min(64, length)]
+        digest = hashlib.sha1(sample.tobytes()).hexdigest()[:8]
+        return length, digest
+    if isinstance(value, (list, tuple)):
+        length = len(value)
+        if length == 0:
+            return 0, "empty"
+        sample = value[: min(64, length)]
+        digest = hashlib.sha1(str(sample).encode("utf-8")).hexdigest()[:8]
+        return length, digest
+    return None, None
+
+
+def _mask_true_count(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        mask = value
+        if mask.dtype != torch.bool:
+            mask = mask != 0
+        return int(mask.sum().item())
+    if isinstance(value, np.ndarray):
+        return int(np.count_nonzero(value))
+    if isinstance(value, (list, tuple)):
+        return int(sum(1 for v in value if v))
+    return None
+
+
+def _shape_tuple(value: object) -> tuple[int, ...] | None:
+    if isinstance(value, torch.Tensor):
+        return tuple(int(x) for x in value.shape)
+    if isinstance(value, np.ndarray):
+        return tuple(int(x) for x in value.shape)
     return None
 
 
@@ -332,6 +388,33 @@ class KimiAudioASRMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _kimia_field_config(hf_inputs)
 
+    def _log_prompt_stats(
+        self,
+        audio_items: DictEmbeddingItems,
+        placeholder_len: int,
+    ) -> None:
+        request_id = get_current_request_id()
+        for item_idx in range(audio_items.get_count()):
+            data = audio_items.get(item_idx)
+            audio_len, audio_hash = _summarize_tensor(data.get("audio_input_ids"))
+            text_len, text_hash = _summarize_tensor(data.get("text_input_ids"))
+            mask_true = _mask_true_count(data.get("is_continuous_mask"))
+            whisper_shape = _shape_tuple(data.get("whisper_input_features"))
+            logger.info(
+                "[Kimi-Audio] prompt_stats request_id=%s item=%d "
+                "audio_len=%s audio_hash=%s text_len=%s text_hash=%s "
+                "mask_true=%s whisper_shape=%s placeholder_len=%s",
+                request_id,
+                item_idx,
+                audio_len,
+                audio_hash,
+                text_len,
+                text_hash,
+                mask_true,
+                whisper_shape,
+                placeholder_len,
+            )
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -367,6 +450,7 @@ class KimiAudioASRMultiModalProcessor(
         placeholder_id = 151666
 
         seq = _placeholder_seq(0)
+        self._log_prompt_stats(audio_items, len(seq))
 
         return [
             PromptReplacement(
