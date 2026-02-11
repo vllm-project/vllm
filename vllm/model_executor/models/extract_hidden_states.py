@@ -13,16 +13,14 @@ from typing import ClassVar
 import torch
 import torch.nn as nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -35,9 +33,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCacheSpec
-
-logger = init_logger(__name__)
-
 
 ########## Custom Ops ########
 
@@ -229,21 +224,14 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         num_heads: int,
         head_size: int,
         cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        num_hidden_states: int = 1,
-        **extra_impl_args,
     ):
         super().__init__()
 
         self.num_heads = num_heads
         self.head_size = head_size
-        self.quant_config = quant_config
         self.layer_name = prefix
-
-        # Get vllm config
-        from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
 
@@ -307,7 +295,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         output = torch.empty(0, device=to_cache.device, dtype=to_cache.dtype)
 
         # todo(fynn): determine if we need to use a custom op here
-        # or if direct call is sufficient
+        # or if direct call only is sufficient
         _ = unified_kv_cache_update(to_cache, self.layer_name)
 
         # Triggers kv_connector transfer via decorator
@@ -327,48 +315,37 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
 
+############ ExtractHiddenStatesModel definition ##########
+
+
 class ExtractHiddenStatesModel(nn.Module):
-    """Model that extracts and caches hidden states without token generation.
-
-    This model is used with the extract_hidden_states speculative decoding method.
-    It processes hidden states from the target model and caches them via a
-    cache-only attention mechanism, optionally transferring them to external storage.
-    """
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.vllm_config = vllm_config
+        self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
         )
         self.num_hidden_states = len(
-            getattr(self.config, "eagle_aux_hidden_state_layer_ids", [])
+            getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
-        # Attention configuration from draft config
-        self.head_size = self.config.head_dim
+        # todo(fynn): Set up a new cache config for the drafter
+        # independent of verifier's cache config
         cache_config = vllm_config.cache_config
 
-        # todo(fynn): loosen this constraint
-        # Currently because we store data in both k and v caches
-        # We need self.hidden_size // self.head_size to be even
-        assert self.hidden_size % (self.head_size * 2) == 0, (
-            "hidden_size // head_size must be even"
-        )
-
-        self.num_kv_heads = (
-            self.hidden_size // (self.head_size * 2)
-        ) * self.num_hidden_states
-
         # Create a single cache-only attention layer
-        # Note: We double the heads to match the combined hidden states format
+        # Note: We set num_heads <- self.num_hidden_states
+        # and head_size <- hidden_size so that we can insert
+        # the hidden states directly into the cache without
+        # reshaping
         self.cache_only_layers = nn.ModuleDict(
             {
                 str(self.target_num_hidden_layers): CacheOnlyAttentionLayer(
-                    num_heads=self.num_kv_heads,
-                    head_size=self.head_size,
+                    num_heads=self.num_hidden_states,
+                    head_size=self.hidden_size,
                     cache_config=cache_config,
                     prefix=maybe_prefix(
                         prefix, f"cache_only_layers.{self.target_num_hidden_layers}"
@@ -385,18 +362,18 @@ class ExtractHiddenStatesModel(nn.Module):
 
         Args:
             hidden_states: Hidden states from target model
-                          shape: [num_tokens, hidden_size * num_hidden_states]
+                          shape: [num_tokens, num_hidden_states, hidden_size]
 
         Returns:
             Tuple of (dummy_output, dummy_output) - both unused
         """
-        # Cache the hidden states
-        cache_layer = self.cache_only_layers[str(self.target_num_hidden_layers)]
+
+        # Call dummy attention layer to cache hidden states
         # Output is ignored - we only care about the KV cache side effects
-        # TODO(fynn): Confirm this doesn't get optimized away when compiled
-        cache_layer(hidden_states)
+        _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)
 
         # Return dummy outputs (required by interface but not used)
+        # todo(fynn): Remove these
         dummy_output = hidden_states.new_zeros(
             (hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states)
         )
