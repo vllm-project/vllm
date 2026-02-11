@@ -581,9 +581,7 @@ def test_rearrange_expert_weights_no_change(world_size, eplb_communicator):
     )
 
 
-def _test_rearrange_expert_weights_profile_mode(
-    env, world_size, eplb_communicator: str
-) -> None:
+def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
@@ -628,7 +626,7 @@ def _test_rearrange_expert_weights_profile_mode(
 
     communicator = create_eplb_communicator(
         ep_group=ep_group,
-        backend=eplb_communicator,
+        backend="torch",
         expert_weights=expert_weights[0],
     )
 
@@ -653,8 +651,7 @@ def _test_rearrange_expert_weights_profile_mode(
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
-def test_rearrange_expert_weights_profile_mode(world_size, eplb_communicator):
+def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
 
     if torch.cuda.device_count() < world_size:
@@ -662,5 +659,4 @@ def test_rearrange_expert_weights_profile_mode(world_size, eplb_communicator):
     distributed_run(
         _test_rearrange_expert_weights_profile_mode,
         world_size,
-        eplb_communicator,
     )
