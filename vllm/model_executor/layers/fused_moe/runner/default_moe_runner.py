@@ -129,30 +129,33 @@ def _moe_forward_shared_new(
     shared_experts_input: torch.Tensor | None,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    layer = get_layer_from_name(layer_name)
+    runner = layer.runner
+
     def reduce_shared_out(shared_out: torch.Tensor) -> torch.Tensor:
         # Reduce shared expert outputs if necessary, since the MLP
         # should have been created with reduce_results=False.
         if (
-            self.reduce_results
+            runner.reduce_results
             and get_tensor_model_parallel_world_size() > 1
-            and self.must_reduce_shared_expert_outputs()
+            and runner.must_reduce_shared_expert_outputs()
         ):
             shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out
 
-    if False and not self.overlap_shared_experts:
-        shared_out = self._shared_experts(hidden_states)
-        # XXXXXXXXXXXx
+    if not runner.overlap_shared_experts:
+        shared_out = runner._shared_experts(hidden_states)
+        # XXXXXXXXXXXXXXXX
         shared_experts = None
 
-    router_logits = self._maybe_gate(hidden_states, router_logits)
-    with self._sequence_parallel_context():
-        if self.use_dp_chunking:
-            shared_out, fused_out = self.forward_impl_chunked(
+    router_logits = runner._maybe_gate(hidden_states, router_logits)
+    with runner._sequence_parallel_context():
+        if runner.use_dp_chunking:
+            shared_out, fused_out = runner.forward_impl_chunked(
                 layer, hidden_states, router_logits
             )
         else:
-            shared_out = fused_out = self.forward_impl(
+            shared_out = fused_out = runner.forward_impl(
                 layer, hidden_states, router_logits
             )
 
@@ -269,6 +272,13 @@ class DefaultMoERunner(MoERunner):
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
+        self.allow_shared_experts_stream = (
+            current_platform.is_cuda()
+            and self.has_separate_shared_experts
+            and not self.use_dp_chunking
+            and self.shared_experts_stream is not None
+        )
+
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
 
@@ -300,14 +310,13 @@ class DefaultMoERunner(MoERunner):
     @property
     def overlap_shared_experts(
         self,
-        shared_experts: torch.nn.Module | None,
     ) -> bool:
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         #   - we are using marlin kernels
         backend = self.moe_config.moe_parallel_config.all2all_backend
-        return shared_experts is not None and not (
+        return self.shared_experts is not None and not (
             (self.enable_eplb and backend != "allgather_reducescatter")
             or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
         )
@@ -515,7 +524,6 @@ class DefaultMoERunner(MoERunner):
     def _apply_quant_method(
         self,
         layer: torch.nn.Module,
-        shared_experts: torch.nn.Module | None,
         hidden_states: torch.Tensor,
         extra_tensor: torch.Tensor | None,
         router_logits: torch.Tensor,
@@ -567,9 +575,7 @@ class DefaultMoERunner(MoERunner):
         else:
             hidden_states = result
 
-        if not run_shared_experts_before and self.has_separate_shared_experts(
-            shared_experts
-        ):
+        if not run_shared_experts_before and self.has_separate_shared_experts:
             assert shared_output is None
             shared_output = self._apply_shared_experts(
                 hidden_states_clone,
@@ -855,15 +861,9 @@ class DefaultMoERunner(MoERunner):
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        self.use_shared_experts_stream = (
-            current_platform.is_cuda()
-            and self.has_separate_shared_experts
-            and not self.use_dp_chunking
-            and self.shared_experts_stream is not None
-            and (
-                hidden_states.shape[0]
-                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            )
+        # TODO(bnell): split this into runtime vs. static parts?
+        self.use_shared_experts_stream = self.allow_shared_experts_stream and (
+            hidden_states.shape[0] <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
 
         # Check if we need to run shared experts before matrix multiply because
