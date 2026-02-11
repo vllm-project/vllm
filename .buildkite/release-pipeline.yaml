@@ -364,32 +364,42 @@ steps:
         # Save cache key for downstream jobs
         buildkite-agent meta-data set "rocm-cache-key" "$${CACHE_KEY}"
 
-        CACHE_STATUS="miss"
+        # Compute ECR cache tag (matches CI pipeline convention)
+        ECR_IMAGE="public.ecr.aws/q9t5s3a7/vllm-release-repo"
+        ECR_CACHE_TAG="$${ECR_IMAGE}:$${CACHE_KEY}-rocm-base"
+
+        # Login to ECR
+        aws ecr-public get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+
+        # Save ECR tag for downstream jobs
+        buildkite-agent meta-data set "rocm-docker-image-ecr-tag" "$${ECR_CACHE_TAG}"
+
+        # Tier 1: Check ECR cache (fastest)
+        ECR_HIT=0
         if [ "$${ROCM_FORCE_REBUILD}" != "true" ]; then
-          CACHE_STATUS=$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
-        else
-          echo "Force rebuild requested, skipping cache check"
+          if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
+            ECR_HIT=1
+          fi
         fi
 
-        if [ "$${CACHE_STATUS}" = "hit" ]; then
+        if [ "$${ECR_HIT}" -eq 1 ]; then
           echo ""
-          echo "CACHE HIT! Downloading pre-built wheels..."
-          echo ""
+          echo "ECR cache HIT: $${ECR_CACHE_TAG}"
+          docker pull "$${ECR_CACHE_TAG}"
+          # Tag for local use
+          docker tag "$${ECR_CACHE_TAG}" "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}"
+
+          # Still need wheels for artifact upload
           .buildkite/scripts/cache-rocm-base-wheels.sh download
 
-          # Set the S3 path for the cached Docker image (for Job 2 to download)
-          S3_ARTIFACT_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
-          buildkite-agent meta-data set "rocm-docker-image-s3-path" "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
-
-          # Mark that we used cache (for Docker image handling)
           buildkite-agent meta-data set "rocm-used-cache" "true"
 
           echo ""
-          echo "Cache download complete. Skipping Docker build."
-          echo "Docker image will be downloaded from: $${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
+          echo "ECR cache download complete. Skipping Docker build."
         else
           echo ""
-          echo "CACHE MISS. Building from scratch..."
+          echo "ECR cache MISS. Building from scratch..."
           echo ""
 
           # Build full base image (for later vLLM build)
@@ -432,25 +442,14 @@ steps:
           echo "Uploading wheels to S3 cache..."
           .buildkite/scripts/cache-rocm-base-wheels.sh upload
 
-          # Export base Docker image for reuse in vLLM build
-          mkdir -p artifacts/rocm-docker-image
-          docker save rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER} | gzip > artifacts/rocm-docker-image/rocm-base-image.tar.gz
-          echo "Docker image size:"
-          ls -lh artifacts/rocm-docker-image/
+          # Push Docker image to ECR cache
+          docker tag "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}" "$${ECR_CACHE_TAG}"
+          docker push "$${ECR_CACHE_TAG}"
 
-          # Upload large Docker image to S3 (also cached by cache key)
-          S3_ARTIFACT_PATH="s3://$${S3_BUCKET}/rocm/cache/$${CACHE_KEY}"
-          echo "Uploading Docker image to $${S3_ARTIFACT_PATH}/"
-          aws s3 cp artifacts/rocm-docker-image/rocm-base-image.tar.gz "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
-
-          # Save the S3 path for downstream jobs
-          buildkite-agent meta-data set "rocm-docker-image-s3-path" "$${S3_ARTIFACT_PATH}/rocm-base-image.tar.gz"
-
-          # Mark that we did NOT use cache
           buildkite-agent meta-data set "rocm-used-cache" "false"
 
           echo ""
-          echo "Build complete. Wheels cached for future builds."
+          echo "Build complete. Wheels cached to S3, Docker image pushed to ECR."
         fi
     artifact_paths:
       - "artifacts/rocm-base-wheels/*.whl"
@@ -495,30 +494,13 @@ steps:
         echo "Downloading wheel artifacts from current build"
         buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
 
-        # Download Docker image from S3 (too large for Buildkite artifacts)
-        DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
-        if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
-          echo "ERROR: rocm-docker-image-s3-path metadata not found"
-          echo "This should have been set by the build-rocm-base-wheels job"
-          exit 1
-        fi
-        echo "Downloading Docker image from $${DOCKER_IMAGE_S3_PATH}"
-        mkdir -p artifacts/rocm-docker-image
-        aws s3 cp "$${DOCKER_IMAGE_S3_PATH}" artifacts/rocm-docker-image/rocm-base-image.tar.gz
-
-        # Load base Docker image and capture the tag
-        echo "Loading base Docker image..."
-        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
-        echo "$${LOAD_OUTPUT}"
-        # Extract the actual loaded image tag from "Loaded image: <tag>" output
-        # This avoids picking up stale images (like rocm/vllm-dev:nightly) already on the agent
-        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
-        if [ -z "$${BASE_IMAGE_TAG}" ]; then
-          echo "ERROR: Failed to extract image tag from docker load output"
-          echo "Load output was: $${LOAD_OUTPUT}"
-          exit 1
-        fi
-        echo "Loaded base image: $${BASE_IMAGE_TAG}"
+        # Pull base image from ECR
+        ECR_TAG="$$(buildkite-agent meta-data get rocm-docker-image-ecr-tag)"
+        echo "Pulling base image from ECR: $${ECR_TAG}"
+        aws ecr-public get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+        docker pull "$${ECR_TAG}"
+        BASE_IMAGE_TAG="$${ECR_TAG}"
 
         # Prepare base wheels for Docker build context
         mkdir -p docker/context/base-wheels
@@ -665,22 +647,11 @@ steps:
         aws ecr-public get-login-password --region us-east-1 | \
           docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
 
-        # Download Docker image from S3 (set by build-rocm-base-wheels)
-        DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
-        if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
-          echo "ERROR: rocm-docker-image-s3-path metadata not found"
-          exit 1
-        fi
-
-        echo "Downloading base image from $${DOCKER_IMAGE_S3_PATH}"
-        mkdir -p artifacts/rocm-docker-image
-        aws s3 cp "$${DOCKER_IMAGE_S3_PATH}" artifacts/rocm-docker-image/rocm-base-image.tar.gz
-
-        # Load base Docker image
-        echo "Loading base Docker image..."
-        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
-        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
-        echo "Loaded base image: $${BASE_IMAGE_TAG}"
+        # Pull base image from ECR (already logged in above)
+        ECR_TAG="$$(buildkite-agent meta-data get rocm-docker-image-ecr-tag)"
+        echo "Pulling base image from ECR: $${ECR_TAG}"
+        docker pull "$${ECR_TAG}"
+        BASE_IMAGE_TAG="$${ECR_TAG}"
 
         # Tag and push the base image to ECR
         docker tag "$${BASE_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
