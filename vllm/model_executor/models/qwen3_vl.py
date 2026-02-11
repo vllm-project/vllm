@@ -803,8 +803,11 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
 
+        mm_processor_kwargs = mm_processor_kwargs or {}
         target_image_width, target_image_height = (
-            self.info.get_image_size_with_most_features()
+            self.info.get_image_size_with_most_features(
+                max_pixels=mm_processor_kwargs.get("max_pixels", None),
+            )
         )
 
         # treat videos as special images
