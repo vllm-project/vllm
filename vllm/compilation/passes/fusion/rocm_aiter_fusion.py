@@ -633,7 +633,7 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         )
 
         cc = config.compilation_config
-        self.max_token_num = cc.pass_config.aiter_rope_kvcache_fusion_max_token_num
+        self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
         for _, layer in attn_layers.items():
@@ -649,17 +649,6 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-        # TODO (Rohan138): Remove before merging!
-        graph.print_tabular()
-        # from torch.fx.passes.graph_drawer import FxGraphDrawer
-
-        # gm = graph.owning_module
-        # drawer = FxGraphDrawer(
-        #     gm, "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
-        # )
-        # drawer.get_dot_graph().write_svg(
-        #     "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass.svg"
-        # )
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         # This pass works best for the small-batch decode setting.

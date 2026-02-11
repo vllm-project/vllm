@@ -1375,7 +1375,8 @@ class VllmConfig:
                 else:
                     logger.debug(
                         "Max num batched tokens below rope+kvcache fusion threshold, "
-                        "rope+kvcache fusion will be enabled for all num_tokens."
+                        "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
                     )
 
         if compilation_config.compile_ranges_split_points is not None:

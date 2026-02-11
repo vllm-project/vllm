@@ -124,7 +124,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # Create dummy KV cache
+        # Fetch the attention backend and kv cache shape and stride order
         attn_backend = self.attn.attn_backend
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
@@ -133,15 +133,21 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-        if self.attn.impl.kv_cache_dtype.startswith("fp8"):  # type: ignore[attr-defined]
-            kv_cache_dtype = FP8_DTYPE
-        else:
-            kv_cache_dtype = self.dtype
-        kv_cache = torch.empty(
-            *kv_cache_shape,
-            dtype=kv_cache_dtype,
+
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        inv_order = [
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+        ]
+
+        # Create dummy KV cache
+        raw_tensor = torch.zeros(
+            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
+            dtype=self.kv_cache_dtype,
             device=self.device,
-        ).permute(kv_cache_stride_order)
+        )
+        raw_tensor = raw_tensor.view(kv_cache_shape)
+        kv_cache = raw_tensor.permute(*inv_order)
+
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
