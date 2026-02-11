@@ -21,6 +21,7 @@ This is a native integration:
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
@@ -134,22 +135,6 @@ def _kimia_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         text_input_ids=MultiModalFieldConfig.batched("audio"),
         audio_input_ids=MultiModalFieldConfig.batched("audio"),
     )
-
-
-def _has_nonzero_mm_inputs(*items: object) -> bool:
-    for item in items:
-        if isinstance(item, torch.Tensor):
-            if item.numel() > 0 and bool(torch.any(item)):
-                return True
-        elif isinstance(item, (list, tuple)):
-            for elem in item:
-                if (
-                    isinstance(elem, torch.Tensor)
-                    and elem.numel() > 0
-                    and bool(torch.any(elem))
-                ):
-                    return True
-    return False
 
 
 def _flatten_seq_inputs(value: object) -> torch.Tensor | None:
@@ -504,62 +489,47 @@ class KimiAudioForConditionalGeneration(
             whisper_feats = flat_whisper.to(device=device, dtype=emb.dtype)
 
             if whisper_feats.shape[0] != emb.shape[0]:
-                # Kimi-Audio can provide continuous whisper features only for the
-                # positions where `is_continuous_mask` is true. In this case,
-                # `whisper_feats` length should match the number of true mask
-                # entries, not the full token sequence length.
-                if not isinstance(flat_mask, torch.Tensor):
-                    return emb
-
-                mask = flat_mask.to(device=device, dtype=torch.bool)
-                if mask.dim() != 1 or mask.shape[0] != emb.shape[0]:
-                    return emb
-
-                true_count = int(mask.sum().item())
-                if true_count != whisper_feats.shape[0]:
-                    return emb
-
-                # Project whisper features to hidden size when needed.
-                if whisper_feats.shape[-1] != emb.shape[-1]:
-                    if not hasattr(self.model, "vq_adaptor"):
-                        return emb
-                    whisper_sbF = whisper_feats.unsqueeze(1)
-                    whisper_feats = self.model.vq_adaptor(whisper_sbF).squeeze(1)
-
-                emb = emb.clone()
-                emb[mask] = whisper_feats.to(device=device, dtype=emb.dtype)
-                return emb
-
-            if whisper_feats.shape[-1] == emb.shape[-1]:
-                whisper_emb = whisper_feats
-            else:
-                # vq_adaptor expects [S, B, F]. Convert from [S, F] to [S, 1, F].
-                whisper_sbF = (
-                    whisper_feats.unsqueeze(1)
-                    if whisper_feats.dim() == 2
-                    else whisper_feats
+                logger.warning(
+                    "[Kimi-Audio] whisper_input_features length mismatch: "
+                    "expected %d tokens but got %d features; skipping conditioning.",
+                    emb.shape[0],
+                    whisper_feats.shape[0],
                 )
-                # Use the model's vq_adaptor to project raw Whisper features.
-                whisper_emb = self.model.vq_adaptor(whisper_sbF).squeeze(1)
+            else:
+                if whisper_feats.shape[-1] == emb.shape[-1]:
+                    whisper_emb = whisper_feats
+                else:
+                    # vq_adaptor expects [S, B, F]. Convert from [S, F] to [S, 1, F].
+                    whisper_sbF = (
+                        whisper_feats.unsqueeze(1)
+                        if whisper_feats.dim() == 2
+                        else whisper_feats
+                    )
+                    # Use the model's vq_adaptor to project raw Whisper features.
+                    whisper_emb = self.model.vq_adaptor(whisper_sbF).squeeze(1)
 
-            if isinstance(flat_mask, torch.Tensor):
-                mask = flat_mask.to(device)
-                if mask.dtype != torch.bool:
-                    mask = mask.to(torch.bool)
-                if mask.dim() != 1:
-                    mask = mask.reshape(-1)
+                if isinstance(flat_mask, torch.Tensor):
+                    mask = flat_mask.to(device)
+                    if mask.dtype != torch.bool:
+                        mask = mask.to(torch.bool)
+                    if mask.dim() != 1:
+                        mask = mask.reshape(-1)
 
-                mask_f = mask[:, None]
-                whisper_emb = whisper_emb * mask_f
+                    mask_f = mask[:, None]
+                    whisper_emb = whisper_emb * mask_f
 
-                sqrt2 = torch.sqrt(torch.tensor(2.0, dtype=emb.dtype, device=device))
-                encoder_add = (emb + whisper_emb) * sqrt2
-                emb = emb * (~mask_f) + encoder_add * mask_f
+                    # Use a Python scalar constant to keep CUDA graph capture
+                    # allocation-free.
+                    sqrt2 = math.sqrt(2.0)
+                    encoder_add = (emb + whisper_emb) * sqrt2
+                    emb = emb * (~mask_f) + encoder_add * mask_f
 
         # Add aligned text embeddings (instruction etc.)
-        if isinstance(flat_text_ids, torch.Tensor) and torch.any(flat_text_ids != 0):
+        if isinstance(flat_text_ids, torch.Tensor):
             text_ids = flat_text_ids.to(device)
-            emb = emb + self.model.embed_tokens(text_ids)
+            text_emb = self.model.embed_tokens(text_ids)
+            text_mask = (text_ids != 0).to(dtype=emb.dtype)[:, None]
+            emb = emb + text_emb * text_mask
 
         return emb
 
@@ -712,6 +682,39 @@ class KimiAudioForConditionalGeneration(
             if isinstance(whisper_feats, torch.Tensor) and whisper_feats.dim() == 2:
                 whisper_feats = whisper_feats.unsqueeze(0)
 
+            if (
+                isinstance(whisper_feats, torch.Tensor)
+                and isinstance(is_continuous_mask, torch.Tensor)
+                and whisper_feats.dim() == 3
+                and is_continuous_mask.dim() == 2
+                and whisper_feats.shape[0] == is_continuous_mask.shape[0]
+                and whisper_feats.shape[1] != is_continuous_mask.shape[1]
+            ):
+                # Some Kimi-Audio preprocessing paths return whisper features only
+                # for masked (continuous) positions. Expand to full token length so
+                # the model forward path stays CUDA-graph friendly.
+                if whisper_feats.shape[0] != 1:
+                    logger.warning(
+                        "[Kimi-Audio] Unexpected batch size for whisper features: %d",
+                        whisper_feats.shape[0],
+                    )
+                else:
+                    mask = is_continuous_mask[0].to(torch.bool)
+                    idx = mask.nonzero(as_tuple=False).squeeze(-1)
+                    if idx.numel() == whisper_feats.shape[1]:
+                        full = whisper_feats.new_zeros(
+                            (1, is_continuous_mask.shape[1], whisper_feats.shape[2])
+                        )
+                        full[0, idx] = whisper_feats[0]
+                        whisper_feats = full
+                    else:
+                        logger.warning(
+                            "[Kimi-Audio] Mask/feature length mismatch: "
+                            "mask_true=%d features=%d",
+                            idx.numel(),
+                            whisper_feats.shape[1],
+                        )
+
             # Ensure returned tensors do not require grad; vLLM may hash tensors.
             with torch.inference_mode():
                 whisper_input_features = whisper_feats.detach()
@@ -801,96 +804,84 @@ class KimiAudioForConditionalGeneration(
             isinstance(true_input_ids, torch.Tensor)
             and whisper_input_features is not None
         ):
-            has_real_mm_inputs = _has_nonzero_mm_inputs(
-                whisper_input_features,
-                is_continuous_mask,
-                text_input_ids,
-                audio_input_ids,
+            # Get the original inputs_embeds from the base model if not provided
+            original_inputs_embeds = kwargs.get("inputs_embeds")
+            if original_inputs_embeds is None and len(args) > 2:
+                # inputs_embeds is the third argument in some model signatures
+                original_inputs_embeds = args[2] if len(args) > 2 else None
+
+            # Compute the new embeddings using our mixing path
+            mixed_embeds = self.embed_input_ids(
+                true_input_ids,
+                whisper_input_features=whisper_input_features,
+                is_continuous_mask=is_continuous_mask,
+                text_input_ids=text_input_ids,
+                audio_input_ids=audio_input_ids,
             )
 
-            if has_real_mm_inputs:
-                # Get the original inputs_embeds from the base model if not provided
-                original_inputs_embeds = kwargs.get("inputs_embeds")
-                if original_inputs_embeds is None and len(args) > 2:
-                    # inputs_embeds is the third argument in some model signatures
-                    original_inputs_embeds = args[2] if len(args) > 2 else None
+            # Ensure the mixed embeddings match the expected sequence length
+            # to avoid rotary embedding mismatches with positions tensor
+            if original_inputs_embeds is not None:
+                if mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 2:
+                    mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
 
-                # Compute the new embeddings using our mixing path
-                mixed_embeds = self.embed_input_ids(
-                    true_input_ids,
-                    whisper_input_features=whisper_input_features,
-                    is_continuous_mask=is_continuous_mask,
-                    text_input_ids=text_input_ids,
-                    audio_input_ids=audio_input_ids,
-                )
+                if mixed_embeds.dim() == 2:
+                    expected_seq_len = original_inputs_embeds.shape[0]
+                    actual_seq_len = mixed_embeds.shape[0]
 
-                # Ensure the mixed embeddings match the expected sequence length
-                # to avoid rotary embedding mismatches with positions tensor
-                if original_inputs_embeds is not None:
-                    if mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 2:
-                        mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
-
-                    if mixed_embeds.dim() == 2:
-                        expected_seq_len = original_inputs_embeds.shape[0]
-                        actual_seq_len = mixed_embeds.shape[0]
-
-                        if expected_seq_len != actual_seq_len:
-                            # Pad or truncate mixed embeddings to match expected length.
-                            if actual_seq_len > expected_seq_len:
-                                # Truncate to expected length
-                                mixed_embeds = mixed_embeds[:expected_seq_len]
+                    if expected_seq_len != actual_seq_len:
+                        # Pad or truncate mixed embeddings to match expected length.
+                        if actual_seq_len > expected_seq_len:
+                            # Truncate to expected length
+                            mixed_embeds = mixed_embeds[:expected_seq_len]
+                        else:
+                            # Pad to expected length using the last embedding
+                            if actual_seq_len > 0:
+                                padding = mixed_embeds[-1:].expand(
+                                    expected_seq_len - actual_seq_len, -1
+                                )
+                                mixed_embeds = torch.cat([mixed_embeds, padding], dim=0)
                             else:
-                                # Pad to expected length using the last embedding
-                                if actual_seq_len > 0:
-                                    padding = mixed_embeds[-1:].expand(
-                                        expected_seq_len - actual_seq_len, -1
-                                    )
-                                    mixed_embeds = torch.cat(
-                                        [mixed_embeds, padding], dim=0
-                                    )
-                                else:
-                                    # If no embeddings exist, create zero embeddings
-                                    device = mixed_embeds.device
-                                    dtype = mixed_embeds.dtype
-                                    hidden_size = mixed_embeds.shape[-1]
-                                    mixed_embeds = torch.zeros(
+                                # If no embeddings exist, create zero embeddings
+                                device = mixed_embeds.device
+                                dtype = mixed_embeds.dtype
+                                hidden_size = mixed_embeds.shape[-1]
+                                mixed_embeds = torch.zeros(
+                                    expected_seq_len,
+                                    hidden_size,
+                                    device=device,
+                                    dtype=dtype,
+                                )
+                elif mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 3:
+                    expected_seq_len = original_inputs_embeds.shape[1]
+                    actual_seq_len = mixed_embeds.shape[1]
+
+                    if expected_seq_len != actual_seq_len:
+                        if actual_seq_len > expected_seq_len:
+                            mixed_embeds = mixed_embeds[:, :expected_seq_len, :]
+                        else:
+                            if actual_seq_len > 0:
+                                padding = mixed_embeds[:, -1:, :].expand(
+                                    -1,
+                                    expected_seq_len - actual_seq_len,
+                                    -1,
+                                )
+                                mixed_embeds = torch.cat([mixed_embeds, padding], dim=1)
+                            else:
+                                device = mixed_embeds.device
+                                dtype = mixed_embeds.dtype
+                                hidden_size = mixed_embeds.shape[-1]
+                                mixed_embeds = torch.zeros(
+                                    (
+                                        mixed_embeds.shape[0],
                                         expected_seq_len,
                                         hidden_size,
-                                        device=device,
-                                        dtype=dtype,
-                                    )
-                    elif mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 3:
-                        expected_seq_len = original_inputs_embeds.shape[1]
-                        actual_seq_len = mixed_embeds.shape[1]
+                                    ),
+                                    device=device,
+                                    dtype=dtype,
+                                )
 
-                        if expected_seq_len != actual_seq_len:
-                            if actual_seq_len > expected_seq_len:
-                                mixed_embeds = mixed_embeds[:, :expected_seq_len, :]
-                            else:
-                                if actual_seq_len > 0:
-                                    padding = mixed_embeds[:, -1:, :].expand(
-                                        -1,
-                                        expected_seq_len - actual_seq_len,
-                                        -1,
-                                    )
-                                    mixed_embeds = torch.cat(
-                                        [mixed_embeds, padding], dim=1
-                                    )
-                                else:
-                                    device = mixed_embeds.device
-                                    dtype = mixed_embeds.dtype
-                                    hidden_size = mixed_embeds.shape[-1]
-                                    mixed_embeds = torch.zeros(
-                                        (
-                                            mixed_embeds.shape[0],
-                                            expected_seq_len,
-                                            hidden_size,
-                                        ),
-                                        device=device,
-                                        dtype=dtype,
-                                    )
-
-                kwargs["inputs_embeds"] = mixed_embeds
+            kwargs["inputs_embeds"] = mixed_embeds
 
         out = super().forward(*args, **kwargs)
 

@@ -326,7 +326,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
-                structured_outputs = StructuredOutputsParams(
+                structured_outputs = StructuredOutputsParams(  # type: ignore[call-arg]
                     json=response_format.schema_
                 )
             elif response_format.type == "json_object":
