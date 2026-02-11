@@ -5,8 +5,7 @@
 vLLM does not depend on the external Oink repository/package. When an external
 plugin registers torch.library.custom_op entrypoints under the `oink::`
 namespace (e.g. via vLLM's general_plugins mechanism) and
-`VLLM_USE_OINK_RMSNORM=1` is set, vLLM can route eligible RMSNorm calls to
-those ops.
+`VLLM_USE_OINK_OPS=1` is set, vLLM can route eligible calls to those ops.
 
 This module provides:
 - A single place to probe Oink op availability at module init time
@@ -47,7 +46,7 @@ def is_oink_available_for_device(device_index: int) -> bool:
     (e.g., in RMSNorm.__init__), not in the forward path.
 
     External plugins are expected to gate registration on SM100+ and
-    VLLM_USE_OINK_RMSNORM=1, so if the ops are present they should be usable.
+    VLLM_USE_OINK_OPS=1, so if the ops are present they should be usable.
     """
     if not torch.cuda.is_available():
         return False

@@ -25,6 +25,8 @@ def _can_view_as_2d(x: torch.Tensor) -> bool:
         return False
     if x.dim() == 2:
         return True
+    # For a view(-1, N) to be valid, all leading dims must be contiguous with
+    # respect to each other (size-1 dims are ignored).
     for dim in range(x.dim() - 1):
         # Strides for size-1 dims are irrelevant and can be arbitrary.
         if x.size(dim + 1) != 1 and x.stride(dim) != x.stride(dim + 1) * x.size(
@@ -172,7 +174,7 @@ class RMSNorm(CustomOp):
         if (
             not current_platform.is_rocm()
             and torch.cuda.is_available()
-            and bool(getattr(envs, "VLLM_USE_OINK_RMSNORM", False))
+            and bool(getattr(envs, "VLLM_USE_OINK_OPS", False))
         ):
             # NOTE: vLLM disables custom ops by default when using Inductor.
             # If this op is disabled, CustomOp will dispatch to forward_native,
@@ -187,7 +189,7 @@ class RMSNorm(CustomOp):
                 except Exception:
                     custom_ops = ["<unknown>"]
                 logger.warning_once(
-                    "VLLM_USE_OINK_RMSNORM=1 but the `rms_norm` custom op is "
+                    "VLLM_USE_OINK_OPS=1 but the `rms_norm` custom op is "
                     "disabled (CompilationConfig.custom_ops=%s). Enable it via "
                     "`compilation_config={'custom_ops': ['none', '+rms_norm']}` "
                     "(or `['all']`) to let vLLM call into torch.ops.oink.*.",
@@ -207,7 +209,7 @@ class RMSNorm(CustomOp):
                     # If anything goes wrong (no Oink install, CPU-only env, etc.),
                     # silently fall back to the built-in RMSNorm path.
                     logger.warning_once(
-                        "VLLM_USE_OINK_RMSNORM=1 but failed to initialize Oink "
+                        "VLLM_USE_OINK_OPS=1 but failed to initialize Oink "
                         "RMSNorm; falling back to vLLM RMSNorm. Error: %s",
                         e,
                     )
