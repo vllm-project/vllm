@@ -43,7 +43,7 @@ from vllm.model_executor.models.internvl import (
     get_internvl_target_ratios,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
+from vllm.model_executor.models.nemotron_3 import Nemotron3ForCausalLM
 from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
 from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
@@ -500,12 +500,15 @@ class DynamicResolutionImageTiler:
         # Add thumbnail embeddings if enabled and image area is below threshold
         num_tiles = 1  # Base dynamic resolution image
 
-        return self.DynamicResolutionParams(
-            media=media,
-            num_tiles=num_tiles,
-            num_embeddings=num_embeddings,
-            patch_size=(target_patch_width, target_patch_height),
-        ), token_count
+        return (
+            self.DynamicResolutionParams(
+                media=media,
+                num_tiles=num_tiles,
+                num_embeddings=num_embeddings,
+                patch_size=(target_patch_width, target_patch_height),
+            ),
+            token_count,
+        )
 
     def compute_params(
         self,
@@ -2123,15 +2126,15 @@ class NemotronH_Nano_VL_V2(
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
-        return NemotronHForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
+        return Nemotron3ForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: "VllmConfig"):
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
-        return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+        return Nemotron3ForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
 
     @classmethod
     def get_mamba_state_copy_func(cls):
-        return NemotronHForCausalLM.get_mamba_state_copy_func()
+        return Nemotron3ForCausalLM.get_mamba_state_copy_func()

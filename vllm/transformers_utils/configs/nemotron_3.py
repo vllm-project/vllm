@@ -15,7 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NemotronH model configuration"""
+"""Nemotron3 model configuration"""
 
 import regex as re
 from transformers.configuration_utils import PretrainedConfig
@@ -24,18 +24,18 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 
-class NemotronHConfig(PretrainedConfig):
+class Nemotron3Config(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a
-    [`NemotronHModel`]. It is used to instantiate a NemotronH model according
+    [`Nemotron3Model`]. It is used to instantiate a Nemotron3 model according
     to the specified arguments, defining the model architecture. Instantiating
     a configuration with the defaults will yield a similar configuration to
     that of the NemotronH-v0.1 model.
     Args:
         vocab_size (`int`, *optional*, defaults to 131072):
-            Vocabulary size of the NemotronH model. Defines the number of
+            Vocabulary size of the Nemotron3 model. Defines the number of
             different tokens that can be represented by the `inputs_ids`
-            passed when calling [`NemotronHModel`]
+            passed when calling [`Nemotron3Model`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be
             tied. Note that this is only relevant if the model has an output
@@ -139,7 +139,7 @@ class NemotronHConfig(PretrainedConfig):
             Whether to rescale the pre-normalization residual connections.
     """
 
-    model_type = "nemotron_h"
+    model_type = "nemotron_3"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -273,12 +273,16 @@ class NemotronHConfig(PretrainedConfig):
     @property
     def layers_block_type(self):
         return [
-            "mamba"
-            if self.hybrid_override_pattern[i] == "M"
-            else "attention"
-            if self.hybrid_override_pattern[i] == "*"
-            else "mlp"
-            if self.hybrid_override_pattern[i] == "-"
-            else "moe"
+            (
+                "mamba"
+                if self.hybrid_override_pattern[i] == "M"
+                else (
+                    "attention"
+                    if self.hybrid_override_pattern[i] == "*"
+                    else "mlp"
+                    if self.hybrid_override_pattern[i] == "-"
+                    else "moe"
+                )
+            )
             for i in range(self.num_hidden_layers)
         ]

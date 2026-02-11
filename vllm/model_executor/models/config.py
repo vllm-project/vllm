@@ -562,10 +562,10 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
-class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
+class Nemotron3ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
+        """Update mamba_ssm_cache_dtype for Nemotron3 models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
         float16 if not specified.
         """
@@ -576,7 +576,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
                 hf_config, "mamba_ssm_cache_dtype", "float16"
             )
             logger.info(
-                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                "Updating mamba_ssm_cache_dtype to '%s' for Nemotron3 model",
                 mamba_ssm_cache_dtype,
             )
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
@@ -609,7 +609,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
-    "NemotronHForCausalLM": NemotronHForCausalLMConfig,
-    "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "NemotronHForCausalLM": Nemotron3ForCausalLMConfig,
+    "Nemotron3ForCausalLM": Nemotron3ForCausalLMConfig,
+    "Nemotron3PuzzleForCausalLM": Nemotron3ForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
 }

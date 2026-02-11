@@ -688,7 +688,7 @@ def get_model_params(config):
         "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
         "Glm4MoeLiteForCausalLM",
-        "NemotronHForCausalLM",
+        "Nemotron3ForCausalLM",
         "MistralLarge3ForCausalLM",
     ):
         E = config.n_routed_experts

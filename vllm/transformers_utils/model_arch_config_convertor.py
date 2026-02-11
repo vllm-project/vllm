@@ -102,7 +102,7 @@ class ModelArchConfigConvertorBase:
         )
 
     def get_num_experts_from_block_configs(self) -> int:
-        """Check block_configs for heterogeneous models (e.g., NemotronH).
+        """Check block_configs for heterogeneous models (e.g., Nemotron3).
 
         For heterogeneous models with varying expert counts per layer,
         returns the MAX to ensure all expert weights can be loaded.

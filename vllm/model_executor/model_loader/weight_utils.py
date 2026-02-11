@@ -223,10 +223,12 @@ def convert_bin_to_safetensor_file(
     sf_size = os.stat(sf_filename).st_size
     pt_size = os.stat(pt_filename).st_size
     if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(f"""The file size different is more than 1%:
+        raise RuntimeError(
+            f"""The file size different is more than 1%:
          - {sf_filename}: {sf_size}
          - {pt_filename}: {pt_size}
-         """)
+         """
+        )
 
     # check if the tensors are the same
     reloaded = load_file(sf_filename)
@@ -1205,7 +1207,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
-        # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
+        # Nemotron3 format: .mixer.{k,v}_proj.{k,v}_scale ->
         # .mixer.attn.{k,v}_scale
         (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
