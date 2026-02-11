@@ -55,6 +55,12 @@ steps:
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
+- label: Model strategy test
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies: []
+  commands:
+    - pytest -v -s models/nightly/llama.py
+
 - label: Transformers Nightly Models
   working_dir: "/vllm-workspace/"
   optional: true
