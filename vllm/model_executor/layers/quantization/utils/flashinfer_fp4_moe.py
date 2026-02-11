@@ -515,8 +515,11 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         bias = getattr(layer.runner.router, "e_score_correction_bias", None)
         # NOTE(rob): update this to check for monolithic kernel once
         # we land the TRTLLM MK PR. EPLB currently uses non-monolithic kernel.
+        # FIXME: there are multiple copies of the e_score_correction_bias
+        # held by different layers right now (@bnell: need to fix this), so
+        # we apply the cast inplace to get around this.
         if bias is not None and not layer.enable_eplb:
-            layer.runner.router.e_score_correction_bias = bias.to(torch.bfloat16)
+            layer.runner.router.e_score_correction_bias.data = bias.to(torch.bfloat16)
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
