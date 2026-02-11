@@ -607,7 +607,7 @@ class SamplingParams(
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(tokenizer, structured_outputs_config)
+        self._validate_structured_outputs(structured_outputs_config, tokenizer)
 
     def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
         allowed_token_ids = self.allowed_token_ids
