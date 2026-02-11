@@ -5,7 +5,6 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from torch._ops import OpOverload
 
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
@@ -15,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
 
@@ -332,9 +332,11 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
 
     FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
 
-    def __init__(self, quant_op: OpOverload) -> None:
+    def __init__(self) -> None:
         self.silu_and_mul_matcher = MatcherSiluAndMul()
-        self.quant_op = quant_op
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key=kFp8Static128BlockSym, match_rocm_aiter=True
+        )
 
     def get_inputs(self) -> list[torch.Tensor]:
         return [
@@ -346,7 +348,7 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = self.silu_and_mul_matcher(input)
-            at2 = self.quant_op(at1, 128)
+            at2 = self.quant_matcher(at1, 128)
             return at2[0], at2[1]
 
         def replacement(
@@ -370,11 +372,6 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
     https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
     """
 
-    AITER_GROUP_FP8_QUANT_OP = rocm_aiter_ops.get_group_quant_op()
-    TRITON_GROUP_FP8_QUANT_OP = torch.ops.vllm.triton_per_token_group_quant_fp8.default
-
-    QUANT_OPS = [AITER_GROUP_FP8_QUANT_OP, TRITON_GROUP_FP8_QUANT_OP]
-
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
@@ -383,8 +380,7 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_silu_mul_fp8_group_quant_fusion_pass"
         )
 
-        for quant_op in self.QUANT_OPS:
-            AiterSiluMulFp8GroupQuantPattern(quant_op).register(self.patterns)
+        AiterSiluMulFp8GroupQuantPattern().register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

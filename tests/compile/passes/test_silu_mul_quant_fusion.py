@@ -148,6 +148,9 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
             weight_group_shape=GroupShape(128, 128),
             act_quant_group_shape=GroupShape(1, 128),
             cutlass_block_fp8_supported=False,
+            # this parameter cannot always be True,
+            # it depends on the VLLM_ROCM_USE_AITER
+            # and VLLM_ROCM_USE_AITER_LINEAR environment variables
             use_aiter_and_is_supported=True,
         )
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
@@ -191,7 +194,7 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
         (TestSiluMulNvfp4QuantModel, False, None),
-        (TestSiluMulGroupFp8QuantModel, False, None),
+        (TestSiluMulGroupFp8QuantModel, True, None),
     ],
 )
 @pytest.mark.skipif(
@@ -209,6 +212,7 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: FP8ScaledMMLinearKernel | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
@@ -235,13 +239,16 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND:
+        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]

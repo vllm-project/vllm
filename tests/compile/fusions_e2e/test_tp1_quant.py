@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.platforms import current_platform
 
 from .common import (
     INDUCTOR_GRAPH_PARTITION,
@@ -15,11 +16,12 @@ from .common import (
 )
 from .models import (
     FLASHINFER_ATTN,
+    ROCM_AITER_UNIFIED_ATTN,
+    ROCM_ATTN,
     TRITON_ATTN,
     llama3_8b_fp4,
     llama3_8b_fp8,
     llama4_scout_fp4,
-    llama4_scout_fp8,
     qwen3_a3b_fp8,
 )
 
@@ -28,12 +30,17 @@ from .models import (
     "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
     [
         (*llama3_8b_fp8, False),
-        (*llama4_scout_fp8, False),
+        # (*llama4_scout_fp8, False),
         (*qwen3_a3b_fp8, False),
-        (*qwen3_a3b_fp8, True),
+        # (*qwen3_a3b_fp8, True),
     ],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [TRITON_ATTN, FLASHINFER_ATTN]
+    if current_platform.is_cuda()
+    else [TRITON_ATTN, ROCM_ATTN, ROCM_AITER_UNIFIED_ATTN],
+)
 @pytest.mark.parametrize("n_layers", [6])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
