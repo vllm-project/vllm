@@ -98,16 +98,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "pplx":
-                from .all2all import PPLXAll2AllManager
-
-                logger.warning(
-                    "The 'pplx' all2all backend is deprecated and will be "
-                    "removed in v0.17.0. Please migrate to "
-                    "'deepep_high_throughput', 'deepep_low_latency', or "
-                    "'flashinfer_all2allv' backends instead."
-                )
-                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
             elif self.all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
@@ -278,7 +268,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.ca_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
-            self.all2all_manager = None
+            self.all2all_manager = None  # type: ignore[assignment]
 
     def all_gatherv(
         self,

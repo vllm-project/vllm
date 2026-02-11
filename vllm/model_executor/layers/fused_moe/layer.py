@@ -738,10 +738,6 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_ep
 
     @property
-    def use_pplx_kernels(self):
-        return self.moe_parallel_config.use_pplx_kernels
-
-    @property
     def use_deepep_ht_kernels(self):
         return self.moe_parallel_config.use_deepep_ht_kernels
 
@@ -760,8 +756,7 @@ class FusedMoE(CustomOp):
     @property
     def use_dp_chunking(self) -> bool:
         return (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
+            self.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_parallel_config.use_mori_kernels
             or self.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK

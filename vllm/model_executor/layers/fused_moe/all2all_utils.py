@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
 import torch
 
@@ -24,16 +25,11 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_mori
 
 logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
-    if has_pplx():
-        from .pplx_prepare_finalize import (
-            PplxPrepareAndFinalize,
-            pplx_hidden_dim_scale_bytes,
-        )
     if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (
@@ -120,51 +116,10 @@ def maybe_make_prepare_finalize(
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
-    if moe.use_pplx_kernels:
-        assert quant_config is not None
-
-        hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
-            moe.max_num_tokens,
-            moe.hidden_dim,
-            moe.in_dtype,
-            quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape,
-        )
-
-        all_to_all_args = dict(
-            max_num_tokens=moe.max_num_tokens,
-            num_experts=moe.num_experts,
-            experts_per_token=moe.experts_per_token,  # topk
-            rank=all2all_manager.rank,
-            world_size=all2all_manager.world_size,
-            # dp_size actually means tp_size, bug in pplx kernels
-            dp_size=all2all_manager.tp_group.world_size,
-            hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=hidden_dim_bytes,
-            hidden_dim_scale_bytes=hidden_scale_bytes,
-        )
-
-        num_dispatchers = (
-            all2all_manager.world_size // all2all_manager.tp_group.world_size
-        )
-
-        # Intranode pplx a2a takes a group name while internode does not.
-        if not all2all_manager.internode:
-            all_to_all_args["group_name"] = all2all_manager.cpu_group.group_name
-
-        handle = all2all_manager.get_handle(all_to_all_args)
-
-        prepare_finalize = PplxPrepareAndFinalize(
-            handle,
-            max_num_tokens=moe.max_num_tokens,
-            num_local_experts=moe.num_local_experts,
-            num_dispatchers=num_dispatchers,
-        )
-    elif moe.use_deepep_ht_kernels:
+    if moe.use_deepep_ht_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
 
-        all_to_all_args = dict()
+        all_to_all_args: dict[str, Any] = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHTPrepareAndFinalize(
             handle,

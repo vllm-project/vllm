@@ -969,6 +969,7 @@ def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     return output_tensor
 
 
+# TODO: The C++ op name is historical; renaming deferred to a follow-up PR.
 def get_cutlass_pplx_moe_mm_data(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
