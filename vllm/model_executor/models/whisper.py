@@ -958,7 +958,7 @@ class WhisperForConditionalGeneration(
 
         token_id = torch.argmax(last, dim=-1)  # 0-d tensor sur GPU
         token_id = int(token_id.item())
-        prob = None
+        prob = float('nan')
         # Safety: sometimes <|startoflm|> is predicted; fallback to English
         if token_id == STARTOFLM_TOKEN_ID:
             token_id = FALLBACK_LANG_TOKEN_ID
