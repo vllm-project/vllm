@@ -3078,6 +3078,7 @@ def cpu_fused_moe(
     topk_ids: torch.Tensor,
     act: str,
     isa: str,
+    skip_weighted: bool = False,
 ) -> torch.Tensor:
     output = torch.empty_like(input)
     torch.ops._C.cpu_fused_moe(
@@ -3089,6 +3090,7 @@ def cpu_fused_moe(
         w2_bias,
         topk_weights,
         topk_ids,
+        skip_weighted,
         act,
         isa,
     )
