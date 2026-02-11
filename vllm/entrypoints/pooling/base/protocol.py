@@ -6,18 +6,14 @@ from typing import Annotated, Any
 
 from pydantic import Field, model_validator
 
-from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.logger import init_logger
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
-
-logger = init_logger(__name__)
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -42,6 +38,21 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."
+        ),
+    )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
+    )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
         ),
     )
     # --8<-- [end:pooling-common-extra-params]
@@ -185,20 +196,6 @@ class EmbedRequestMixin(EncodingRequestMixin):
     )
     # --8<-- [end:embed-extra-params]
 
-    def to_pooling_params(self):
-        if self.normalize is not None:
-            logger.warning_once(
-                "`normalize` is deprecated and will be removed in v0.17. "
-                "Please pass `use_activation` instead."
-            )
-            self.use_activation = self.normalize
-
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
-
 
 class ClassifyRequestMixin(OpenAIBaseModel):
     # --8<-- [start:classify-extra-params]
@@ -208,9 +205,3 @@ class ClassifyRequestMixin(OpenAIBaseModel):
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )

@@ -510,7 +510,7 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
-    For example, VLM2Vec uses [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
+    For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs
 
@@ -521,7 +521,7 @@ First, launch the OpenAI-compatible server:
 
 ```bash
 vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
-  --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
+  --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt.image 2
 ```
 
 Then, you can use the OpenAI client as follows:
