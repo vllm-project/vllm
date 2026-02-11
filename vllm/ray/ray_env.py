@@ -28,6 +28,24 @@ except json.JSONDecodeError:
     )
     RAY_NON_CARRY_OVER_ENV_VARS = set()
 
+# ---------------------------------------------------------------------------
+# Built-in defaults for env var propagation.
+# Users can add more via VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY and
+# VLLM_RAY_EXTRA_ENV_VARS_TO_COPY (additive, not replacing).
+# ---------------------------------------------------------------------------
+DEFAULT_ENV_VAR_PREFIXES: set[str] = {
+    "VLLM_",
+    "LMCACHE_",
+    "NCCL_",
+    "UCX_",
+    "HF_",
+    "HUGGING_FACE_",
+}
+
+DEFAULT_EXTRA_ENV_VARS: set[str] = {
+    "PYTHONHASHSEED",
+}
+
 
 def _parse_csv(value: str) -> set[str]:
     """Split a comma-separated string into a set of stripped, non-empty tokens."""
@@ -45,8 +63,10 @@ def get_env_vars_to_copy(
 
     1. Env vars registered in ``vllm.envs.environment_variables``.
     2. Env vars in ``os.environ`` matching a prefix in
-       ``VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY``.
-    3. Individual names in ``VLLM_RAY_EXTRA_ENV_VARS_TO_COPY``.
+       ``DEFAULT_ENV_VAR_PREFIXES`` + ``VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY``.
+    3. Individual names in ``DEFAULT_EXTRA_ENV_VARS`` +
+       ``VLLM_RAY_EXTRA_ENV_VARS_TO_COPY``.
+    4. Caller-supplied *additional_vars* (e.g. platform-specific).
 
     Minus any names in *exclude_vars* or ``RAY_NON_CARRY_OVER_ENV_VARS``.
 
@@ -58,16 +78,18 @@ def get_env_vars_to_copy(
     """
     exclude = (exclude_vars or set()) | RAY_NON_CARRY_OVER_ENV_VARS
 
-    # -- prefixes (from envs.py, user-overridable) --------------------------
-    prefixes = _parse_csv(envs.VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY)
+    # -- prefixes (built-in + user-supplied, additive) ----------------------
+    prefixes = DEFAULT_ENV_VAR_PREFIXES | _parse_csv(
+        envs.VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY
+    )
 
     # -- collect env var names ----------------------------------------------
     # 1. vLLM's registered env vars
     result = set(envs.environment_variables)
     # 2. Prefix-matched vars present in the current environment
     result |= {name for name in os.environ if any(name.startswith(p) for p in prefixes)}
-    # 3. Individual extra vars (from envs.py, user-overridable)
-    result |= _parse_csv(envs.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY)
+    # 3. Individual extra vars (built-in + user-supplied, additive)
+    result |= DEFAULT_EXTRA_ENV_VARS | _parse_csv(envs.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY)
     # 4. Caller-supplied extra vars (e.g. platform-specific)
     result |= additional_vars or set()
     # 5. Exclude worker-specific and user-blacklisted vars

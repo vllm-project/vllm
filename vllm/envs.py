@@ -139,7 +139,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
-    VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY: str = ""
+    VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
@@ -1089,19 +1089,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
     ),
-    # Comma-separated prefixes of env vars to copy from the driver to Ray
-    # workers. Any env var whose name starts with one of these prefixes is
-    # forwarded.  Override to replace the defaults entirely.
-    # Default: "VLLM_,LMCACHE_,NCCL_,UCX_,HF_,HUGGING_FACE_"
-    "VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
-        "VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY",
-        "VLLM_,LMCACHE_,NCCL_,UCX_,HF_,HUGGING_FACE_",
+    # Comma-separated *additional* prefixes of env vars to copy from the
+    # driver to Ray workers.  These are merged with the built-in defaults
+    # defined in ``vllm.ray.ray_env`` (VLLM_, etc.).  Example: "MYLIB_,OTHER_"
+    "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY", ""
     ),
-    # Comma-separated individual env var names (without a common prefix)
-    # to copy from the driver to Ray workers.
-    # Default: "PYTHONHASHSEED"
+    # Comma-separated *additional* individual env var names to copy from
+    # the driver to Ray workers.  Merged with the built-in defaults
+    # defined in ``vllm.ray.ray_env`` (PYTHONHASHSEED).
+    # Example: "MY_SECRET,MY_FLAG"
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
-        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "PYTHONHASHSEED"
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
     ),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
