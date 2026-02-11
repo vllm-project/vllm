@@ -417,6 +417,8 @@ class BlockPool:
         fresh_blocks = [b for b in freeable if b.block_hash is None]
         cached_blocks = [b for b in freeable if b.block_hash is not None]
 
+        # Fresh blocks go to front of queue (used first during allocation),
+        # cached blocks go to back (preserved longer for prefix cache hits).
         if fresh_blocks:
             self.free_block_queue.prepend_n(fresh_blocks)
         if cached_blocks:
