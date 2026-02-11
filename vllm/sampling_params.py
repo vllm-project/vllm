@@ -456,6 +456,7 @@ class SamplingParams(
                 value=self.prompt_logprobs,
             )
         if self.logits_processors:
+            # TODO: Remove `logits_processors` attribute
             raise ValueError(
                 "vLLM V1 does not support per request user-provided logits processors."
             )
