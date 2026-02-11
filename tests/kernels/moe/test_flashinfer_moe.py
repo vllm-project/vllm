@@ -97,6 +97,7 @@ def test_flashinfer_fp4_moe_no_graph(
             hidden_dim=k,
             intermediate_size_per_partition=n,
             num_local_experts=e,
+            num_logical_experts=e,
             activation=activation,
             device="cuda",
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),

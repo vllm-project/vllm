@@ -147,6 +147,7 @@ def pplx_cutlass_moe(
             hidden_dim=hidden_dim,
             intermediate_size_per_partition=intermediate_dim,
             num_local_experts=num_local_experts,
+            num_logical_experts=num_experts,
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             activation="silu",
             in_dtype=torch.bfloat16,
