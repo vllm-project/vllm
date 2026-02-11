@@ -18,13 +18,13 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
-/vllm/config/cache.py @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
+/vllm/config/cache.py @heheda12345
 
-# Offline and Online Inference APIs
+# User-facing Inference APIs
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
-/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
+/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
 /vllm/entrypoints/openai/realtime @njhill
 /vllm/entrypoints/openai/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
