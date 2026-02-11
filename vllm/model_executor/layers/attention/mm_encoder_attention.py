@@ -186,9 +186,7 @@ class MMEncoderAttention(CustomOp):
         kv_len = key.size(1)
         is_reshaped = query.dim() != 4
 
-        query, key, value = self.maybe_reshape_qkv_to_4d(
-            query, key, value, bsz, q_len, kv_len
-        )
+        query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
 
         output = vit_triton_attn_wrapper(
             q=query,
