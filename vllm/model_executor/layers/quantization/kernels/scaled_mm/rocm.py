@@ -9,6 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.utils import record_function_or_nullcontext
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -24,21 +25,25 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
     Bs: torch.Tensor,
     bias: torch.Tensor,
 ) -> torch.Tensor:
+    M = A.shape[0]
+    K = A.shape[1]
+    N = B.shape[0]
     if (
-        A.shape[0] <= 4
-        and B.shape[0] % 16 == 0  # M TODO: needed?
-        and B.shape[1] % 16 == 0  # K
+        M <= 4
+        and N % 16 == 0  # M TODO: needed?
+        and K % 16 == 0  # K
         and ((bias is None) or (bias.dtype == out_dtype))
     ):
-        output = ops.wvSplitKQ(
-            B.t(),
-            A,
-            out_dtype,
-            As,
-            Bs,
-            get_cu_count(),
-            bias,
-        )
+        with record_function_or_nullcontext(f"wvSplitKQ {M}x{N}x{K}"):
+            output = ops.wvSplitKQ(
+                B.t(),
+                A,
+                out_dtype,
+                As,
+                Bs,
+                get_cu_count(),
+                bias,
+            )
     # Fallback
     else:
         output = torch._scaled_mm(

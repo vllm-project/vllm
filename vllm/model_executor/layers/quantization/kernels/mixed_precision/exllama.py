@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.v1.utils import record_function_or_nullcontext
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -159,9 +160,21 @@ class ExllamaLinearKernel(MPLinearKernel):
 
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
-        output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
-        )
+
+        M = x_2d.shape[0]
+        N = c.partition_weight_shape[1]
+        K = x_2d.shape[1]
+        with record_function_or_nullcontext(f"exllama_gptq_gemm {M}x{N}x{K}"):
+            output = ops.gptq_gemm(
+                x_2d,
+                w_q,
+                w_zp,
+                w_s,
+                w_g_idx,
+                True,
+                use_v2_format,
+                c.weight_type.size_bits,
+            )
 
         if bias is not None:
             output.add_(bias)

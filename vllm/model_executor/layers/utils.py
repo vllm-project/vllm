@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
@@ -183,7 +184,8 @@ def rocm_unquantized_gemm_impl(
     )
     if use_skinny_reduce_counting:
         x_view = x.reshape(-1, x.size(-1))
-        out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
+        with record_function_or_nullcontext(f"wvSplitKrc {n}x{m}x{k}"):
+            out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
     use_skinny = (
@@ -200,10 +202,12 @@ def rocm_unquantized_gemm_impl(
     x_view = x.reshape(-1, x.size(-1))
     if m > 8 and 0 < n <= 4:
         cu_count = get_cu_count()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
+        with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
+        with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
+            out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
 
