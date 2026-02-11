@@ -507,10 +507,9 @@ class Glm4MoeModel(nn.Module):
             if spec_layer is not None:
                 continue
             if ("scale" in name) or ("zero_point" in name):
-                remapped = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped is None:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
-                name = remapped
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
