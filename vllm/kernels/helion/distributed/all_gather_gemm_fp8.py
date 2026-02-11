@@ -2,7 +2,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 import helion
-from helion._testing import DEVICE
 import helion.language as hl
 
 HELION_CONFIG = helion.Config(
@@ -49,7 +48,7 @@ def helion_matmul_w_progress_fp8(
 
         for tile_k in hl.tile(K):
             # Cast FP8 -> FP32 for accumulation
-            a_f32 = a_shared[tile_m, tile_k].to(torch.float32)  # [tile_m, tile_k]
+            a_f32 = a[tile_m, tile_k].to(torch.float32)  # [tile_m, tile_k]
             b_f32 = b[tile_k, tile_n].to(torch.float32)  # [tile_k, tile_n]
             acc = torch.addmm(acc, a_f32 * sa, b_f32 * sb)  # Matrix multiplication with scaling.
 
