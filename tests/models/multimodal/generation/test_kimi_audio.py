@@ -9,12 +9,6 @@ import torch
 from vllm.model_executor.models.kimi_audio_asr import KimiAudioForConditionalGeneration
 from vllm.platforms import current_platform
 
-# Skip entire module if kimia_infer is not installed (optional dependency)
-try:
-    import kimia_infer.api.prompt_manager  # noqa: F401
-except Exception as e:  # noqa: BLE001
-    pytest.skip(f"kimia_infer not available: {e}", allow_module_level=True)
-
 
 class _DummyEmbedTokens:
     def __init__(self, hidden: int):
@@ -143,6 +137,10 @@ def test_kimi_audio_basic_load(vllm_runner, monkeypatch, dtype: str) -> None:
     if current_platform.is_cpu():
         pytest.skip("Skipping on CPU CI")
 
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    if free_bytes < int(total_bytes * 0.6):
+        pytest.skip("Skipping Kimi-Audio load due to limited free GPU memory")
+
     # Avoid fork-based engine startup issues in multi-threaded pytest runs.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -158,6 +156,7 @@ def test_kimi_audio_basic_load(vllm_runner, monkeypatch, dtype: str) -> None:
         limit_mm_per_prompt={"audio": 1},
         enable_mm_embeds=True,
         enforce_eager=True,
+        gpu_memory_utilization=0.5,
         disable_custom_all_reduce=True,
         # tokenizer_mode is auto-detected as 'kimi' for this model
     ):
