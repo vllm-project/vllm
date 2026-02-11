@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -193,6 +194,7 @@ if TYPE_CHECKING:
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -2938,6 +2940,7 @@ class GPUModelRunner(
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -3308,6 +3311,221 @@ class GPUModelRunner(
 
         return slot_mappings_by_gid, slot_mappings_by_layer
 
+    # ── Auxiliary tensor transfer for P/D disaggregation ──────────────
+
+    def _build_eagle_hs_injection_inputs(
+        self,
+        transferred_hs: dict[str, torch.Tensor],
+        orig_cad: CommonAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, CommonAttentionMetadata]:
+        """Build expanded inputs for EAGLE when full-prefix hidden states
+        were transferred from the prefill instance.
+
+        Instead of feeding EAGLE just 1 token (the last prompt token),
+        we feed it the full N-token prefix so that it can "prefill" its
+        own KV cache and produce well-informed draft proposals from the
+        very first step.
+
+        Returns:
+            (target_token_ids, target_positions, target_hidden_states,
+             new_common_attn_metadata)
+        """
+        assert isinstance(self.drafter, EagleProposer)
+
+        # ── Get block_size from the drafter's attention metadata builder.
+        attn_builder = self.drafter._get_attention_metadata_builder()
+        block_size = attn_builder.kv_cache_spec.block_size
+        block_table = orig_cad.block_table_tensor  # [num_reqs, max_blocks]
+
+        all_token_ids: list[torch.Tensor] = []
+        all_positions: list[torch.Tensor] = []
+        all_hidden_states: list[torch.Tensor] = []
+        all_slot_mappings: list[torch.Tensor] = []
+        query_starts: list[int] = [0]
+        seq_lens_list: list[int] = []
+
+        num_reqs = orig_cad.num_reqs
+        req_ids = self.input_batch.req_ids
+
+        for req_idx in range(num_reqs):
+            req_id = req_ids[req_idx]
+            hs = transferred_hs.get(req_id)
+
+            if hs is not None:
+                N = hs.shape[0]
+                expected_prompt_len = int(self.input_batch.num_prompt_tokens[req_idx])
+                assert expected_prompt_len == N, (
+                    f"Transferred HS dim mismatch for {req_id}: "
+                    f"got {N}, expected {expected_prompt_len} "
+                    f"(prompt_length)"
+                )
+                # Full-prefix token IDs from the cached request state.
+                tok_ids = torch.tensor(
+                    self.input_batch.token_ids_cpu[req_idx, :N],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                positions = torch.arange(N, device=self.device, dtype=torch.long)
+                # Compute slot mapping for positions 0..N-1.
+                block_nums = block_table[req_idx, (positions // block_size).long()]
+                slot_map = block_nums * block_size + positions % block_size
+
+                all_token_ids.append(tok_ids)
+                all_positions.append(positions)
+                all_hidden_states.append(hs)
+                all_slot_mappings.append(slot_map)
+                query_starts.append(query_starts[-1] + N)
+                seq_lens_list.append(N)
+
+            else:
+                # No transferred hidden states — use the original 1 token.
+                # Get it from the original input_ids (already on GPU).
+                num_computed = int(orig_cad.seq_lens[req_idx].item()) - 1
+                tok_ids = self.input_batch.token_ids_cpu[
+                    req_idx, num_computed : num_computed + 1
+                ]
+                tok_ids_gpu = torch.tensor(
+                    tok_ids, dtype=torch.int32, device=self.device
+                )
+                pos = torch.tensor([num_computed], device=self.device, dtype=torch.long)
+                # Single-token slot mapping.
+                bn = block_table[req_idx, (pos // block_size).long()]
+                sm = bn * block_size + pos % block_size
+                # Use the 1 hidden state from the target forward.
+                # (There's only 1 scheduled token per request here.)
+                hs_1 = self.input_ids  # placeholder — we won't reach
+                # this in the common P/D case where all reqs have HS.
+                # For safety, fall back to zeros matching hidden_size.
+                hs_1 = torch.zeros(
+                    1,
+                    transferred_hs[next(iter(transferred_hs))].shape[-1],
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+
+                all_token_ids.append(tok_ids_gpu)
+                all_positions.append(pos)
+                all_hidden_states.append(hs_1)
+                all_slot_mappings.append(sm)
+                query_starts.append(query_starts[-1] + 1)
+                seq_lens_list.append(int(orig_cad.seq_lens[req_idx].item()))
+
+        # ── Concatenate into batch tensors.
+        target_token_ids = torch.cat(all_token_ids)
+        target_positions = torch.cat(all_positions)
+        target_hidden_states = torch.cat(all_hidden_states, dim=0)
+        slot_mapping = torch.cat(all_slot_mappings)
+
+        total_tokens = target_token_ids.shape[0]
+        query_start_loc = torch.tensor(
+            query_starts, device=self.device, dtype=torch.int32
+        )
+        query_start_loc_cpu = torch.tensor(query_starts, dtype=torch.int32)
+        seq_lens_gpu = torch.tensor(
+            seq_lens_list, device=self.device, dtype=torch.int32
+        )
+        seq_lens_cpu = torch.tensor(seq_lens_list, dtype=torch.int32)
+        max_query_len = max(
+            query_starts[i + 1] - query_starts[i] for i in range(num_reqs)
+        )
+        max_seq_len = max(seq_lens_list)
+
+        new_cad = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens_gpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_tokens,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=True,
+            _seq_lens_cpu=seq_lens_cpu,
+            _num_computed_tokens_cpu=None,
+        )
+
+        return target_token_ids, target_positions, target_hidden_states, new_cad
+
+    def _maybe_put_aux(
+        self,
+        model_output: torch.Tensor | tuple[torch.Tensor, ...],
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """Save auxiliary tensors (hidden states) via the KV connector.
+
+        Called inside the KV connector context, right after the model
+        forward.  Only does work when the connector exposes ``put_aux``
+        (e.g. NixlConnectorWithAux) and there are requests that need
+        their data sent to a remote decode instance.
+        """
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        if not hasattr(connector, "put_aux"):
+            return
+
+        # Determine which requests in this batch need aux saving.
+        # reqs_in_batch is set for requests with do_remote_decode=True.
+        meta = getattr(connector, "_connector_metadata", None)
+        if meta is None:
+            return
+        reqs_in_batch: set[str] = getattr(meta, "reqs_in_batch", set())
+        if not reqs_in_batch:
+            return
+
+        # Unpack hidden states from model_output.
+        if isinstance(model_output, tuple):
+            hidden_states = model_output[0]
+        else:
+            hidden_states = model_output
+
+        # Compute per-request token offsets so we can slice hidden_states.
+        req_ids = self.input_batch.req_ids
+        num_sched = scheduler_output.num_scheduled_tokens
+        offset = 0
+        for req_id in req_ids:
+            n_tokens = num_sched.get(req_id, 0)
+            if req_id in reqs_in_batch and n_tokens > 0:
+                hs_slice = hidden_states[offset : offset + n_tokens]
+                connector.put_aux("hidden_states", req_id, hs_slice)
+            offset += n_tokens
+
+    def _maybe_get_aux(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, torch.Tensor]:
+        """Load transferred auxiliary tensors on the decode side.
+
+        Returns a dict mapping ``req_id`` to a hidden-states tensor for
+        every request whose hidden states were transferred from the
+        prefill instance.  Empty dict when nothing was transferred.
+
+        These hidden states are injected into EAGLE's first proposal
+        step via ``_build_eagle_hs_injection_inputs`` so the drafter
+        gets full prompt context from the very first decode step.
+        """
+        result: dict[str, torch.Tensor] = {}
+        if not has_kv_transfer_group():
+            return result
+        connector = get_kv_transfer_group()
+        if not hasattr(connector, "get_aux"):
+            return result
+
+        for req_id in scheduler_output.num_scheduled_tokens:
+            tensor = connector.get_aux("hidden_states", req_id)
+            if tensor is not None:
+                result[req_id] = tensor
+                logger.info(
+                    "Received transferred hidden_states for req=%s  "
+                    "shape=%s  dtype=%s  "
+                    "(will inject into EAGLE first pass)",
+                    req_id,
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                )
+        return result
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3542,6 +3760,10 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            # Hook: save auxiliary tensors (e.g. hidden states) for P/D
+            # transfer, inside the KV connector context so metadata is
+            # still bound and wait_for_save hasn't been called yet.
+            self._maybe_put_aux(model_output, scheduler_output)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4030,18 +4252,48 @@ class GPUModelRunner(
                 )
 
             num_rejected_tokens_gpu = None
+
+            # ── Check for transferred hidden states from P/D ──────
+            # Must happen BEFORE we compute target_hidden_states so
+            # we can expand the inputs when hidden states are available.
+            transferred_hs = self._maybe_get_aux(scheduler_output)
+
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
-                # input_ids can be None for multimodal models.
-                target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
-                target_positions = self._get_positions(num_scheduled_tokens)
-                if self.use_aux_hidden_state_outputs:
-                    assert aux_hidden_states is not None
-                    target_hidden_states = torch.cat(
-                        [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+
+                # ── EAGLE HS injection: on the first decode step,
+                # if we have full-prefix hidden states from the
+                # prefill instance, expand inputs so EAGLE does a
+                # full "prefill" of its own KV cache.
+                # Set VLLM_DISABLE_EAGLE_HS_INJECT=1 to skip (for A/B testing).
+                if (
+                    transferred_hs
+                    and not self.use_aux_hidden_state_outputs
+                    and isinstance(self.drafter, EagleProposer)
+                    and not os.environ.get("VLLM_DISABLE_EAGLE_HS_INJECT")
+                ):
+                    (
+                        target_token_ids,
+                        target_positions,
+                        target_hidden_states,
+                        common_attn_metadata,
+                    ) = self._build_eagle_hs_injection_inputs(
+                        transferred_hs,
+                        common_attn_metadata,
                     )
                 else:
-                    target_hidden_states = hidden_states[:num_scheduled_tokens]
+                    # Original path: 1 token per request.
+                    # input_ids can be None for multimodal models.
+                    target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
+                    target_positions = self._get_positions(num_scheduled_tokens)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[:num_scheduled_tokens] for h in aux_hidden_states],
+                            dim=-1,
+                        )
+                    else:
+                        target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
                 if spec_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None

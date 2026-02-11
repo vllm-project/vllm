@@ -11,6 +11,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -309,7 +313,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_connector.set_disabled(False)
         assert self.execute_model_state is not None
-        hidden_states, input_batch, _ = self.execute_model_state
+        hidden_states, input_batch, _, _ = self.execute_model_state
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
@@ -777,6 +781,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states: list[torch.Tensor] | None,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
+        injection_data: dict[str, dict] | None = None,
     ) -> torch.Tensor:
         assert self.speculator is not None
         draft_tokens = self.speculator.propose(
@@ -789,8 +794,112 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.next_prefill_tokens,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
+            injection_data=injection_data,
         )
         return draft_tokens
+
+    # ── Auxiliary tensor transfer for P/D disaggregation ──────────────
+
+    def _maybe_put_aux(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Save auxiliary tensors (hidden states) via the KV connector.
+
+        Called after the target model forward, before post_forward().
+        Only does work when the connector exposes ``put_aux``
+        (e.g. NixlConnectorWithAux).
+        """
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        if not hasattr(connector, "put_aux"):
+            return
+
+        meta = getattr(connector, "_connector_metadata", None)
+        if meta is None:
+            return
+        reqs_in_batch: set[str] = getattr(meta, "reqs_in_batch", set())
+        if not reqs_in_batch:
+            return
+
+        req_ids = scheduler_output.num_scheduled_tokens.keys()
+        num_sched = scheduler_output.num_scheduled_tokens
+        offset = 0
+        for req_id in req_ids:
+            n_tokens = num_sched.get(req_id, 0)
+            if req_id in reqs_in_batch and n_tokens > 0:
+                hs_slice = hidden_states[offset : offset + n_tokens]
+                connector.put_aux("hidden_states", req_id, hs_slice)
+            offset += n_tokens
+
+    def _maybe_get_aux(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> dict[str, torch.Tensor]:
+        """Load transferred auxiliary tensors on the decode side.
+
+        Returns a dict mapping req_id to hidden-states tensor for
+        every request whose hidden states were transferred from the
+        prefill instance.
+        """
+        result: dict[str, torch.Tensor] = {}
+        if not has_kv_transfer_group():
+            return result
+        connector = get_kv_transfer_group()
+        if not hasattr(connector, "get_aux"):
+            return result
+
+        for req_id in scheduler_output.num_scheduled_tokens:
+            tensor = connector.get_aux("hidden_states", req_id)
+            if tensor is not None:
+                result[req_id] = tensor
+                logger.info(
+                    "Received transferred hidden_states for req=%s  "
+                    "shape=%s  dtype=%s  "
+                    "(will inject into EAGLE first pass)",
+                    req_id,
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                )
+        return result
+
+    def _build_eagle_hs_injection_inputs(
+        self,
+        transferred_hs: dict[str, torch.Tensor],
+        input_batch: "InputBatch",
+    ) -> dict[str, dict]:
+        """Build per-request injection data for EAGLE warm-up.
+
+        For each request with transferred hidden states, packages:
+          - hs:         Tensor[N, H]  (full-prefix hidden states)
+          - token_ids:  Tensor[N]     (prompt token IDs, int32, on GPU)
+          - prompt_len: int
+
+        The speculator's propose() uses this to build an expanded
+        EAGLE "prefill" batch so the draft model's KV cache is
+        properly warmed up from the first step.
+        """
+        result: dict[str, dict] = {}
+        for req_id, hs in transferred_hs.items():
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is None:
+                continue
+            N = hs.shape[0]
+            prompt_len = int(self.req_states.prompt_len[req_idx])
+            assert prompt_len == N, (
+                f"Transferred HS dim mismatch for {req_id}: "
+                f"got {N}, expected {prompt_len}"
+            )
+            # Token IDs from req_states (UVA-backed GPU tensor).
+            token_ids = self.req_states.prefill_token_ids.gpu[req_idx, :N].clone()
+            result[req_id] = {
+                "hs": hs,
+                "token_ids": token_ids,
+                "prompt_len": N,
+            }
+        return result
 
     @torch.inference_mode()
     def execute_model(
@@ -905,8 +1014,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=input_batch.inputs_embeds,
                 )
 
+        # Save auxiliary tensors (e.g. hidden states) for P/D transfer.
+        if not dummy_run:
+            self._maybe_put_aux(hidden_states, scheduler_output)
+
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-        self.execute_model_state = hidden_states, input_batch, kv_connector_output
+        self.execute_model_state = (
+            hidden_states,
+            input_batch,
+            kv_connector_output,
+            scheduler_output,
+        )
         return None
 
     @torch.inference_mode()
@@ -914,7 +1032,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput:
         assert self.execute_model_state is not None
-        hidden_states, input_batch, kv_connector_output = self.execute_model_state
+        hidden_states, input_batch, kv_connector_output, scheduler_output = (
+            self.execute_model_state
+        )
         self.execute_model_state = None  # type: ignore
 
         sampler_output, num_sampled, num_rejected = self.sample(
@@ -958,12 +1078,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.do_spec_decode:
+            # Check for transferred hidden states from P/D.
+            transferred_hs = self._maybe_get_aux(scheduler_output)
+            injection_data = None
+            if transferred_hs:
+                injection_data = self._build_eagle_hs_injection_inputs(
+                    transferred_hs,
+                    input_batch,
+                )
+                if injection_data:
+                    logger.info(
+                        "P/D HS injection: %d requests have transferred "
+                        "hidden states for EAGLE warm-up",
+                        len(injection_data),
+                    )
+
             draft_tokens = self.propose_draft(
                 input_batch,
                 hidden_states,
                 None,  # aux_hidden_states
                 num_sampled,
                 num_rejected,
+                injection_data=injection_data,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)

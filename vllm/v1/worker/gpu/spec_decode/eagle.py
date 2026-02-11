@@ -198,6 +198,8 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        # P/D injection data (optional).
+        injection_data: dict[str, dict] | None = None,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -212,6 +214,26 @@ class EagleSpeculator:
             )
         else:
             hidden_states = last_hidden_states
+
+        num_reqs = input_batch.num_reqs
+        idx_mapping = self.idx_mapping[:num_reqs]
+        idx_mapping.copy_(input_batch.idx_mapping)
+        self.temperature.copy_(temperature)
+        self.seeds.copy_(seeds)
+
+        # ── P/D injection: expanded EAGLE "prefill" for warm-up ──
+        if injection_data:
+            return self._propose_with_injection(
+                input_batch,
+                hidden_states,
+                injection_data,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+            )
+
+        # ── Normal path (no injection) ──
         num_tokens = input_batch.num_tokens_after_padding
         self.hidden_states[:num_tokens] = hidden_states
 
@@ -236,16 +258,11 @@ class EagleSpeculator:
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
-        num_reqs = input_batch.num_reqs
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        idx_mapping = self.idx_mapping[:num_reqs]
-        idx_mapping.copy_(input_batch.idx_mapping)
-        self.temperature.copy_(temperature)
-        self.seeds.copy_(seeds)
         # Gather the values and copy them to the pre-allocated buffers.
         pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
@@ -314,6 +331,220 @@ class EagleSpeculator:
         self.generate_draft(
             num_reqs, attn_metadata, slot_mappings_by_layer, num_tokens_across_dp=None
         )  # FIXME
+        return self.draft_tokens[:num_reqs]
+
+    @torch.inference_mode()
+    def _propose_with_injection(
+        self,
+        input_batch: InputBatch,
+        target_hidden_states: torch.Tensor,
+        injection_data: dict[str, dict],
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run EAGLE's first forward pass with expanded full-prefix inputs
+        for requests that have transferred hidden states from P/D.
+
+        For injected requests, EAGLE receives N tokens (the full prompt)
+        instead of 1 token, so its KV cache is warmed up properly.
+        Non-injected requests in the same batch keep their original 1-token
+        input (with zero hidden states as fallback).
+        """
+        num_reqs = input_batch.num_reqs
+        idx_mapping = self.idx_mapping[:num_reqs]
+
+        # ── Build expanded tensors per request ──
+        all_input_ids: list[torch.Tensor] = []
+        all_positions: list[torch.Tensor] = []
+        all_hidden_states: list[torch.Tensor] = []
+        query_lens: list[int] = []
+
+        for batch_idx in range(num_reqs):
+            req_id = input_batch.req_ids[batch_idx]
+            req_state_idx = int(input_batch.idx_mapping[batch_idx].item())
+            inj = injection_data.get(req_id)
+
+            if inj is not None:
+                N = inj["prompt_len"]
+                hs = inj["hs"]  # [N, H]
+                tok_ids = inj["token_ids"]  # [N] int32
+
+                # EAGLE input_ids are shifted by 1: [t1, t2, ..., t_{N-1}, last_sampled]
+                eagle_ids = torch.empty(N, dtype=torch.int32, device=self.device)
+                eagle_ids[: N - 1] = tok_ids[1:]
+                if int(num_sampled[batch_idx].item()) > 0:
+                    eagle_ids[N - 1] = last_sampled[req_state_idx].to(torch.int32)
+                else:
+                    eagle_ids[N - 1] = tok_ids[N - 1]
+
+                positions = torch.arange(N, device=self.device, dtype=torch.long)
+
+                all_input_ids.append(eagle_ids)
+                all_positions.append(positions)
+                all_hidden_states.append(hs)
+                query_lens.append(N)
+            else:
+                # Fallback: 1-token decode (same as normal path).
+                num_sampled_i = int(num_sampled[batch_idx].item())
+                if num_sampled_i > 0:
+                    tok = last_sampled[req_state_idx].view(1).to(torch.int32)
+                else:
+                    tok = input_batch.input_ids[
+                        int(input_batch.query_start_loc[batch_idx].item())
+                    ].view(1)
+                # Position = seq_len - 1  (last computed position).
+                pos = (input_batch.seq_lens[batch_idx] - 1).view(1).long()
+                # Use target hidden state at this request's position.
+                start = int(input_batch.query_start_loc[batch_idx].item())
+                hs_1 = target_hidden_states[start : start + 1]
+
+                all_input_ids.append(tok)
+                all_positions.append(pos)
+                all_hidden_states.append(hs_1)
+                query_lens.append(1)
+
+        # ── Concatenate into batch tensors ──
+        cat_input_ids = torch.cat(all_input_ids)
+        cat_positions = torch.cat(all_positions)
+        cat_hidden_states = torch.cat(all_hidden_states, dim=0)
+        total_tokens = cat_input_ids.shape[0]
+
+        # Copy into speculator buffers.
+        self.input_buffers.input_ids[:total_tokens] = cat_input_ids
+        self.input_buffers.positions[:total_tokens] = cat_positions
+        self.hidden_states[:total_tokens] = cat_hidden_states
+
+        # ── Build query_start_loc and seq_lens ──
+        query_starts = [0]
+        for ql in query_lens:
+            query_starts.append(query_starts[-1] + ql)
+        query_start_loc_gpu = torch.tensor(
+            query_starts, device=self.device, dtype=torch.int32
+        )
+        query_start_loc_cpu = torch.tensor(query_starts, dtype=torch.int32)
+        seq_lens_list = []
+        for batch_idx in range(num_reqs):
+            inj = injection_data.get(input_batch.req_ids[batch_idx])
+            if inj is not None:
+                seq_lens_list.append(inj["prompt_len"])
+            else:
+                seq_lens_list.append(int(input_batch.seq_lens[batch_idx].item()))
+        seq_lens_gpu = torch.tensor(
+            seq_lens_list, device=self.device, dtype=torch.int32
+        )
+        max_query_len = max(query_lens)
+        max_seq_len = max(seq_lens_list)
+
+        # ── Compute slot_mappings via speculator's block tables ──
+        # First, gather the block tables for the current batch.
+        self.block_tables.gather_block_tables(idx_mapping)
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            idx_mapping,
+            query_start_loc_gpu,
+            cat_positions,
+        )
+
+        # ── Build attention metadata ──
+        block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
+        attn_metadata = build_attn_metadata(
+            attn_metadata_builders=self.attn_metadata_builders,
+            num_reqs=num_reqs,
+            num_tokens=total_tokens,
+            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=seq_lens_gpu,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+        )
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
+
+        # ── Run EAGLE model (first pass — expanded prefill) ──
+        last_hidden_states_out, hidden_states_out = self.run_model(
+            total_tokens,
+            attn_metadata,
+            slot_mappings_by_layer,
+            num_tokens_across_dp=None,
+        )
+
+        # ── Sample first draft token from last position per request ──
+        last_token_indices = torch.tensor(
+            [query_starts[i + 1] - 1 for i in range(num_reqs)],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        sample_hidden_states = last_hidden_states_out[last_token_indices]
+        logits = self.model.compute_logits(sample_hidden_states)
+
+        pos = self.input_buffers.positions[:num_reqs]
+        torch.gather(cat_positions, 0, last_token_indices, out=pos)
+        draft_tokens = gumbel_sample(
+            logits,
+            idx_mapping,
+            self.temperature,
+            self.seeds,
+            pos + 1,
+            apply_temperature=True,
+        )
+        if self.num_speculative_steps == 1:
+            return draft_tokens.view(-1, 1)
+
+        # ── Prepare decode steps (same as normal path) ──
+        self.draft_tokens[:num_reqs, 0] = draft_tokens
+        prepare_eagle_decode(
+            draft_tokens,
+            hidden_states_out,
+            last_token_indices,
+            seq_lens_gpu,
+            torch.zeros(num_reqs, dtype=torch.int32, device=self.device),
+            self.input_buffers,
+            self.hidden_states,
+            self.max_model_len,
+            self.max_num_reqs,
+        )
+        query_start_loc_decode = self.input_buffers.query_start_loc[: num_reqs + 1]
+        slot_mappings_decode = self.block_tables.compute_slot_mappings(
+            idx_mapping, query_start_loc_decode, pos
+        )
+
+        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
+        if cudagraph_size is not None:
+            self.cudagraph_manager.run(cudagraph_size)
+            return self.draft_tokens[:num_reqs]
+
+        # Eager decode steps.
+        decode_qsl_cpu = torch.arange(num_reqs + 1, dtype=torch.int32, device="cpu")
+        decode_block_tables = [
+            x[:num_reqs] for x in self.block_tables.input_block_tables
+        ]
+        decode_attn_metadata = build_attn_metadata(
+            attn_metadata_builders=self.attn_metadata_builders,
+            num_reqs=num_reqs,
+            num_tokens=num_reqs,
+            query_start_loc_gpu=query_start_loc_decode,
+            query_start_loc_cpu=decode_qsl_cpu,
+            max_query_len=1,
+            seq_lens=self.input_buffers.seq_lens[:num_reqs],
+            max_seq_len=self.max_model_len,
+            block_tables=decode_block_tables,
+            slot_mappings=slot_mappings_decode,
+            kv_cache_config=self.kv_cache_config,
+        )
+        decode_slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings_decode, self.kv_cache_config
+        )
+        self.generate_draft(
+            num_reqs,
+            decode_attn_metadata,
+            decode_slot_mappings_by_layer,
+            num_tokens_across_dp=None,
+        )
         return self.draft_tokens[:num_reqs]
 
 
