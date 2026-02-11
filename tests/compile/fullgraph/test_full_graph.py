@@ -205,11 +205,9 @@ def test_custom_compile_config(
         ]
         if current_platform.is_cuda()
         else [
-            # ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-            # (
-            #     "deepseek-ai/DeepSeek-V2-Lite",
-            #     AttentionBackendEnum.TRITON_MLA,
-            # ),  # MLA (Multi-head Latent Attention) model
+            ("Qwen/Qwen2-0.5B", None),  # Standard attention model
+            # AttentionBackendEnum.TRITON_MLA does not support
+            # fp8 kv scale compile.
             (
                 "deepseek-ai/DeepSeek-V2-Lite",
                 AttentionBackendEnum.ROCM_AITER_MLA,
