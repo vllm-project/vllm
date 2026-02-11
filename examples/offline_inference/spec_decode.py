@@ -5,13 +5,8 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
-
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
@@ -75,6 +70,7 @@ def parse_args():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     parser.add_argument("--max-num-seqs", type=int, default=None)
+    parser.add_argument("--parallel-drafting", action="store_true")
     parser.add_argument("--allowed-local-media-path", type=str, default="")
     return parser.parse_args()
 
@@ -121,6 +117,7 @@ def main(args):
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
+            "parallel_drafting": args.parallel_drafting,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -137,6 +134,7 @@ def main(args):
             "num_speculative_tokens": args.num_spec_tokens,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
+            "parallel_drafting": args.parallel_drafting,
         }
     elif args.method == "mtp":
         speculative_config = {

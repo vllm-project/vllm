@@ -398,10 +398,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
 
-        if self.num_kv_heads != self.num_heads:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
-
         causal_attn = attn_type == AttentionType.DECODER
 
         sdpa_start_loc = attn_metadata.sdpa_start_loc.numpy()  # type: ignore
@@ -418,6 +414,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                     dropout_p=0.0,
                     is_causal=causal_attn and mask is None,
                     scale=self.scale,
+                    enable_gqa=self.num_heads > self.num_kv_heads,
                 )
                 .squeeze(0)
                 .movedim(query.dim() - 2, 0)
@@ -490,10 +487,12 @@ def _get_attn_isa(
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
     supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        if supports_arm:
+            # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
         else:
             return "vec"

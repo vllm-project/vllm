@@ -58,6 +58,10 @@ class TokenizerLike(Protocol):
         raise NotImplementedError
 
     @property
+    def max_chars_per_token(self) -> int:
+        raise NotImplementedError
+
+    @property
     def truncation_side(self) -> str:
         raise NotImplementedError
 

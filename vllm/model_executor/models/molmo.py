@@ -235,7 +235,7 @@ class MultiHeadDotProductAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -1278,6 +1278,7 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
