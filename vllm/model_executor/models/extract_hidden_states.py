@@ -74,6 +74,16 @@ def dummy_attention(layer_name):
     pass
 
 
+def basic_cache(
+    to_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+):
+    num_blocks, block_size, num_heads, head_size = kv_cache.shape
+    token_kv_cache = kv_cache.view(num_blocks * block_size, num_heads, head_size)
+    token_kv_cache[slot_mapping] = to_cache
+
+
 ######### CacheOnlyAttentionBackend ########
 
 
@@ -180,11 +190,13 @@ class CacheOnlyAttentionImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         kv_cache_dtype: str,
+        kv_cache_torch_dtype: torch.dtype,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.kv_cache_dtype = kv_cache_dtype
+        self.kv_cache_torch_dtype = kv_cache_torch_dtype
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(f"Unsupported attention type: {attn_type}")
@@ -200,17 +212,15 @@ class CacheOnlyAttentionImpl(AttentionImpl):
         kv_cache,
         slot_mapping,
     ):
-        # todo(fynn): Implement reshape_and_cache_flash custom op
+        assert to_cache.dtype == self.kv_cache_torch_dtype, (
+            f"Data to cache must be {self.kv_cache_torch_dtype}, got {to_cache.dtype}"
+        )
+        assert kv_cache.dtype == self.kv_cache_torch_dtype, (
+            f"KV cache must be {self.kv_cache_torch_dtype}, got {kv_cache.dtype}"
+        )
 
-        # reshape_and_cache_flash(
-        #     to_cache,
-        #     kv_cache,
-        #     slot_mapping,
-        #     self.kv_cache_dtype,
-        #     layer._k_scale, # do I need these?
-        #     layer._v_scale,
-        # )
-        pass
+        # todo(fynn): Implement more performant op (maybe custom triton op?)
+        basic_cache(to_cache, kv_cache, slot_mapping)
 
 
 ############## CacheOnlyAttentionLayer (replaces Attention) ############
@@ -262,6 +272,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             num_heads,
             head_size,
             kv_cache_dtype,
+            self.kv_cache_torch_dtype,
             attn_type,
         )
 
