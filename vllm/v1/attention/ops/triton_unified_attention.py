@@ -105,6 +105,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
+    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8/int4 KV cache
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -259,7 +260,7 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
-        if K_load.dtype.is_fp8():
+        if USE_QUANTIZED_KV:
             if Q.dtype.is_fp8():
                 K = K_load
             else:
@@ -274,7 +275,7 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
-        if V_load.dtype.is_fp8():
+        if USE_QUANTIZED_KV:
             if Q.dtype.is_fp8():
                 V = V_load
             else:
@@ -450,6 +451,7 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8/int4 KV cache
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
@@ -614,7 +616,7 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
-        if K_load.dtype.is_fp8():
+        if USE_QUANTIZED_KV:
             if Q.dtype.is_fp8():
                 K = K_load
             else:
@@ -629,7 +631,7 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
-        if V_load.dtype.is_fp8():
+        if USE_QUANTIZED_KV:
             if Q.dtype.is_fp8():
                 V = V_load
             else:
@@ -931,6 +933,8 @@ def unified_attention(
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
+    # True when KV cache is quantized (fp8/int8/int4); kernel dequantizes with scale
+    use_quantized_kv = k_descale is not None
 
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
@@ -1040,6 +1044,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            USE_QUANTIZED_KV=use_quantized_kv,
         )
     else:
         kernel_unified_attention_3d[
@@ -1092,6 +1097,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            USE_QUANTIZED_KV=use_quantized_kv,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

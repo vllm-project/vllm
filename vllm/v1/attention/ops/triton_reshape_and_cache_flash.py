@@ -29,8 +29,8 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
-    # FP8 flags
-    FP8_KV_CACHE: tl.constexpr,
+    # Quantization flags
+    QUANTIZED_KV_CACHE: tl.constexpr,  # True for fp8/int8/int4
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -77,10 +77,17 @@ def reshape_and_cache_kernel_flash(
     key_load = tl.load(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if FP8_KV_CACHE:
-        # tl.store will do the correct implicit cast to fp8,
+    if QUANTIZED_KV_CACHE:
+        # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
         # based on the key_cache_ptr.dtype.element_ty
-        key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
+        if key_load.dtype.is_fp8():
+            key_tile = key_load
+        else:
+            key_tile = key_load / tl.load(k_scale)
+            # INT8 requires explicit clamping to [-128, 127]
+            # FP8 has automatic saturation, but INT8 needs manual clamp
+            if key_cache_ptr.dtype.element_ty == tl.int8:
+                key_tile = tl.clamp(key_tile, -128.0, 127.0)
     else:
         key_tile = key_load
 
@@ -88,13 +95,17 @@ def reshape_and_cache_kernel_flash(
     value_load = tl.load(
         value_ptr + src_value_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if FP8_KV_CACHE:
+    if QUANTIZED_KV_CACHE:
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
-            # tl.store will do the correct implicit cast to fp8,
+            # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
             #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
+            # INT8 requires explicit clamping to [-128, 127]
+            # FP8 has automatic saturation, but INT8 needs manual clamp
+            if value_cache_ptr.dtype.element_ty == tl.int8:
+                value_tile = tl.clamp(value_tile, -128.0, 127.0)
     else:
         value_tile = value_load
 
@@ -119,7 +130,7 @@ def triton_reshape_and_cache_flash(
     # [num_blocks, block_size, num_heads, head_size]
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,  # [num_tokens]
-    kv_cache_dtype: str,  # "auto", "fp8"
+    kv_cache_dtype: str,  # "auto", "fp8", "int8", "int4"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
@@ -145,36 +156,45 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(("fp8", "int8", "int4")), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
-    kv_cache_torch_dtype = (
-        current_platform.fp8_dtype()
-        if kv_cache_dtype.startswith("fp8")
-        else key_cache.dtype
-    )
+    
+    # Determine the target dtype based on cache type
+    if kv_cache_dtype.startswith("fp8"):
+        kv_cache_torch_dtype = current_platform.fp8_dtype()
+    elif kv_cache_dtype.startswith("int8"):
+        kv_cache_torch_dtype = torch.int8
+    elif kv_cache_dtype.startswith("int4"):
+        kv_cache_torch_dtype = torch.uint8  # int4 is packed into uint8
+    else:
+        kv_cache_torch_dtype = key_cache.dtype
 
-    if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith("fp8"):
-        # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
+    # View the cache tensor as the target quantized dtype if needed
+    if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(("fp8", "int8", "int4")):
+        # to avoid erroneous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
+    
     assert kv_cache_dtype != torch.uint8, (
-        "explicit fp8 cast and store to "
+        "explicit cast and store to "
         "uint8 is not supported by triton reshape_and_cache_flash"
     )
 
-    FP8_KV_CACHE = kv_cache_dtype.startswith("fp8")
-    assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-        torch.uint8,
-        torch.float8_e4m3fnuz,
-    ], (
-        "unsupported dtype of KV cache tensor, got "
-        "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
-        "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
-    )
+    QUANTIZED_KV_CACHE = kv_cache_dtype.startswith(("fp8", "int8", "int4"))
+    if QUANTIZED_KV_CACHE:
+        assert kv_cache_torch_dtype in [
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+            torch.uint8,
+            torch.float8_e4m3fnuz,
+            torch.int8,
+        ], (
+            f"unsupported dtype of KV cache tensor, got "
+            f"{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
+            "fp8e5m2, uint8, int8, bfloat16, float16, float32, fp8e4m3fnuz."
+        )
 
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
@@ -215,8 +235,8 @@ def triton_reshape_and_cache_flash(
         block_size=block_size,
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
-        # FP8 flags
-        FP8_KV_CACHE=FP8_KV_CACHE,
+        # Quantization flags
+        QUANTIZED_KV_CACHE=QUANTIZED_KV_CACHE,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
@@ -241,8 +261,8 @@ def reshape_and_cache_kernel_flash_diffkv(
     head_size_k: tl.constexpr,
     head_size_v: tl.constexpr,
     block_size: tl.constexpr,
-    # FP8 flags
-    FP8_KV_CACHE: tl.constexpr,
+    # Quantization flags
+    QUANTIZED_KV_CACHE: tl.constexpr,  # True for fp8/int8/int4
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -269,8 +289,8 @@ def reshape_and_cache_kernel_flash_diffkv(
 
     # [TILE_SIZE]
     key_load = tl.load(key_ptr + src_key_idx + tile_offs, mask=tile_offs < head_size_k)
-    if FP8_KV_CACHE:
-        # tl.store will do the correct implicit cast to fp8,
+    if QUANTIZED_KV_CACHE:
+        # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
         # based on the key_cache_ptr.dtype.element_ty
         key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
     else:
@@ -280,11 +300,11 @@ def reshape_and_cache_kernel_flash_diffkv(
     value_load = tl.load(
         value_ptr + src_value_idx + tile_offs, mask=tile_offs < head_size_v
     )
-    if FP8_KV_CACHE:
+    if QUANTIZED_KV_CACHE:
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
-            # tl.store will do the correct implicit cast to fp8,
+            # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
             #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
     else:
@@ -309,7 +329,7 @@ def triton_reshape_and_cache_flash_diffkv(
     # [num_blocks, block_size, num_heads, head_size + head_size_v]
     kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,  # [num_tokens]
-    kv_cache_dtype: str,  # "auto", "fp8"
+    kv_cache_dtype: str,  # "auto", "fp8", "int8", "int4"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
@@ -323,35 +343,44 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(("fp8", "int8", "int4")), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
-    kv_cache_torch_dtype = (
-        current_platform.fp8_dtype()
-        if kv_cache_dtype.startswith("fp8")
-        else kv_cache.dtype
-    )
+    
+    # Determine the target dtype based on cache type
+    if kv_cache_dtype.startswith("fp8"):
+        kv_cache_torch_dtype = current_platform.fp8_dtype()
+    elif kv_cache_dtype.startswith("int8"):
+        kv_cache_torch_dtype = torch.int8
+    elif kv_cache_dtype.startswith("int4"):
+        kv_cache_torch_dtype = torch.uint8  # int4 is packed into uint8
+    else:
+        kv_cache_torch_dtype = kv_cache.dtype
 
-    if kv_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith("fp8"):
-        # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
+    # View the cache tensor as the target quantized dtype if needed
+    if kv_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(("fp8", "int8", "int4")):
+        # to avoid erroneous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         kv_cache = kv_cache.view(kv_cache_torch_dtype)
+    
     assert kv_cache_dtype != torch.uint8, (
-        "explicit fp8 cast and store to "
+        "explicit cast and store to "
         "uint8 is not supported by triton reshape_and_cache_flash_diffkv"
     )
 
-    FP8_KV_CACHE = kv_cache_dtype.startswith("fp8")
-    assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-        torch.uint8,
-        torch.float8_e4m3fnuz,
-    ], (
-        "unsupported dtype of KV cache tensor, got "
-        "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
-        "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
-    )
+    QUANTIZED_KV_CACHE = kv_cache_dtype.startswith(("fp8", "int8", "int4"))
+    if QUANTIZED_KV_CACHE:
+        assert kv_cache_torch_dtype in [
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+            torch.uint8,
+            torch.float8_e4m3fnuz,
+            torch.int8,
+        ], (
+            f"unsupported dtype of KV cache tensor, got "
+            f"{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
+            "fp8e5m2, uint8, int8, bfloat16, float16, float32, fp8e4m3fnuz."
+        )
 
     # heuristics instead of autotuning
     TILE_SIZE = max(head_size_k, head_size_v)
@@ -386,8 +415,8 @@ def triton_reshape_and_cache_flash_diffkv(
         head_size_k=head_size_k,
         head_size_v=head_size_v,
         block_size=block_size,
-        # FP8 flags
-        FP8_KV_CACHE=FP8_KV_CACHE,
+        # Quantization flags
+        QUANTIZED_KV_CACHE=QUANTIZED_KV_CACHE,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
