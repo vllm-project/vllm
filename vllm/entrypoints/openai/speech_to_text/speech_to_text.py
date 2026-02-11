@@ -241,11 +241,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
-    
+
     async def _detect_language(
         self,
         audio_chunk: np.ndarray,
-        request_id: str = "lang-detect",
+        request_id: str,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
@@ -307,6 +307,7 @@ class OpenAISpeechToText(OpenAIServing):
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
+        request_id: str,
     ) -> tuple[list[ProcessorInputs], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
@@ -339,7 +340,9 @@ class OpenAISpeechToText(OpenAIServing):
         if language is None and hasattr(
             self.model_cls, "get_language_detection_prompt"
         ):
-            language = await self._detect_language(chunks[0])
+            language = await self._detect_language(
+                chunks[0], f"{request_id}-lang_detect"
+            )
             request.language = language
 
         parsed_prompts: list[DictPrompt] = []
@@ -503,6 +506,7 @@ class OpenAISpeechToText(OpenAIServing):
             engine_prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
+                request_id=request_id,
             )
 
         except ValueError as e:
