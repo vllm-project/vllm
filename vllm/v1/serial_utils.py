@@ -242,13 +242,11 @@ class MsgpackEncoder:
             for modality, itemlist in items.items()
         }
 
-    def _encode_mm_item(self, item: MultiModalKwargsItem) -> list[dict[str, Any]]:
-        return [self._encode_mm_field_elem(elem) for elem in item.values()]
+    def _encode_mm_item(self, item: MultiModalKwargsItem) -> dict[str, Any]:
+        return {key: self._encode_mm_field_elem(elem) for key, elem in item.items()}
 
     def _encode_mm_field_elem(self, elem: MultiModalFieldElem) -> dict[str, Any]:
         return {
-            "modality": elem.modality,
-            "key": elem.key,
             "data": (
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
@@ -383,9 +381,9 @@ class MsgpackDecoder:
             }
         )
 
-    def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
-        return MultiModalKwargsItem.from_elems(
-            [self._decode_mm_field_elem(v) for v in obj]
+    def _decode_mm_item(self, obj: dict[str, Any]) -> MultiModalKwargsItem:
+        return MultiModalKwargsItem(
+            {key: self._decode_mm_field_elem(elem) for key, elem in obj.items()}
         )
 
     def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:

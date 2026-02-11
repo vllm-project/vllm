@@ -11,10 +11,9 @@ from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -23,7 +22,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .vision import should_torch_compile_mm_vit
+from .vision import (
+    is_vit_use_data_parallel,
+    resolve_visual_encoder_outputs,
+    should_torch_compile_mm_vit,
+)
 
 
 class Siglip2VisionEmbeddings(nn.Module):
@@ -154,7 +157,6 @@ class Siglip2Attention(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -171,10 +173,7 @@ class Siglip2Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
-        use_data_parallel = (
-            multimodal_config is not None
-            and multimodal_config.mm_encoder_tp_mode == "data"
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
         assert self.num_heads % tp_size == 0
         self.num_heads_per_partition = self.num_heads // tp_size
@@ -199,7 +198,6 @@ class Siglip2Attention(nn.Module):
             head_size=self.head_dim,
             scale=self.scale,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
     def forward(
@@ -241,16 +239,12 @@ class Siglip2MLP(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        use_data_parallel = (
-            multimodal_config is not None
-            and multimodal_config.mm_encoder_tp_mode == "data"
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -282,7 +276,6 @@ class Siglip2EncoderLayer(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -291,14 +284,12 @@ class Siglip2EncoderLayer(nn.Module):
         self.self_attn = Siglip2Attention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -344,20 +335,25 @@ class Siglip2Encoder(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList(
             [
                 Siglip2EncoderLayer(
                     config=config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
-                for idx in range(config.num_hidden_layers)
+                for idx in range(num_hidden_layers)
             ]
         )
 
@@ -366,15 +362,21 @@ class Siglip2Encoder(nn.Module):
         inputs_embeds: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
-    ) -> torch.Tensor:
+        return_all_hidden_states: bool = False,
+    ) -> torch.Tensor | list[torch.Tensor]:
+        hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
+
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+            hidden_states = encoder_layer(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            hidden_states = layer_outputs
+            if return_all_hidden_states:
+                hidden_states_pool.append(hidden_states)
+        if return_all_hidden_states:
+            return hidden_states_pool
         return hidden_states
 
 
@@ -383,7 +385,8 @@ class Siglip2VisionTransformer(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -397,7 +400,7 @@ class Siglip2VisionTransformer(nn.Module):
             self.encoder = Siglip2Encoder(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
+                num_hidden_layers_override=num_hidden_layers_override,
                 prefix=f"{prefix}.encoder",
             )
         num_hidden_layers = config.num_hidden_layers
@@ -407,7 +410,13 @@ class Siglip2VisionTransformer(nn.Module):
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
 
-        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
+            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        else:
+            self.post_layernorm = None
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -418,19 +427,34 @@ class Siglip2VisionTransformer(nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
+        select_layers: list[int] | None = None,
     ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
         of the input images.
+        select_layers (`list[int]` or `None`, defaults to `None`):
+            Layer indices to select hidden states from. Supports negative
+            indices (e.g., -1 for last layer, -2 for second-to-last).
+            If None, returns the last layer output.
         """
         hidden_states = self.embeddings(pixel_values_packed, spatial_shapes)
+
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            return_all_hidden_states=select_layers is not None,
         )
-        return self.post_layernorm(encoder_outputs)
+
+        encoder_outputs = resolve_visual_encoder_outputs(
+            encoder_outputs,
+            self.post_layernorm,
+            select_layers=select_layers,
+            max_possible_layers=self.config.num_hidden_layers,
+        )
+
+        return encoder_outputs
 
 
 class Siglip2Model(torch.nn.Module):
@@ -438,7 +462,8 @@ class Siglip2Model(torch.nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -446,7 +471,8 @@ class Siglip2Model(torch.nn.Module):
         self.vision_model = Siglip2VisionTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
         )
 
@@ -456,12 +482,22 @@ class Siglip2Model(torch.nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
+        select_layers: list[int] | None = None,
     ) -> torch.Tensor:
+        """Forward pass through the vision model.
+
+        Args:
+            select_layers: Layer indices to select hidden states from.
+                Supports negative indices (e.g., [-2] for second-to-last).
+                If None, returns the last layer output with post_layernorm.
+                Multiple layers can be selected and will be concatenated.
+        """
         return self.vision_model(
             pixel_values_packed=pixel_values_packed,
             spatial_shapes=spatial_shapes,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            select_layers=select_layers,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -473,8 +509,22 @@ class Siglip2Model(torch.nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
+            # post_layernorm is optional in Siglip2Model
+            if (
+                name.startswith("vision_model.post_layernorm")
+                and self.vision_model.post_layernorm is None
+            ):
+                continue
+
+            # omit layers when num_hidden_layers_override is set
+            if name.startswith("vision_model.encoder.layers"):
+                layer_idx = int(name.split(".")[3])
+                if layer_idx >= layer_count:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue

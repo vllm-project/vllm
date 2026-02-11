@@ -24,10 +24,23 @@ from vllm.multimodal.utils import (
 )
 from vllm.utils.serial_utils import tensor2base64
 
+KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+
+@pytest.fixture(scope="function")
+def kimi_k2_5_model_config():
+    return ModelConfig(
+        KIMI_K2_5_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
 
 
 @pytest.fixture(scope="function")
@@ -64,6 +77,16 @@ def phi3v_model_config_image_embeds():
         limit_mm_per_prompt={
             "image": 2,
         },
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25omni_model_config_image_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"image": 2},
         enable_mm_embeds=True,
     )
 
@@ -151,6 +174,22 @@ def _assert_mm_data_is_image_input(
     if skipped_image_indices is not None:
         for i in skipped_image_indices:
             assert image_data[i] is None
+
+
+def _assert_mm_data_is_vision_chunk_input(
+    mm_data: MultiModalDataDict | None,
+    vision_chunk_count: int,
+) -> None:
+    assert mm_data is not None
+    assert set(mm_data.keys()) == {"vision_chunk"}
+
+    vision_chunk_data = mm_data.get("vision_chunk")
+    assert vision_chunk_data is not None
+
+    assert (
+        isinstance(vision_chunk_data, list)
+        and len(vision_chunk_data) == vision_chunk_count
+    )
 
 
 def _assert_mm_uuids(
@@ -823,7 +862,8 @@ def test_parse_chat_messages_audio_embeds_with_string(
     import torch
 
     # Create a sample audio embedding tensor
-    audio_embedding = torch.randn(1, 128, 768)
+    hidden_size = audio_embeds_model_config.get_inputs_embeds_size()
+    audio_embedding = torch.randn(1, 128, hidden_size)
 
     # Encode it as base64
     base64_audio_embedding = tensor2base64(audio_embedding)
@@ -865,7 +905,8 @@ async def test_parse_chat_messages_audio_embeds_async(
     import torch
 
     # Create a sample audio embedding tensor
-    audio_embedding = torch.randn(1, 128, 768)
+    hidden_size = audio_embeds_model_config.get_inputs_embeds_size()
+    audio_embedding = torch.randn(1, 128, hidden_size)
 
     # Encode it as base64
     base64_audio_embedding = tensor2base64(audio_embedding)
@@ -908,8 +949,9 @@ def test_parse_chat_messages_multiple_image_embeds(
     can be provided in a single request, similar to regular images.
     """
     # Create two sample image embedding tensors
-    image_embedding_1 = torch.randn(256, 1024)
-    image_embedding_2 = torch.randn(128, 1024)
+    hidden_size = phi3v_model_config_image_embeds.get_inputs_embeds_size()
+    image_embedding_1 = torch.randn(256, hidden_size)
+    image_embedding_2 = torch.randn(128, hidden_size)
 
     # Encode them as base64 using the convenience function
     base64_image_embedding_1 = tensor2base64(image_embedding_1)
@@ -1022,8 +1064,9 @@ async def test_parse_chat_messages_multiple_image_embeds_async(
     This validates the AsyncMultiModalItemTracker also supports multiple embeddings.
     """
     # Create two sample image embedding tensors
-    image_embedding_1 = torch.randn(200, 768)
-    image_embedding_2 = torch.randn(150, 768)
+    hidden_size = phi3v_model_config_image_embeds.get_inputs_embeds_size()
+    image_embedding_1 = torch.randn(200, hidden_size)
+    image_embedding_2 = torch.randn(150, hidden_size)
 
     # Encode them as base64 using the convenience function
     base64_image_embedding_1 = tensor2base64(image_embedding_1)
@@ -1145,13 +1188,14 @@ def test_parse_chat_messages_empty_dict_image_embeds(
 
 
 def test_parse_chat_messages_multiple_dict_image_embeds(
-    phi3v_model_config_image_embeds,
+    qwen25omni_model_config_image_embeds,
 ):
     """Test that multiple dictionaries for image_embeds is handled without errors."""
     # Create two sample image embedding tensors
     batch_size = 2
-    image_embedding_1 = torch.randn(batch_size, 256, 1024)
-    image_embedding_2 = torch.randn(batch_size, 3)
+    hidden_size = qwen25omni_model_config_image_embeds.get_inputs_embeds_size()
+    image_embeds = torch.randn(batch_size * 220, hidden_size)
+    image_grid_thw = torch.tensor([[1, 22, 40] for _ in range(batch_size)])
 
     conversation, mm_data, mm_uuids = parse_chat_messages(
         [
@@ -1161,18 +1205,20 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                     {
                         "type": "image_embeds",
                         "image_embeds": {
-                            "image_embedding_1": tensor2base64(p),
-                            "image_embedding_2": tensor2base64(i),
+                            "image_embeds": tensor2base64(embeds),
+                            "image_grid_thw": tensor2base64(grid_thw),
                         },
                     }
-                    for p, i in zip(image_embedding_1, image_embedding_2)
+                    for embeds, grid_thw in zip(
+                        image_embeds.chunk(batch_size), image_grid_thw
+                    )
                 ]
                 + [
                     {"type": "text", "text": "Describe these two images."},
                 ],
             }
         ],
-        phi3v_model_config_image_embeds,
+        qwen25omni_model_config_image_embeds,
         content_format="string",
     )
 
@@ -1180,7 +1226,8 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
     assert conversation == [
         {
             "role": "user",
-            "content": "<|image_1|>\n<|image_2|>\nDescribe these two images.",
+            "content": "<|vision_start|><|IMAGE|><|vision_end|>\n"
+            "<|vision_start|><|IMAGE|><|vision_end|>\nDescribe these two images.",
         }
     ]
 
@@ -1191,10 +1238,10 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
     assert len(mm_data["image"]) == batch_size
 
     # Verify each embedding has the correct shape
-    assert isinstance(mm_data["image"]["image_embedding_1"], torch.Tensor)
-    assert mm_data["image"]["image_embedding_1"].shape == image_embedding_1.shape
-    assert isinstance(mm_data["image"]["image_embedding_2"], torch.Tensor)
-    assert mm_data["image"]["image_embedding_2"].shape == image_embedding_2.shape
+    assert isinstance(mm_data["image"]["image_embeds"], torch.Tensor)
+    assert mm_data["image"]["image_embeds"].shape == image_embeds.shape
+    assert isinstance(mm_data["image"]["image_grid_thw"], torch.Tensor)
+    assert mm_data["image"]["image_grid_thw"].shape == image_grid_thw.shape
 
     # Verify UUIDs (None since we didn't provide any)
     _assert_mm_uuids(mm_uuids, batch_size, expected_uuids=[None, None])
@@ -2133,3 +2180,505 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     ]
     _assert_mm_data_inputs(mm_data, {"audio": 1})
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
+
+
+def test_parse_chat_messages_image_vision_chunk(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+def test_parse_chat_messages_video_vision_chunk(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+def test_parse_chat_messages_image_vision_chunk_with_uuid(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    image_uuid = "image_123"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "uuid": image_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid], modality="vision_chunk")
+
+
+def test_parse_chat_messages_video_vision_chunk_with_uuid(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    video_uuid = "video_456"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                    "uuid": video_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+def test_parse_chat_messages_mixed_vision_chunk(
+    kimi_k2_5_model_config,
+    image_url,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image and video."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    image_placeholder = (
+        "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    )
+    video_placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": (
+                f"{image_placeholder}\n{video_placeholder}\n"
+                "Analyze this image and video."
+            ),
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 2)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None], modality="vision_chunk")
+
+
+def test_parse_chat_messages_mixed_vision_chunk_with_uuid(
+    kimi_k2_5_model_config,
+    image_url,
+    video_url,
+):
+    image_uuid = "image_123"
+    video_uuid = "video_456"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image and video."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "uuid": image_uuid,
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                    "uuid": video_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    image_placeholder = (
+        "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    )
+    video_placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": (
+                f"{image_placeholder}\n{video_placeholder}\n"
+                "Analyze this image and video."
+            ),
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 2)
+    _assert_mm_uuids(
+        mm_uuids, 2, expected_uuids=[image_uuid, video_uuid], modality="vision_chunk"
+    )
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_mixed_vision_chunk_async(
+    kimi_k2_5_model_config,
+    image_url,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image and video."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    image_placeholder = (
+        "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    )
+    video_placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": (
+                f"{image_placeholder}\n{video_placeholder}\n"
+                "Analyze this image and video."
+            ),
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 2)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None], modality="vision_chunk")
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_mixed_vision_chunk_with_uuid_async(
+    kimi_k2_5_model_config,
+    image_url,
+    video_url,
+):
+    image_uuid = "image_123"
+    video_uuid = "video_456"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image and video."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "uuid": image_uuid,
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                    "uuid": video_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    image_placeholder = (
+        "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    )
+    video_placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": (
+                f"{image_placeholder}\n{video_placeholder}\n"
+                "Analyze this image and video."
+            ),
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 2)
+    _assert_mm_uuids(
+        mm_uuids, 2, expected_uuids=[image_uuid, video_uuid], modality="vision_chunk"
+    )
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_image_vision_chunk_async(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_vision_chunk_async(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_image_vision_chunk_with_uuid_async(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    image_uuid = "image_123"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "uuid": image_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid], modality="vision_chunk")
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    video_uuid = "video_456"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                    "uuid": video_uuid,
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")

@@ -32,9 +32,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
-    device: torch.device,
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
 ):
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_metadata_builders: list[AttentionMetadataBuilder] = []
@@ -50,10 +48,7 @@ def init_attn_backend(
             attn_backends[layer_name] = attn_backend
 
         attn_metadata_builder = attn_backend.get_builder_cls()(
-            kv_cache_group_spec.kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
+            kv_cache_group_spec.kv_cache_spec, layer_names, vllm_config, device
         )
         attn_metadata_builders.append(attn_metadata_builder)  # type: ignore
 
@@ -65,10 +60,7 @@ def init_attn_backend(
     return attn_backends, attn_metadata_builders
 
 
-def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig,
-    device: torch.device,
-):
+def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -140,19 +132,30 @@ def init_kv_cache(
     return kv_caches
 
 
+def build_slot_mappings_by_layer(
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+) -> dict[str, torch.Tensor]:
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+        for layer_name in kv_cache_group.layer_names:
+            slot_mappings_by_layer[layer_name] = slot_mapping
+    return slot_mappings_by_layer
+
+
 def build_attn_metadata(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
+    max_query_len: int,
     seq_lens: torch.Tensor,
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
-    max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
@@ -176,8 +179,7 @@ def build_attn_metadata(
 
         attn_metadata_builder = attn_metadata_builders[i]
         metadata = attn_metadata_builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
         for layer_name in kv_cache_spec.layer_names:
             attn_metadata[layer_name] = metadata
