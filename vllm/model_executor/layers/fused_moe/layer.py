@@ -47,6 +47,9 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    MOEExpertMixSpec
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -81,6 +84,7 @@ def determine_expert_map(
     global_num_experts: int,
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
+    mix_placement: bool = False,
     return_expert_mask: bool = False,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
@@ -117,6 +121,9 @@ def determine_expert_map(
 
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
+    if mix_placement:
+        base_experts += num_fused_shared_experts
+        global_num_experts += num_fused_shared_experts * ep_size
     remainder = global_num_experts % ep_size
     local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
@@ -425,13 +432,18 @@ class FusedMoE(CustomOp):
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
         )
 
+        additional_config = self.vllm_config.additional_config
+        if isinstance(additional_config, dict):
+            mix_placement = additional_config.get("mix_placement", False)
+
         self.num_fused_shared_experts = (
             n_shared_experts
-            if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
+            if n_shared_experts is not None
+            and (self.aiter_fmoe_shared_expert_enabled or mix_placement)
             else 0
         )
         if (
-            not self.aiter_fmoe_shared_expert_enabled
+            not (self.aiter_fmoe_shared_expert_enabled or mix_placement)
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
@@ -466,9 +478,11 @@ class FusedMoE(CustomOp):
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
+                mix_placement=mix_placement,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
+            self.global_num_experts = self.local_num_experts * self.ep_size
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
@@ -492,7 +506,6 @@ class FusedMoE(CustomOp):
             )
 
         self.top_k = top_k
-
         self._init_aiter_shared_experts_topK_buffer(
             vllm_config=vllm_config, dp_size=dp_size_
         )
@@ -644,6 +657,13 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
+
+        self.moe_expert_spec = MOEExpertMixSpec(
+            mix_placement=mix_placement,
+            routed_scaling_factor=self.routed_scaling_factor,
+            logical_num_experts=self.logical_num_experts,
+            num_fused_shared_experts=self.num_fused_shared_experts
+        )
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -1113,7 +1133,7 @@ class FusedMoE(CustomOp):
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
     ):
-        if self.num_fused_shared_experts > 0:
+        if self.num_fused_shared_experts > 0 and self.aiter_fmoe_shared_expert_enabled:
             init_aiter_topK_meta_data(
                 n_routed_experts=self.global_num_experts,
                 n_shared_experts=self.num_fused_shared_experts,
@@ -1125,7 +1145,7 @@ class FusedMoE(CustomOp):
                 * dp_size,
                 is_EP=self.use_ep,
             )
-        self.local_num_experts += self.num_fused_shared_experts
+            self.local_num_experts += self.num_fused_shared_experts
 
     @overload
     def weight_loader(
@@ -1749,6 +1769,7 @@ class FusedMoE(CustomOp):
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
                     router_logits=staged_router_logits,
+                    moe_expert_spec=self.moe_expert_spec
                 )
 
                 final_hidden_states = self.quant_method.apply(
@@ -1942,6 +1963,7 @@ class FusedMoE(CustomOp):
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=x_orig,
                     router_logits=router_logits,
+                    moe_expert_spec=self.moe_expert_spec
                 )
 
                 final_hidden_states = self.quant_method.apply(
@@ -2000,8 +2022,9 @@ class FusedMoE(CustomOp):
         ckpt_up_proj_name: str,
         num_experts: int,
         num_redundant_experts: int = 0,
+        num_shared_experts: int = 0,
+        mix_placement: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        num_physical_experts = num_experts + num_redundant_experts
 
         # In the returned mapping:
         # - `expert_id` is the physical expert id
@@ -2009,10 +2032,14 @@ class FusedMoE(CustomOp):
         # So that we should map the expert id to logical in `weight_name`
         physical_to_logical_map = (
             EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
+                num_experts,
+                num_redundant_experts,
+                num_shared_experts,
+                mix_placement,
             )
         )
 
+        num_physical_experts = len(physical_to_logical_map)
         base_layer = (
             "base_layer."
             if any(".base_layer." in name for name, _ in model.named_parameters())

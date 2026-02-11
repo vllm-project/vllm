@@ -311,6 +311,8 @@ class EplbState:
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
         num_redundant_experts: int,
+        num_shared_experts: int = 0,
+        mix_placement: bool = False,
     ) -> Sequence[int]:
         """
         Build an initial expert arrangement using the following structure:
@@ -321,10 +323,25 @@ class EplbState:
                 where each integer is the index of the logical expert
                 that the corresponding physical expert maps to.
         """
-        global_physical_to_logical_map = list(range(num_routed_experts))
-        global_physical_to_logical_map += [
-            i % num_routed_experts for i in range(num_redundant_experts)
-        ]
+        ep_size = get_ep_group().world_size
+        num_physical_experts = num_routed_experts + num_redundant_experts
+        if mix_placement:
+            num_base_experts = num_physical_experts // ep_size
+            global_physical_to_logical_map = list()
+            for ep_rank in range(ep_size):
+                start_idx = ep_rank * num_base_experts
+                end_idx = (ep_rank + 1) * num_base_experts
+                global_physical_to_logical_map += [
+                    i % num_routed_experts for i in range(start_idx, end_idx)
+                ]
+                global_physical_to_logical_map += [
+                    num_routed_experts + i for i in range(num_shared_experts)
+                ]
+        else:
+            global_physical_to_logical_map = list(range(num_routed_experts))
+            global_physical_to_logical_map += [
+                i % num_routed_experts for i in range(num_redundant_experts)
+            ]
         return global_physical_to_logical_map
 
     def validate_ep_configuration(self, new_model: MixtureOfExperts):
@@ -370,6 +387,7 @@ class EplbState:
         global_expert_load: torch.Tensor | None = None,
         old_global_expert_indices: torch.Tensor | None = None,
         rank_mapping: dict[int, int] | None = None,
+        mix_placement: bool = False,
     ):
         """
         Build the initial EPLB state.
@@ -381,6 +399,8 @@ class EplbState:
             EplbState.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
                 model.num_redundant_experts,
+                model.num_shared_experts,
+                mix_placement,
             )
         )
         physical_to_logical_map = torch.tensor(
