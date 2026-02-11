@@ -1373,9 +1373,9 @@ template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     __attribute__((amdgpu_waves_per_eu(1, 1)))
-    wvSplitKrc_(const int actlN, const int K, const int M, const int Bx,
-                const int By, const scalar_t* __restrict__ B,
-                const scalar_t* __restrict__ A,
+    wvSplitKrc_(const int actlN, const int K, const int Kap, const int M,
+                const int Bx, const int By, const scalar_t* __restrict__ A,
+                const scalar_t* __restrict__ B,
                 const scalar_t* __restrict__ BIAS, float* glbl, scalar_t* C,
                 const int CuCount) {
   // Use upper half of glbl buffer for atomic reduce counting
@@ -1572,11 +1572,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               k_str + kOff;  // min__(K - A_CHUNK, k_str + kOff);
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
             __builtin_amdgcn_global_load_lds(
-                (int*)(&A[min__(
-                    K * actlN - A_CHUNK,
-                    kOffcp + K * (n / CHUNKK +
-                                  (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
-                                  (threadIdx.y % sprdN)))]),
+                (int*)(&A[min__(Kap * actlN - A_CHUNK,
+                                kOffcp + Kap * (n / CHUNKK +
+                                                (N / CHUNKK) * (threadIdx.x /
+                                                                (64 / CHUNKK)) +
+                                                (threadIdx.y % sprdN)))]),
                 (int*)(&s[(k +
                            kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
                 16, 0, 0);
@@ -1721,6 +1721,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
       __builtin_amdgcn_sched_barrier(0);
+      // Cleanup the static shared space, so we don't need to zero it later.
+      cntr[adr_] = 0;
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int g_nindx =
+              j + (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          int g_adr = g_mindx + M * g_nindx * 4;
+          glbl[g_adr] = 0;
+        }
+      }
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
         for (uint32_t j = 0; j < 4; j++) {
           int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
@@ -1752,9 +1762,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK>
-__global__ void wvSplitKrc_(const int actlN, const int K, const int M,
-                            const int Bx, const int By, const scalar_t* B,
-                            const scalar_t* __restrict__ A,
+__global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
+                            const int M, const int Bx, const int By,
+                            const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             // int* cntr,
                             scalar_t* C, const int CuCount){UNREACHABLE_CODE}
@@ -1763,9 +1773,11 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int M,
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount) {
-  auto M_in = in_a.size(0);
-  auto N_in = in_b.size(0);
-  auto K_in = in_a.size(1);
+  auto M_in = in_b.size(0);
+  auto N_in = in_a.size(0);
+  auto K_in = in_b.size(1);
+  auto Kap_in = in_a.stride(0);
+
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -1782,13 +1794,16 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   auto out_c = torch::empty(
       {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+      torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
   auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
-  auto axl_glbl = torch::empty(
-      {N_p2 + N_p2 / 4, M_in + M_in / 4},
-      torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
-  axl_glbl.zero_();  // disable for FAST_UNSAFE_RDC_INIT
+
+  // Reusable reduce buffer, must be cleared to zero after use.
+  static torch::Tensor axl_glbl =
+      torch::zeros(
+          128 * 1024 + 128 * 1024 / 4,
+          torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()))
+          .detach();
 
   dim3 grid(CuCount);
 
@@ -1796,17 +1811,17 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
-  {                                                                            \
-    dim3 block(64, 4);                                                         \
-    wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK>               \
-        <<<grid, block, 0, stream>>>(N_in, K_in, M_in, Bx_in, By_in, af4, bf4, \
-                                     biasf4, glbl, c, CuCount);                \
+#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                   \
+  {                                                                          \
+    dim3 block(64, 4);                                                       \
+    wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK>             \
+        <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
+                                     af4, bf4, biasf4, glbl, c, CuCount);    \
   }
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitKrc", [&] {
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "wvSplitKrc", [&] {
     using fptype = typename scalar<scalar_t>::type;
-    fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
+    const fptype* af4 = reinterpret_cast<const fptype*>(in_a.data_ptr());
     const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
     const fptype* biasf4 =
         (in_bias.has_value() && in_bias->numel() > 0)
