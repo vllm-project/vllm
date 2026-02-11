@@ -341,7 +341,7 @@ if __name__ == "__main__":
         description=(
             "Run single prepare-finalize & fused-experts combination test"
             "Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations "
-            "--pf-type MoEPrepareAndFinalizeNoEP --experts-type BatchedTritonExperts"
+            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )
     args = parser.parse_args()

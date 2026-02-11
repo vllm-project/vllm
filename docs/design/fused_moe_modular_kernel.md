@@ -228,7 +228,7 @@ Doing this will add the new implementation to the test suite.
 ### How To Check `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` Compatibility
 
 The unit test file [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
-Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type MoEPrepareAndFinalizeNoEP --experts-type BatchedTritonExperts`
+Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 As a side effect, this script can be used to test `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` compatibility. When invoked
 with incompatible types, the script will error.
 
@@ -237,7 +237,7 @@ with incompatible types, the script will error.
 Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
 The script can be used to generate Torch traces for a single `FusedMoEModularKernel::forward()` call for any compatible
 `FusedMoEPrepareAndFinalize` and `FusedMoEPermuteExpertsUnpermute` types.
-Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type MoEPrepareAndFinalizeNoEP --experts-type BatchedTritonExperts`
+Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 
 ## FusedMoEPrepareAndFinalize Implementations
 
