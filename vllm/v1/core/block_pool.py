@@ -407,6 +407,8 @@ class BlockPool:
                 else:
                     cached_blocks.append(block)
 
+        # Fresh blocks go to front of queue (used first during allocation),
+        # cached blocks go to back (preserved longer for prefix cache hits).
         if fresh_blocks:
             self.free_block_queue.prepend_n(fresh_blocks)
         if cached_blocks:
