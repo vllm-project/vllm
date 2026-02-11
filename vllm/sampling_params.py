@@ -615,12 +615,23 @@ class SamplingParams(
             return
 
         if len(allowed_token_ids) == 0:
-            raise ValueError("allowed_token_ids is not None and empty!")
+            raise VLLMValidationError(
+                "allowed_token_ids is not None and empty!",
+                parameter="allowed_token_ids",
+                value=allowed_token_ids,
+            )
 
         if tokenizer is not None:
             vocab_size = len(tokenizer)
-            if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
-                raise ValueError("allowed_token_ids contains out-of-vocab token id!")
+            oov_token_ids = [
+                tid for tid in allowed_token_ids if not (0 <= tid < vocab_size)
+            ]
+            if oov_token_ids:
+                raise VLLMValidationError(
+                    "allowed_token_ids contains out-of-vocab token id!",
+                    parameter="allowed_token_ids",
+                    value=oov_token_ids,
+                )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
