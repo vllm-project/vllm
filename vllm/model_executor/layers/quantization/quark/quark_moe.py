@@ -880,14 +880,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 _, _, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w13_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
                     layer.w13_input_scale,
                 )
                 _, _, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w2_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
