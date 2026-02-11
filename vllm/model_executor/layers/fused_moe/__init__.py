@@ -24,6 +24,13 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.sonic_moe import (
+    SonicMoeExperts,
+    is_sonic_moe_supported,
+    is_valid_sonic_moe,
+    permute_weights_for_sonic,
+    sonic_moe_forward,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -65,6 +72,11 @@ __all__ = [
     "activation_without_mul",
     "override_config",
     "get_config",
+    "is_sonic_moe_supported",
+    "is_valid_sonic_moe",
+    "sonic_moe_forward",
+    "permute_weights_for_sonic",
+    "SonicMoeExperts",
 ]
 
 if HAS_TRITON:
