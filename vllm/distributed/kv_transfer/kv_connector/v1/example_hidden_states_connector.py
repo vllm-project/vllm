@@ -14,13 +14,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -28,21 +25,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def reshape_hidden_states_from_kv_cache(
-    kv: torch.Tensor, num_hidden_states: int
+def extract_from_kv_cache(
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_tokens: int,
 ) -> torch.Tensor:
-    # kv shape: [2, batch_size, num_heads, head_size]
-    kv = kv.flatten(2)
-    # kv shape: [2, batch_size, num_heads * head_size]
+    """Extract data from KV cache
+    Assume the shape of the kv_cache is (num_pages, page_size, num_heads, head_size)
+    """
 
-    hidden_states = torch.cat([kv[0], kv[1]], dim=1)
-    # hidden_states shape: [batch_size, hidden_size * num_hidden_states]
-
-    assert hidden_states.shape[1] % num_hidden_states == 0
-    split_size = hidden_states.shape[1] // num_hidden_states
-    hidden_states = hidden_states.split(split_size, dim=1)
-
-    return torch.stack(hidden_states, dim=0)
+    padded_kv = kv_cache.flatten(0, 1)[slot_mapping]
+    # shape: [len(slot_mapping), num_heads, head_size]
+    return padded_kv[:num_tokens]  # shape: [num_tokens, num_heads, head_size]
 
 
 @dataclass
@@ -99,10 +93,21 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1):
-    # NOTE: This is Simple debug implementation of the KV connector.
-    # It save / load the KV cache to / from the disk.
-    # It does extra work which will overwrite the existing prefix-cache in GPU
-    # - to remove the overhead, need to add some "mask" in the ReqMeta class
+    """
+    Simple debug implementation of a HiddenStatesConnector.
+
+    Simply extracts the hidden states from the kv cache and stores them to disk.
+    Must be used in conjunction with the `extract_hidden_states` spec decoding method.
+    """
+
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        # Must be False so that drafter kv cache isn't merged with verifier's
+        return False
 
     def __init__(
         self,
@@ -119,7 +124,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
-        self.cache_layers = []
+        self.cache_layers = []  # set by self.register_kv_caches
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
@@ -130,38 +135,22 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
 
         self._request_filenames: dict[str, str] = {}
 
+    # ==============================
+    # Worker-side methods
+    # ==============================
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        from vllm.model_executor.models.extract_hidden_states import (
+            CacheOnlyAttentionLayer,
+        )
+
         # Filter layers to only include CacheOnlyAttentionLayers
         layers = get_layers_from_vllm_config(
-            self._vllm_config, CacheOnlyAttentionLayer, kv_caches.keys()
+            self._vllm_config, CacheOnlyAttentionLayer, list(kv_caches.keys())
         )
         self.cache_layers = list(layers.keys())
-        logger.info(f"Found {len(self.cache_layers)} CacheOnlyAttentionLayers")
-
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
-        """Start loading the KV cache from the connector buffer to vLLM's
-        paged KV buffer.
-
-        Args:
-            forward_context (ForwardContext): the forward context.
-            **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-        """
-        pass
-
-    def wait_for_layer_load(self, layer_name: str) -> None:
-        """Blocking until the KV for a specific layer is loaded into vLLM's
-        paged buffer.
-
-        This interface will be useful for layer-by-layer pipelining.
-
-        Args:
-            layer_name: the name of that layer
-        """
-        return
+        assert len(self.cache_layers) == 1, (
+            f"Expected 1 CacheOnlyAttentionLayer, got {len(self.cache_layers)}"
+        )
 
     def save_kv_layer(
         self,
@@ -183,34 +172,21 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         if layer_name not in self.cache_layers:
             return
 
-        def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
-            num_tokens: int,
-        ) -> torch.Tensor:
-            """Extract the KV cache from the layer.
+        from vllm.model_executor.models.extract_hidden_states import (
+            CacheOnlyAttentionMetadata,
+        )
 
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-            """
-            if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            padded_kv = layer.reshape(2, num_pages * page_size, -1)[
-                :, slot_mapping, ...
-            ]
-            return padded_kv[:, :num_tokens, ...]
+        assert isinstance(attn_metadata, CacheOnlyAttentionMetadata), (
+            "ExampleHiddenStatesConnector only supports CacheOnlyAttentionBackend"
+        )
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
+
         os.makedirs(self._storage_path, exist_ok=True)
         for request in connector_metadata.requests:
-            kv_cache = extract_kv_from_layer(
+            hidden_states = extract_from_kv_cache(
                 kv_layer, request.slot_mapping, request.token_ids.shape[0]
-            )
-            hidden_states = reshape_hidden_states_from_kv_cache(
-                kv_cache, self.num_hidden_states
             )
             tensors = {
                 "hidden_states": hidden_states.detach().cpu(),
@@ -218,8 +194,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             }
             safetensors.torch.save_file(tensors, request.filename)
 
-    def wait_for_save(self):
-        return
+    # ==============================
+    # Scheduler-side methods
+    # ==============================
 
     def get_num_new_matched_tokens(
         self,
@@ -245,13 +222,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
-
-        If blocks were allocated, add to _requests_need_load,
-        such that we load the KVs in the next forward pass.
-        """
-        pass
+        # Usually used to handle allocation of new blocks for requests that are loading
+        # tokens from connector's external kv cache. We never load from external cache
+        # so this is a no-op.
+        assert num_external_tokens == 0, "This connector is store-only"
 
     def build_connector_meta(
         self,
@@ -304,3 +278,27 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         req_filename = self._request_filenames.pop(req_id, None)
 
         return False, {"hidden_states_path": req_filename}
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError(
+                "get_required_kvcache_layout should not be called "
+                "on the abstract base class"
+            )
+        # NHD means we have (num_tokens, num_heads)
+        # HND means we have (num_heads, num_tokens)
+        # For now, we only support NHD layout since this keeps the
+        # hidden states for each token together in memory.
+        # HND is primarily used when sharding heads across devices.
+        return "NHD"
