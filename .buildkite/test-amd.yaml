@@ -1681,23 +1681,11 @@ steps:
   - "pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py"
 
 # corresponds to .buildkite/test_areas/compile.yaml
-- label: AsyncTP Correctness Tests  (2xMI325 GPUs)
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction, tj]
-  agent_pool: mi325_2
-  optional: true
-  num_devices: 2
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - "pytest -v -s tests/compile/correctness_e2e/test_async_tp.py"
-
-# corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion and Compile Unit Tests (2xMI325 GPUs)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   mirror_hardwares: [amdexperimental, amdproduction, tj]
-  agent_pool: mi325_2
+  agent_pool: mi325_1 # changed to 1 GPU until the fusion all reduce is enabled then only revert back to 2 GPUs
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
@@ -1762,6 +1750,7 @@ steps:
     - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'llama-3'"
     - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8' -k 'inductor_partition and not +rms_norm and +quant_fp8 and qwen3' -k 'llama-3'"
 
-- label: Fusion E2E TP2 Quick (MI325)
-- label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
-- label: Fusion E2E TP2 (MI325)
+# - label: AsyncTP Correctness Tests  (2xMI325 GPUs)
+# - label: Fusion E2E TP2 Quick (MI325)
+# - label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
+# - label: Fusion E2E TP2 (MI325)
