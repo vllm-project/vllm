@@ -208,15 +208,9 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         q_k_v, _ = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
-        q_h = torch.reshape(q, (b, t, self.h, self.d_k)).transpose(
-            1, 2
-        )  # (batch, head, time1, d_k)
-        k_h = torch.reshape(k, (b, t, self.h, self.d_k)).transpose(
-            1, 2
-        )  # (batch, head, time2, d_k)
-        v_h = torch.reshape(v, (b, t, self.h, self.d_k)).transpose(
-            1, 2
-        )  # (batch, head, time2, d_k)
+        q_h = torch.reshape(q, (b, t, self.h, self.d_k)).transpose(1, 2)
+        k_h = torch.reshape(k, (b, t, self.h, self.d_k)).transpose(1, 2)
+        v_h = torch.reshape(v, (b, t, self.h, self.d_k)).transpose(1, 2)
 
         return q_h, k_h, v_h, v
 
@@ -232,23 +226,19 @@ class MultiHeadedAttentionSANM(nn.Module):
             if mask_att_chunk_encoder is not None:
                 mask = mask * mask_att_chunk_encoder
 
-            mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
+            mask = mask.unsqueeze(1).eq(0)
 
             min_value = -float("inf")
             scores = scores.masked_fill(mask, min_value)
-            attn = torch.softmax(scores, dim=-1).masked_fill(
-                mask, 0.0
-            )  # (batch, head, time1, time2)
+            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)
         else:
-            attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
+            attn = torch.softmax(scores, dim=-1)
 
         p_attn = attn
-        x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
-        x = (
-            x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
-        )  # (batch, time1, d_model)
+        x = torch.matmul(p_attn, value)
+        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
 
-        out, _ = self.out_proj(x)  # (batch, time1, d_model)
+        out, _ = self.out_proj(x)
         return out
 
     def forward(
@@ -393,7 +383,6 @@ class SenseVoiceEncoderSmall(nn.Module):
         xs_pad: torch.Tensor,
         ilens: torch.Tensor,
     ):
-        """Embed positions in tensor."""
         maxlen = xs_pad.shape[1]
         masks = sequence_mask(
             ilens, maxlen=maxlen, dtype=ilens.dtype, device=ilens.device
@@ -403,7 +392,6 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         xs_pad = self.embed(xs_pad)
 
-        # forward encoder1
         for layer_idx, encoder_layer in enumerate(self.encoders0):
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
@@ -845,9 +833,6 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
             audio_output_lengths = []
         else:
             assert isinstance(fake_token_len, torch.Tensor)
-            # _, audio_output_lens = _get_feat_extract_output_lengths(
-            #    feature_attention_mask.sum(-1)
-            # )
 
             audio_output_lengths = fake_token_len.tolist()
 
@@ -858,15 +843,6 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
                 assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
-
-            # if num_features == 0:
-            #    audios = mm_items.get_items("audio", AudioProcessorItems)
-            #    audio_len = audios.get_audio_length(item_idx)
-
-            #    raise ValueError(
-            #        f"The audio (len={audio_len}) is too short "
-            #        "to be represented inside the model"
-            #    )
 
             audio_tokens = [audio_token_id] * num_features
 
@@ -939,7 +915,6 @@ class FunASRForConditionalGeneration(
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        # processor = cached_processor_from_config(model_config)
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the funasr prompt"

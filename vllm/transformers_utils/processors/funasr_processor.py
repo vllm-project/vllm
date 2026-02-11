@@ -307,7 +307,7 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
                     data_i = torch.from_numpy(data_i)
                 data_list.append(data_i)
                 data_len.append(data_i.shape[0])
-            data = pad_sequence(data_list, batch_first=True)  # data: [batch, N]
+            data = pad_sequence(data_list, batch_first=True)
 
         data, data_len = frontend(data, data_len, **kwargs)
 
@@ -367,7 +367,7 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
             data_type=kwargs.get("data_type", "sound"),
             frontend=self.frontend,
             is_final=True,
-        )  # speech: [b, T, d]
+        )
         olens = 1 + (speech_lengths - 3 + 2 * 1) // 2
         olens = 1 + (olens - 3 + 2 * 1) // 2
         fake_token_len = (olens - 1) // 2 + 1
@@ -436,7 +436,6 @@ class FunASRProcessor(ProcessorMixin):
         [`~Qwen2Tokenizer.__call__`]. Please refer to the docstring of the
         above two methods for more information.
         """
-        # For backward compatibility
         if self._in_target_context_manager:
             return self.current_processor(*args, **kwargs)
 
@@ -447,10 +446,6 @@ class FunASRProcessor(ProcessorMixin):
             audio = args[0]
             args = args[1:]
 
-        # if audio is None and text is None:
-        #    raise ValueError(
-        #        "You need to specify either an `audio` or `text` input to process."
-        #    )
         if text is None:
             raise ValueError("You need to specify `text` input to process.")
         elif isinstance(text, str):
