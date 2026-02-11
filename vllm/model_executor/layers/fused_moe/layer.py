@@ -2080,26 +2080,6 @@ class FusedMoE(CustomOp):
 
         return s
 
-    def is_mxfp4_quant(self, quant_config: QuantizationConfig | None = None) -> bool:
-        if quant_config is None:
-            return False
-
-        name = quant_config.get_name()
-        if name == "mxfp4":
-            return True
-        elif name == "quark":
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-            model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
-            from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-
-            assert isinstance(quant_config, QuarkConfig)
-            # Padding for triton kernel only is enabled when it is gpt_oss
-            return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
-
-        return False
-
 
 def get_layer_from_name(layer_name: str) -> FusedMoE:
     forward_context: ForwardContext = get_forward_context()
