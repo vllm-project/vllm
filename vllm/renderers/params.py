@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -147,6 +148,7 @@ class TokenizeParams:
                 f"Please request fewer output tokens.",
                 parameter=self.max_output_tokens_param,
                 value=max_output_tokens,
+                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
         if (
@@ -161,6 +163,7 @@ class TokenizeParams:
                 f"Please request a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
+                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
     def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
@@ -262,6 +265,7 @@ class TokenizeParams:
                     f"Please reduce the length of the input prompt.",
                     parameter="input_text",
                     value=len(text),
+                    http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 )
 
         return text
@@ -343,6 +347,7 @@ class TokenizeParams:
                 f"Please reduce the length of the input prompt.",
                 parameter="input_tokens",
                 value=len(tokens),
+                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
         return tokens
