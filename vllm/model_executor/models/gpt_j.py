@@ -26,11 +26,11 @@ import torch
 from torch import nn
 from transformers import GPTJConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -95,12 +95,13 @@ class GPTJAttention(nn.Module):
         scaling = self.head_size**-0.5
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
+        rope_parameters = getattr(config, "rope_parameters", {})
+        rope_parameters["partial_rotary_factor"] = config.rotary_dim / self.head_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=rope_parameters,
             is_neox_style=False,
         )
         self.attn = Attention(
@@ -219,7 +220,7 @@ class GPTJModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -323,7 +324,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

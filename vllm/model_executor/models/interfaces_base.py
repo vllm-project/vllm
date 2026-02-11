@@ -19,10 +19,15 @@ from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
     from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any
+    SequencePoolingType = Any
+    TokenPoolingType = Any
+    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
@@ -45,13 +50,7 @@ class VllmModel(Protocol[T_co]):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Apply token embeddings to `input_ids`."""
-        if hasattr(self, "get_input_embeddings"):
-            logger.warning_once(
-                "`get_input_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_input_ids`."
-            )
-            return self.get_input_embeddings(input_ids)
+        ...
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> T_co: ...
 
@@ -64,14 +63,6 @@ def _check_vllm_model_init(model: type[object] | object) -> bool:
 def _check_vllm_model_embed_input_ids(model: type[object] | object) -> bool:
     model_embed_input_ids = getattr(model, "embed_input_ids", None)
     if not callable(model_embed_input_ids):
-        model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
-        if callable(model_get_input_embeddings):
-            logger.warning(
-                "`get_input_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_input_ids`."
-            )
-            model.embed_input_ids = model_get_input_embeddings
         logger.warning(
             "The model (%s) is missing the `embed_input_ids` method.",
             model,
@@ -165,14 +156,34 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    default_pooling_type: ClassVar[str] = "LAST"
+    default_seq_pooling_type: ClassVar[SequencePoolingType] = "LAST"
     """
-    Indicates the
-    [vllm.model_executor.layers.pooler.PoolerConfig.pooling_type][]
+    Indicates the [vllm.config.pooler.PoolerConfig.seq_pooling_type][]
     to use by default.
 
     You can use the
     [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    default_tok_pooling_type: ClassVar[TokenPoolingType] = "ALL"
+    """
+    Indicates the [vllm.config.pooler.PoolerConfig.tok_pooling_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    attn_type: ClassVar[AttnTypeStr] = "decoder"
+    """
+    Indicates the
+    [vllm.config.model.ModelConfig.attn_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.attn_type][]
     decorator to conveniently set this field.
     """
 
@@ -200,15 +211,42 @@ def is_pooling_model(
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def default_pooling_type(pooling_type: str):
-    """Decorator to set `VllmModelForPooling.default_pooling_type`."""
+def default_pooling_type(
+    *,
+    seq_pooling_type: SequencePoolingType = "LAST",
+    tok_pooling_type: TokenPoolingType = "ALL",
+):
+    """Decorator to set `VllmModelForPooling.default_*_pooling_type`."""
 
     def func(model: _T) -> _T:
-        model.default_pooling_type = pooling_type  # type: ignore
+        model.default_seq_pooling_type = seq_pooling_type  # type: ignore
+        model.default_tok_pooling_type = tok_pooling_type  # type: ignore
         return model
 
     return func
 
 
-def get_default_pooling_type(model: type[object] | object) -> str:
-    return getattr(model, "default_pooling_type", "LAST")
+def get_default_seq_pooling_type(
+    model: type[object] | object,
+) -> SequencePoolingType:
+    return getattr(model, "default_seq_pooling_type", "LAST")
+
+
+def get_default_tok_pooling_type(
+    model: type[object] | object,
+) -> TokenPoolingType:
+    return getattr(model, "default_tok_pooling_type", "ALL")
+
+
+def attn_type(attn_type: AttnTypeStr):
+    """Decorator to set `VllmModelForPooling.attn_type`."""
+
+    def func(model: _T) -> _T:
+        model.attn_type = attn_type  # type: ignore
+        return model
+
+    return func
+
+
+def get_attn_type(model: type[object] | object) -> AttnTypeStr:
+    return getattr(model, "attn_type", "decoder")

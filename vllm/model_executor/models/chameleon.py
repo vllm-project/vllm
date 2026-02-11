@@ -16,12 +16,12 @@ from transformers import (
     ChameleonVQVAEConfig,
 )
 
-from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -49,13 +49,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -314,7 +314,6 @@ class ChameleonAttention(nn.Module):
         self.k_norm = ChameleonLayerNorm((self.num_kv_heads, self.head_dim))
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -918,8 +917,6 @@ class ChameleonModel(nn.Module):
 class ChameleonForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -938,9 +935,20 @@ class ChameleonForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.model = ChameleonModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=(
+                ChameleonDecoderLayer
+                if not self.config.swin_norm
+                else ChameleonSwinDecoderLayer
+            ),
+            tower_targets={"image": ChameleonVQVAE},
+        ):
+            self.model = ChameleonModel(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
 
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -973,9 +981,6 @@ class ChameleonForConditionalGeneration(
             resolve_bindings={"h": expected_h, "w": expected_w},
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -989,7 +994,7 @@ class ChameleonForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

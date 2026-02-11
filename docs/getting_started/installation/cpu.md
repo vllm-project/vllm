@@ -18,6 +18,12 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
+## Technical Discussions
+
+The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).
+
+When open a Github issue about the CPU backend, please add `[CPU Backend]` in the title and it will be labeled with `cpu` for better awareness.
+
 ## Requirements
 
 - Python: 3.10 -- 3.13
@@ -46,9 +52,36 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ### Pre-built wheels
 
-Currently, there are no pre-built CPU wheels.
+When specifying the index URL, please make sure to use the `cpu` variant subdirectory.
+For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
+
+=== "Intel/AMD x86"
+
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-wheels"
+
+=== "ARM AArch64"
+
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:pre-built-wheels"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:pre-built-wheels"
+
+=== "IBM Z (S390X)"
+
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-wheels"
 
 ### Build wheel from source
+
+#### Set up using Python-only build (without compilation) {#python-only-build}
+
+Please refer to the instructions for [Python-only build on GPU](./gpu.md#python-only-build), and replace the build commands with:
+
+```bash
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu uv pip install --editable .
+```
+
+#### Full build (with compilation) {#full-build}
 
 === "Intel/AMD x86"
 
@@ -74,6 +107,18 @@ Currently, there are no pre-built CPU wheels.
 
     --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-images"
 
+=== "ARM AArch64"
+
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:pre-built-images"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:pre-built-images"
+
+=== "IBM Z (S390X)"
+
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-images"
+
 ### Build image from source
 
 === "Intel/AMD x86"
@@ -86,7 +131,7 @@ Currently, there are no pre-built CPU wheels.
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
@@ -124,6 +169,35 @@ vllm serve facebook/opt-125m --dtype=bfloat16
 ```
 
 Note, it is recommended to manually reserve 1 CPU for vLLM front-end process when `world_size == 1`.
+
+### What are supported models on CPU?
+
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](../../models/hardware_supported_models/cpu.md)
+
+### How to find benchmark configuration examples for supported CPU models?
+
+For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+
+Below is an example command to benchmark all CPU-supported models using optimized configurations.
+
+```bash
+ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+The benchmark results will be saved in `./benchmark/results/`.
+In the directory, the generated `.commands` files contain all example commands for the benchmark.
+
+We recommend configuring tensor-parallel-size to match the number of NUMA nodes on your system. Note that the current release does not support tensor-parallel-size=6.
+To determine the number of NUMA nodes available, use the following command:
+
+```bash
+lscpu | grep "NUMA node(s):" | awk '{print $3}'
+```
+
+For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
+, which publishes default-model CPU results produced using the same Benchmark Suite.
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
@@ -189,11 +263,6 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
     - AWQ (x86 only)
     - GPTQ (x86 only)
     - compressed-tensor INT8 W8A8 (x86, s390x)
-
-### (x86 only) What is the purpose of `VLLM_CPU_SGL_KERNEL`?
-
-- Both of them require `amx` CPU flag.
-    - `VLLM_CPU_SGL_KERNEL` can provide better performance for MoE models and small-batch scenarios.
 
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 

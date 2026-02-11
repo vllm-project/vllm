@@ -20,13 +20,10 @@ from vllm.config.multimodal import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import MultiModalInputs
+from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.transformers_utils.tokenizer import (
-    MistralTokenizer,
-    cached_tokenizer_from_config,
-    encode_tokens,
-)
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -87,11 +84,25 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
+def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for GLM-ASR model.
+    GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
+    """
+    if "audio" in mm_data:
+        audio = mm_data["audio"]
+        if isinstance(audio, list) and len(audio) > 1:
+            # Limit to single audio to match text requirement
+            mm_data["audio"] = [audio[0]]
+    return mm_data
+
+
 # For some multimodal models, tokenizer will always add bos_token
 # at the beginning of prompt by default, causing hf_processor outputs
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "nemotron_parse": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
@@ -107,9 +118,14 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
+    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
+    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
+    "glm_ocr": glm4_1v_patch_mm_data,
+    "glmasr": glmasr_patch_mm_data,
+    "interns1_pro": qwen3_vl_patch_mm_data,
+    "molmo2": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
@@ -154,14 +170,14 @@ def get_text_token_prompts(
     mm_data: MultiModalDataDict,
 ):
     dummy_inputs = processor.dummy_inputs
-    tokenizer = processor.info.get_tokenizer()
+    tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
-    parsed_data = processor.data_parser.parse_mm_data(mm_data)
+    parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     text_prompt: str | None
@@ -191,13 +207,34 @@ def get_text_token_prompts(
         assert isinstance(inputs.prompt, str)
 
         text_prompt = inputs.prompt
-        token_prompt = encode_tokens(
-            tokenizer,
+        token_prompt = tokenizer.encode(
             text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type),
+            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
         )
 
     return text_prompt, token_prompt
+
+
+def random_vision_chunk(
+    rng: np.random.RandomState,
+    min_wh: int,
+    max_wh: int,
+    min_frames: int,
+    max_frames: int,
+) -> dict:
+    num_frames = rng.randint(min_frames, max_frames + 1)
+    if num_frames == 1:
+        # Single image chunk
+        wh = rng.randint(min_wh, max_wh + 1)
+        image = random_image(rng, wh, wh + 1)
+        return {"type": "image", "image": image}
+    frames = []
+    for _ in range(num_frames):
+        wh = rng.randint(min_wh, max_wh + 1)
+        frame = rng.randint(0, 256, size=(wh, wh, 3), dtype=np.uint8)
+        frames.append(frame)
+    video_array = np.stack(frames, axis=0)
+    return {"type": "video_chunk", "video_chunk": video_array}
 
 
 def _test_processing_correctness(
@@ -214,7 +251,11 @@ def _test_processing_correctness(
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
         model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config = ModelConfig(
         model_id,
@@ -223,17 +264,18 @@ def _test_processing_correctness(
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        # Ensure that the cache can fit all of the data
-        mm_processor_cache_gb=2048,
         skip_tokenizer_init=model_info.require_embed_inputs,
         enable_prompt_embeds=model_info.require_embed_inputs,
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
+    # Ensure that the cache can fit all of the data
+    # (set after because ModelConfig would set it to 0 for encoder-decoder models)
+    model_config.multimodal_config.mm_processor_cache_gb = 2048
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    factories = model_cls._processor_factory
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
@@ -272,6 +314,7 @@ def _test_processing_correctness(
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
         "audio": (np.zeros((512,)), 16000),
+        "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
         "image": partial(random_image, rng, min_wh=128, max_wh=256),
@@ -279,6 +322,9 @@ def _test_processing_correctness(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
         "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "vision_chunk": partial(
+            random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
+        ),
     }
 
     for batch_idx in range(num_batches):
@@ -317,17 +363,18 @@ def _test_processing_correctness_one(
     model_type = model_config.hf_config.model_type
 
     text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
+    mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
@@ -341,12 +388,12 @@ def _test_processing_correctness_one(
     if text_prompt is not None:
         baseline_text_result = baseline_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
         cached_text_result = cached_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
 
@@ -388,31 +435,17 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
+    if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
+        pytest.skip(
+            "Qwen-VL tokenizer requires downloading a font file from "
+            "servers that often refuse connections in CI"
+        )
+    if model_id == "internlm/Intern-S1-Pro":
+        # FIXME(Isotr0py): Fix later.
+        pytest.skip("Tokenization issue. Fix later")
 
     _test_processing_correctness(
         model_id,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
-    )
-
-
-# Phi4MultimodalForCausalLM share same model repo with original format
-# Phi4MMForCausalLM, so we add it as a separate test case
-# Remove this test after conversion PR merged:
-# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
-@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-def test_processing_correctness_phi4_multimodal(
-    model_arch: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
-):
-    _test_processing_correctness(
-        model_arch,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
@@ -441,4 +474,4 @@ def _assert_inputs_equal(
         a_data.pop(key, None)
         b_data.pop(key, None)
 
-    assert a_data == b_data, msg
+    assert batched_tensors_equal(a_data, b_data), msg

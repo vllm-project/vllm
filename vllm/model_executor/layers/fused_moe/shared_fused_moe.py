@@ -18,45 +18,6 @@ class SharedFusedMoE(FusedMoE):
     can be interleaved with the fused all2all dispatch communication step.
     """
 
-    def __init__(
-        self,
-        shared_experts: torch.nn.Module | None,
-        gate: torch.nn.Module | None = None,
-        use_overlapped: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self._shared_experts = shared_experts
-
-        # Disable shared expert overlap if:
-        #   - we are using eplb, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothint to gain
-        #   - we are using marlin kjernels
-        self.use_overlapped = (
-            use_overlapped
-            and not (
-                # TODO(wentao): find the root cause and remove this condition
-                self.enable_eplb
-                or (self.moe_config.use_flashinfer_cutlass_kernels and self.dp_size > 1)
-                or self.use_marlin_kernels
-            )
-            and self._shared_experts is not None
-        )
-
-        self._gate = gate
-
-    @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
-
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     def forward(
         self,
         hidden_states: torch.Tensor,

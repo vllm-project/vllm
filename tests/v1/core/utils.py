@@ -9,6 +9,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -53,6 +54,7 @@ def create_scheduler(
     num_speculative_tokens: int | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
+    pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
 ) -> Scheduler | AsyncScheduler:
@@ -69,6 +71,13 @@ def create_scheduler(
     Returns:
       {class}`Scheduler` instance
     """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=skip_tokenizer_init,
+    )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -79,13 +88,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=skip_tokenizer_init,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -107,7 +110,7 @@ def create_scheduler(
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -120,7 +123,7 @@ def create_scheduler(
 
     ec_transfer_config = (
         ECTransferConfig(
-            ec_connector="ECSharedStorageConnector",
+            ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
@@ -132,6 +135,7 @@ def create_scheduler(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
+        parallel_config=ParallelConfig(pipeline_parallel_size=pipeline_parallel_size),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
@@ -141,7 +145,13 @@ def create_scheduler(
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
-                ["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False)
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             )
         ],
     )
@@ -226,7 +236,7 @@ def create_requests(
                 # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",

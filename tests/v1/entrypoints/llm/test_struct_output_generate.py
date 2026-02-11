@@ -4,7 +4,7 @@
 
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jsonschema
 import pytest
@@ -23,11 +23,6 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-
-if TYPE_CHECKING:
-    from vllm.config.model import TokenizerMode
-else:
-    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -92,6 +87,10 @@ PARAMS_MODELS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
+platform_args = {}
+if current_platform.is_rocm():
+    platform_args["async_scheduling"] = False
+
 
 class CarType(str, Enum):
     sedan = "sedan"
@@ -139,6 +138,7 @@ def test_structured_output(
         load_format="auto" if not model_name.startswith("mistralai/") else "hf",
         config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
+        **platform_args,
     )
 
     #
@@ -613,7 +613,7 @@ Make the response as short as possible.
 
 
 @pytest.mark.parametrize(
-    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config, async_scheduling",  # noqa: E501
     [
         (
             "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -621,16 +621,19 @@ Make the response as short as possible.
             "auto",
             "deepseek_r1",
             NGRAM_SPEC_CONFIG,
+            False,
         ),
-        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, False),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, True),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
     backend: str,
-    tokenizer_mode: TokenizerMode,
+    tokenizer_mode: str,
     reasoning_parser: str,
     model_name: str,
     speculative_config: dict[str, Any] | None,
+    async_scheduling: bool,
 ):
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
@@ -651,6 +654,7 @@ def test_structured_output_with_reasoning_matrices(
         ),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
+        async_scheduling=async_scheduling,
     )
     tokenizer = llm.get_tokenizer()
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(

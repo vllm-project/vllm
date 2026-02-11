@@ -5,13 +5,15 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.openai.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.protocol import (
+    from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
         ResponsesRequest,
     )
 else:
@@ -43,7 +45,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:
@@ -63,9 +65,22 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        start_token_id = self.start_token_id
         end_token_id = self.end_token_id
-        return any(input_id == end_token_id for input_id in reversed(input_ids))
+
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == start_token_id:
+                return False
+            if input_ids[i] == end_token_id:
+                return True
+        return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        end_token_id = self.end_token_id
+        return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

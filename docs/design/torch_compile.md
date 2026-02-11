@@ -117,7 +117,7 @@ vllm serve meta-llama/Llama-3.2-1B \
 
 
 # Alternative: Using dot notation (simpler for single values)
-vllm serve meta-llama/Llama-3.2-1B -O.dynamic_shapes_config.type=unbacked
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
 ```
 
 #### Choosing the Right Mode

@@ -1,0 +1,60 @@
+# MLA mixed batch benchmark (prefill + decode)
+# Tests chunked prefill performance
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+batch_specs:
+  # Small prefill + decode
+  - "1q1k_8q1s1k"           # 1 prefill + 8 decode
+  - "2q2k_16q1s1k"          # 2 prefill + 16 decode
+  - "4q1k_32q1s2k"          # 4 prefill + 32 decode
+
+  # Medium prefill + decode
+  - "2q4k_32q1s2k"          # 2 medium prefill + 32 decode
+  - "4q4k_64q1s2k"          # 4 medium prefill + 64 decode
+  - "8q2k_64q1s4k"          # 8 prefill + 64 decode
+
+  # Large prefill + decode (chunked prefill stress test)
+  - "2q8k_32q1s1k"          # 2 large prefill + 32 decode
+  - "1q16k_16q1s2k"         # 1 very large prefill + 16 decode
+  - "2q16k_32q1s4k"         # 2 very large prefill + 32 decode
+
+  # Context extension + decode
+  - "2q1kkv2k_16q1s1k"       # 2 extend + 16 decode
+  - "4q2kkv4k_32q1s2k"       # 4 extend + 32 decode
+  - "2q1kkv8k_32q1s2k"       # 2 large extend + 32 decode
+
+  # Explicitly chunked prefill
+  - "q8k"           # 8k prefill with chunking hint
+  - "q16k"          # 16k prefill with chunking hint
+  - "2q8k_32q1s2k"    # 2 chunked prefill + 32 decode
+
+  # High decode ratio (realistic serving)
+  - "1q2k_63q1s1k"          # 1 prefill + 63 decode
+  - "2q2k_62q1s2k"          # 2 prefill + 62 decode
+  - "4q4k_60q1s4k"          # 4 prefill + 60 decode
+
+backends:
+  - cutlass_mla
+  - flashinfer_mla
+  - flashattn_mla   # Hopper only
+  - flashmla        # Hopper only
+
+device: "cuda:0"
+repeats: 5
+warmup_iters: 3
+profile_memory: true
+
+# Analyze chunked prefill workspace size impact
+chunked_prefill:
+  test_workspace_sizes: [4096, 8192, 16384, 32768, 65536]

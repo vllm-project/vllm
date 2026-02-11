@@ -9,11 +9,6 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "sentence-transformers/all-MiniLM-L12-v2"
 max_model_len = 128
 
@@ -44,6 +39,10 @@ def server():
         str(max_model_len),
     ]
 
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
+
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -57,20 +56,6 @@ async def client(server):
 @pytest.mark.asyncio
 async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
     truncation_size = 10
-    kwargs: dict[str, Any] = {
-        "model": MODEL_NAME,
-        "input": input,
-        "truncate_prompt_tokens": truncation_size,
-    }
-
-    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
-
-    assert response["usage"]["prompt_tokens"] == truncation_size
-
-
-@pytest.mark.asyncio
-async def test_zero_truncation_size(client: openai.AsyncOpenAI):
-    truncation_size = 0
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,

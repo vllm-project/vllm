@@ -43,7 +43,7 @@ class TestLogprobsLists(TestCase):
             cu_num_generated_tokens=None,
         )
 
-        sliced = logprobsLists.slice(1, 3)
+        sliced = logprobsLists.slice_request(1, num_positions=2)
         assert sliced.logprob_token_ids == [[2], [3]]
         assert sliced.logprobs == [[0.2], [0.3]]
         assert sliced.sampled_token_ranks == [2, 3]
@@ -51,7 +51,7 @@ class TestLogprobsLists(TestCase):
 
     def test_slice_from_start(self):
         """Test slicing from the start position"""
-        sliced = self.logprobsLists.slice(0, 2)
+        sliced = self.logprobsLists.slice_request(0, num_positions=5)
         assert len(sliced.logprob_token_ids) == 5
         assert sliced.logprob_token_ids == [
             [1, 2],
@@ -60,11 +60,11 @@ class TestLogprobsLists(TestCase):
             [7, 8],
             [9, 10],
         ]
-        assert sliced.cu_num_generated_tokens == [0, 2, 5]
+        assert sliced.cu_num_generated_tokens is None
 
     def test_slice_from_middle(self):
         """Test slicing from the middle position"""
-        sliced = self.logprobsLists.slice(1, 3)
+        sliced = self.logprobsLists.slice_request(1, num_positions=7)
         assert len(sliced.logprob_token_ids) == 7
         assert sliced.logprob_token_ids == [
             [5, 6],
@@ -75,27 +75,25 @@ class TestLogprobsLists(TestCase):
             [15, 16],
             [17, 18],
         ]
-        assert sliced.cu_num_generated_tokens == [0, 3, 7]
+        assert sliced.cu_num_generated_tokens is None
 
     def test_slice_single_request(self):
         """Test slicing a single request"""
-        sliced = self.logprobsLists.slice(1, 2)
+        sliced = self.logprobsLists.slice_request(1, num_positions=3)
         assert len(sliced.logprob_token_ids) == 3
         assert sliced.logprob_token_ids == [[5, 6], [7, 8], [9, 10]]
-        assert sliced.cu_num_generated_tokens == [0, 3]
+        assert sliced.cu_num_generated_tokens is None
 
     def test_slice_last_request(self):
         """Test slicing the last request"""
-        sliced = self.logprobsLists.slice(2, 3)
+        sliced = self.logprobsLists.slice_request(2, num_positions=4)
         assert len(sliced.logprob_token_ids) == 4
         assert sliced.logprob_token_ids == [[11, 12], [13, 14], [15, 16], [17, 18]]
-        assert sliced.cu_num_generated_tokens == [0, 4]
+        assert sliced.cu_num_generated_tokens is None
 
     def test_slice_all_requests(self):
         """Test slicing all requests (full slice)"""
-        sliced = self.logprobsLists.slice(0, 3)
+        sliced = self.logprobsLists.slice_request(0, num_positions=9)
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids
-        assert (
-            sliced.cu_num_generated_tokens == self.logprobsLists.cu_num_generated_tokens
-        )
+        assert sliced.cu_num_generated_tokens is None

@@ -70,15 +70,28 @@ async def test_background_cancel(client: openai.AsyncOpenAI):
     assert response.status == "queued"
 
     # Cancel the response before it is completed.
-    # FIXME: This test can be flaky.
-    await asyncio.sleep(0.5)
+    # Poll until the response is no longer queued (started processing) or timeout
+    loop = asyncio.get_running_loop()
+    start_time = loop.time()
+    max_wait_seconds = 5.0
+    poll_interval = 0.1
+    while loop.time() - start_time < max_wait_seconds:
+        response = await client.responses.retrieve(response.id)
+        if response.status != "queued":
+            # Started processing or completed - try to cancel
+            break
+        await asyncio.sleep(poll_interval)
+
     response = await client.responses.cancel(response.id)
     assert response.status == "cancelled"
 
-    # Make sure the response status remains unchanged.
-    await asyncio.sleep(5)
-    response = await client.responses.retrieve(response.id)
-    assert response.status == "cancelled"
+    # Make sure the response status remains unchanged after some time.
+    max_retries = 10
+    for _ in range(max_retries):
+        await asyncio.sleep(0.5)
+        response = await client.responses.retrieve(response.id)
+        # Verify status is still cancelled
+        assert response.status == "cancelled"
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,11 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
     runtime_env = {
         "env_vars": {
             "TEST_ENV_VAR": "test_value",
+            # In future ray versions, this will be default, so when setting a
+            # task or actor with num_gpus=None/0, the visible devices env var
+            # won't be overridden resulting in no GPUs being visible on a gpu
+            # machine.
+            "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
         },
     }
 
@@ -73,3 +78,27 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
     )
 
     ray.shutdown()
+
+
+def test_unrecognized_env():
+    import os
+
+    # Test that if fail_on_environ_validation is True, then an error
+    # is raised when an unrecognized vLLM environment variable is set
+    os.environ["VLLM_UNRECOGNIZED_ENV_VAR"] = "some_value"
+    engine_args = EngineArgs(
+        fail_on_environ_validation=True,
+    )
+    with pytest.raises(ValueError, match="Unknown vLLM environment variable detected"):
+        engine_args.create_engine_config()
+
+    # Test that if fail_on_environ_validation is False, then no error is raised
+    engine_args = EngineArgs()
+    engine_args.create_engine_config()
+
+    # Test that when the unrecognized env var is removed, no error is raised
+    os.environ.pop("VLLM_UNRECOGNIZED_ENV_VAR", None)
+    engine_args = EngineArgs(
+        fail_on_environ_validation=True,
+    )
+    engine_args.create_engine_config()

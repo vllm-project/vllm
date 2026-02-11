@@ -8,9 +8,9 @@ TL;DR:
 | Online Flag | Offline Flag   |      Result |
 |----------|----------|-------------|
 | --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -O.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -O.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
-| -O.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
+| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
+| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
 
@@ -33,16 +33,15 @@ goals while minimizing impact to performance and also helps us (vLLM) when you o
 For more details on the design, please see the following resources:
 
 - [Introduction to vLLM-torch.compile blogpost](https://blog.vllm.ai/2025/08/20/torch-compile.html)
-- [vLLM-torch.compile integration design](https://docs.vllm.ai/en/latest/design/torch_compile.html)
+- [vLLM-torch.compile integration design](./torch_compile.md)
 - [vLLM Office Hours #26](https://www.youtube.com/live/xLyxc7hxCJc?si=Xulo9pe53C6ywf0V&t=561)
 - [Talk at PyTorch Conference 2025](https://youtu.be/1wV1ESbGrVQ?si=s1GqymUfwiwOrDTg&t=725)
 
 ## Use tlparse
 
-Use [tlparse](https://github.com/meta-pytorch/tlparse) to acquire torch.compile logs. These logs show all stages of the compilation process,
-including the fused kernels that torch.compile produces.
-If you can, we recommend sending these or pieces of these along with any bug reports --
-they are very helpful.
+Use [tlparse](https://github.com/meta-pytorch/tlparse) to view torch.compile
+logs. These logs show all stages of the compilation process, including the fused
+kernels that torch.compile produces.
 
 Install tlparse:
 
@@ -50,11 +49,16 @@ Install tlparse:
 pip install tlparse
 ```
 
+To enable the torch.compile logs, you can set the envvar `TORCH_TRACE=<dir>`.
+During tracing, a file per rank will be created inside of that directory, with
+each file containing the artifacts during compilation. If you can, we recommend
+sending these log files along with bug reports -- they are very helpful.
+
 Usage (offline inference)
 
 ```sh
 TORCH_TRACE=~/trace_dir python my_script.py
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
 Usage (serving)
@@ -62,10 +66,11 @@ Usage (serving)
 ```sh
 TORCH_TRACE=~/trace_dir vllm serve
 # ctrl-c out of the server
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
-The `tlparse` command outputs some HTML files (perhaps into e.g. `./tl_out/index.html`).
+Given one of the log files, the `tlparse` command outputs some HTML files
+(perhaps into e.g. `./tl_out/index.html`).
 Open it to see the logs. It'll look something like the following:
 
 ![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
@@ -86,11 +91,11 @@ LLM(model, enforce_eager=True)
 ```
 
 To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-O` is short for `--compilation_config`):
+(`-cc` is short for `--compilation_config`):
 
 ```sh
 # Online
-vllm serve -O.mode=0
+vllm serve -cc.mode=0
 ```
 
 ```py
@@ -103,7 +108,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py
@@ -183,10 +188,10 @@ help debug the issue:
 
 ```sh
 # Online - using unbacked mode
-vllm serve meta-llama/Llama-3.2-1B -O.dynamic_shapes_config.type=unbacked
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
 
 # Online - using backed_size_oblivious mode
-vllm serve meta-llama/Llama-3.2-1B -O.dynamic_shapes_config.type=backed_size_oblivious
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=backed_size_oblivious
 ```
 
 ```py
@@ -206,7 +211,7 @@ LLM(model, compilation_config=CompilationConfig(
 These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
 
 - `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
-- `backed_size_oblivious`: Uses a mode that is more strict about guarding.
+- `backed_size_oblivious`: Uses a mode that is stricter about guarding.
 
 For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
 
@@ -233,7 +238,7 @@ to the compilation config:
 
 ```sh
 # online
-vllm serve -O.backend=eager
+vllm serve -cc.backend=eager
 ```
 
 ```py
@@ -252,7 +257,7 @@ You can also use `TORCH_LOGS=output_code <command>` to print the Inductor output
 ### Editable TorchInductor code
 
 You can edit the TorchInductor code that gets run by setting `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`
-or passing `-O.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
+or passing `-cc.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
 
 This is a useful technique: you can put breakpoints (e.g. `torch.distributed.breakpoint()`)
 and print statements in the output code.
@@ -277,6 +282,15 @@ If vLLM's compile cache is wrong, this usually means that a factor is missing.
 Please see [this example](https://github.com/vllm-project/vllm/blob/18b39828d90413d05d770dfd2e2f48304f4ca0eb/vllm/config/model.py#L310)
 of how vLLM computes part of the cache key.
 
+vLLM's compilation cache requires that the code being compiled ends up being serializable.
+If this is not the case, then it will error out on save. Usually the fixes are to either:
+
+- rewrite the non-serializable pieces (perhaps difficult because it's difficult to
+  tell right now what is serializable and what isn't)
+- file a bug report
+- ignore the error by setting `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will
+  make warm server starts a lot slower).
+
 ## Debugging CUDAGraphs
 
 CUDAGraphs is a feature that allows one to:
@@ -299,7 +313,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py

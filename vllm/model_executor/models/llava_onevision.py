@@ -479,8 +479,6 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -510,20 +508,25 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        self.image_newline = nn.Parameter(torch.empty(config.text_config.hidden_size))
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            # Initialize the vision tower only up to the required feature layer
+            self.vision_tower = init_vision_tower_for_llava(
+                config,
+                quant_config=quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.image_newline = nn.Parameter(
+                torch.empty(config.text_config.hidden_size)
+            )
+            self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors
@@ -727,8 +730,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self,
         inputs: LlavaOnevisionImagePixelInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = inputs["pixel_values"]
 
         if isinstance(pixel_values, torch.Tensor):
@@ -763,7 +764,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         image_input: LlavaOnevisionImageInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
+            return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)
 
@@ -802,8 +803,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         return video_features
 
     def _process_video_pixels(self, inputs: LlavaOnevisionVideoPixelInputs):
-        assert self.vision_tower is not None
-
         video_pixels = inputs["pixel_values_videos"]
 
         if isinstance(video_pixels, torch.Tensor):
@@ -863,9 +862,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -891,7 +887,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

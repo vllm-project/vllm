@@ -8,6 +8,7 @@ def test_request_status_fmt_str():
     assert f"{RequestStatus.WAITING}" == "WAITING"
     assert f"{RequestStatus.WAITING_FOR_FSM}" == "WAITING_FOR_FSM"
     assert f"{RequestStatus.WAITING_FOR_REMOTE_KVS}" == "WAITING_FOR_REMOTE_KVS"
+    assert f"{RequestStatus.WAITING_FOR_STREAMING_REQ}" == "WAITING_FOR_STREAMING_REQ"
     assert f"{RequestStatus.RUNNING}" == "RUNNING"
     assert f"{RequestStatus.PREEMPTED}" == "PREEMPTED"
     assert f"{RequestStatus.FINISHED_STOPPED}" == "FINISHED_STOPPED"
