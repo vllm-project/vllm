@@ -606,46 +606,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             skipped = max(0, skipped - self.block_size)
         return skipped
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        """
-        Cache only the blocks within the sliding window for prefix caching.
-
-        For SWA, only the last `sliding_window_blocks` blocks are useful for
-        prefix cache lookup (since find_longest_cache_hit searches from right
-        to left and only needs contiguous blocks within the window).
-        Caching earlier blocks wastes hash table capacity and causes LRU
-        eviction of actually-reusable hashes (e.g., full attention blocks).
-        """
-        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_full_blocks = num_tokens // self.block_size
-
-        if num_cached_blocks >= num_full_blocks:
-            return
-
-        # Only cache blocks within the sliding window.
-        # Earlier blocks will be freed by remove_skipped_blocks anyway.
-        # Cache one extra block at the beginning to account for the off-by-one
-        # in cache hit lookup: lookup starts at max_num_blocks-1 (excluding the
-        # incomplete last block), so we need sliding_window_blocks + 1 cached
-        # blocks to achieve sliding_window_blocks contiguous hits.
-        sliding_window_blocks = cdiv(self.sliding_window, self.block_size)
-        start_cache_block = max(
-            num_cached_blocks, num_full_blocks - sliding_window_blocks - 1
-        )
-
-        if start_cache_block < num_full_blocks:
-            self.block_pool.cache_full_blocks(
-                request=request,
-                blocks=self.req_to_blocks[request.request_id],
-                num_cached_blocks=start_cache_block,
-                num_full_blocks=num_full_blocks,
-                block_size=self.block_size,
-                kv_cache_group_id=self.kv_cache_group_id,
-            )
-
-        # Mark all blocks up to num_full_blocks as processed (even if skipped).
-        self.num_cached_block[request.request_id] = num_full_blocks
-
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
         NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
