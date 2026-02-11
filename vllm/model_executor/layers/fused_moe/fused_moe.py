@@ -38,7 +38,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -96,19 +95,19 @@ def fused_moe_kernel_gptq_awq(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am,
-    stride_ak,
-    stride_be,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_bse,
-    stride_bsk,
-    stride_bsn,
-    stride_bze,
-    stride_bzk,
-    stride_bzn,
+    stride_am: tl.int64,
+    stride_ak: tl.int64,
+    stride_be: tl.int64,
+    stride_bk: tl.int64,
+    stride_bn: tl.int64,
+    stride_cm: tl.int64,
+    stride_cn: tl.int64,
+    stride_bse: tl.int64,
+    stride_bsk: tl.int64,
+    stride_bsn: tl.int64,
+    stride_bze: tl.int64,
+    stride_bzk: tl.int64,
+    stride_bzn: tl.int64,
     block_k_diviable: tl.constexpr,
     group_size: tl.constexpr,
     # Meta-parameters
@@ -330,20 +329,20 @@ def fused_moe_kernel(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am,
-    stride_ak,
-    stride_be,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_asm,
-    stride_ask,
-    stride_bse,
-    stride_bsk,
-    stride_bsn,
-    stride_bbe,  # bias expert stride
-    stride_bbn,  # bias N stride
+    stride_am: tl.int64,
+    stride_ak: tl.int64,
+    stride_be: tl.int64,
+    stride_bk: tl.int64,
+    stride_bn: tl.int64,
+    stride_cm: tl.int64,
+    stride_cn: tl.int64,
+    stride_asm: tl.int64,
+    stride_ask: tl.int64,
+    stride_bse: tl.int64,
+    stride_bsk: tl.int64,
+    stride_bsn: tl.int64,
+    stride_bbe: tl.int64,  # bias expert stride
+    stride_bbn: tl.int64,  # bias N stride
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -1583,6 +1582,11 @@ def _get_config_quant_dtype(
         return "mxfp6_e3m2"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
         return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
+        return torch.bfloat16
+    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
+        return torch.float8_e4m3fn
+
     return None
 
 
@@ -1617,17 +1621,10 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {
-            "w_mxfp4_a_mxfp4",
-            "w_mxfp4_a_mxfp6_e3m2",
-            "w_mxfp4_a_mxfp6_e2m3",
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {
-            "w_mxfp6_e3m2_a_mxfp6_e3m2",
-            "w_mxfp6_e2m3_a_mxfp6_e2m3",
-        }:
+        elif ocp_mx_scheme.startswith("w_mxfp6"):
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
                 "hidden size mismatch"
             )
@@ -1717,17 +1714,13 @@ def fused_experts_impl(
         # TODO: On platforms for which `current_platform.supports_mx()` is True
         # and for which we have a native OCP mx fused MOE kernel,
         # this dequantization step should not be done.
-        if ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None
             w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
@@ -1736,7 +1729,7 @@ def fused_experts_impl(
                 w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
             )
@@ -1779,6 +1772,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
@@ -1846,6 +1840,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         if expert_map is not None:
