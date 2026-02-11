@@ -171,7 +171,7 @@ class CPUWorker(Worker):
             start_idx = (
                 self.local_rank
                 + self.parallel_config.world_size
-                * self.parallel_config.data_parallel_rank_local
+                * self.parallel_config.data_parallel_rank_local  # type: ignore
             ) * sim_cpu_num_per_node
             logical_cpu_list = logical_cpu_list[
                 start_idx : (start_idx + sim_cpu_num_per_node)
