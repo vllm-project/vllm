@@ -611,16 +611,16 @@ class SamplingParams(
 
     def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
         allowed_token_ids = self.allowed_token_ids
-        if allowed_token_ids is not None:
-            if len(allowed_token_ids) == 0:
-                raise ValueError("allowed_token_ids is not None and empty!")
+        if allowed_token_ids is None:
+            return
 
-            if tokenizer is not None:
-                vocab_size = len(tokenizer)
-                if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
-                    raise ValueError(
-                        "allowed_token_ids contains out-of-vocab token id!"
-                    )
+        if len(allowed_token_ids) == 0:
+            raise ValueError("allowed_token_ids is not None and empty!")
+
+        if tokenizer is not None:
+            vocab_size = len(tokenizer)
+            if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
+                raise ValueError("allowed_token_ids contains out-of-vocab token id!")
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
