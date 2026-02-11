@@ -3,6 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
+import json
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -777,8 +778,6 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        import json
-
                         schema = json.loads(so_params.json)
                     else:
                         schema = so_params.json
