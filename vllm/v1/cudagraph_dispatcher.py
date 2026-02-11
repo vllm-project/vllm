@@ -70,6 +70,8 @@ class CudagraphDispatcher:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_size = self.compilation_config.max_cudagraph_capture_size
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        if capture_sizes is None:
+            capture_sizes = [max_size]
         self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
         for end, start in zip(
             capture_sizes + [max_size + 1],
@@ -88,6 +90,7 @@ class CudagraphDispatcher:
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
             for size in self.compilation_config.compile_sizes:
+                size = int(size)
                 if size <= self.compilation_config.max_cudagraph_capture_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
@@ -177,6 +180,9 @@ class CudagraphDispatcher:
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+            assert self.compilation_config.cudagraph_capture_sizes is not None, (
+                "Cudagraph capture sizes must be set when mixed mode is enabled."
+            )
             for bs, num_active_loras in product(
                 self.compilation_config.cudagraph_capture_sizes, lora_cases
             ):
@@ -196,6 +202,9 @@ class CudagraphDispatcher:
             max_num_tokens = (
                 uniform_decode_query_len
                 * self.vllm_config.scheduler_config.max_num_seqs
+            )
+            assert self.compilation_config.cudagraph_capture_sizes is not None, (
+                "Cudagraph capture sizes must be set when full mode is enabled."
             )
             cudagraph_capture_sizes_for_decode = [
                 x
@@ -259,6 +268,9 @@ class CudagraphDispatcher:
             else:
                 # When not specializing, graphs are captured only with max_loras + 1,
                 # so we must use max_loras + 1 for dispatch to find a matching graph.
+                assert self.vllm_config.lora_config is not None, (
+                    "LoRA config must be set when has_lora is True."
+                )
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
         batch_desc = self._create_padded_batch_descriptor(

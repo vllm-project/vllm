@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -323,7 +324,7 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
 
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
-) -> str:
+) -> CacheDType:
     """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
     Returns the resolved cache_dtype string.
     """

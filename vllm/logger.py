@@ -38,7 +38,7 @@ def _use_color() -> bool:
     return False
 
 
-DEFAULT_LOGGING_CONFIG = {
+DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
@@ -157,7 +157,7 @@ _METHODS_TO_PATCH = {
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, dict[str, Any] | Any]()
+    logging_config: dict[str, dict[str, Any] | Any] = {}
 
     if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -225,7 +225,7 @@ def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     logging.disable(current_level)
 
 
-def current_formatter_type(lgr: Logger) -> Literal["color", "newline", None]:
+def current_formatter_type(lgr: Logger | None) -> Literal["color", "newline", None]:
     while lgr is not None:
         if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
             formatter = lgr.handlers[0].formatter

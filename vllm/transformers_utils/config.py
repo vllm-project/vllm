@@ -480,12 +480,12 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
 
 def maybe_override_with_speculators(
     model: str,
-    tokenizer: str | None,
+    tokenizer: str,
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
     **kwargs,
-) -> tuple[str, str | None, dict[str, Any] | None]:
+) -> tuple[str, str, dict[str, Any] | None]:
     """
     Resolve model configuration when speculators are detected.
 

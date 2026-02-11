@@ -48,7 +48,7 @@ def config(cls: ConfigT) -> ConfigT:
     return cls
 
 
-def get_field(cls: ConfigType, name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):

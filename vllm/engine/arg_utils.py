@@ -65,6 +65,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
+from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -75,7 +76,12 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.parallel import (
+    All2AllBackend,
+    DataParallelBackend,
+    DistributedExecutorBackend,
+    ExpertPlacementStrategy,
+)
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel
@@ -255,7 +261,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                     # VllmConfig's Fields have default_factory set to config classes.
                     # These could emit logs on init, which would be confusing.
                     with suppress_logging():
-                        default = default.default_factory()
+                        default = default.default_factory()  # type: ignore[call-arg]
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -354,7 +360,7 @@ class EngineArgs:
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
-    tokenizer: str | None = ModelConfig.tokenizer
+    tokenizer: str = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
@@ -371,7 +377,7 @@ class EngineArgs:
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
-    max_model_len: int | None = ModelConfig.max_model_len
+    max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -403,14 +409,14 @@ class EngineArgs:
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
-    data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    all2all_backend: str = ParallelConfig.all2all_backend
+    all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
-    disable_nccl_for_dp_synchronization: bool | None = (
+    disable_nccl_for_dp_synchronization: bool = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
@@ -423,7 +429,7 @@ class EngineArgs:
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: BlockSize | None = CacheConfig.block_size
+    block_size: BlockSize = CacheConfig.block_size
     enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
@@ -448,7 +454,7 @@ class EngineArgs:
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
-    quantization: QuantizationMethods | None = ModelConfig.quantization
+    quantization: QuantizationMethods | str | None = ModelConfig.quantization
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -475,11 +481,11 @@ class EngineArgs:
     )
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
-    max_lora_rank: int = LoRAConfig.max_lora_rank
+    max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
@@ -530,7 +536,7 @@ class EngineArgs:
     )
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -551,7 +557,7 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str = ModelConfig.override_attention_dtype
+    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
@@ -563,14 +569,14 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
-    pt_load_map_location: str = LoadConfig.pt_load_map_location
+    pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling: bool = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -1398,6 +1404,10 @@ class EngineArgs:
             self.kv_cache_dtype, model_config
         )
 
+        assert self.enable_prefix_caching is not None, (
+            "enable_prefix_caching must be set by this point"
+        )
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1628,6 +1638,13 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
 
+        assert self.max_num_batched_tokens is not None, (
+            "max_num_batched_tokens must be set by this point"
+        )
+        assert self.max_num_seqs is not None, "max_num_seqs must be set by this point"
+        assert self.enable_chunked_prefill is not None, (
+            "enable_chunked_prefill must be set by this point"
+        )
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
