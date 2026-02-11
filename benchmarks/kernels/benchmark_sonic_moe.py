@@ -122,6 +122,7 @@ def main() -> int:
                 hidden_dim=k,
                 intermediate_size_per_partition=n // 2,
                 num_local_experts=e,
+                num_logical_experts=e,
                 moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                 activation="silu",
                 in_dtype=dtype,
