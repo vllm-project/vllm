@@ -302,6 +302,23 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         return self._model_runner_output
 
 
+class BatchIndexMapping(NamedTuple):
+    """Mapping between current and previous batch indices.
+
+    Computed once per iteration by ``_compute_batch_index_mapping`` and
+    reused by ``_prepare_inputs`` and ``_prepare_input_ids``.
+    """
+
+    current_indices: list[int]
+    """Indices in the current batch for requests also in the previous batch."""
+    prev_indices: list[int]
+    """Corresponding indices in the previous batch."""
+    new_indices: list[int]
+    """Indices in the current batch for new requests."""
+    indices_match: bool
+    """True when every request is continuing and its index is unchanged."""
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -1253,11 +1270,42 @@ class GPUModelRunner(
 
         return cu_num_tokens
 
+    def _compute_batch_index_mapping(self) -> BatchIndexMapping:
+        """Map current batch indices to their previous-batch counterparts."""
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        current_indices: list[int] = []
+        prev_indices: list[int] = []
+        new_indices: list[int] = []
+        indices_match = True
+        if prev_req_id_to_index:
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                prev_index = prev_req_id_to_index.get(req_id)
+                if prev_index is not None:
+                    current_indices.append(i)
+                    prev_indices.append(prev_index)
+                    indices_match &= prev_index == i
+                else:
+                    new_indices.append(i)
+                    indices_match = False
+        else:
+            indices_match = False
+        return BatchIndexMapping(
+            current_indices, prev_indices, new_indices, indices_match
+        )
+
+    def _copy_input_ids_to_gpu(self, num_tokens: int) -> None:
+        """Copy input_ids (and prompt-embed metadata) from CPU to GPU."""
+        self.input_ids.copy_to_gpu(num_tokens)
+        if self.enable_prompt_embeds:
+            self.inputs_embeds.copy_to_gpu(num_tokens)
+            self.is_token_ids.copy_to_gpu(num_tokens)
+
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
         total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
+        batch_index_mapping: BatchIndexMapping,
     ) -> None:
         """Prepare the input IDs for the current batch.
 
@@ -1267,82 +1315,75 @@ class GPUModelRunner(
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-            if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self._copy_input_ids_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        assert prev_req_id_to_index is not None
-        sample_flattened_indices: list[int] = []
-        spec_flattened_indices: list[int] = []
-        prev_common_req_indices: list[int] = []
-        prev_draft_token_indices: list[int] = []
-        indices_match = True
-        max_flattened_index = -1
-        total_num_spec_tokens = 0
+        current_indices = batch_index_mapping.current_indices
+        prev_indices = batch_index_mapping.prev_indices
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
-        for req_id, cur_index in self.input_batch.req_id_to_index.items():
-            if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
-                prev_common_req_indices.append(prev_index)
-                # We need to compute the flattened input_ids index of the
-                # last token in each common request.
-                draft_len = len(scheduled_spec_tokens.get(req_id, ()))
-                total_num_spec_tokens += draft_len
-                flattened_index = cu_num_tokens[cur_index].item() - 1
-                # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
-                # sample_flattened_indices = [0, 2, 5]
-                # spec_flattened_indices = [1,   3, 4,    6, 7]
-                sample_flattened_indices.append(flattened_index - draft_len)
-                spec_flattened_indices.extend(
-                    range(flattened_index - draft_len + 1, flattened_index + 1)
-                )
-                start = prev_index * self.num_spec_tokens
-                # prev_draft_token_indices is used to find which draft_tokens_id
-                # should be copied to input_ids
-                # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
-                # flatten draft_tokens_id [1,2,3,4,5,6]
-                # draft_len of each request [1, 2, 1]
-                # then prev_draft_token_indices is [0,   2, 3,   4]
-                prev_draft_token_indices.extend(range(start, start + draft_len))
-                indices_match &= prev_index == flattened_index
-                max_flattened_index = max(max_flattened_index, flattened_index)
+        # Fast path: batch unchanged, pure decode, no draft tokens.
+        # Skip the loop and use a direct slice copy.
+        if (
+            batch_index_mapping.indices_match
+            and not scheduled_spec_tokens
+            and total_num_scheduled_tokens == len(current_indices)
+        ):
+            n = len(current_indices)
+            self.input_ids.gpu[:n].copy_(
+                self.input_batch.prev_sampled_token_ids[:n, 0],
+                non_blocking=True,
+            )
+            if self.enable_prompt_embeds:
+                self.is_token_ids.gpu[:n] = True
+            return
+
+        sample_flattened_indices: list[int] = []
+        spec_flattened_indices: list[int] = []
+        prev_draft_token_indices: list[int] = []
+        total_num_spec_tokens = 0
+
+        for cur_index, prev_index in zip(current_indices, prev_indices):
+            req_id = self.input_batch.req_ids[cur_index]
+            # We need to compute the flattened input_ids index of the
+            # last token in each common request.
+            draft_len = len(scheduled_spec_tokens.get(req_id, ()))
+            total_num_spec_tokens += draft_len
+            flattened_index = cu_num_tokens[cur_index].item() - 1
+            # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
+            # sample_flattened_indices = [0, 2, 5]
+            # spec_flattened_indices = [1,   3, 4,    6, 7]
+            sample_flattened_indices.append(flattened_index - draft_len)
+            spec_flattened_indices.extend(
+                range(flattened_index - draft_len + 1, flattened_index + 1)
+            )
+            start = prev_index * self.num_spec_tokens
+            # prev_draft_token_indices is used to find which draft_tokens_id
+            # should be copied to input_ids
+            # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
+            # flatten draft_tokens_id [1,2,3,4,5,6]
+            # draft_len of each request [1, 2, 1]
+            # then prev_draft_token_indices is [0,   2, 3,   4]
+            prev_draft_token_indices.extend(range(start, start + draft_len))
         num_commmon_tokens = len(sample_flattened_indices)
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
-            # We need to copy the input_ids_cpu to the GPU first.
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-            if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            # we need to copy the input_ids_cpu to the GPU first.
+            self._copy_input_ids_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
-            # No requests in common with the previous iteration
-            # So input_ids.cpu will have all the input ids.
-            return
-        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
-            # Common-case optimization: the batch is unchanged
-            # and no reordering happened.
-            # The indices are both the same permutation of 0..N-1 so
-            # we can copy directly using a single slice.
-            self.input_ids.gpu[:num_commmon_tokens].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_commmon_tokens, 0],
-                non_blocking=True,
-            )
-            if self.enable_prompt_embeds:
-                self.is_token_ids.gpu[:num_commmon_tokens] = True
+            # No requests in common with the previous iteration.
+            # input_ids.cpu has all the input ids.
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
             sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
         ).to(self.device, non_blocking=True)
         prev_common_req_indices_tensor = torch.tensor(
-            prev_common_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            prev_indices, dtype=torch.int64, pin_memory=self.pin_memory
         ).to(self.device, non_blocking=True)
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -1541,19 +1582,16 @@ class GPUModelRunner(
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        # Build the prev→current index mapping once for reuse below.
+        # Build the prev→current index mapping once for reuse below
+        # and in _prepare_input_ids.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        current_indices: list[int] = []
-        prev_indices: list[int] = []
-        new_indices: list[int] = []
-        if self.use_async_spec_decode and prev_req_id_to_index:
-            for i, req_id in enumerate(self.input_batch.req_ids):
-                prev_index = prev_req_id_to_index.get(req_id)
-                if prev_index is not None:
-                    current_indices.append(i)
-                    prev_indices.append(prev_index)
-                else:
-                    new_indices.append(i)
+        if prev_req_id_to_index:
+            batch_index_mapping = self._compute_batch_index_mapping()
+        else:
+            batch_index_mapping = BatchIndexMapping([], [], [], False)
+        current_indices = batch_index_mapping.current_indices
+        prev_indices = batch_index_mapping.prev_indices
+        new_indices = batch_index_mapping.new_indices
 
         # For async spec decode, bound the error in optimistic_seq_lens_cpu.
         # The CPU num_computed_tokens drifts because the scheduler
@@ -1561,11 +1599,17 @@ class GPUModelRunner(
         # continuing requests using num_accepted_tokens from the previous
         # iteration:  correction = prev_scheduled - prev_accepted
         if current_indices and self.prev_num_scheduled_tokens is not None:
-            prev_sched = self.prev_num_scheduled_tokens[prev_indices]
-            accepted = self.input_batch.num_accepted_tokens_cpu[current_indices]
-            self.optimistic_seq_lens_cpu.numpy()[current_indices] -= (
-                prev_sched - accepted
-            )
+            if batch_index_mapping.indices_match:
+                self.optimistic_seq_lens_cpu.numpy()[:num_reqs] -= (
+                    self.prev_num_scheduled_tokens[:num_reqs]
+                    - self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
+            else:
+                prev_sched = self.prev_num_scheduled_tokens[prev_indices]
+                accepted = self.input_batch.num_accepted_tokens_cpu[current_indices]
+                self.optimistic_seq_lens_cpu.numpy()[current_indices] -= (
+                    prev_sched - accepted
+                )
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
@@ -1597,23 +1641,35 @@ class GPUModelRunner(
             and prev_req_id_to_index
         ):
             if current_indices:
-                prev_indices_gpu = torch.tensor(
-                    prev_indices, dtype=torch.int64, device=self.device
-                )
-                current_indices_gpu = torch.tensor(
-                    current_indices, dtype=torch.int64, device=self.device
-                )
+                if batch_index_mapping.indices_match:
+                    # Fast path: batch unchanged, use slices instead of
+                    # creating GPU index tensors from Python lists.
+                    n = num_reqs
+                    valid_counts = self.valid_sampled_token_count_gpu[:n]
+                    self.num_computed_tokens[:n] = (
+                        self.prev_num_computed_tokens_gpu[:n] + valid_counts.int()
+                    )
+                    self.num_accepted_tokens.gpu[:n] = valid_counts
+                else:
+                    prev_indices_gpu = torch.tensor(
+                        prev_indices, dtype=torch.int64, device=self.device
+                    )
+                    current_indices_gpu = torch.tensor(
+                        current_indices, dtype=torch.int64, device=self.device
+                    )
 
-                # Additive correction: actual = prev_actual + accepted_tokens.
-                # prev_actual is from the previous iteration's GPU snapshot;
-                # valid_counts is the number of tokens actually accepted
-                # (including bonus token) in the previous iteration.
-                prev_actual = self.prev_num_computed_tokens_gpu[prev_indices_gpu]
-                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
-                self.num_computed_tokens[current_indices_gpu] = (
-                    prev_actual + valid_counts.int()
-                )
-                self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+                    # Additive correction:
+                    # actual = prev_actual + accepted_tokens.
+                    # prev_actual is from the previous iteration's GPU
+                    # snapshot; valid_counts is the number of tokens actually
+                    # accepted (including bonus token) in the previous
+                    # iteration.
+                    prev_actual = self.prev_num_computed_tokens_gpu[prev_indices_gpu]
+                    valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                    self.num_computed_tokens[current_indices_gpu] = (
+                        prev_actual + valid_counts.int()
+                    )
+                    self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
             if new_indices:
                 new_indices_gpu = torch.tensor(
@@ -1659,6 +1715,7 @@ class GPUModelRunner(
             scheduler_output,
             total_num_scheduled_tokens,
             cu_num_tokens,
+            batch_index_mapping=batch_index_mapping,
         )
 
         if self.uses_mrope:
