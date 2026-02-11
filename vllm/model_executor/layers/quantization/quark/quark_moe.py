@@ -78,13 +78,17 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 "output_tensors and bias "
                 "quantized are not supported"
             )
+
+        emulate = not current_platform.supports_mx() or not (
+            rocm_aiter_ops.is_fused_moe_enabled()
+        )
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
         if quant_config._is_fp8_w4a8(weight_config, input_config):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
-        elif quant_config._is_mx_fp4(weight_config, input_config):
+        elif quant_config._is_mx_fp4(weight_config, input_config) and not emulate:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
@@ -1146,22 +1150,6 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
         self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
 
-        self.emulate = not current_platform.supports_mx() or not (
-            rocm_aiter_ops.is_fused_moe_enabled()
-        )
-
-        if self.emulate:
-            logger.warning_once(
-                f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={rocm_aiter_ops.is_fused_moe_enabled()}, "
-                "does not support native MXFP4/MXFP6 "
-                "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
-            )
-        else:
-            logger.info_once("The current mode supports native MoE MXFP4 computation")
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1188,9 +1176,6 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer):
-        if self.emulate:
-            return
-
         from aiter.utility.fp4_utils import e8m0_shuffle
 
         # Pre-shuffle weight scales
@@ -1228,53 +1213,37 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
             )
 
-        if not self.emulate:
-            from aiter import ActivationType, QuantType
-            from aiter.fused_moe import fused_moe
+        from aiter import ActivationType, QuantType
+        from aiter.fused_moe import fused_moe
 
-            aiter_acts = {
-                ActivationType.No.name.lower(): ActivationType.No,
-                ActivationType.Silu.name.lower(): ActivationType.Silu,
-                ActivationType.Gelu.name.lower(): ActivationType.Gelu,
-            }
-            assert layer.activation in aiter_acts, (
-                f"Aiter CK fp4 MoE doesn't support activation {layer.activation}"
-            )
-            if hasattr(torch, "float4_e2m1fn_x2"):
-                w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
-                w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
-            else:
-                w13_weight = layer.w13_weight
-                w2_weight = layer.w2_weight
-
-            out = fused_moe(
-                x,
-                w13_weight,
-                w2_weight,
-                topk_weights,
-                topk_ids,
-                quant_type=QuantType.per_1x32,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                activation=aiter_acts[layer.activation],
-                doweight_stage1=False,
-            )
+        aiter_acts = {
+            ActivationType.No.name.lower(): ActivationType.No,
+            ActivationType.Silu.name.lower(): ActivationType.Silu,
+            ActivationType.Gelu.name.lower(): ActivationType.Gelu,
+        }
+        assert layer.activation in aiter_acts, (
+            f"Aiter CK fp4 MoE doesn't support activation {layer.activation}"
+        )
+        if hasattr(torch, "float4_e2m1fn_x2"):
+            w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
+            w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
         else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
+            w13_weight = layer.w13_weight
+            w2_weight = layer.w2_weight
 
-            out = fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=expert_map,
-                quant_config=self.moe_quant_config,
-            )
+        out = fused_moe(
+            x,
+            w13_weight,
+            w2_weight,
+            topk_weights,
+            topk_ids,
+            quant_type=QuantType.per_1x32,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            activation=aiter_acts[layer.activation],
+            doweight_stage1=False,
+        )
+
         return out
 
 
@@ -1295,22 +1264,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             )  # noqa E501
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
-        self.emulate = not current_platform.supports_mx()
-        if self.emulate:
-            logger.warning_once(
-                "The current platform does not support native MXFP4 "
-                "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
-            )
-        else:
-            logger.warning_once(
-                "The current platform supports native MXFP4 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
-            )
 
     def create_weights(
         self,
