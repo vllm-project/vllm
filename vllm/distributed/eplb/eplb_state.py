@@ -472,8 +472,8 @@ class EplbState:
         policy_type = self.parallel_config.eplb_config.policy
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
+        ep_group = get_ep_group().device_group
         if global_expert_load is not None:
-            ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (
                 model.num_moe_layers,
                 model.num_logical_experts,
