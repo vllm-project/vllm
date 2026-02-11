@@ -63,7 +63,7 @@ class BlockStored(KVCacheEvent):
     extra_keys: list[tuple[Any, ...] | None] | None = None
     """Extra keys used in block hash computation, one entry per block in
     block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
-    prompt embeddings data, etc. for that specific block. Exposed for external
+    prompt embedding hashes, etc. for that specific block. Exposed for external
     KV cache consumers to reconstruct block hashes.
     """
 
