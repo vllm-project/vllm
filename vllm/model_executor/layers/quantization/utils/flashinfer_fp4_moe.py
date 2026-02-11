@@ -313,7 +313,7 @@ def flashinfer_trtllm_fp4_moe(
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
 
-    # Prepare routing bias
+    # Ensure we have bf16 bias (required by kernel).
     if e_score_correction_bias is not None:
         assert e_score_correction_bias.dtype == torch.bfloat16
 
