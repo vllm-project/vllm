@@ -808,11 +808,8 @@ class VllmConfig:
                 self.compilation_config.pass_config.enable_sp = False
                 self.compilation_config.pass_config.fuse_gemm_comms = False
             else:
-                # Compute SP threshold early so we can disable enable_sp
-                # before +rms_norm is forced into custom_ops.
-                # If threshold is None (small model), SP would never run,
-                # so disable it to avoid forcing custom ops that no pass
-                # handles.
+                # Compute SP threshold early; disable if None (model too
+                # small) before +rms_norm gets forced into custom_ops.
                 pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
@@ -827,10 +824,7 @@ class VllmConfig:
                     )
 
                 if pass_config.sp_min_token_num is None:
-                    logger.debug(
-                        "SP threshold is None (model too small for SP), "
-                        "disabling enable_sp"
-                    )
+                    logger.debug("SP threshold is None, disabling enable_sp")
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
