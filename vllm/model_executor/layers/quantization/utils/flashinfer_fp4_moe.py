@@ -82,8 +82,12 @@ def _supports_routing_method(
 
 
 def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """Supports EP."""
-    return True
+    """
+    TRTLLM is a monolithic kernel that requires dispatch_router_logits() for
+    the naive dispatch/combine path. DeepEP HT only implements dispatch() for
+    the modular kernel path, so TRTLLM is incompatible with DeepEP HT.
+    """
+    return not moe_parallel_config.use_deepep_ht_kernels
 
 
 def is_supported_config_trtllm(
