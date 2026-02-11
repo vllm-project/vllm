@@ -257,10 +257,12 @@ class MultiModalRegistry:
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)
 
+        mm_config = model_config.get_multimodal_config()
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,
             mm_counts=mm_counts,
             mm_options=self._extract_mm_options(model_config),
+            mm_processor_kwargs=mm_config.mm_processor_kwargs,
         )
         mm_inputs = processor.apply(
             prompt=processor_inputs.prompt,

@@ -611,8 +611,11 @@ class FunAudioChatDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **(mm_processor_kwargs or {})
+        )
         sampling_rate = int(feature_extractor.sampling_rate)
 
         # Dummy inputs are used for profiling; construct the worst-case audio
@@ -656,7 +659,7 @@ class FunAudioChatMultiModalProcessor(
         if not audios:
             return BatchFeature({"input_ids": input_ids})
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
