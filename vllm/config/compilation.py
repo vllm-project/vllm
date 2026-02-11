@@ -130,7 +130,7 @@ class PassConfig:
     fuse_rope_kvcache: bool = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
 
-    aiter_rope_kvcache_fusion_max_token_num: int = 256
+    rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     """
