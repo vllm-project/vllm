@@ -855,7 +855,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
-        if self.static_input_scales:
+        if self.static_input_scales and self.input_dtype == "fp8":
             # firstly, process activations if fp8 static input
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
