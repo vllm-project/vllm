@@ -14,7 +14,7 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -168,9 +168,21 @@ def get_inductor_factors() -> list[Any]:
 
 
 def is_compile_cache_enabled(
-    vllm_additional_inductor_config: dict[str, Any],
+    vllm_additional_inductor_config_or_compilation_config: CompilationConfig
+    | dict[str, Any],
     vllm_enable_compile_cache: bool = True,
 ) -> bool:
+    if isinstance(
+        vllm_additional_inductor_config_or_compilation_config, CompilationConfig
+    ):
+        compilation_config = vllm_additional_inductor_config_or_compilation_config
+        vllm_additional_inductor_config = compilation_config.inductor_compile_config
+        vllm_enable_compile_cache = compilation_config.vllm_enable_compile_cache
+    else:
+        vllm_additional_inductor_config = (
+            vllm_additional_inductor_config_or_compilation_config
+        )
+
     vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
         "force_disable_caches", False
     )
