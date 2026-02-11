@@ -95,6 +95,28 @@ class Moondream3TextConfig(PretrainedConfig):
         self.num_experts_per_tok = self.moe_experts_per_token
 
 
+class Moondream3RegionConfig(PretrainedConfig):
+    """Region module configuration for Moondream3 (point/detect)."""
+
+    model_type = "moondream3_region"
+
+    def __init__(
+        self,
+        dim: int = 2048,
+        coord_feat_dim: int = 256,
+        coord_out_dim: int = 1024,
+        size_feat_dim: int = 512,
+        size_out_dim: int = 2048,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.dim = dim
+        self.coord_feat_dim = coord_feat_dim
+        self.coord_out_dim = coord_out_dim
+        self.size_feat_dim = size_feat_dim
+        self.size_out_dim = size_out_dim
+
+
 class Moondream3Config(PretrainedConfig):
     """Combined configuration for Moondream3 multimodal model."""
 
@@ -117,6 +139,10 @@ class Moondream3Config(PretrainedConfig):
         # Parse vision config
         vision_config = config.get("vision", {})
         self.vision_config = Moondream3VisionConfig(**vision_config)
+
+        # Parse region config
+        region_config = config.get("region", {})
+        self.region_config = Moondream3RegionConfig(**region_config)
 
         # Store the original config dict for model access
         self.config = config
