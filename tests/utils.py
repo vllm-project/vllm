@@ -1100,9 +1100,6 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         with suppress(RuntimeError):
             mp.set_start_method("spawn")
 
-        # Get the module
-        module_name = f.__module__
-
         # Create a process with environment variable set
         env = os.environ.copy()
         env["RUNNING_IN_SUBPROCESS"] = "1"
@@ -1118,7 +1115,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             env = dict(env or os.environ)
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-            cmd = [sys.executable, "-m", f"{module_name}"]
+            # Run tests.utils module which has a __main__ block that reads
+            # the pickled function from stdin and executes it
+            cmd = [sys.executable, "-m", "tests.utils"]
 
             returned = subprocess.run(
                 cmd, input=input_bytes, capture_output=True, env=env
@@ -1536,3 +1535,18 @@ class TestBlockFP8Layer:
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.linear_op.input_quant_op.enabled()
+
+
+def _run_spawned_test() -> None:
+    """Entry point for spawned test processes.
+
+    This function is called when running `python -m tests.utils` from
+    spawn_new_process_for_each_test. It reads the pickled test function
+    from stdin and executes it.
+    """
+    f, output_filepath = cloudpickle.loads(sys.stdin.buffer.read())
+    f()
+
+
+if __name__ == "__main__":
+    _run_spawned_test()
