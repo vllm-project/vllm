@@ -3,8 +3,7 @@
 
 
 import struct
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
@@ -29,9 +28,9 @@ logger = init_logger(__name__)
 
 class DPSyncMode(Enum):
     """Mode for DP rank synchronization."""
-    SYNC = "sync"      # Synchronous (no async started)
-    UCC = "ucc"        # UCC async allgather
-    THREAD = "thread"  # Background thread running Gloo
+    SYNC = "sync"       # Synchronous (no async started)
+    UCC = "ucc"         # UCC async allgather
+    GLOO_ASYNC = "gloo" # Gloo with async_op=True
 
 
 @dataclass
@@ -42,7 +41,7 @@ class DPSyncHandle:
     Call `finish()` to wait for completion and get results.
     """
 
-    # Mode of async operation (SYNC, UCC, or THREAD)
+    # Mode of async operation (SYNC, UCC, or GLOO_ASYNC)
     mode: DPSyncMode
     # Parameters needed to fall back to sync or finish async
     should_attempt_ubatching: bool
@@ -64,10 +63,10 @@ class DPSyncHandle:
         """
         if self.mode == DPSyncMode.UCC:
             # UCC async was started, wait for completion
-            tensor = _run_ar_async_finish(self.parallel_config)
-        elif self.mode == DPSyncMode.THREAD:
-            # Thread was started, join and get result
-            tensor = _run_ar_thread_finish()
+            tensor = _run_ar_ucc_finish(self.parallel_config)
+        elif self.mode == DPSyncMode.GLOO_ASYNC:
+            # Gloo async was started, wait for completion
+            tensor = _run_ar_gloo_finish()
         else:
             # Fall back to synchronous all-reduce (SYNC mode)
             tensor = _run_ar(
@@ -118,10 +117,9 @@ _ucc_pending_handle: Optional["UCCHandle"] = None
 _ucc_initialized: bool = False
 _ucc_init_attempted: bool = False
 
-# Module-level state for thread-based async (Gloo fallback)
-_thread_handle: Optional[threading.Thread] = None
-_thread_result: Optional[torch.Tensor] = None
-_thread_exception: Optional[Exception] = None
+# Module-level state for Gloo async (using async_op=True)
+_gloo_pending_work: Optional[dist.Work] = None
+_gloo_pending_tensor: Optional[torch.Tensor] = None
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -238,7 +236,7 @@ def _init_ucc_allgather(parallel_config: ParallelConfig) -> bool:
         return False
 
 
-def _run_ar_async_start(
+def _run_ar_ucc_start(
     should_ubatch: bool,
     should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
@@ -246,9 +244,9 @@ def _run_ar_async_start(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> bool:
-    """Start async allgather. Call BEFORE GPU forward pass.
+    """Start async UCC allgather. Call BEFORE other CPU work.
 
-    Returns True if async operation was started, False if fallback to sync.
+    Returns True if async operation was started, False if UCC not available.
     """
     global _ucc_pending_handle, _ucc_send_buffer, _ucc_recv_buffer
     global _ucc_allgather
@@ -278,15 +276,15 @@ def _run_ar_async_start(
     return True
 
 
-def _run_ar_async_finish(parallel_config: ParallelConfig) -> torch.Tensor:
-    """Wait for async allgather and return results. Call AFTER GPU forward pass.
+def _run_ar_ucc_finish(parallel_config: ParallelConfig) -> torch.Tensor:
+    """Wait for async UCC allgather and return results.
 
     Returns tensor in same format as _run_ar.
     """
     global _ucc_pending_handle, _ucc_recv_buffer
 
     if _ucc_pending_handle is None:
-        raise RuntimeError("No pending async operation")
+        raise RuntimeError("No pending UCC async operation")
 
     # Wait for completion
     _ucc_pending_handle.wait()
@@ -305,7 +303,7 @@ def _run_ar_async_finish(parallel_config: ParallelConfig) -> torch.Tensor:
     return result
 
 
-def _run_ar_thread_start(
+def _run_ar_gloo_start(
     should_ubatch: bool,
     should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
@@ -313,64 +311,53 @@ def _run_ar_thread_start(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> bool:
-    """Start Gloo all-reduce in background thread.
+    """Start async Gloo all-reduce using async_op=True.
 
-    This allows the main thread to continue while Gloo blocks on network I/O.
-    When Gloo is waiting for network, it releases the GIL, allowing overlap.
+    This queues the all-reduce to run on Gloo's background thread.
+    The calling thread can continue with other work while the
+    collective runs in the background.
 
-    Returns True if thread was started successfully.
+    Returns True (always succeeds for Gloo).
     """
-    global _thread_handle, _thread_result, _thread_exception
+    global _gloo_pending_work, _gloo_pending_tensor
 
-    # Clear any previous state
-    _thread_result = None
-    _thread_exception = None
+    dp_size = parallel_config.data_parallel_size
+    dp_rank = parallel_config.data_parallel_rank
+    device, group = _get_device_and_group(parallel_config)
 
-    def _run_ar_in_thread():
-        global _thread_result, _thread_exception
-        try:
-            _thread_result = _run_ar(
-                should_ubatch=should_ubatch,
-                should_dp_pad=should_dp_pad,
-                orig_num_tokens_per_ubatch=orig_num_tokens_per_ubatch,
-                padded_num_tokens_per_ubatch=padded_num_tokens_per_ubatch,
-                cudagraph_mode=cudagraph_mode,
-                parallel_config=parallel_config,
-            )
-        except Exception as e:
-            _thread_exception = e
+    # Create and populate tensor
+    tensor = torch.zeros(5, dp_size, device=device, dtype=torch.int32)
+    tensor[0][dp_rank] = orig_num_tokens_per_ubatch
+    tensor[1][dp_rank] = padded_num_tokens_per_ubatch
+    tensor[2][dp_rank] = 1 if should_ubatch else 0
+    tensor[3][dp_rank] = 1 if should_dp_pad else 0
+    tensor[4][dp_rank] = cudagraph_mode
 
-    _thread_handle = threading.Thread(target=_run_ar_in_thread, daemon=True)
-    _thread_handle.start()
+    # Start async all-reduce - returns immediately, runs on background thread
+    _gloo_pending_work = dist.all_reduce(tensor, group=group, async_op=True)
+    _gloo_pending_tensor = tensor
+
     return True
 
 
-def _run_ar_thread_finish() -> torch.Tensor:
-    """Wait for background thread and return results.
+def _run_ar_gloo_finish() -> torch.Tensor:
+    """Wait for async Gloo all-reduce and return results.
 
     Returns tensor in same format as _run_ar.
     """
-    global _thread_handle, _thread_result, _thread_exception
+    global _gloo_pending_work, _gloo_pending_tensor
 
-    if _thread_handle is None:
-        raise RuntimeError("No pending thread operation")
+    if _gloo_pending_work is None or _gloo_pending_tensor is None:
+        raise RuntimeError("No pending Gloo async operation")
 
-    # Wait for thread to complete
-    _thread_handle.join()
-    _thread_handle = None
+    # Wait for completion
+    _gloo_pending_work.wait()
 
-    # Check for exceptions
-    if _thread_exception is not None:
-        exc = _thread_exception
-        _thread_exception = None
-        raise exc
+    # Get result and clear state
+    result = _gloo_pending_tensor
+    _gloo_pending_work = None
+    _gloo_pending_tensor = None
 
-    # Get result
-    if _thread_result is None:
-        raise RuntimeError("Thread completed but no result available")
-
-    result = _thread_result
-    _thread_result = None
     return result
 
 
@@ -450,9 +437,8 @@ def _synchronize_dp_ranks(
     # to determine the total number of tokens that each rank
     # will run and if we are using ubatching or not.
     #
-    # Try async UCC path first if enabled - this releases the GIL during
-    # the collective operation, allowing other Python threads to run.
-    use_ucc = _run_ar_async_start(
+    # Try async UCC path first if enabled.
+    use_ucc = _run_ar_ucc_start(
         should_ubatch=should_attempt_ubatching,
         should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -463,7 +449,7 @@ def _synchronize_dp_ranks(
 
     if use_ucc:
         # UCC async started successfully, wait for completion
-        tensor = _run_ar_async_finish(parallel_config)
+        tensor = _run_ar_ucc_finish(parallel_config)
     else:
         # Fall back to synchronous all-reduce
         tensor = _run_ar(
@@ -616,7 +602,7 @@ def coordinate_batch_across_dp_start(
         num_tokens_padded = num_tokens_unpadded
 
     # Try to start async UCC allgather first (preferred path)
-    use_ucc = _run_ar_async_start(
+    use_ucc = _run_ar_ucc_start(
         should_ubatch=should_attempt_ubatching,
         should_dp_pad=allow_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -628,10 +614,10 @@ def coordinate_batch_across_dp_start(
     if use_ucc:
         mode = DPSyncMode.UCC
     elif envs.VLLM_USE_ASYNC_DP_SYNC:
-        # UCC not available but async enabled, try thread-based fallback.
-        # This runs Gloo in a background thread while the main thread continues.
-        # When Gloo waits on network I/O, it releases the GIL, allowing overlap.
-        use_thread = _run_ar_thread_start(
+        # UCC not available but async enabled, use Gloo with async_op=True.
+        # This queues the all-reduce to run on Gloo's background thread
+        # while the main thread continues with other CPU work.
+        _run_ar_gloo_start(
             should_ubatch=should_attempt_ubatching,
             should_dp_pad=allow_dp_padding,
             orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -639,7 +625,7 @@ def coordinate_batch_across_dp_start(
             cudagraph_mode=cudagraph_mode,
             parallel_config=parallel_config,
         )
-        mode = DPSyncMode.THREAD if use_thread else DPSyncMode.SYNC
+        mode = DPSyncMode.GLOO_ASYNC
     else:
         # Neither UCC nor async enabled, will use sync in finish()
         mode = DPSyncMode.SYNC
