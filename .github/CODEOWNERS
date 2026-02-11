@@ -36,7 +36,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Input/Output Processing
 /vllm/sampling_params.py @njhill @NickLucche
-/vllm/pooling_params.py @noooop
+/vllm/pooling_params.py @noooop @DarkLight1337
 /vllm/tokenizers @DarkLight1337 @njhill
 /vllm/renderers @DarkLight1337 @njhill
 /vllm/reasoning @aarnphm @chaunceyjiang
