@@ -1428,12 +1428,9 @@ def _fused_moe_lora(
     )
     EM = total_m_blocks * shrink_block_size_m
 
-    # Use fused shrink+expand when possible (keeps intermediate in registers)
-    can_fuse = (
-        not fully_sharded
-        and max_lora_rank >= 16
-        and shrink_split_k == 1
-    )
+    # The fused shrink+expand kernel keeps intermediate in registers but
+    # benchmarks slower than separate kernels in practice.  Disable for now.
+    can_fuse = False
 
     if can_fuse:
         _fused_moe_lora_shrink_expand_fused(
