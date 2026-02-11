@@ -350,7 +350,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
         if self.need_to_return_lse_for_decode:
             o, lse = attn_out
-            # FA returns LSE in shape [ H, B ] but CP wants [ B, H ]
+            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
             return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
         else:
             o = attn_out

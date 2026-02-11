@@ -1680,8 +1680,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         * self.dcp_local_block_size
                     )
                     # Note(hc): The above max_context_chunk already enforces
-                    # block_size alignment, DCP and PCP just need the block_size can
-                    # be divisible by cp_world_size, because DCP and PCP use
+                    # block_size alignment, DCP just need the block_size can
+                    # be divisible by dcp_world_size, because DCP use
                     # cp_gather_cache which not require `cp_chunk_starts`
                     # aligned to page_size.
                     assert max_context_chunk % self.dcp_world_size == 0
@@ -2465,7 +2465,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-        cp_world_size: int,
+        dcp_world_size: int,
     ):
         assert k_scale is None, "PCP/DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
@@ -2496,15 +2496,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # workspace
             # |------- N tokens --------|--------- N*cp_size tokens ----------|
             # |<- use for loca_gather ->|<--------- use for allgather -------->|
-            allgather_offset = workspace.shape[0] // (cp_world_size + 1)
-            assert allgather_offset * (cp_world_size + 1) == workspace.shape[0]
+            allgather_offset = workspace.shape[0] // (dcp_world_size + 1)
+            assert allgather_offset * (dcp_world_size + 1) == workspace.shape[0]
             assert toks <= allgather_offset
             local_gathered_kvcache = workspace[:toks]
             cur_allgather_workspace = workspace[
-                allgather_offset : allgather_offset * (1 + cp_world_size)
+                allgather_offset : allgather_offset * (1 + dcp_world_size)
             ]
-            assert toks * cp_world_size <= cur_allgather_workspace.shape[0]
-            cur_allgather_kvcache = cur_allgather_workspace[: toks * cp_world_size]
+            assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
+            cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
             # TODO(yyj) Reduce to a single all-gather operation
             cur_allgather_kvcache.copy_(
                 get_pcp_group().all_gather(
@@ -2617,7 +2617,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                         kv_c_and_k_pe_cache,
                         attn_metadata,
                         k_scale=None,
-                        cp_world_size=self.dcp_world_size,
+                        dcp_world_size=self.dcp_world_size,
                     )
                 )
             else:
