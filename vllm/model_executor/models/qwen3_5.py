@@ -206,7 +206,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
+            prefix=f"{prefix}.in_proj_b",
         )
         self.in_proj_a = ColumnParallelLinear(
             input_size=self.hidden_size,
