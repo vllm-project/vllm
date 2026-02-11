@@ -10,6 +10,11 @@ from vllm.entrypoints.pooling.base.protocol import CompletionRequestMixin
 
 class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin):
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    return_token_id_texts_map: bool | None = Field(
+        default=None,
+        description="Whether to return dict shows the mapping of token_id to text."
+        "`None` or False means not return.",
+    )
 
 
 class SparseEmbeddingResponseData(BaseModel):
