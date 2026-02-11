@@ -16,6 +16,7 @@ ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
 def scan_file(path: str) -> int:
     with open(path, encoding="utf-8") as f:
         content = f.read()
+    return_code = 0
     for match in re.finditer(_TORCH_CUDA_RE, content, re.MULTILINE):
         # Calculate line number from match position
         line_num = content[: match.start() + 1].count("\n") + 1
@@ -24,8 +25,8 @@ def scan_file(path: str) -> int:
             "\033[91merror:\033[0m "  # red color
             "Found torch.cuda API call"
         )
-        return 1
-    return 0
+        return_code = 1
+    return return_code
 
 
 def main():
