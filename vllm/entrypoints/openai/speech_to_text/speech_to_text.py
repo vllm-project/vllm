@@ -241,6 +241,67 @@ class OpenAISpeechToText(OpenAIServing):
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
+    
+    async def _detect_language(
+        self,
+        audio_chunk: np.ndarray,
+        request_id: str = "lang-detect",
+    ) -> str:
+        """Auto-detect the spoken language from an audio chunk.
+
+        Delegates prompt construction and output parsing to the model class
+        via ``get_language_detection_prompt`` and
+        ``parse_language_detection_output``.  Falls back to ``"en"`` on any
+        failure.
+        """
+        try:
+            from vllm.sampling_params import SamplingParams
+
+            prompt = self.model_cls.get_language_detection_prompt(
+                audio_chunk,
+                self.asr_config,
+            )
+            sampling_params = SamplingParams(
+                max_tokens=1,
+                temperature=0.0,
+            )
+
+            result_generator = self.engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+            )
+
+            final_output: RequestOutput | None = None
+            async for output in result_generator:
+                final_output = output
+
+            if (
+                final_output is None
+                or not final_output.outputs
+                or not final_output.outputs[0].token_ids
+            ):
+                logger.warning(
+                    "Language detection produced no output, defaulting to 'en'"
+                )
+                return "en"
+
+            token_ids = list(final_output.outputs[0].token_ids)
+            lang = self.model_cls.parse_language_detection_output(
+                token_ids,
+                self.tokenizer,
+            )
+            if lang is not None:
+                logger.info("Auto-detected language: '%s'", lang)
+                return lang
+
+            logger.warning(
+                "Could not determine language from model output, defaulting to 'en'"
+            )
+            return "en"
+        except Exception:
+            logger.exception("Language detection failed, defaulting to 'en'")
+            return "en"
 
     async def _preprocess_speech_to_text(
         self,
@@ -274,6 +335,13 @@ class OpenAISpeechToText(OpenAIServing):
             and duration > self.asr_config.max_audio_clip_s
         )
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+
+        if language is None and hasattr(
+            self.model_cls, "get_language_detection_prompt"
+        ):
+            language = await self._detect_language(chunks[0])
+            request.language = language
+
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
             # The model has control over the construction, as long as it

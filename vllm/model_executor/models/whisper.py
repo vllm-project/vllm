@@ -807,15 +807,12 @@ class WhisperForConditionalGeneration(
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
         if language is None:
-            # TODO language should be optional and can be guessed.
-            # For now we default to en. See
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-            logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe "
-                "audio in a different language, pass the `language` field "
+            logger.info(
+                "No language specified. Language will be auto-detected "
+                "from audio. To skip detection, pass the `language` field "
                 "in the TranscriptionRequest."
             )
-            language = "en"
+            return None
         return super().validate_language(language)
 
     @classmethod
@@ -845,6 +842,57 @@ class WhisperForConditionalGeneration(
             ),
             decoder_prompt=TextPrompt(prompt=decoder_text),
         )
+
+    @classmethod
+    def get_language_detection_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+    ) -> PromptType:
+        """Return a prompt that elicits a single language token from Whisper.
+
+        Feed only ``<|startoftranscript|>`` as the decoder input so the model
+        predicts the most likely language token (e.g. ``<|de|>``).
+        """
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+            ),
+            decoder_prompt=TextPrompt(prompt="<|startoftranscript|>"),
+        )
+
+    @classmethod
+    def parse_language_detection_output(
+        cls,
+        token_ids: list[int],
+        tokenizer: object,
+    ) -> str | None:
+        """Parse the language token predicted by Whisper.
+
+        Decodes the first token ID and extracts the language code from the
+        ``<|xx|>`` format.  Returns ``None`` if the token cannot be parsed
+        or the language is not in :attr:`supported_languages`.
+        """
+        if not token_ids:
+            return None
+
+        decoded = tokenizer.decode(
+            [token_ids[0]],
+            skip_special_tokens=False,
+        )
+        # Whisper language tokens have the form <|xx|>
+        if decoded.startswith("<|") and decoded.endswith("|>"):
+            lang_code = decoded[2:-2]
+            if lang_code in cls.supported_languages:
+                return lang_code
+            logger.warning(
+                "Detected language token '%s' not in supported languages", decoded
+            )
+            return None
+
+        logger.warning("Unexpected language token format: '%s'", decoded)
+        return None
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
