@@ -206,7 +206,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
+            prefix=f"{prefix}.in_proj_b",
         )
         self.in_proj_a = ColumnParallelLinear(
             input_size=self.hidden_size,
@@ -870,8 +870,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
+        mamba_ssm_dtype = vllm_config.model_config.hf_text_config.mamba_ssm_dtype
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype, mamba_ssm_dtype
         )
 
     @classmethod
