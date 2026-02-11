@@ -136,7 +136,7 @@ class AsyncLLM(EngineClient):
             self.model_config.io_processor_plugin,
         )
 
-        # Convert TokPrompt --> EngineCoreOutputs.
+        # Convert TokPrompt --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
