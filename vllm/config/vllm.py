@@ -1367,7 +1367,7 @@ class VllmConfig:
 
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
-                compilation_config.pass_config.aiter_rope_kvcache_fusion_max_token_num
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
             )
             if max_token_num is not None:
                 if compile_range_end is not None and max_token_num < compile_range_end:
