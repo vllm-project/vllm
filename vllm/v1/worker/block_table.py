@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -80,13 +80,6 @@ class BlockTable:
         else:
             self._kernel_block_arange = None
 
-        try:
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group
-        except AssertionError:
-            # PCP might not be initialized in testing
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
