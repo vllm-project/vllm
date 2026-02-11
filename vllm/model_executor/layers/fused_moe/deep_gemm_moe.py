@@ -113,6 +113,8 @@ def _valid_deep_gemm(
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    """DeepGemm-based fused MoE expert implementation."""
+
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()

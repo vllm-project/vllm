@@ -22,6 +22,7 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -42,6 +43,7 @@ from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -118,9 +120,6 @@ class Worker(WorkerBase):
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner", scope="global")
-
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -186,6 +185,7 @@ class Worker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
@@ -238,6 +238,9 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            if self.use_v2_model_runner:
+                logger.info_once("Using V2 Model Runner", scope="local")
+
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
@@ -284,9 +287,10 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -407,6 +411,7 @@ class Worker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
+    @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
@@ -426,6 +431,7 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+    @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> None:
         warmup_sizes = []
 
@@ -810,10 +816,14 @@ class Worker(WorkerBase):
             for module in moe_modules:
                 module.moe_config.num_experts = num_local_experts * new_ep_size
                 module.global_num_experts = module.moe_config.num_experts
+                tp_size = get_tp_group().world_size
+                is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+                sp_size = tp_size if is_sequence_parallel else 1
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
-                    tp_size_=get_tp_group().world_size,
+                    tp_size_=tp_size,
                     pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
+                    sp_size_=sp_size,
                     vllm_parallel_config=parallel_config,
                 )
                 module.moe_config.moe_parallel_config = module.moe_parallel_config
@@ -1030,6 +1040,7 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance(attention_config.backend)
+    override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
