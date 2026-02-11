@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8KVCacheMethod,
     Fp8LinearMethod,
     Fp8MoEMethod,
+    Fp8OnlineMoEMethod,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -466,3 +467,122 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_moe_cpu_weights_skip_streaming_quant(
+    default_vllm_config,
+    dist_init,
+    monkeypatch,
+):
+    """When Fp8OnlineMoEMethod creates weights on CPU (simulating the
+    online_fp8 plugin's CPU-init flow), verify that:
+
+    1. patched_weight_loader does NOT call process_weights_after_loading
+       (which would fail with ops.scaled_fp8_quant on CPU tensors)
+    2. _already_called_process_weights_after_loading is NOT set, so the
+       outer move_to_device path can still run quantization later
+    3. After moving weights to GPU, process_weights_after_loading succeeds
+    """
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
+
+    num_experts = 4
+    hidden_size = 64
+    intermediate_size = 32
+
+    config = Fp8Config(
+        is_checkpoint_fp8_serialized=False,
+        activation_scheme="dynamic",
+    )
+
+    # Create FusedMoE layer on GPU (non-MoE parts need GPU)
+    with torch.device("cuda:0"):
+        layer = FusedMoE(
+            num_experts=num_experts,
+            top_k=1,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+        )
+        method = Fp8OnlineMoEMethod(config, layer)
+
+    # Simulate online_fp8 plugin: wrap create_weights with CPU device context
+    with torch.device("cpu"):
+        method.create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+
+    # Verify weights start on meta device (upstream uses deferred init)
+    assert layer.w13_weight.device == torch.device("meta")
+    assert layer.w2_weight.device == torch.device("meta")
+    # _load_device should be CPU since we wrapped with torch.device("cpu")
+    assert layer._load_device == torch.device("cpu")
+
+    # Simulate weight loading via patched_weight_loader.
+    # Load w13 weights (gate + up, 2 * intermediate_size experts)
+    w13_loader = layer.w13_weight.weight_loader
+    for expert_id in range(num_experts):
+        # gate weight (shard_id="w1")
+        w13_loader(
+            layer.w13_weight,
+            torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16),
+            "w13_weight",
+            "w1",
+            expert_id,
+        )
+        # up weight (shard_id="w3")
+        w13_loader(
+            layer.w13_weight,
+            torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16),
+            "w13_weight",
+            "w3",
+            expert_id,
+        )
+
+    # Load w2 weights (down projection)
+    w2_loader = layer.w2_weight.weight_loader
+    for expert_id in range(num_experts):
+        w2_loader(
+            layer.w2_weight,
+            torch.randn(hidden_size, intermediate_size, dtype=torch.bfloat16),
+            "w2_weight",
+            "w2",
+            expert_id,
+        )
+
+    # After loading all weights, the patched_weight_loader should have
+    # detected that weights are on CPU and skipped streaming quantization.
+    assert not getattr(
+        layer, "_already_called_process_weights_after_loading", False
+    ), (
+        "_already_called_process_weights_after_loading should NOT be set "
+        "when weights are on CPU — the outer move_to_device path needs to "
+        "handle quantization"
+    )
+
+    # Weights should still be BF16 on CPU (not quantized)
+    assert layer.w13_weight.device.type == "cpu"
+    assert layer.w2_weight.device.type == "cpu"
+    assert layer.w13_weight.dtype == torch.bfloat16
+    assert layer.w2_weight.dtype == torch.bfloat16
+
+    # Now simulate the online_fp8 plugin's move_to_device path:
+    # move weights to GPU, then call process_weights_after_loading
+    for _, param in layer.named_parameters():
+        if param.device.type == "cpu":
+            param.data = param.data.to("cuda:0")
+
+    method.process_weights_after_loading(layer)
+
+    # Verify quantization succeeded
+    assert layer.w13_weight.dtype == torch.float8_e4m3fn
+    assert layer.w2_weight.dtype == torch.float8_e4m3fn
+    assert layer.w13_weight.device.type == "cuda"
+    assert layer.w2_weight.device.type == "cuda"

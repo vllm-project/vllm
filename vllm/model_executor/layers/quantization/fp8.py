@@ -1113,19 +1113,28 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
             # if we have loaded all of the elements, call
             # process_weights_after_loading
+            #
+            # When weights are on CPU (e.g. cpu-offload or plugin
+            # CPU-init path), skip streaming quantization since
+            # ops.scaled_fp8_quant requires GPU tensors.  The caller
+            # is responsible for moving weights to GPU and calling
+            # process_weights_after_loading via move_to_device.
+            #
+            # Note that we keep `layer._loaded_numel`,
+            # `layer._w13_weight_orig_id` and `layer._w2_weight_orig_id`
+            # around because if EP is on, weight loaders for non-local
+            # experts will run but not actually copy any elements, and we
+            # need to not re-initialize in that case.
             target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
+            if (
+                layer._loaded_numel == target_loaded_numel
+                and layer.w13_weight.is_cuda
+            ):
                 self.process_weights_after_loading(layer)
 
-                # Prevent the usual `process_weights_after_loading` call
-                # from doing anything
+                # Prevent the usual `process_weights_after_loading`
+                # call from doing anything
                 layer._already_called_process_weights_after_loading = True
-
-                # Note that we keep `layer._loaded_numel`,
-                # `layer._w13_weight_orig_id` and `layer._w2_weight_orig_id`
-                # around because if EP is on, weight loaders for non-local
-                # experts will run but not actually copy any elements, and we
-                # need to not re-initialize in that case.
 
             return res
 
