@@ -20,7 +20,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
 /vllm/config/cache.py @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
-# API layer
+# Offline and Online Inference APIs
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
@@ -35,7 +35,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/entrypoints/llm.py @DarkLight1337
 
 # Input/Output Processing
-/vllm/sampling_params.py @njhill
+/vllm/sampling_params.py @njhill @NickLucche
 /vllm/pooling_params.py @noooop
 /vllm/tokenizers @DarkLight1337 @njhill
 /vllm/renderers @DarkLight1337 @njhill
