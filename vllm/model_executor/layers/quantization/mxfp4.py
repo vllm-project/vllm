@@ -160,7 +160,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
     elif current_platform.is_xpu():
-        logger.info_once("Using ipex marlin backend on XPU")
+        logger.info_once("Using xpu backend on XPU")
         return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm() and has_triton_kernels():
         logger.info_once("Using Triton backend")
@@ -235,6 +235,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MXFP4 MoE quantization method."""
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
