@@ -211,6 +211,7 @@ def coordinate_batch_across_dp(
             num_tokens_unpadded,
             uniform_decode=uniform_decode,
         )
+    logger.info(f"jcz coordinate_batch_across_dp should_attempt_ubatching:{should_attempt_ubatching}")
 
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
@@ -224,5 +225,6 @@ def coordinate_batch_across_dp(
             parallel_config,
         )
     )
+    logger.info(f"jcz coordinate_batch_across_dp should_ubatch:{should_ubatch}")
 
     return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)

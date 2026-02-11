@@ -237,7 +237,7 @@ class UBatchWrapper:
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
-                cudagraph=torch.cuda.CUDAGraph(),
+                cudagraph=torch.cuda.CUDAGraph(keep_graph=True),
                 ubatch_metadata=ubatch_metadata,
             )
             if self.graph_pool is not None:
@@ -428,14 +428,14 @@ class UBatchWrapper:
             # num_tokens, we don't have a non-ubatched one. Without this
             # check, the cudagraph wrapper will try to capture a cudagraph
             # for this shape during a normal run.
-
+            logger.info(f"jcz UBatchWrapper __call__ cudagraph_runtime_mode:{cudagraph_runtime_mode}")
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
                 if batch_descriptor.num_tokens in self.cudagraphs:
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
-                logger.info("jcz UBatchWrapper __call__ 1")
+                logger.info(f"jcz UBatchWrapper __call__ 1")
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.cudagraph_wrapper is not None

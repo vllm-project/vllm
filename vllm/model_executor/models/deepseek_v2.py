@@ -1244,7 +1244,6 @@ class DeepseekV2Model(nn.Module):
             if layer_idx > 0:
                 # Pass current hidden_states as ref_tensor to preserve dynamic shapes
                 hidden_states = afd_connector.recv_ffn_output(ref_tensor=hidden_states)
-            
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )

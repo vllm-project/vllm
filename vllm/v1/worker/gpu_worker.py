@@ -858,7 +858,7 @@ class Worker(WorkerBase):
                         is_warmup,
                     ) = self.model_runner.connector.recv_dp_metadata_list()
                     logger.info(f"jcz after recv_dp_metadata_list dp_metadata_list:{dp_metadata_list}")
-                    if is_attn_graph_capturing or is_warmup:
+                    if is_attn_graph_capturing or (is_warmup and not self.model_config.enforce_eager):
                         self.model_runner.capture_model(
                             dp_metadata_list=dp_metadata_list,
                             is_warmup=is_warmup,

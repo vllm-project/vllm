@@ -788,7 +788,7 @@ class GPUModelRunner(
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=1000, warmup=1, active=10, repeat=1
+                wait=1500, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True,
@@ -5559,6 +5559,37 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                 )
             )
+
+            if allow_microbatching:
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                    # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                    # But be careful, warm up with `NONE`is orthogonal to
+                    # if we want to warm up attention or not. This is
+                    # different from the case where `FULL` implies capture
+                    # attention while `PIECEWISE` implies no attention.
+                    force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    self._is_warmup = True
+                    self._dummy_run(
+                        num_tokens,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=force_attention,
+                        uniform_decode=uniform_decode,
+                        allow_microbatching=False,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        activate_lora=activate_lora,
+                    )
+                self._is_warmup = False
+                self._dummy_run(
+                    num_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    uniform_decode=uniform_decode,
+                    allow_microbatching=False,
+                    skip_eplb=True,
+                    remove_lora=False,
+                    activate_lora=activate_lora,
+                    is_graph_capturing=True,
+                )
 
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
