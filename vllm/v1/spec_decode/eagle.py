@@ -547,10 +547,14 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=batch_size, num_tokens_padded=batch_size
         )
 
-        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-            batch_size_dp_padded
-        )
-        input_batch_size = batch_desc.num_tokens
+        # Disable CUDA graphs for draft loop iterations.
+        # When CUDA graphs pad the batch (e.g., 100 → 104), the MLA attention
+        # backends call reshape_query_for_spec_decode(q, num_decodes) which
+        # fails when padded_size % num_decodes != 0. Even when divisible,
+        # padding positions contain invalid topk indices that cause CUDA
+        # illegal memory access in the FlashMLA kernel.
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
+        input_batch_size = batch_size_dp_padded
         if batch_size_across_dp is not None:
             batch_size_across_dp[self.dp_rank] = input_batch_size
 
@@ -652,6 +656,17 @@ class SpecDecodeBaseProposer:
             )
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
+
+            # Rebuild indexer/DSA attention metadata for models like GLM5
+            if self.draft_indexer_metadata_builder:
+                draft_indexer_metadata = (
+                    self.draft_indexer_metadata_builder.build_for_drafting(
+                        common_attn_metadata=common_attn_metadata,
+                        draft_index=token_index + 1,
+                    )
+                )
+                for layer_name in self.indexer_layer_names:
+                    per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids

@@ -268,11 +268,39 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_reqs=reqs_end - reqs_start,
         )
 
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> DeepseekV32IndexerMetadata:
+        """Build indexer metadata for draft model.
+
+        During drafting, each forward pass generates only 1 token per request,
+        so we set offsets=None (no speculative decoding offsets needed).
+        """
+        return self._build_impl(
+            common_attn_metadata=common_attn_metadata,
+            fast_build=True,
+            drafting=True,
+        )
+
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+    ) -> DeepseekV32IndexerMetadata:
+        return self._build_impl(
+            common_attn_metadata=common_attn_metadata,
+            fast_build=fast_build,
+            drafting=False,
+        )
+
+    def _build_impl(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        drafting: bool = False,
     ) -> DeepseekV32IndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
@@ -331,11 +359,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
             use_large_context_topk = batch_size <= 128 and _is_large_context
 
-            next_n = 1 + self.num_speculative_tokens
-            if next_n > 1:
-                offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
-            else:
+            if drafting:
+                # During drafting, each forward generates 1 token per request,
+                # so no speculative offsets are needed.
                 offsets = None
+            else:
+                next_n = 1 + self.num_speculative_tokens
+                if next_n > 1:
+                    offsets = torch.arange(
+                        next_n, device=self.device, dtype=torch.int32
+                    )
+                else:
+                    offsets = None
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             if is_deep_gemm_supported():
