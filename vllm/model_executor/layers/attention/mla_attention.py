@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
@@ -1040,22 +1040,6 @@ class MLACommonBackend(AttentionBackend):
         return True
 
 
-class PrefillKernelMetadataProtocol(Protocol):
-    """Protocol for prefill attention kernel metadata."""
-
-    @property
-    def cu_seqlens_q(self) -> torch.Tensor: ...
-
-    @property
-    def cu_seqlens_k(self) -> torch.Tensor: ...
-
-    @property
-    def max_seqlen_q(self) -> int: ...
-
-    @property
-    def max_seqlen_k(self) -> int: ...
-
-
 @dataclass
 class MLACommonPrefillMetadata:
     """Prefill Specific Metadata"""
@@ -1102,22 +1086,10 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     pcp_metadata: PCPMetadata | None = None
 
-    # Implement PrefillKernelMetadataProtocol for non-PCP case
-    @property
-    def cu_seqlens_q(self) -> torch.Tensor:
-        return self.query_start_loc
 
-    @property
-    def cu_seqlens_k(self) -> torch.Tensor:
-        return self.query_start_loc
-
-    @property
-    def max_seqlen_q(self) -> int:
-        return self.max_query_len
-
-    @property
-    def max_seqlen_k(self) -> int:
-        return self.max_query_len
+PrefillKernelMetadata = (
+    MLACommonPrefillMetadata | MLACommonPrefillMetadata.PCPMetadata.ChunkMetadata
+)
 
 
 @dataclass
@@ -2188,24 +2160,31 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         q,
         k,
         v,
-        prefill: PrefillKernelMetadataProtocol,
+        prefill: PrefillKernelMetadata,
         return_softmax_lse: bool,
     ):
+        if isinstance(prefill, MLACommonPrefillMetadata):
+            cu_seqlens_q = cu_seqlens_k = prefill.query_start_loc
+            max_seqlen_q = max_seqlen_k = prefill.max_query_len
+        else:
+            cu_seqlens_q, cu_seqlens_k = prefill.cu_seqlens_q, prefill.cu_seqlens_k
+            max_seqlen_q, max_seqlen_k = prefill.max_seqlen_q, prefill.max_seqlen_k
+
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=prefill.cu_seqlens_q,
-            cu_seqlens_k=prefill.cu_seqlens_k,
-            max_seqlen_q=prefill.max_seqlen_q,
-            max_seqlen_k=prefill.max_seqlen_k,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=return_softmax_lse,
         )
 
     def _run_prefill_new_tokens_fi(
-        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadata, return_softmax_lse
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
@@ -2223,7 +2202,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_new_tokens_cudnn(
-        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadata, return_softmax_lse
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
@@ -2310,7 +2289,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadata, return_softmax_lse
     ):
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek

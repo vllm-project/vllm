@@ -236,11 +236,15 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return the softmax lse "
-                    f"for decode, but {layer_impl.__class__.__name__} does not."
+                    "DCP requires attention impls to return"
+                    " the softmax lse for decode, but the impl "
+                    f"{layer_impl.__class__.__name__} "
+                    "does not return the softmax lse for decode."
                 )
+
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    f"PCP requires attention impl support, but "
-                    f"{layer_impl.__class__.__name__} does not support PCP."
+                    "PCP requires attention impls' support, "
+                    f"but the impl {layer_impl.__class__.__name__} "
+                    "does not support PCP."
                 )
