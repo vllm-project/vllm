@@ -115,7 +115,7 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Field(default=None)
     """Fuse the custom attention + quant ops."""
-    eliminate_noops: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
     """Enable sequence parallelism."""
@@ -194,7 +194,6 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "eliminate_noops",
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
