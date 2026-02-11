@@ -4,7 +4,7 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():

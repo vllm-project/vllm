@@ -60,15 +60,10 @@ def test_common_broadcastable_dtype(dtypes, expected_result):
     assert common_broadcastable_dtype(dtypes) == expected_result
 
 
-def test_current_stream_multithread():
+def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
     import threading
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    main_default_stream = torch.cuda.current_stream()
     child_stream = torch.cuda.Stream()
-
     thread_stream_ready = threading.Event()
     thread_can_exit = threading.Event()
 
@@ -90,15 +85,32 @@ def test_current_stream_multithread():
         assert main_current_stream != child_stream, (
             "Main thread's current_stream was contaminated by child thread"
         )
-        assert main_current_stream == main_default_stream, (
-            "Main thread's current_stream is not the default stream"
+        assert main_current_stream == main_expected_stream, (
+            f"Main thread's stream changed unexpectedly. "
+            f"Expected {main_expected_stream}, got {main_current_stream}"
         )
 
-        # Notify child thread it can exit
         thread_can_exit.set()
 
     finally:
-        # Ensure child thread exits properly
         child_thread.join(timeout=5)
         if child_thread.is_alive():
             pytest.fail("Child thread failed to exit properly")
+
+
+def test_current_stream_multithread():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    main_dedicated_stream = current_stream()
+
+    assert main_dedicated_stream.cuda_stream != 0, (
+        "ROCm/CUDA should create a dedicated stream, not use default stream (0x0)"
+    )
+
+    main_stream_again = current_stream()
+    assert main_stream_again == main_dedicated_stream, (
+        "Multiple calls to current_stream should return the same dedicated stream"
+    )
+
+    _test_stream_thread(main_dedicated_stream)

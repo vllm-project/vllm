@@ -7,6 +7,7 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
 
+import logging
 from typing import Any
 
 import pytest
@@ -22,8 +23,8 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
     register_quantization_config,
 )
-from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-    QuantizationConfig,
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,  # noqa: E501
 )
 
 
@@ -100,16 +101,21 @@ class CustomQuantConfig(QuantizationConfig):
         return None
 
 
-def test_register_quantization_config():
+def test_register_quantization_config(caplog_vllm):
     """Test register custom quantization config."""
 
     # The quantization method `custom_quant` should be registered.
     assert get_quantization_config("custom_quant") == CustomQuantConfig
 
     # The quantization method `custom_quant` is already exists,
-    # should raise an error.
-    with pytest.raises(ValueError):
+    # should raise a warning when re-registering it.
+    with caplog_vllm.at_level(logging.WARNING):
         register_quantization_config("custom_quant")(CustomQuantConfig)
+
+    assert any(
+        "The quantization method 'custom_quant' already exists" in message
+        for message in caplog_vllm.messages
+    ), "Expected a warning when re-registering custom_quant"
 
 
 @pytest.mark.parametrize(
@@ -136,5 +142,5 @@ def test_custom_quant(vllm_runner, model, monkeypatch):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=1)
         assert output

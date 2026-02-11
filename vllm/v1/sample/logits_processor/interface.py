@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -58,6 +58,14 @@ class BatchUpdate:
 
 
 class LogitsProcessor(ABC):
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        """Validate sampling params for this logits processor.
+
+        Raise ValueError for invalid ones.
+        """
+        return None
+
     @abstractmethod
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
@@ -86,7 +94,7 @@ class LogitsProcessor(ABC):
     @abstractmethod
     def update_state(
         self,
-        batch_update: Optional["BatchUpdate"],
+        batch_update: "BatchUpdate | None",
     ) -> None:
         """Called when there are new output tokens, prior
         to each forward pass.

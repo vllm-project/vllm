@@ -5,15 +5,16 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("ernie45")
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.
@@ -36,8 +37,8 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -59,7 +60,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 "tokens in the tokenizer!"
             )
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -75,7 +76,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         The Ernie45 thinking model ouput format is
             abc\n</think>\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
-        - 'abc' goes to reasoning_content
+        - 'abc' goes to reasoning
         - 'def' goes to content
         """
         # Skip single special tokens
@@ -96,7 +97,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             # </think> in delta with more tokens,
             # extract reasoning content and content
             think_end_index = delta_text.find(self.end_token)
-            reasoning_content = delta_text[:think_end_index]
+            reasoning = delta_text[:think_end_index]
             content = delta_text[think_end_index + len(self.end_token) :]
             content = content.lstrip("\n")
             response_start_idx = content.find(self.response_start_token)
@@ -106,7 +107,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             if response_end_idx != -1:
                 content = content[:response_end_idx]
             return DeltaMessage(
-                reasoning_content=reasoning_content,
+                reasoning=reasoning,
                 content=content if content else None,
             )
         elif self.end_token_id in previous_token_ids:
@@ -140,9 +141,9 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             return DeltaMessage(content=content if content else None)
         else:
             # no </think> in previous or delta, reasoning content continues
-            return DeltaMessage(reasoning_content=delta_text)
+            return DeltaMessage(reasoning=delta_text)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
         """
@@ -150,14 +151,12 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         The Ernie45 thinking model ouput format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
-        - 'abc' goes to reasoning_content
+        - 'abc' goes to reasoning
         - 'def' goes to content
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
-        reasoning_content, content = super().extract_reasoning_content(
-            model_output, request
-        )
+        reasoning, content = super().extract_reasoning(model_output, request)
         if content:
             start_idx = content.find(self.response_start_token)
             end_idx = content.rfind(self.response_end_token)
@@ -166,4 +165,4 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 content = content[start_idx + len(self.response_start_token) : end_idx]
         final_content = content or None
 
-        return reasoning_content, final_content
+        return reasoning, final_content

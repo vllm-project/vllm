@@ -19,7 +19,7 @@ from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
@@ -82,40 +82,51 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: Union[
-                "SchedulerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
-            ],
+            execute_model_input: tuple["SchedulerOutput", "GrammarOutput"]
+            | tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
         ) -> Union[
-            "ModelRunnerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
+            "ModelRunnerOutput",
+            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
         ]:
             # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
-            if isinstance(scheduler_output, tuple):
-                scheduler_output, intermediate_tensors = scheduler_output
+            if len(execute_model_input) == 3:
+                scheduler_output, grammar_output, intermediate_tensors = (
+                    execute_model_input
+                )
             else:
-                scheduler_output, intermediate_tensors = scheduler_output, None
+                scheduler_output, grammar_output = execute_model_input
+                intermediate_tensors = None
             assert self.worker.model_runner is not None
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, IntermediateTensors):
-                output = scheduler_output, output
-            elif not get_pp_group().is_last_rank:
+            if self._is_intermediate_tensors(output):
+                return scheduler_output, grammar_output, output
+
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
+            if not get_pp_group().is_last_rank:
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids
-                output = scheduler_output, None
-            # Ensure outputs crossing Ray compiled DAG are serializable.
-            # AsyncModelRunnerOutput holds CUDA events and cannot be
-            # pickled.
-            if isinstance(output, AsyncModelRunnerOutput):
-                output = output.get_output()
+                output = scheduler_output, grammar_output, None
+            elif output is None:
+                output = self.worker.model_runner.sample_tokens(grammar_output)
+                # Ensure outputs crossing Ray compiled DAG are serializable.
+                # AsyncModelRunnerOutput holds CUDA events and cannot be
+                # pickled.
+                if isinstance(output, AsyncModelRunnerOutput):
+                    output = output.get_output()
             return output
 
         def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
+
+        def _is_intermediate_tensors(self, output) -> bool:
+            return isinstance(output, IntermediateTensors)
 
     ray_import_err = None
 
@@ -136,19 +147,16 @@ class FutureWrapper(Future):
     the result() call. If not only the first worker's output is returned.
     """
 
-    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
+    def __init__(self, ref_or_refs, aggregator: KVOutputAggregator | None = None):
         super().__init__()
-        self.refs = refs
+        self.ref_or_refs = ref_or_refs
         self.aggregator = aggregator
 
     def result(self, timeout=None):
-        if timeout is not None:
-            raise NotImplementedError("timeout is not supported")
-
+        outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
-            return self.refs[0].get()
+            return outputs
 
-        outputs = [ref.get() for ref in self.refs]
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 
@@ -255,12 +263,33 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     try:
         ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
-        raise ValueError(
-            "Cannot provide a placement group of "
-            f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
-            "`ray status` and `ray list nodes` to make sure the cluster has "
-            "enough resources."
-        ) from None
+        # Provide more helpful error message when GPU count is exceeded
+        total_gpu_required = sum(spec.get("GPU", 0) for spec in placement_group_specs)
+        # If more than one GPU is required for the placement group, provide a
+        # more specific error message.
+        # We use >1 here because multi-GPU (tensor parallel) jobs are more
+        # likely to fail due to insufficient cluster resources, and users may
+        # need to adjust tensor_parallel_size to fit available GPUs.
+        if total_gpu_required > 1:
+            raise ValueError(
+                f"Cannot provide a placement group requiring "
+                f"{total_gpu_required} GPUs "
+                f"(placement_group_specs={placement_group_specs}) within "
+                f"{PG_WAIT_TIMEOUT} seconds.\n"
+                f"Tensor parallel size may exceed available GPUs in your "
+                f"cluster. Check resources with `ray status` and "
+                f"`ray list nodes`.\n"
+                f"If running on K8s with limited GPUs, consider reducing "
+                f"--tensor-parallel-size to match available GPU resources."
+            ) from None
+        else:
+            raise ValueError(
+                "Cannot provide a placement group of "
+                f"{placement_group_specs=} within "
+                f"{PG_WAIT_TIMEOUT} seconds. See "
+                "`ray status` and `ray list nodes` to make sure the cluster "
+                "has enough resources."
+            ) from None
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
@@ -298,6 +327,23 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
+
+    # Prevalidate GPU requirements before Ray processing
+    if current_platform.is_cuda() and parallel_config.world_size > 1:
+        from vllm.utils.torch_utils import cuda_device_count_stateless
+
+        available_gpus = cuda_device_count_stateless()
+        if parallel_config.world_size > available_gpus:
+            logger.warning(
+                "Tensor parallel size (%d) exceeds available GPUs (%d). "
+                "This may result in Ray placement group allocation failures. "
+                "Consider reducing tensor_parallel_size to %d or less, "
+                "or ensure your Ray cluster has %d GPUs available.",
+                parallel_config.world_size,
+                available_gpus,
+                available_gpus,
+                parallel_config.world_size,
+            )
 
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")

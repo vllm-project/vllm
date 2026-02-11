@@ -27,13 +27,7 @@ def test_models(
     example_prompts,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
-    if current_platform.is_rocm():
-        # ROCm Triton FA does not currently support sliding window attention
-        # switch to use ROCm CK FA backend
-        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
     with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
 

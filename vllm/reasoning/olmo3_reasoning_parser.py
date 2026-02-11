@@ -9,15 +9,18 @@ from typing import TYPE_CHECKING
 import regex as re
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
-
-from vllm.entrypoints.openai.protocol import (
+    from vllm.tokenizers import TokenizerLike
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -115,7 +118,7 @@ class Olmo3ReasoningBuffer:
             if end_think_idx > 0:
                 # this covers the case there's content before
                 # the end of the reasoning block
-                return DeltaMessage(reasoning_content=pretext)
+                return DeltaMessage(reasoning=pretext)
 
         if self.state == Olmo3ReasoningState.REASONING:
             # we are inside reasoning block, return and empty
@@ -124,7 +127,7 @@ class Olmo3ReasoningBuffer:
                 text_buffer,
                 self.buffer,
             ) = self.buffer, ""
-            return DeltaMessage(reasoning_content=text_buffer)
+            return DeltaMessage(reasoning=text_buffer)
 
         if self.state == Olmo3ReasoningState.CONTENT:
             # we are outside reasoning block, return and empty
@@ -192,7 +195,6 @@ class Olmo3ReasoningBuffer:
         return delta_message
 
 
-@ReasoningParserManager.register_module("olmo3")
 class Olmo3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Olmo 3 model
@@ -221,7 +223,7 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
-    def __init__(self, tokenizer: "AnyTokenizer", *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         self.think_start = r"<think>"
@@ -232,7 +234,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         # reasoning template.
         reasoning_expr = (
             rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
-            + rf"{self.think_end}(?P<content>.*)$"
+            rf"{self.think_end}(?P<content>.*)$"
         )
         self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
 
@@ -240,7 +242,7 @@ class Olmo3ReasoningParser(ReasoningParser):
             think_start=self.think_start, think_end=self.think_end
         )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         text = self.model_tokenizer.decode(input_ids)
         return self.think_end in text
 
@@ -251,7 +253,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         # this id is not part of content, so just return [] here.
         return []
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -272,14 +274,14 @@ class Olmo3ReasoningParser(ReasoningParser):
 
         re_match = self.reasoning_regex.match(model_output)
         if re_match:
-            reasoning_content = re_match.group("reasoning") or None
+            reasoning = re_match.group("reasoning") or None
             content = re_match.group("content") or None
-            return reasoning_content, content
+            return reasoning, content
 
         # no reasoning content
         return None, model_output
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,

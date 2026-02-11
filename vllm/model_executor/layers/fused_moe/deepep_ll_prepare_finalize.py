@@ -6,6 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -20,9 +22,13 @@ from vllm.v1.worker.ubatching import (
     dbo_maybe_run_recv_hook,
 )
 
+logger = init_logger(__name__)
+
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
+
+logger = init_logger(__name__)
 
 
 def dequant_fp8(
@@ -82,6 +88,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        global_to_physical: torch.Tensor | None = None,
+        physical_to_global: torch.Tensor | None = None,
+        local_expert_global_ids: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -93,6 +102,40 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+
+        topk_indices_dtype = self.topk_indices_dtype()
+
+        def _maybe_cast(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            if tensor is None or topk_indices_dtype is None:
+                return tensor
+            return tensor.to(dtype=topk_indices_dtype)
+
+        self.global_to_physical = _maybe_cast(global_to_physical)
+        self.physical_to_global = _maybe_cast(physical_to_global)
+        self.local_expert_global_ids = _maybe_cast(local_expert_global_ids)
+
+        # We don't have enough information to determine if we should dispatch
+        # activation scales in a packed ue8m0 format during object construction
+        # time. This setting is handled by post_init_setup.
+        self.use_ue8m0_dispatch = False
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+        if not fused_experts.supports_packed_ue8m0_act_scales():
+            # Early exit.
+            return
+
+        if self.use_fp8_dispatch:
+            logger.debug_once(
+                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
+            )
+            self.use_ue8m0_dispatch = True
+        else:
+            logger.warning_once(
+                "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
+                f"activations despite ({fused_experts.__class__.__name__}) being able "
+                "to support quantized activations.",
+                scope="local",
+            )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -109,6 +152,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
+
+    def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.global_to_physical is None:
+            return topk_ids
+        return self.global_to_physical[topk_ids]
+
+    def _map_local_to_global_ids(self, expert_topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.local_expert_global_ids is None:
+            return expert_topk_ids
+        return self.local_expert_global_ids[expert_topk_ids]
 
     def _do_quant(
         self,
@@ -131,22 +184,47 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x_fp8, x_scales = x
             x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
 
-        assert isinstance(x, torch.Tensor)
+        assert isinstance(x, (torch.Tensor, tuple))
+        q_dtype = quant_config.quant_dtype
 
-        num_experts, max_tokens, hidden_dim = x.size()
+        if q_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH:
+            logger.info_once(
+                "Since VLLM_DEEPEPLL_NVFP4_DISPATCH==1, make sure "
+                "using the hybrid-ep branch of DeepEP"
+                "(https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep)"
+            )
+            assert isinstance(x, tuple)
+            x_scales = x[1]
+            x = x[0].permute(2, 0, 1)
+            num_experts, max_tokens, hidden_dim_by_2 = x.shape
+            hidden_dim = hidden_dim_by_2 * 2
+            assert envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm"
+            logger.info_once(
+                "Quantization is fused with DeepEP nvfp4 dispatch for "
+                "FlashInfer CUTEDSL as VLLM_DEEPEPLL_NVFP4_DISPATCH==1"
+            )
+        else:
+            if q_dtype == "nvfp4":
+                q_dtype = None
+                logger.info_once(
+                    "Using DeepEP bfloat16 dispatch for FlashInfer CUTEDSL as "
+                    "VLLM_DEEPEPLL_NVFP4_DISPATCH==0"
+                )
+            assert isinstance(x, torch.Tensor)
+            num_experts, max_tokens, hidden_dim = x.size()
 
-        # TODO (varun): Optimization - Use a batched version of quant
-        x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(
-            x,
-            quant_config.a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-        )
-        x = x.view((num_experts, -1, hidden_dim))
+            # TODO (varun): Optimization - Use a batched version of quant
+            x = x.view((-1, hidden_dim))
+            x, x_scales = moe_kernel_quantize_input(
+                x,
+                quant_config.a1_scale,
+                q_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+            )
+            x = x.view((num_experts, -1, hidden_dim))
 
-        if quant_config.quant_dtype is not None:
+        if q_dtype is not None and q_dtype != "nvfp4":
             assert x_scales is not None
             x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
@@ -164,7 +242,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, (
             f"Hidden Size {hidden_size} not in supported list of hidden sizes"
@@ -178,18 +263,28 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "DeepEP kernels quantize the inputs in blocks of shape 128"
             )
 
+        use_nvfp4 = False
+        nvfp4_dispatch = (
+            quant_config.quant_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+        )
+        if nvfp4_dispatch:
+            use_nvfp4 = True
+        qc_a1_gscale_or_scale = (
+            quant_config.a1_gscale if nvfp4_dispatch else quant_config.a1_scale
+        )
         has_per_token_scales = (
-            quant_config.a1_scale.numel() != 1
-            if quant_config.a1_scale is not None
+            qc_a1_gscale_or_scale.numel() != 1
+            if qc_a1_gscale_or_scale is not None
             else (
                 quant_config.a2_scale.numel() != 1
                 if quant_config.a2_scale is not None
                 else False
             )
         )
-        assert not has_per_token_scales, (
-            "low_latency kernels doesn't support dispatching per-token scales"
-        )
+        if not use_nvfp4:
+            assert not has_per_token_scales, (
+                "low_latency kernels doesn't support dispatching per-token scales"
+            )
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -200,12 +295,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
             a1,
-            topk_ids,
+            dispatch_topk_ids,
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
+            round_scale=self.use_ue8m0_dispatch,
+            use_ue8m0=self.use_ue8m0_dispatch,
+            **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+            **(
+                dict(x_global_scale=qc_a1_gscale_or_scale)
+                if qc_a1_gscale_or_scale is not None
+                else dict()
+            ),
             async_finish=False,
             return_recv_hook=True,
         )
@@ -247,7 +351,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         hook, receiver = self.prepare_async(
             a1,
             topk_weights,
@@ -284,11 +394,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
+        combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
-            topk_ids,
+            combine_topk_ids,
             combine_topk_weights,
             handle,
             async_finish=False,

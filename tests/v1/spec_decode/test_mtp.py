@@ -12,7 +12,6 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import _Backend
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -25,6 +24,7 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
@@ -51,7 +51,10 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
     )
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
@@ -67,6 +70,10 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
     mock_get_model.return_value = mock_model
+    # MTP does not have its own embed_tokens or lm_head
+    # so it should share them with the target model
+    mock_model.has_own_embed_tokens = False
+    mock_model.has_own_lm_head = False
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
@@ -177,7 +184,9 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     sampling_metadata = mock.MagicMock()
 
     # Setup attention metadata
-    attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.FLASH_ATTN)
+    attn_metadata_builder_cls, _ = try_get_attention_backend(
+        AttentionBackendEnum.FLASH_ATTN
+    )
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
@@ -195,7 +204,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )

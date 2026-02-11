@@ -6,6 +6,7 @@ import pytest
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.sampling_params import SamplingParams
 
 from ..openai.test_vision import TEST_IMAGE_ASSETS
 
@@ -15,6 +16,29 @@ def text_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0)
+
+    yield weakref.proxy(llm)
+
+    del llm
+
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="function")
+def llm_for_failure_test():
+    """
+    Fixture for testing issue #26081.
+    Uses a small max_model_len to easily trigger length errors.
+    """
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        enforce_eager=True,
+        seed=0,
+        max_model_len=128,
+        disable_log_stats=True,
+    )
 
     yield weakref.proxy(llm)
 
@@ -157,3 +181,32 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     else:
         # The chat template includes dummy thinking process
         assert think_id in prompt_token_ids
+
+
+def test_chat_batch_failure_cleanup(llm_for_failure_test):
+    """
+    Tests that if a batch call to llm.chat() fails mid-way
+    (e.g., due to one invalid prompt), the requests that
+    were already enqueued are properly aborted and do not
+    pollute the queue for subsequent calls.
+    (Fixes Issue #26081)
+    """
+    llm = llm_for_failure_test
+    valid_msg = [{"role": "user", "content": "Hello"}]
+    long_text = "This is a very long text to test the error " * 50
+    invalid_msg = [{"role": "user", "content": long_text}]
+    batch_1 = [
+        valid_msg,
+        valid_msg,
+        invalid_msg,
+    ]
+    batch_2 = [
+        valid_msg,
+        valid_msg,
+    ]
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    with pytest.raises(ValueError, match="context length is only"):
+        llm.chat(batch_1, sampling_params=sampling_params)
+    outputs_2 = llm.chat(batch_2, sampling_params=sampling_params)
+    assert len(outputs_2) == len(batch_2)
+    assert llm.llm_engine.get_num_unfinished_requests() == 0

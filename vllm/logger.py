@@ -7,27 +7,36 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Hashable
+from collections.abc import Generator, Hashable
+from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import vllm.envs as envs
-
-VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
-VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
-VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
-VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
-VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
+from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
-    f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+    f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+
+
+def _use_color() -> bool:
+    if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
+        return False
+    if envs.VLLM_LOGGING_COLOR == "1":
+        return True
+    if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":  # stdout
+        return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    elif envs.VLLM_LOGGING_STREAM == "ext://sys.stderr":  # stderr
+        return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+    return False
+
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
@@ -36,19 +45,25 @@ DEFAULT_LOGGING_CONFIG = {
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
+        "vllm_color": {
+            "class": "vllm.logging_utils.ColoredFormatter",
+            "datefmt": _DATE_FORMAT,
+            "format": _FORMAT,
+        },
     },
     "handlers": {
         "vllm": {
             "class": "logging.StreamHandler",
-            "formatter": "vllm",
-            "level": VLLM_LOGGING_LEVEL,
-            "stream": VLLM_LOGGING_STREAM,
+            # Choose formatter based on color setting.
+            "formatter": "vllm_color" if _use_color() else "vllm",
+            "level": envs.VLLM_LOGGING_LEVEL,
+            "stream": envs.VLLM_LOGGING_STREAM,
         },
     },
     "loggers": {
         "vllm": {
             "handlers": ["vllm"],
-            "level": "DEBUG",
+            "level": envs.VLLM_LOGGING_LEVEL,
             "propagate": False,
         },
     },
@@ -59,20 +74,37 @@ DEFAULT_LOGGING_CONFIG = {
 
 @lru_cache
 def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.debug(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.debug(msg, *args, stacklevel=3)
 
 
 @lru_cache
 def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.info(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.info(msg, *args, stacklevel=3)
 
 
 @lru_cache
 def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.warning(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.warning(msg, *args, stacklevel=3)
+
+
+LogScope = Literal["process", "global", "local"]
+
+
+def _should_log_with_scope(scope: LogScope) -> bool:
+    """Decide whether to log based on scope"""
+    if scope == "global":
+        from vllm.distributed.parallel_state import is_global_first_rank
+
+        return is_global_first_rank()
+    if scope == "local":
+        from vllm.distributed.parallel_state import is_local_first_rank
+
+        return is_local_first_rank()
+    # default "process" scope: always log
+    return True
 
 
 class _VllmLogger(Logger):
@@ -84,40 +116,50 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def debug_once(self, msg: str, *args: Hashable) -> None:
+    def debug_once(
+        self, msg: str, *args: Hashable, scope: LogScope = "process"
+    ) -> None:
         """
         As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
         """
+        if not _should_log_with_scope(scope):
+            return
         _print_debug_once(self, msg, *args)
 
-    def info_once(self, msg: str, *args: Hashable) -> None:
+    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "process") -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
         """
+        if not _should_log_with_scope(scope):
+            return
         _print_info_once(self, msg, *args)
 
-    def warning_once(self, msg: str, *args: Hashable) -> None:
+    def warning_once(
+        self, msg: str, *args: Hashable, scope: LogScope = "process"
+    ) -> None:
         """
         As [`warning`][logging.Logger.warning], but subsequent calls with
         the same message are silently dropped.
         """
+        if not _should_log_with_scope(scope):
+            return
         _print_warning_once(self, msg, *args)
 
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
 _METHODS_TO_PATCH = {
-    "debug_once": _print_debug_once,
-    "info_once": _print_info_once,
-    "warning_once": _print_warning_once,
+    "debug_once": _VllmLogger.debug_once,
+    "info_once": _VllmLogger.info_once,
+    "warning_once": _VllmLogger.warning_once,
 }
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, Any]()
+    logging_config = dict[str, dict[str, Any] | Any]()
 
-    if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
+    if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
             "VLLM_CONFIGURE_LOGGING evaluated to false, but "
             "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
@@ -125,16 +167,25 @@ def _configure_vllm_root_logger() -> None:
             "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH."
         )
 
-    if VLLM_CONFIGURE_LOGGING:
+    if envs.VLLM_CONFIGURE_LOGGING:
         logging_config = DEFAULT_LOGGING_CONFIG
 
-    if VLLM_LOGGING_CONFIG_PATH:
-        if not path.exists(VLLM_LOGGING_CONFIG_PATH):
+        vllm_handler = logging_config["handlers"]["vllm"]
+        # Refresh these values in case env vars have changed.
+        vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
+        vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
+        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+
+        vllm_loggers = logging_config["loggers"]["vllm"]
+        vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
+
+    if envs.VLLM_LOGGING_CONFIG_PATH:
+        if not path.exists(envs.VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH,
+                envs.VLLM_LOGGING_CONFIG_PATH,
             )
-        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
+        with open(envs.VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
@@ -166,10 +217,35 @@ def init_logger(name: str) -> _VllmLogger:
     return cast(_VllmLogger, logger)
 
 
+@contextmanager
+def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
+    current_level = logging.root.manager.disable
+    logging.disable(level)
+    yield
+    logging.disable(current_level)
+
+
+def current_formatter_type(lgr: Logger) -> Literal["color", "newline", None]:
+    while lgr is not None:
+        if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
+            formatter = lgr.handlers[0].formatter
+            if isinstance(formatter, ColoredFormatter):
+                return "color"
+            if isinstance(formatter, NewLineFormatter):
+                return "newline"
+        lgr = lgr.parent
+    return None
+
+
 # The root logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
 _configure_vllm_root_logger()
+
+# Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
+# so we set its logging level to WARNING when vLLM's logging level is INFO.
+if envs.VLLM_LOGGING_LEVEL == "INFO":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 

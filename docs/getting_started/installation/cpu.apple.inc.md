@@ -4,8 +4,8 @@ vLLM has experimental support for macOS with Apple Silicon. For now, users must 
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
-!!! warning
-    There are no pre-built wheels or images for this device, so you must build vLLM from source.
+!!! tip "GPU-Accelerated Inference with vLLM-Metal"
+    For GPU-accelerated inference on Apple Silicon using Metal, check out [vllm-metal](https://github.com/vllm-project/vllm-metal), a community-maintained hardware plugin that uses MLX as the compute backend.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -20,6 +20,8 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
+Currently, there are no pre-built Apple silicon CPU wheels.
+
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
@@ -28,9 +30,14 @@ After installation of XCode and the Command Line Tools, which include Apple Clan
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-uv pip install -r requirements/cpu.txt
+uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
 uv pip install -e .
 ```
+
+!!! tip
+    The `--index-strategy unsafe-best-match` flag is needed to resolve dependencies across multiple package indexes (PyTorch CPU index and PyPI). Without this flag, you may encounter `typing-extensions` version conflicts.
+    
+    The term "unsafe" refers to the package resolution strategy, not security. By default, `uv` only searches the first index where a package is found to prevent dependency confusion attacks. This flag allows `uv` to search all configured indexes to find the best compatible versions. Since both PyTorch and PyPI are trusted package sources, using this strategy is safe and appropriate for vLLM installation.
 
 !!! note
     On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which is currently the only supported device.
@@ -72,6 +79,8 @@ uv pip install -e .
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
+
+Currently, there are no pre-built Arm silicon CPU images.
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]

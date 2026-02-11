@@ -31,10 +31,10 @@ import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -45,7 +45,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -87,7 +86,7 @@ class PhiMoEConfig(PretrainedConfig):
         bos_token_id=1,
         eos_token_id=2,
         tie_word_embeddings=False,
-        rope_theta=1e6,
+        rope_parameters=None,
         sliding_window=None,
         attention_dropout=0.0,
         num_experts_per_tok=2,
@@ -120,7 +119,9 @@ class PhiMoEConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
+        if rope_parameters is None:
+            rope_theta = kwargs.pop("rope_theta", 1e6)
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         self.attention_dropout = attention_dropout
 
         self.num_experts_per_tok = num_experts_per_tok
@@ -271,6 +272,7 @@ class PhiMoE(nn.Module):
             bias=False,
             params_dtype=params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.experts = FusedMoE(
@@ -303,12 +305,11 @@ class PhiMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: dict,
         head_dim: int | None = None,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: dict | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -333,8 +334,6 @@ class PhiMoEAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -343,20 +342,20 @@ class PhiMoEAttention(nn.Module):
             self.total_num_kv_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
-            base=int(self.rope_theta),
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=self.rope_scaling,
         )
         self.attn = Attention(
             self.num_heads,
@@ -392,7 +391,6 @@ class PhiMoEDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
         self.self_attn = PhiMoEAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -401,10 +399,9 @@ class PhiMoEDecoderLayer(nn.Module):
             head_dim=getattr(
                 config, "head_dim", self.hidden_size // config.num_attention_heads
             ),
-            rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=config.rope_scaling,
+            rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
         self.block_sparse_moe = PhiMoE(
@@ -456,22 +453,15 @@ class PhiMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+        self.vocab_size = config.vocab_size
+
         self.config = config
         self.quant_config = quant_config
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -488,12 +478,12 @@ class PhiMoEModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -502,7 +492,7 @@ class PhiMoEModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -526,6 +516,7 @@ class PhiMoEModel(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
@@ -627,51 +618,38 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
-        self.lora_config = lora_config
+
         self.quant_config = vllm_config.quant_config
 
         self.model = PhiMoEModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=(
-                DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config
-                else lora_config.lora_vocab_padding_size
-            ),
             quant_config=None,
             bias=True,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -21,7 +21,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.5 MTP model compatible with HuggingFace weights."""
+"""Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
+model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
 
@@ -29,7 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -41,8 +42,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .glm4_moe import Glm4MoeDecoderLayer, get_spec_layer_idx_from_weight_name
-from .interfaces import SupportsPP
+from .glm4_moe import (
+    Glm4MixtureOfExperts,
+    Glm4MoE,
+    Glm4MoeDecoderLayer,
+    get_spec_layer_idx_from_weight_name,
+)
 from .utils import maybe_prefix
 
 
@@ -73,6 +78,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         prefix: str,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -81,11 +87,13 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
+        self.enable_eplb = parallel_config.enable_eplb
         self.mtp_block = Glm4MoeDecoderLayer(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            enable_eplb=self.enable_eplb,
         )
 
     def forward(
@@ -98,7 +106,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions == 0] = 0
+        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -127,6 +135,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
                     f"{prefix}.layers.{idx}",
                     cache_config=vllm_config.cache_config,
                     quant_config=vllm_config.quant_config,
+                    parallel_config=vllm_config.parallel_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -140,7 +149,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -175,7 +184,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, SupportsPP):
+class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -183,12 +192,31 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        self.expert_weights = []
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = self.config.num_nextn_predict_layers
+        self.num_expert_groups = self.config.n_group
+
+        self.moe_layers: list[FusedMoE] = []
+        self.moe_mlp_layers: list[Glm4MoE] = []
+        example_moe = None
+        for layer in self.model.layers.values():
+            assert isinstance(layer, Glm4MoeMultiTokenPredictorLayer)
+            layer = layer.mtp_block
+            assert isinstance(layer, Glm4MoeDecoderLayer)
+            if isinstance(layer.mlp, Glm4MoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+        self.extract_moe_parameters(example_moe)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -220,6 +248,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -229,10 +258,16 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is None:
-                continue
-            name = self._rewrite_spec_layer_name(spec_layer, name)
+            if name == "lm_head.weight":
+                spec_layer = self.model.mtp_start_layer_idx
+                name = f"model.layers.{spec_layer}.shared_head.head.weight"
+            elif name == "model.embed_tokens.weight":
+                spec_layer = self.model.mtp_start_layer_idx
+            else:
+                spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+                if spec_layer is None:
+                    continue
+                name = self._rewrite_spec_layer_name(spec_layer, name)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -274,6 +309,12 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Some checkpoints include weight scale tensors for the
+                    # LM head even when the quantized head isn't built. Skip
+                    # them if the model does not expose a matching parameter
+                    # to avoid KeyError during load.
+                    if name.endswith(".weight_scale") and name not in params_dict:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules

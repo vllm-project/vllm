@@ -1,6 +1,6 @@
 # Using vLLM
 
-First, vLLM must be [installed](../getting_started/installation/) for your chosen device in either a Python or Docker environment.
+First, vLLM must be [installed](../getting_started/installation/README.md) for your chosen device in either a Python or Docker environment.
 
 Then, vLLM supports the following usage patterns:
 

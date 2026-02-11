@@ -7,15 +7,15 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files):
+def default_server_args(qwen3_lora_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -28,7 +28,7 @@ def default_server_args(zephyr_lora_files):
         # lora config
         "--enable-lora",
         "--lora-modules",
-        f"zephyr-lora={zephyr_lora_files}",
+        f"qwen3-lora={qwen3_lora_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -37,7 +37,7 @@ def default_server_args(zephyr_lora_files):
 
 
 @pytest.fixture(scope="module")
-def server_fixture(request, default_server_args):  # noqa: F811
+def server_fixture(request, default_server_args):
     use_server_flag = request.param
     if use_server_flag:
         args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
@@ -121,3 +121,42 @@ async def test_chat_return_tokens_as_token_ids_completion(server_fixture):
         for logprob_content in response.choices[0].logprobs.content:
             token_ids.append(int(logprob_content.token.removeprefix("token_id:")))
         assert tokenizer.decode(token_ids, skip_special_tokens=True) == text
+
+
+def test_responses_api_logprobs_with_return_tokens_as_token_ids():
+    """Test that return_tokens_as_token_ids works in Responses API logprobs."""
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+    from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+    from vllm.logprobs import Logprob as SampleLogprob
+
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.return_tokens_as_token_ids = True
+    serving._get_decoded_token = OpenAIServing._get_decoded_token
+
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_id: "decoded"
+
+    token_ids = [100, 200, 300]
+    sample_logprobs = [
+        {100: SampleLogprob(logprob=-0.5, decoded_token="hello")},
+        {200: SampleLogprob(logprob=-1.2, decoded_token="world")},
+        {300: SampleLogprob(logprob=-0.8, decoded_token="!")},
+    ]
+
+    result = OpenAIServingResponses._create_response_logprobs(
+        serving,
+        token_ids=token_ids,
+        logprobs=sample_logprobs,
+        tokenizer=tokenizer,
+        top_logprobs=1,
+    )
+
+    assert len(result) == 3
+    assert result[0].token == "token_id:100"
+    assert result[1].token == "token_id:200"
+    assert result[2].token == "token_id:300"
+    assert result[0].logprob == -0.5
+    assert result[1].logprob == -1.2
+    assert result[2].logprob == -0.8

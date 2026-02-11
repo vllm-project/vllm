@@ -1,6 +1,6 @@
 # IO Processor Plugins
 
-IO Processor plugins are a feature that allows pre and post processing of the model input and output for pooling models. The idea is that users are allowed to pass a custom input to vLLM that is converted into one or more model prompts and fed to the model `encode` method. One potential use-case of such plugins is that of using vLLM for generating multi-modal data. Say users feed an image to vLLM and get an image in output.
+IO Processor plugins are a feature that allows pre- and post-processing of the model input and output for pooling models. The idea is that users are allowed to pass a custom input to vLLM that is converted into one or more model prompts and fed to the model `encode` method. One potential use-case of such plugins is that of using vLLM for generating multi-modal data. Say users feed an image to vLLM and get an image in output.
 
 When performing an inference with IO Processor plugins, the prompt type is defined by the plugin and the same is valid for the final request output. vLLM does not perform any validation of input/output data, and it is up to the plugin to ensure the correct data is being fed to the model and returned to the user. As of now these plugins support only pooling models and can be triggered via the `encode` method in `LLM` and `AsyncLLM`, or in online serving mode via the `/pooling` endpoint.
 
@@ -13,9 +13,26 @@ IOProcessorInput = TypeVar("IOProcessorInput")
 IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-
     def __init__(self, vllm_config: VllmConfig):
+        super().__init__()
+
         self.vllm_config = vllm_config
+
+    @abstractmethod
+    def parse_data(self, data: object) -> IOProcessorInput:
+        raise NotImplementedError
+
+    def merge_sampling_params(
+        self,
+        params: SamplingParams | None = None,
+    ) -> SamplingParams:
+        return params or SamplingParams()
+
+    def merge_pooling_params(
+        self,
+        params: PoolingParams | None = None,
+    ) -> PoolingParams:
+        return params or PoolingParams()
 
     @abstractmethod
     def pre_process(
@@ -49,27 +66,22 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
-        collected_output = [item async for i, item in model_output]
-        return self.post_process(collected_output, request_id, **kwargs)
-
-    @abstractmethod
-    def parse_request(self, request: Any) -> IOProcessorInput:
-        raise NotImplementedError
-
-    @abstractmethod
-    def output_to_response(
-        self, plugin_output: IOProcessorOutput
-    ) -> IOProcessorResponse:
-        raise NotImplementedError
+        # We cannot guarantee outputs are returned in the same order they were
+        # fed to vLLM.
+        # Let's sort them by id before post_processing
+        sorted_output = sorted(
+            [(i, item) async for i, item in model_output], key=lambda output: output[0]
+        )
+        collected_output = [output[1] for output in sorted_output]
+        return self.post_process(collected_output, request_id=request_id, **kwargs)
 ```
 
-The `parse_request` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
+The `parse_data` method is used for validating the user data and converting it into the input expected by the `pre_process*` methods.
+The `merge_sampling_params` and `merge_pooling_params` methods merge input `SamplingParams` or `PoolingParams` (if any) with the default one.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
 
-The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/pooling` serving endpoint is available here [vllm/entrypoints/openai/serving_pooling.py](../../vllm/entrypoints/openai/serving_pooling.py).
-
-An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to our online ([examples/online_serving/prithvi_geospatial_mae.py](../../examples/online_serving/prithvi_geospatial_mae.py)) and offline ([examples/offline_inference/prithvi_geospatial_mae_io_processor.py](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py)) inference examples.
+An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/IBM/terratorch/tree/main/terratorch/vllm/plugins/segmentation). Please, also refer to our online ([examples/pooling/plugin/prithvi_geospatial_mae_online.py](../../examples/pooling/plugin/prithvi_geospatial_mae_online.py)) and offline ([examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py](../../examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py)) inference examples.
 
 ## Using an IO Processor plugin
 

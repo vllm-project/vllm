@@ -5,33 +5,24 @@ import ast
 
 import pytest
 
-from tools.validate_config import validate_ast
+from tools.pre_commit.validate_config import validate_ast
 
-_TestConfig1 = """
+_TestConfig1 = '''
 @config
 class _TestConfig1:
-    pass
-"""
-
-_TestConfig2 = '''
-@config
-@dataclass
-class _TestConfig2:
     a: int
     """docstring"""
 '''
 
-_TestConfig3 = """
+_TestConfig2 = """
 @config
-@dataclass
-class _TestConfig3:
+class _TestConfig2:
     a: int = 1
 """
 
-_TestConfig4 = '''
+_TestConfig3 = '''
 @config
-@dataclass
-class _TestConfig4:
+class _TestConfig3:
     a: Union[Literal[1], Literal[2]] = 1
     """docstring"""
 '''
@@ -40,10 +31,9 @@ class _TestConfig4:
 @pytest.mark.parametrize(
     ("test_config", "expected_error"),
     [
-        (_TestConfig1, "must be a dataclass"),
-        (_TestConfig2, "must have a default"),
-        (_TestConfig3, "must have a docstring"),
-        (_TestConfig4, "must use a single Literal"),
+        (_TestConfig1, "must have a default"),
+        (_TestConfig2, "must have a docstring"),
+        (_TestConfig3, "must use a single Literal"),
     ],
 )
 def test_config(test_config, expected_error):

@@ -1,0 +1,88 @@
+# Study 4: What is optimal reorder_batch_threshold for MLA backends supporting query length > 1?
+# Question: At what query length does prefill pipeline become faster than decode pipeline?
+# Methodology: For each query length, compare decode vs prefill performance to find crossover point
+# Applies to: FlashAttn MLA, FlashMLA
+
+description: "Decode vs Prefill pipeline crossover analysis"
+
+# Test FlashAttn MLA
+backend: flashattn_mla
+
+# Mode: decode_vs_prefill comparison (special sweep mode)
+# For each batch spec, we'll test both decode and prefill pipelines
+mode: "decode_vs_prefill"
+
+# Query lengths to test (from old benchmark_mla_threshold.py methodology)
+# Each query length will be tested with BOTH decode and prefill pipelines:
+#   - decode: threshold >= query_length (forces decode pipeline)
+#   - prefill: threshold < query_length (forces prefill pipeline)
+#
+# We use q<N>s1k format which creates q_len=N, seq_len=1024 requests
+# This tests different query lengths with fixed sequence length context
+#
+# Using batch_spec_ranges for automatic generation:
+batch_spec_ranges:
+  - template: "q{q_len}s1k"
+    q_len:
+      start: 1
+      stop: 16
+      step: 1
+      end_inclusive: false
+  - template: "q{q_len}s1k"
+    q_len:
+      start: 16
+      stop: 64
+      step: 2
+      end_inclusive: false
+  - template: "q{q_len}s1k"
+    q_len:
+      start: 64
+      stop: 1024
+      step: 4
+      end_inclusive: true
+
+# Batch sizes to test (from old script)
+batch_sizes:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+
+# Model configuration (DeepSeek V2/V3 defaults)
+model:
+  num_layers: 10
+  head_dim: 576
+  num_q_heads: 128
+  num_kv_heads: 1
+  block_size: 128
+
+# Benchmark settings
+benchmark:
+  device: "cuda:0"
+  repeats: 15          # More repeats for spec decode variance
+  warmup_iters: 5
+  profile_memory: false
+
+# Output
+output:
+  csv: "reorder_threshold_results.csv"
+  json: "reorder_threshold_results.json"
+
+# Expected outcome (reproduces old benchmark_mla_threshold.py study):
+# - For each batch size, find the crossover point where prefill becomes faster than decode
+# - Show decode vs prefill performance across all query lengths
+# - Determine optimal reorder_batch_threshold based on last query length where decode is faster
+# - Understand how crossover point varies with batch size
+# - Provide data-driven guidance for default threshold value
+#
+# Methodology (from old script):
+# - Each query length tested with BOTH pipelines:
+#     * decode: threshold >= query_length (forces decode pipeline)
+#     * prefill: threshold < query_length (forces prefill pipeline)
+# - Compare which is faster to find crossover point
+#

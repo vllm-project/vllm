@@ -46,7 +46,7 @@ import time
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):

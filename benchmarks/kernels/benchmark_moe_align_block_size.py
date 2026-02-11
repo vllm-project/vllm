@@ -24,12 +24,15 @@ def get_topk_ids(num_tokens: int, num_experts: int, topk: int) -> torch.Tensor:
 num_tokens_range = [1, 16, 256, 4096]
 num_experts_range = [16, 64, 224, 256, 280, 512]
 topk_range = [1, 2, 8]
-configs = list(itertools.product(num_tokens_range, num_experts_range, topk_range))
+ep_size_range = [1, 8]
+configs = list(
+    itertools.product(num_tokens_range, num_experts_range, topk_range, ep_size_range)
+)
 
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=["num_tokens", "num_experts", "topk"],
+        x_names=["num_tokens", "num_experts", "topk", "ep_size"],
         x_vals=configs,
         line_arg="provider",
         line_vals=["vllm"],
@@ -38,16 +41,26 @@ configs = list(itertools.product(num_tokens_range, num_experts_range, topk_range
         args={},
     )
 )
-def benchmark(num_tokens, num_experts, topk, provider):
+def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     """Benchmark function for Triton."""
     block_size = 256
+    torch.cuda.manual_seed_all(0)
     topk_ids = get_topk_ids(num_tokens, num_experts, topk)
+
+    e_map = None
+    if ep_size != 1:
+        local_e = num_experts // ep_size
+        e_ids = torch.randperm(num_experts, device="cuda", dtype=torch.int32)[:local_e]
+        e_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
 
     quantiles = [0.5, 0.2, 0.8]
 
     if provider == "vllm":
         ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: moe_align_block_size(topk_ids, block_size, num_experts),
+            lambda: moe_align_block_size(
+                topk_ids, block_size, num_experts, e_map, ignore_invalid_experts=True
+            ),
             quantiles=quantiles,
         )
 

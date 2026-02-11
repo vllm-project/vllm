@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for Mixture of Experts (MoE) models."""
+"""Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# --8<-- [start:transformers_fused_moe]
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
-    """Custom FusedMoE for the Transformers backend."""
+    """Custom FusedMoE for the Transformers modeling backend."""
+
+    # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +118,7 @@ direct_register_custom_op(
 
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("4.57.0.dev0", "MoE models support")
+        self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -125,7 +128,7 @@ class MoEMixin(MixtureOfExperts):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ):
-        for moe_layer_idx, mlp_layer in enumerate(self.mlp_layers):
+        for moe_layer_idx, mlp_layer in enumerate(self.mlp_moe_layers):
             mlp_layer.experts.set_eplb_state(
                 moe_layer_idx=moe_layer_idx,
                 expert_load_view=expert_load_view,
@@ -142,7 +145,7 @@ class MoEMixin(MixtureOfExperts):
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for mlp in self.mlp_layers:
+        for mlp in self.mlp_moe_layers:
             mlp.n_local_physical_experts = num_local_physical_experts
             mlp.n_physical_experts = num_physical_experts
             mlp.n_redundant_experts = self.num_redundant_experts
@@ -165,6 +168,7 @@ class MoEMixin(MixtureOfExperts):
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
+                    self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,
@@ -240,7 +244,8 @@ class MoEMixin(MixtureOfExperts):
         # MixtureOfExperts mixin settings
         ep_size = get_ep_group().world_size
 
-        self.mlp_layers = []  # Used for MixtureOfExperts methods
+        self.mlp_moe_layers = []  # Used for MixtureOfExperts methods
+        self.moe_layers = []
         self.expert_weights = []
         self.num_moe_layers = 0
         self.num_expert_groups = 1 if num_expert_group is None else num_expert_group
@@ -255,7 +260,14 @@ class MoEMixin(MixtureOfExperts):
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                if child_name == "experts" and isinstance(child_module, nn.ModuleList):
+                # Naive implementations will have experts as ModuleList
+                is_modulelist = isinstance(child_module, nn.ModuleList)
+                # Packed implementations will have experts as 3D tensors of shapes like:
+                # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
+                # down_proj = (num_experts, intermediate_size, hidden_size)
+                params = list(child_module.parameters())
+                is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
+                if child_name == "experts" and (is_modulelist or is_3d):
                     # Alias for readability
                     mlp = module
                     experts = child_module
@@ -298,7 +310,8 @@ class MoEMixin(MixtureOfExperts):
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # Update MixtureOfExperts mixin state
-                    self.mlp_layers.append(mlp)
+                    self.mlp_moe_layers.append(mlp)
+                    self.moe_layers.append(fused_experts)
                     self.expert_weights.append(fused_experts.get_expert_weights())
                     self.num_moe_layers += 1
                     # If results are not all-reduced in FusedMoE, ensure they

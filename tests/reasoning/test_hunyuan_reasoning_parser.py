@@ -12,51 +12,51 @@ START_REASONING = "<think>\n"
 START_RESPONSE = "\n</think>\n<answer>\n"
 END_RESPONSE = "\n</answer>"
 
-NO_REASONING_QUICK_THROUGHT = {
+NO_REASONING_QUICK_THOUGHT = {
     "output": f"{START_REASONING}{START_RESPONSE}This is the rest{END_RESPONSE}",  # noqa: E501
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
 }
 
 SIMPLE_REASONING = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}This is the rest{END_RESPONSE}",  # noqa: E501
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
 COMPLETE_REASONING = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
 }
 
 COMPLETE_REASONING_WITH_SYMBOL = {
     "output": f"{START_REASONING}This is a reasoning section!{START_RESPONSE}",
-    "reasoning_content": "This is a reasoning section!",
+    "reasoning": "This is a reasoning section!",
     "content": None,
 }
 NO_REASONING = {
     "output": "This is content",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is content",
 }
 MULTIPLE_LINES = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
 }
 REASONING_WITH_THINK = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}This is the rest",  # noqa: E501
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
 COMPLETE_REASONING_WITH_THINK = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
 }
 MULTIPLE_LINES_WITH_THINK = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
 }
 
@@ -81,7 +81,7 @@ TEST_CASES = [
         NO_REASONING,
         id="no_reasoning",
     ),
-    pytest.param(False, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick"),
+    pytest.param(False, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick"),
     pytest.param(
         False,
         MULTIPLE_LINES,
@@ -117,7 +117,7 @@ TEST_CASES = [
         NO_REASONING,
         id="no_reasoning_streaming",
     ),
-    pytest.param(True, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick_stream"),
+    pytest.param(True, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick_stream"),
     pytest.param(
         True,
         MULTIPLE_LINES,
@@ -164,5 +164,5 @@ def test_reasoning(
         parser, output_tokens, streaming=streaming
     )
 
-    assert reasoning == param_dict["reasoning_content"]
+    assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]

@@ -14,11 +14,9 @@ from tests.utils import RemoteOpenAIServerCustom, create_new_process_for_each_te
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
-    DUMMY_LOGITPROC_MODULE,
     MAX_TOKENS,
     MODEL_NAME,
     TEMP_GREEDY,
-    dummy_module,
     prompts,
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
@@ -47,20 +45,14 @@ def _server_with_logitproc_entrypoint(
     main.main()
 
 
-def _server_with_logitproc_module(
+def _server_with_logitproc_fqcn(
     env_dict: dict[str, str] | None,
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
     """Start vLLM server, inject module with dummy logitproc"""
-
-    # Patch `modules` to inject dummy logitproc module
     from vllm.entrypoints.cli import main
 
-    sys.modules[DUMMY_LOGITPROC_MODULE] = dummy_module
-
-    # fork is required for workers to see entrypoint patch
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
     if env_dict is not None:
         os.environ.update(env_dict)
 
@@ -99,7 +91,7 @@ def server(default_server_args, request, monkeypatch):
     if request.param:
         # Launch server, append FQCN argument, inject dummy logitproc module
         args = default_server_args + request.param
-        _server_fxn = _server_with_logitproc_module
+        _server_fxn = _server_with_logitproc_fqcn
     else:
         # Launch server, inject dummy logitproc entrypoint
         args = default_server_args
@@ -177,3 +169,32 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
 
         # Alternate whether to activate dummy logitproc for each request
         use_dummy_logitproc = not use_dummy_logitproc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_custom_logitsproc_arg(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    """Test that request with invalid custom logitsproc is rejected"""
+
+    prompt = "Hello, my name is"
+    # Pass invalid (non-int) target_token value to dummy logits processor
+    request_keyword_args: dict[str, Any] = {
+        **api_keyword_args,
+        "extra_body": {
+            "vllm_xargs": {DUMMY_LOGITPROC_ARG: "invalid_target_token_value"}
+        },
+    }
+
+    with pytest.raises(openai.OpenAIError) as exc_info:
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            **request_keyword_args,
+        )
+
+    assert "is not int" in str(exc_info.value)

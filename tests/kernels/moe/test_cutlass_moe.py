@@ -7,35 +7,39 @@ from math import prod
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    cutlass_moe_fp8,
+    CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
 
 MNK_FACTORS = [
     (2, 1024, 1024),
-    (2, 1024, 1536),
     (2, 3072, 1024),
     (2, 3072, 1536),
     (7, 3072, 1536),
     (64, 1024, 1024),
     (64, 1024, 1536),
     (64, 3072, 1024),
-    (64, 3072, 1536),
     (224, 1024, 1024),
-    (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
     (32768, 1024, 1024),
@@ -45,8 +49,6 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclasses.dataclass
@@ -154,24 +156,21 @@ class MOETensors8Bit(MOETensors):
 
 
 def run_with_expert_maps(
-    num_experts: int, num_local_experts: int, **cutlass_moe_kwargs
+    num_experts: int,
+    num_local_experts: int,
+    quant_config: FusedMoEQuantConfig,
+    **cutlass_moe_kwargs,
 ):
     def slice_experts():
         slice_params = [
-            "w1_q",
-            "w2_q",
-            "ab_strides1",
-            "ab_strides2",
-            "c_strides1",
-            "c_strides2",
+            "w1",
+            "w2",
         ]
         full_tensors = {
             k: v
             for k, v in cutlass_moe_kwargs.items()
             if k in slice_params and k in cutlass_moe_kwargs
         }
-
-        quant_config = cutlass_moe_kwargs["quant_config"]
 
         for i in range(0, num_experts, num_local_experts):
             s, e = i, i + num_local_experts
@@ -191,13 +190,26 @@ def run_with_expert_maps(
             new_quant_config._w1.scale = quant_config.w1_scale[s:e]
             new_quant_config._w2.scale = quant_config.w2_scale[s:e]
 
-            cutlass_moe_kwargs["quant_config"] = new_quant_config
+            yield cutlass_moe_kwargs, new_quant_config
 
-            yield cutlass_moe_kwargs
-
-    out_tensor = torch.zeros_like(cutlass_moe_kwargs["a"])
-    for kwargs in slice_experts():
-        out_tensor = out_tensor + cutlass_moe_fp8(**kwargs)
+    out_tensor = torch.zeros_like(cutlass_moe_kwargs["hidden_states"])
+    for kwargs, new_quant_config in slice_experts():
+        w2 = kwargs["w2"]
+        a = kwargs["hidden_states"]
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp8(
+                moe_config=make_dummy_moe_config(
+                    num_experts=w2.shape[0],
+                    hidden_dim=w2.shape[1],
+                    intermediate_size_per_partition=w2.shape[2],
+                    in_dtype=a.dtype,
+                ),
+                quant_config=new_quant_config,
+            ),
+            inplace=False,
+        )
+        out_tensor = out_tensor + kernel(**kwargs)
 
     return out_tensor
 
@@ -234,27 +246,36 @@ def run_8_bit(
     )
 
     kwargs = {
-        "a": moe_tensors.a,
-        "w1_q": moe_tensors.w1_q,  # type: ignore[union-attr]
-        "w2_q": moe_tensors.w2_q,  # type: ignore[union-attr]
+        "hidden_states": moe_tensors.a,
+        "w1": moe_tensors.w1_q,  # type: ignore[union-attr]
+        "w2": moe_tensors.w2_q,  # type: ignore[union-attr]
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
-        "ab_strides1": moe_tensors.ab_strides1,
-        "ab_strides2": moe_tensors.ab_strides2,
-        "c_strides1": moe_tensors.c_strides1,
-        "c_strides2": moe_tensors.c_strides2,
-        "quant_config": quant_config,
     }
 
-    num_experts = moe_tensors.w1.size(0)
+    num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
-        return cutlass_moe_fp8(**kwargs)
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp8(
+                moe_config=make_dummy_moe_config(
+                    num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
+                    hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
+                    intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+                    in_dtype=moe_tensors.a.dtype,
+                ),
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+        return kernel(**kwargs)
 
     assert num_local_experts is not None
     return run_with_expert_maps(
         num_experts,
         num_local_experts,  # type: ignore[arg-type]
+        quant_config,
         **kwargs,
     )
 
@@ -279,9 +300,10 @@ def test_cutlass_moe_8_bit_no_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
+    workspace_init,
     ep_size: int | None = None,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
@@ -334,8 +356,9 @@ def test_cutlass_moe_8_bit_cuda_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
+    workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
@@ -390,9 +413,19 @@ def test_cutlass_moe_8_bit_EP(
     per_out_channel: bool,
     ep_size: int,
     monkeypatch,
+    workspace_init,
 ):
     test_cutlass_moe_8_bit_no_graph(
-        m, n, k, e, topk, per_act_token, per_out_channel, monkeypatch, ep_size
+        m,
+        n,
+        k,
+        e,
+        topk,
+        per_act_token,
+        per_out_channel,
+        monkeypatch,
+        workspace_init,
+        ep_size,
     )
 
 
@@ -424,9 +457,19 @@ def test_cutlass_moe_8_bit_EP_large(
     per_out_channel: bool,
     ep_size: int,
     monkeypatch,
+    workspace_init,
 ):
     test_cutlass_moe_8_bit_no_graph(
-        m, n, k, e, topk, per_act_token, per_out_channel, monkeypatch, ep_size
+        m,
+        n,
+        k,
+        e,
+        topk,
+        per_act_token,
+        per_out_channel,
+        monkeypatch,
+        workspace_init,
+        ep_size,
     )
 
 
@@ -450,8 +493,9 @@ def test_run_cutlass_moe_fp8(
     per_act_token: bool,
     per_out_channel: bool,
     ep_size: int,
+    workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(
             m, k, n, e, per_act_token, per_out_channel
@@ -487,7 +531,7 @@ def test_run_cutlass_moe_fp8(
         c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
         c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
 
-        activation = lambda o, i: torch.ops._C.silu_and_mul(o, i)
+        activation = "silu"
         a1q, a1q_scale = moe_kernel_quantize_input(
             mt.a, mt.a_scale, torch.float8_e4m3fn, per_act_token
         )

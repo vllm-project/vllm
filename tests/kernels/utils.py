@@ -4,26 +4,20 @@
 
 import itertools
 import random
-import unittest
 from collections.abc import Sequence
 from numbers import Number
 from typing import Any, NamedTuple
+from unittest.mock import patch
 
-import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
-from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.attention.backends.registry import _Backend
+from vllm.model_executor.custom_op import op_registry
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import (
-    STR_BACKEND_ENV_VAR,
-    STR_FLASH_ATTN_VAL,
-    STR_XFORMERS_ATTN_VAL,
-)
 from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm.v1.attention.backend import AttentionType
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -218,22 +212,6 @@ def make_causal_mask(
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1, float("-inf")).masked_fill(mask == 0, 0.0)
     return mask
-
-
-def override_backend_env_variable(
-    mpatch: pytest.MonkeyPatch, backend_name: str
-) -> None:
-    """
-    Override the environment variable indicating the vLLM backend temporarily,
-    using pytest monkeypatch to ensure that the env vars get
-    reset once the test context exits.
-
-    Arguments:
-
-    * mpatch: pytest monkeypatch instance
-    * backend_name: attention backend name to force
-    """
-    mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
 
 
 def ref_masked_attention(
@@ -512,87 +490,6 @@ def pack_qkv(qkv: QKVInputs, device: torch.device | str) -> PackedQKVInputs:
     )
 
 
-def make_backend(backend_name: str) -> AttentionBackend:
-    """
-    Construct the backend instance determined by the backend_name string
-    argument.
-
-    Note: at time of writing the Attention wrapper automatically selects
-    its own backend for Attention.forward(); so the backend instance which
-    you generate with this function is not meant to be used for *running*
-    inference, but rather for generating compatible metadata structures
-    using backend.make_metadata()
-
-
-    Returns:
-
-    * Backend instance
-    """
-    if backend_name == STR_XFORMERS_ATTN_VAL:
-        from vllm.v1.attention.backends.xformers import XFormersAttentionBackend
-
-        return XFormersAttentionBackend()
-    if backend_name == STR_FLASH_ATTN_VAL:
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-        return FlashAttentionBackend()
-    if backend_name == "TRITON_ATTN":
-        from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-
-        return TritonAttentionBackend()
-    if backend_name == "FLEX_ATTENTION":
-        from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
-
-        return FlexAttentionBackend()
-    if backend_name == "TORCH_SDPA":
-        from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
-
-        return TorchSDPABackend()
-    if backend_name == "FLASHINFER":
-        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-        return FlashInferBackend()
-
-    raise AssertionError(f"Unrecognized backend_name {backend_name} for unit test")
-
-
-def make_alibi_bias(
-    alibi_slopes: torch.Tensor,
-    num_kv_heads: int,
-    dtype: torch.dtype,
-    seq_lens: list[int],
-) -> list[Any]:
-    """Create ALiBi biases compatible with xFormers attention tests."""
-    from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
-
-    if alibi_slopes is None:
-        return [None for _ in seq_lens]
-
-    attn_biases: list[Any] = []
-    num_heads = alibi_slopes.shape[0]
-    assert num_heads >= num_kv_heads, (
-        "ALiBi slopes expect at least as many heads as KV heads"
-    )
-
-    for seq_len in seq_lens:
-        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
-        bias = bias[None, :] - bias[:, None]
-
-        padded_len = (seq_len + 7) // 8 * 8
-        bias_tensor = torch.empty(
-            1,
-            num_heads,
-            seq_len,
-            padded_len,
-            device=alibi_slopes.device,
-            dtype=dtype,
-        )[:, :, :, :seq_len].copy_(bias)
-        bias_tensor.mul_(alibi_slopes[:, None, None])
-        attn_biases.append(LowerTriangularMaskWithTensorBias(bias_tensor))
-
-    return attn_biases
-
-
 def _make_metadata_tensors(
     seq_lens: list[int] | None,
     context_lens: list[int] | None,
@@ -696,23 +593,12 @@ def make_kv_cache(
 
     Returns:
 
-    * kv_cache: 2 x num_blocks x (block_size * num_heads * head_size)
-    *     for backend 'XFORMERS'
     * kv_cache: 2 x num_blocks x block_size x num_heads x head_size
     *     for backend 'FLASH_ATTN'
     """
-    if backend == "XFORMERS":
-        kv_cache = torch.rand((2, num_blocks, block_size * num_heads * head_size)).to(
-            device
-        )
-    elif backend == "FLASH_ATTN":
-        kv_cache = torch.rand((2, num_blocks, block_size, num_heads, head_size)).to(
-            device
-        )
-    else:
-        raise ValueError(
-            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'."
-        )
+    if backend != "FLASH_ATTN":
+        raise ValueError(f"Unknown backend value: '{backend}'. Expected 'FLASH_ATTN'.")
+    kv_cache = torch.rand((2, num_blocks, block_size, num_heads, head_size)).to(device)
     if default_val is not None:
         kv_cache[:, :, :] = default_val
     return kv_cache
@@ -723,7 +609,7 @@ def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
     """
-    return (num_tokens + block_size) // block_size
+    return (num_tokens + block_size - 1) // block_size
 
 
 def make_empty_slot_mapping_tensor(device: torch.device | str):
@@ -808,7 +694,7 @@ def make_block_tables_slot_mapping(
     For a sequence with num_tokens tokens the minimum number
     of required KV cache blocks is
 
-    num_blocks = (num_tokens + block_size) // block_size
+    num_blocks = (num_tokens + block_size - 1) // block_size
 
     Then the minimum KV cache size in blocks is
 
@@ -877,197 +763,6 @@ def make_block_tables_slot_mapping(
     return (block_tables_tensor, slot_mapping_list, max_block_idx)
 
 
-def make_test_metadata(
-    attn_backend: _Backend,
-    is_prompt: bool,
-    seq_lens: list[int] | None,
-    decoder_test_params: PhaseTestParameters | None,
-    device: torch.device | str,
-    encoder_test_params: PhaseTestParameters | None = None,
-    cross_test_params: PhaseTestParameters | None = None,
-) -> AttentionMetadata:
-    """
-    Construct fake attention metadata for a given test phase
-    (prefill-phase or decode-phase).
-
-    encoder_test_params and cross_test_params arguments allow encoder
-    attention and enc/dec cross-attention (respectively) to use distinct
-    metadata values from decoder self-attention (decoder_test_params.)
-
-    if encoder_test_params and cross_test_params are None, the attention
-    metadata will support decoder-only scenario.
-
-    Assumptions:
-
-    * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
-
-    Arguments:
-
-    * attn_backend_name: Backend for sourcing attention kernels
-    * is_prompt: prefill if True, o/w decode
-    * seq_lens: list of token counts for each sequence
-    * decoder_test_params: decoder self-attention test params;
-                           this function requires
-                           kv_mmap (memory mapping) field
-    * device: CPU or CUDA device
-    * encoder_test_params: encoder attention test params;
-                           this function requires encoder query
-                           sequence lengths field. If None,
-                           encoder query sequence lengths are
-                           treated as None
-    * cross_test_params: enc/dec cross-attention test params;
-                         this function requires kv_mmap field.
-                         If None, KV cache memory map data
-                         structures are treated as None
-
-    Return:
-
-    * AttentionMetadata structure
-    """
-
-    # Decoder self-attention memory mapping
-    # decoder_test_params is None signals encoder-only
-    # scenario, so kv_mmap is None
-    kv_mmap = None if decoder_test_params is None else decoder_test_params.kv_mmap
-
-    # This function constructs metadata assuming no chunked prefill,
-    # i.e. 100% prefill tokens or 100% decode tokens
-    #
-    # - If is_prompt, num_prefills_or_decodes is the number of prefills
-    #   and num_prefill_or_decode_tokens is the number of prefill tokens
-    # - If not is_prompt, num_prefills_or_decodes is the number of decodes
-    #   and num_prefill_or_decode_tokens is the number of decode tokens
-    #
-    # seq_lens is None signals encoder-only
-    # scenario, in which case num_prefills_or_decodes and
-    # num_prefill_or_decode_tokens are unused
-    num_prefills_or_decodes = None if seq_lens is None else len(seq_lens)
-
-    num_prefill_or_decode_tokens = (
-        None if seq_lens is None else (sum(seq_lens) if is_prompt else len(seq_lens))
-    )
-
-    # Seems for non-prefix-caching scenarios context_lens
-    # is never needed
-    context_lens = None
-
-    if encoder_test_params is None:
-        encoder_seq_lens = None
-        num_encoder_tokens = None
-    else:
-        # Encoder/decoder or encoder-only models only:
-        # * Extract encoder input sequence lengths
-        assert encoder_test_params.packed_qkvo.packed_qkv is not None
-        encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
-        num_encoder_tokens = (
-            None if encoder_seq_lens is None else (sum(encoder_seq_lens))
-        )
-
-    # For encoder/decoder or encoder-only models only, extract *cross-attention*
-    # slot_mapping and block table (kv_mmap)
-    cross_kv_mmap = None if cross_test_params is None else cross_test_params.kv_mmap
-
-    attn_backend_obj = make_backend(attn_backend.name)
-
-    if is_prompt:
-        # Prefill-phase scenario
-
-        num_prefills = num_prefills_or_decodes
-        num_prefill_tokens = num_prefill_or_decode_tokens
-        num_decode_tokens = 0
-
-        (
-            seq_lens_tensor,
-            context_lens_tensor,
-            _,
-            _,
-            seq_start_loc,
-            encoder_seq_lens_tensor,
-            encoder_seq_start_loc,
-            max_encoder_seq_len,
-        ) = _make_metadata_tensors(
-            seq_lens, context_lens, encoder_seq_lens, device=device
-        )
-        return attn_backend_obj.make_metadata(
-            num_prefills=num_prefills,
-            slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
-            enable_kv_scales_calculation=True,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            seq_lens=seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            seq_start_loc=seq_start_loc,
-            max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
-            max_decode_seq_len=0,
-            context_lens_tensor=context_lens_tensor,
-            block_tables=(None if kv_mmap is None else kv_mmap.block_tables),
-            use_cuda_graph=False,
-            num_encoder_tokens=num_encoder_tokens,
-            encoder_seq_lens=encoder_seq_lens,
-            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
-            encoder_seq_start_loc=encoder_seq_start_loc,
-            max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=(
-                None if cross_kv_mmap is None else cross_kv_mmap.slot_mapping
-            ),
-            cross_block_tables=(
-                None if cross_kv_mmap is None else cross_kv_mmap.block_tables
-            ),
-        )
-
-    else:  # not is_prompt
-        # Decode-phase scenario
-
-        assert kv_mmap is not None
-        assert num_prefill_or_decode_tokens is not None
-        assert seq_lens is not None
-
-        num_prefills = 0
-        num_prefill_tokens = 0
-        num_decode_tokens = num_prefill_or_decode_tokens
-
-        (
-            seq_lens_tensor,
-            context_lens_tensor,
-            _,
-            _,
-            seq_start_loc,
-            encoder_seq_lens_tensor,
-            encoder_seq_start_loc,
-            max_encoder_seq_len,
-        ) = _make_metadata_tensors(
-            seq_lens, context_lens, encoder_seq_lens, device=device
-        )
-
-        return attn_backend_obj.make_metadata(
-            num_prefills=num_prefills,
-            slot_mapping=kv_mmap.slot_mapping,
-            enable_kv_scales_calculation=True,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            seq_lens=seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            seq_start_loc=seq_start_loc,
-            max_prefill_seq_len=0,
-            max_decode_seq_len=max(seq_lens),
-            max_decode_query_len=1,
-            context_lens_tensor=context_lens_tensor,
-            block_tables=kv_mmap.block_tables,
-            use_cuda_graph=False,
-            num_encoder_tokens=num_encoder_tokens,
-            encoder_seq_lens=encoder_seq_lens,
-            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
-            encoder_seq_start_loc=encoder_seq_start_loc,
-            max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=(
-                None if cross_kv_mmap is None else cross_kv_mmap.slot_mapping
-            ),
-            cross_block_tables=(
-                None if cross_kv_mmap is None else cross_kv_mmap.block_tables
-            ),
-        )
-
-
 def assert_actual_matches_ideal(
     test_params: PhaseTestParameters, output_under_test: torch.Tensor, backend: str
 ) -> None:
@@ -1081,22 +776,14 @@ def assert_actual_matches_ideal(
     * output_under_test: actually observed output value
     """
     ideal_output = test_params.packed_qkvo.ideal_output
-    if backend == "XFORMERS":
-        torch.testing.assert_close(
-            ideal_output, output_under_test.view_as(ideal_output)
-        )
-
-    elif backend == "FLASH_ATTN":
-        # For FlashAttention override the accuracy thresholds to non default
-        # values since we notice a higher difference between the ideal and
-        # actual output.
-        torch.testing.assert_close(
-            ideal_output, output_under_test.view_as(ideal_output), atol=0.01, rtol=0.016
-        )
-    else:
-        raise ValueError(
-            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'."
-        )
+    if backend != "FLASH_ATTN":
+        raise ValueError(f"Unknown backend value: '{backend}'. Expected 'FLASH_ATTN'.")
+    # For FlashAttention override the accuracy thresholds to non default
+    # values since we notice a higher difference between the ideal and
+    # actual output.
+    torch.testing.assert_close(
+        ideal_output, output_under_test.view_as(ideal_output), atol=0.01, rtol=0.016
+    )
 
 
 # Copied/modified from torch._refs.__init__.py
@@ -1153,12 +840,20 @@ def torch_experts(
     per_act_token_quant=False,
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
+    activation: str = "silu_and_mul",
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
         or (global_num_experts == w1.shape[0] and expert_map is None)
         or (expert_map is not None and global_num_experts == expert_map.shape[0])
     )
+
+    if quant_dtype in [torch.float16, torch.bfloat16]:
+        quant_dtype = None
+    quant_input_only = quant_dtype is not None and w1_scale is None and w2_scale is None
+    if quant_input_only:
+        assert a1_scale is None and a2_scale is None
+        assert per_act_token_quant
 
     M, K = a.shape
     topk = topk_ids.shape[1]
@@ -1177,6 +872,9 @@ def torch_experts(
         a, a1_scale, quant_dtype, per_act_token_quant, block_shape
     )
 
+    if quant_input_only:
+        a = (a.float() * a_scale.view(-1, 1)).to(w1.dtype)
+
     num_experts = w1.shape[0]
 
     topk_ids = topk_ids.view(-1)
@@ -1185,6 +883,8 @@ def torch_experts(
 
     f32 = torch.float32
 
+    act = op_registry[activation]
+
     for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
@@ -1192,10 +892,18 @@ def torch_experts(
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+                tmp2 = act()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+            elif quant_input_only:
+                tmp1 = a[mask] @ w1[i].transpose(0, 1)
+                tmp2 = SiluAndMul()(tmp1)
+                tmp2, tmp2_scale = moe_kernel_quantize_input(
+                    tmp2, None, quant_dtype, per_act_token_quant
+                )
+                tmp2 = (tmp2.float() * tmp2_scale.view(-1, 1)).to(w2.dtype)
+                out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
                 # block quantized
                 assert (
@@ -1265,6 +973,7 @@ def torch_moe(
     b_bias2: torch.Tensor | None = None,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    activation: str = "silu_and_mul",
 ) -> torch.Tensor:
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
@@ -1278,6 +987,7 @@ def torch_moe(
         b_bias1,
         b_bias2,
         expert_map,
+        activation=activation,
     )
 
 
@@ -1308,7 +1018,7 @@ def opcheck(
     raise_exception: bool = True,
     cond: bool = True,
 ) -> dict[str, str]:
-    with unittest.mock.patch("torch.allclose", new=fp8_allclose):
+    with patch("torch.allclose", new=fp8_allclose):
         return (
             torch.library.opcheck(
                 op, args, kwargs, test_utils=test_utils, raise_exception=raise_exception

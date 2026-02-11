@@ -16,9 +16,9 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Unsure on where to start? Check out the following links for tasks to work on:
 
 - [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-    - [Selected onboarding tasks](gh-project:6)
+    - [Selected onboarding tasks](https://github.com/orgs/vllm-project/projects/6)
 - [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new-model%22)
-    - [Models with multi-modal capabilities](gh-project:10)
+    - [Models with multi-modal capabilities](https://github.com/orgs/vllm-project/projects/10)
 
 ## License
 
@@ -43,10 +43,16 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install vLLM using:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
-uv pip install -e .
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
+
+then install vLLM using:
+
+```bash
+uv pip install -e . --no-build-isolation
 ```
 
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.

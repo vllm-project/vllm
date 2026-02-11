@@ -95,7 +95,7 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
 # fix inductor partition + attention-nvfp4 quant fusion, tested in
-# `tests/compile/test_fusions_e2e.py::test_attn_quant`.
+# `tests/compile/test_fusion_attn.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
 
 
@@ -272,7 +272,6 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     from torch._inductor.scheduler import (
         BaseSchedulerNode,
         FusedSchedulerNode,
-        _custom_should_partition_fns,
     )
     from torch._inductor.utils import (
         _unstable_customized_partition_wrapper,
@@ -283,9 +282,21 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # Allow users to manually specify if a node should be partitioned
     # Can only do this for FallbackKernels
     ir_node = node.node
-    if isinstance(ir_node, ir.FallbackKernel):
-        operator = ir_node.op_overload
-        if operator is not None and operator in _custom_should_partition_fns:
+    if isinstance(ir_node, torch._inductor.ir.FallbackKernel) and (
+        op := ir_node.op_overload
+    ):
+        op_overload_packet_name = op.name()
+        op_overload_name = (
+            f"{op_overload_packet_name}.{op._overloadname}"
+            if isinstance(op, torch._ops.OpOverload)
+            else op_overload_packet_name
+        )
+        if (
+            op_overload_packet_name
+            in torch._inductor.config.custom_should_partition_ops
+            or op_overload_name in torch._inductor.config.custom_should_partition_ops
+        ):
+            assert isinstance(op, torch._ops.OpOverload)
             return True
 
     # When not using cudagraphs, keep all kernels in the `call` function
@@ -352,9 +363,40 @@ def _update_scheduler_patched(self) -> None:
         self.scheduler = Scheduler(self.operations)
 
 
+# ===================================================
+# torch 2.9 Inductor get_raw_stream workaround
+# ===================================================
+# Workaround for TorchInductor autotune using get_raw_stream() without defining it.
+# This occurs when compile_sizes > 1 in compilation_config.
+# For more context, see https://github.com/vllm-project/vllm/issues/30905.
+def _patch_get_raw_stream_if_needed():
+    """Workaround for TorchInductor autotune get_raw_stream() bug."""
+    from vllm.utils.torch_utils import is_torch_equal
+
+    # Only apply the patch for torch 2.9.0 or 2.9.1
+    if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
+        import builtins
+
+        # Check if CUDA functionality is available without initializing CUDA
+        # _cuda_getCurrentRawStream only exists in CUDA builds of PyTorch
+        if hasattr(torch._C, "_cuda_getCurrentRawStream"):
+            from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+
+            builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
+
+
+_patch_get_raw_stream_if_needed()
+
 if is_torch_equal("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
+    from torch.utils._config_module import _Config, _ConfigEntry
+
+    # `custom_should_partition_ops` is a new config after 2.9.0. So this would
+    # not overwrite any user configs.
+    torch._inductor.config._config["custom_should_partition_ops"] = _ConfigEntry(
+        _Config(default=[])
+    )
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
     GraphLowering._update_scheduler = _update_scheduler_patched

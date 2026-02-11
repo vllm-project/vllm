@@ -30,8 +30,8 @@ Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at 
 Where to get started with vLLM depends on the type of user. If you are looking to:
 
 - Run open-source models on vLLM, we recommend starting with the [Quickstart Guide](./getting_started/quickstart.md)
-- Build applications with vLLM, we recommend starting with the [User Guide](./usage)
-- Build vLLM, we recommend starting with [Developer Guide](./contributing)
+- Build applications with vLLM, we recommend starting with the [User Guide](./usage/README.md)
+- Build vLLM, we recommend starting with [Developer Guide](./contributing/README.md)
 
 For information about the development of vLLM, see:
 
@@ -56,13 +56,13 @@ vLLM is flexible and easy to use with:
 - Tensor, pipeline, data and expert parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
+- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, Arm CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
 - Prefix caching support
 - Multi-LoRA support
 
 For more information, check out the following:
 
-- [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
+- [vLLM announcing blog post](https://blog.vllm.ai/2023/06/20/vllm.html) (intro to PagedAttention)
 - [vLLM paper](https://arxiv.org/abs/2309.06180) (SOSP 2023)
 - [How continuous batching enables 23x throughput in LLM inference while reducing p50 latency](https://www.anyscale.com/blog/continuous-batching-llm-inference) by Cade Daniel et al.
 - [vLLM Meetups](community/meetups.md)

@@ -63,12 +63,35 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
+        # Subclasses should either:
+        # - implement handling for extra_tensors, or
+        # - raise a clear error if extra_tensors is not supported.
+        raise NotImplementedError
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        # Subclasses should either:
+        # - implement handling for extra_tensors, or
+        # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -112,9 +135,9 @@ class DeviceCommunicatorBase:
 
         use_ep = False
         all2all_backend = None
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        config = get_current_vllm_config()
+        config = get_current_vllm_config_or_none()
         if config is not None:
             # as long as we use data parallel (coupled data parallel
             # where all data parallel ranks execute forward together),
@@ -266,26 +289,51 @@ class DeviceCommunicatorBase:
             module
             for module in model.modules()
             # TODO(bnell): Should use isinstance but can't.  Maybe search for
-            # presence of quant_method.init_prepare_finalize?
+            # presence of quant_method.maybe_init_modular_kernel?
             if (
                 module.__class__.__name__ == "FusedMoE"
                 or module.__class__.__name__ == "SharedFusedMoE"
             )
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module)
+            module.maybe_init_modular_kernel()
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
+        if extra_tensors is not None:
+            return hidden_states, router_logits, extra_tensors
         return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        This is a no-op in the base class.
+        """
+        if extra_tensors is not None:
+            return hidden_states, topk_weights, topk_ids, extra_tensors
+        return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
