@@ -250,7 +250,7 @@ def maybe_patch_hf_config_from_gguf(
         text_config = hf_config.get_text_config()
         is_gemma3 = hf_config.model_type in ("gemma3", "gemma3_text")
         if vision_config is not None and is_gemma3:
-            new_hf_config = Gemma3Config.from_text_vision_configs(
+            new_hf_config = Gemma3Config(
                 text_config=text_config,
                 vision_config=vision_config,
                 architectures=["Gemma3ForConditionalGeneration"],

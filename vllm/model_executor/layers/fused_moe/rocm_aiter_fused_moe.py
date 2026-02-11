@@ -192,6 +192,7 @@ def rocm_aiter_fused_experts(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
