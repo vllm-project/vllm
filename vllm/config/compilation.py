@@ -254,7 +254,7 @@ class PassConfig:
             self.fuse_act_padding = False
         if self.fuse_rope_kvcache and not current_platform.is_rocm():
             logger.warning_once(
-                "KV cache fusion enabled but the current platform is not ROCm. "
+                "KV cache fusion currently only enabled on ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
