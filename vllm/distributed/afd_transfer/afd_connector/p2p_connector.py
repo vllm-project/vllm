@@ -54,9 +54,16 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
+    print(f"begin afd_p2p_send_impl tensor.shape:{tensor.shape}", flush=True)
     comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
+    print("end afd_p2p_send_impl", flush=True)
+    if not torch.cuda.is_current_stream_capturing():
+        print(f"jcz before afd_p2p_send_impl synchronize", flush=True)
+        torch.cuda.synchronize()
+        print(f"jcz end afd_p2p_send_impl synchronize", flush=True)
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
+    print("afd_p2p_send_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -75,7 +82,13 @@ def afd_p2p_recv_impl(
     comm = _AFD_COMMUNICATORS.get(comm_id)
     if comm is None:
         raise RuntimeError(f"Communicator with ID {comm_id} not found/registered.")
+    print(f"begin afd_p2p_recv_impl out.shape:{out.shape}", flush=True)
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
+    print("end afd_p2p_recv_impl", flush=True)
+    if not torch.cuda.is_current_stream_capturing():
+        print(f"jcz before afd_p2p_recv_impl synchronize", flush=True)
+        torch.cuda.synchronize()
+        print(f"jcz end afd_p2p_recv_impl synchronize", flush=True)
 
 def afd_p2p_recv_fake(
     out: torch.Tensor,
@@ -424,6 +437,7 @@ class P2PAFDConnector(AFDConnectorBase):
         ubatch_idx = get_forward_context().afd_metadata.afd_stage_idx
         src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
         if not self.config.model_config.enforce_eager and self.is_graph_capturing:
+        # if not self.config.model_config.enforce_eager:
             meta = self._tensor_metadata_list[ubatch_idx]
             buffer_key = (ubatch_idx, tuple(meta.size))
             recv_buffer = self._recv_ffn_buffers.get(buffer_key)
@@ -431,6 +445,7 @@ class P2PAFDConnector(AFDConnectorBase):
             # source tensor in compiled/fullgraph execution.
             if recv_buffer is not None:
                 ref_tensor = recv_buffer
+                # print(f"jcz recv_ffn_output recv_buffer is not None:{ref_tensor.shape}")
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,

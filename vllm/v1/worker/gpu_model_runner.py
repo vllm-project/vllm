@@ -897,7 +897,7 @@ class GPUModelRunner(
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=1000, warmup=1, active=10, repeat=1
+                wait=1500, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True,
@@ -6460,6 +6460,12 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                 )
             )
+            if allow_microbatching:
+                self._warmup_and_capture(
+                    batch_desc,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    allow_microbatching=False,
+                )
             self._warmup_and_capture(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
