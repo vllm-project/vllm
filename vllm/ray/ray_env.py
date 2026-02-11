@@ -65,10 +65,7 @@ def get_env_vars_to_copy(
     # 1. vLLM's registered env vars
     result = set(envs.environment_variables)
     # 2. Prefix-matched vars present in the current environment
-    result |= {
-        name for name in os.environ
-        if any(name.startswith(p) for p in prefixes)
-    }
+    result |= {name for name in os.environ if any(name.startswith(p) for p in prefixes)}
     # 3. Individual extra vars (from envs.py, user-overridable)
     result |= _parse_csv(envs.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY)
     # 4. Caller-supplied extra vars (e.g. platform-specific)
