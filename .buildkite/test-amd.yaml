@@ -1696,7 +1696,7 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   mirror_hardwares: [amdexperimental, amdproduction, tj]
-  device: mi325_2
+  agent_pool: mi325_2
   optional: true
   num_devices: 2
   commands:
@@ -1750,7 +1750,7 @@ steps:
     # Run all models and attn backends but only Inductor partition and native custom ops
     - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
-    # TODO: Qwen uses group quantizatio which the pattern matcher on ROCm is not supported yet.
+    # TODO: Qwen uses group quantization which the pattern matcher on ROCm is not supported yet.
     # - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
 
 # corresponds to .buildkite/test_areas/compile.yaml
@@ -1779,7 +1779,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   mirror_hardwares: [amdexperimental, amdproduction, tj]
-  device: mi325_1
+  agent_pool: mi325_1
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
@@ -1790,14 +1790,14 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+    - "pytest -v -rsx tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   mirror_hardwares: [amdexperimental, amdproduction, tj]
-  device: mi325_2
+  agent_pool: mi325_2
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
@@ -1811,13 +1811,13 @@ steps:
   commands:
     - rocm-smi
     # Run just llama3 (fp8 & bf16) for all config combinations
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'llama-3'"
+    - "pytest -v -rsx tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'llama-3'"
 
 - label: Fusion E2E TP2 (MI325)
   mirror_hardwares: [amdexperimental, amdproduction, tj, tj2]
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
-  device: mi325_2
+  agent_pool: mi325_2
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
@@ -1828,4 +1828,4 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+    - "pytest -v -rsx tests/compile/fusions_e2e/test_tp2_async_tp.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
