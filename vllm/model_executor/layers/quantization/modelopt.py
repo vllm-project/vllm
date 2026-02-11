@@ -959,6 +959,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
 
@@ -984,7 +985,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts_input=layer._get_shared_experts_input(x),
+            shared_experts_input=shared_experts_input,
         )
 
 
@@ -1528,6 +1529,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
 
@@ -1555,7 +1557,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                shared_experts_input=layer._get_shared_experts_input(x),
+                shared_experts_input=shared_experts_input,
             )
 
 
