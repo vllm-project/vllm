@@ -1664,23 +1664,6 @@ steps:
 # enable them as as soon as possible.
 
 # corresponds to .buildkite/test_areas/compile.yaml
-- label: Sequence Parallel Correctness Tests (2xMI325 GPUs)
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_2
-  num_devices: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/
-  - vllm/compilation/
-  - vllm/v1/worker/
-  - vllm/v1/cudagraph_dispatcher.py
-  - tests/compile/correctness_e2e/test_sequence_parallel.py
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - "pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py"
-
-# corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion and Compile Unit Tests (2xMI325 GPUs)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
@@ -1751,7 +1734,12 @@ steps:
     - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'llama-3'"
     - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8' -k 'inductor_partition and not +rms_norm and +quant_fp8 and qwen3' -k 'llama-3'"
 
+## There are no ops on ROCm for these tests.
+## The test still passes but the logs are not useful.
+## fused ops just call torch.ops.symm_mem which 
+## exists in ROCm even though they don't work
 # - label: AsyncTP Correctness Tests  (2xMI325 GPUs)
 # - label: Fusion E2E TP2 Quick (MI325)
 # - label: Fusion E2E TP2 AsyncTP Config Sweep (MI325)
 # - label: Fusion E2E TP2 (MI325)
+# - label: Sequence Parallel Correctness Tests (2xMI325 GPUs)
