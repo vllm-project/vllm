@@ -81,8 +81,14 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_unrecognized_env(monkeypatch):
-    # Remove any existing VLLM env vars that might interfere
-    monkeypatch.delenv("VLLM_TEST_GROUP_NAME", raising=False)
+    import os
+
+    from vllm.envs import environment_variables
+
+    # Remove any existing unrecognized VLLM env vars that might interfere
+    for env in list(os.environ):
+        if env.startswith("VLLM_") and env not in environment_variables:
+            monkeypatch.delenv(env, raising=False)
 
     # Test that if fail_on_environ_validation is True, then an error
     # is raised when an unrecognized vLLM environment variable is set
