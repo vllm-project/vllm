@@ -59,7 +59,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies: []
   commands:
-    - pytest -v -s models/nightly/llama.py
+    - pytest -v -s tests/models/nightly/llama.py
 
 - label: Transformers Nightly Models
   working_dir: "/vllm-workspace/"
