@@ -1286,6 +1286,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
