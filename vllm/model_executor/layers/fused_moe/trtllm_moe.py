@@ -19,6 +19,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    """TensorRT-LLM-based fused MoE expert implementation."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

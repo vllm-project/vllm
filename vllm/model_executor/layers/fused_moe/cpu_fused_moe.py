@@ -207,6 +207,8 @@ class SGLFusedMOE:
 
 
 class CPUFusedMOE:
+    """CPU-based fused MoE implementation."""
+
     def __init__(self, layer: torch.nn.Module) -> None:
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
@@ -237,7 +239,6 @@ class CPUFusedMOE:
         activation: MoEActivation = MoEActivation.SILU,
     ) -> torch.Tensor:
         assert activation in _CPU_MOE_ACT_FN, f"{activation} is not supported."
-        assert not apply_router_weight_on_input
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -260,6 +261,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            apply_router_weight_on_input,
         )
 
     def check_grouped_gemm(
@@ -354,7 +356,14 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int = -1,
+        skip_weighted: bool = False,
     ) -> torch.Tensor:
+        if skip_weighted:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            input.mul_(topk_weights.to(input.dtype))
+
         output = cpu_fused_moe(
             input,
             layer.w13_weight,
@@ -365,6 +374,7 @@ class CPUFusedMOE:
             topk_ids,
             activation.value,
             self.isa,
+            skip_weighted,
         )
         return output
 
@@ -376,7 +386,14 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int = -1,
+        skip_weighted: bool = False,
     ) -> torch.Tensor:
+        if skip_weighted:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            input.mul_(topk_weights.to(input.dtype))
+
         output = torch.empty_like(input)
         layer_id = id(layer)
         torch.ops.vllm.cpu_fused_moe_torch(
@@ -387,6 +404,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            skip_weighted,
         )
 
         return output
@@ -400,6 +418,7 @@ def cpu_fused_moe_torch(
     topk_ids: torch.Tensor,
     activation: str,
     global_num_experts: int = -1,
+    skip_weighted: bool = False,
 ) -> None:
     act = MoEActivation.from_str(activation)
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
@@ -434,13 +453,16 @@ def cpu_fused_moe_torch(
     new_x = torch.empty_like(outs)
 
     new_x[idxs] = outs
-    final_out = (
-        new_x.view(*topk_ids.shape, -1)
-        .type(topk_weights.dtype)
-        .mul_(topk_weights.unsqueeze(dim=-1))
-        .sum(dim=1)
-        .type(new_x.dtype)
-    )
+    if skip_weighted:
+        final_out = new_x
+    else:
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .type(topk_weights.dtype)
+            .mul_(topk_weights.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(new_x.dtype)
+        )
     output.copy_(final_out)
 
 
