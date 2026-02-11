@@ -1467,15 +1467,15 @@ class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
 class Tarsier2Processor(Qwen2VLProcessor):
     def __init__(
         self,
-        vision_config: dict,
+        image_processor: Tarsier2ImageProcessor,
         tokenizer: TokenizerLike,
+        video_processor: Qwen2VLVideoProcessor,
         **kwargs,
     ):
-        self.image_processor = Tarsier2ImageProcessor(**vision_config)
         super().__init__(
-            image_processor=self.image_processor,
+            image_processor=image_processor,
             tokenizer=tokenizer,
-            video_processor=Qwen2VLVideoProcessor(**vision_config),
+            video_processor=video_processor,
             chat_template=None,
             **kwargs,
         )
@@ -1489,8 +1489,12 @@ class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
         return correct_config
 
     def get_hf_processor(self, **kwargs: object) -> Tarsier2Processor:
+        vision_config = self.ctx.get_hf_image_processor_config()
+        image_processor = Tarsier2ImageProcessor(**vision_config)
+        video_processor = Qwen2VLVideoProcessor(**vision_config)
         return Tarsier2Processor(
-            vision_config=self.ctx.get_hf_image_processor_config(),
+            image_processor=image_processor,
+            video_processor=video_processor,
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )

@@ -810,9 +810,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
 
         # Postprocess: rename mask and add chunk counts
         # Handle different key names from different transformers versions
-        if "input_feature_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_feature_mask")
-        elif "feature_attention_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in outputs:
+            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+        elif "input_features_mask" not in outputs and "input_features" in outputs:
             # If no mask is provided, create one from input_features
             input_features = outputs["input_features"]
             if isinstance(input_features, torch.Tensor):
