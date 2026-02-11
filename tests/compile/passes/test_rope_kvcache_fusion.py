@@ -94,13 +94,18 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         self.attn._k_scale = self.attn._k_scale.to(device)
         self.attn._v_scale = self.attn._v_scale.to(device)
 
+        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.kv_cache_dtype = (
+            FP8_DTYPE if kv_cache_dtype_str.startswith("fp8") else self.dtype
+        )
+
         # Initialize attn MetadataBuilder
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=head_size,
-                dtype=self.dtype,
+                dtype=self.kv_cache_dtype,
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
