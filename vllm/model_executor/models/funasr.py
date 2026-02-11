@@ -769,13 +769,6 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
             target_channels=self.info.get_target_channels(),
         )
 
-    def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-    ) -> str | list[int]:
-        return [0]
-
     def _call_hf_processor(
         self,
         prompt: str,
