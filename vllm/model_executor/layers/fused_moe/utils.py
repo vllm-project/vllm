@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -241,7 +244,27 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
+    ocp_mx_scheme: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
+    if ocp_mx_scheme is not None:
+        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
+            pass  # No QDQ needed for these schemes
+        elif ocp_mx_scheme.endswith("a_fp8"):
+            # Perform QDQ (quantize and dequantize) on activation for emulation
+            # purpose, because there is no native kernel for weight in ocp_mx_scheme
+            # and activation in FP8. The implementation is based on existing
+            # non-emulation ops.
+            qA, qA_scale = ops.scaled_fp8_quant(
+                A, A_scale, use_per_token_if_dynamic=False
+            )
+            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
+            # After QDQ, we don't need further quantization
+            return A, None
+        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
+        # weights are already dequantized, and we proceed with normal
+        # activation quantization below.
+
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
@@ -358,6 +381,11 @@ def apply_moe_activation(
         torch.ops._C.gelu_and_mul(output, input)
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(output, input)
+    elif activation == "swiglustep":
+        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
+
+        swiglustep_and_mul_triton(output, input)
+
     # Activations without gated multiplication
     elif activation == SILU_NO_MUL:
         output.copy_(F.silu(input))

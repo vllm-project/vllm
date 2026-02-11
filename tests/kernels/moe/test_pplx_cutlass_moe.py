@@ -147,6 +147,7 @@ def pplx_cutlass_moe(
             hidden_dim=hidden_dim,
             intermediate_size_per_partition=intermediate_dim,
             num_local_experts=num_local_experts,
+            num_logical_experts=num_experts,
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             activation="silu",
             in_dtype=torch.bfloat16,
@@ -172,6 +173,7 @@ def pplx_cutlass_moe(
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
         experts,
+        inplace=False,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
