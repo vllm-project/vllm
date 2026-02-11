@@ -582,10 +582,10 @@ class GPUModelRunner(
         self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self.prev_num_computed_tokens_gpu = torch.zeros(
+        self.prev_num_draft_tokens: np.ndarray | None = None
+        self.prev_num_draft_tokens_gpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self.prev_num_draft_tokens: np.ndarray | None = None
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -1644,26 +1644,29 @@ class GPUModelRunner(
         self.num_accepted_tokens.copy_to_gpu()
 
         # Update num_computed_tokens on GPU.
-        # For async spec decode, the CPU values are "optimistic" (assume all
-        # draft tokens accepted) and have unbounded accumulated error. Instead,
-        # we maintain the GPU tensor directly: for continuing requests, add the
-        # actual accepted token count from the previous iteration. For new
-        # requests, initialize from the (correct) CPU value.
-        # For non-async paths, the CPU values are already corrected and can be
-        # copied directly.
+        # For async spec decode, the CPU values have one-iteration drift
+        # because the scheduler optimistically assumes all draft tokens are
+        # accepted. Correct by: cpu + valid_count - prev_draft - 1, which
+        # exactly cancels the (1 + D - V) over-count.
+        # For non-async paths, the CPU values are already corrected and can
+        # be copied directly.
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
+            and self.prev_num_draft_tokens is not None
             and prev_req_id_to_index
         ):
             if current_indices:
                 if batch_index_mapping.indices_match:
-                    # Fast path: batch unchanged, use slices instead of
-                    # creating GPU index tensors from Python lists.
                     n = num_reqs
                     valid_counts = self.valid_sampled_token_count_gpu[:n]
                     self.num_computed_tokens[:n] = (
-                        self.prev_num_computed_tokens_gpu[:n] + valid_counts.int()
+                        self.input_batch.num_computed_tokens_cpu_tensor[:n].to(
+                            device=self.device, non_blocking=True
+                        )
+                        + valid_counts.int()
+                        - self.prev_num_draft_tokens_gpu[:n]
+                        - 1
                     )
                     self.num_accepted_tokens.gpu[:n] = valid_counts
                 else:
@@ -1673,17 +1676,14 @@ class GPUModelRunner(
                     current_indices_gpu = torch.tensor(
                         current_indices, dtype=torch.int64, device=self.device
                     )
-
-                    # Additive correction:
-                    # actual = prev_actual + accepted_tokens.
-                    # prev_actual is from the previous iteration's GPU
-                    # snapshot; valid_counts is the number of tokens actually
-                    # accepted (including bonus token) in the previous
-                    # iteration.
-                    prev_actual = self.prev_num_computed_tokens_gpu[prev_indices_gpu]
                     valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
                     self.num_computed_tokens[current_indices_gpu] = (
-                        prev_actual + valid_counts.int()
+                        self.input_batch.num_computed_tokens_cpu_tensor[
+                            current_indices
+                        ].to(device=self.device, non_blocking=True)
+                        + valid_counts.int()
+                        - self.prev_num_draft_tokens_gpu[prev_indices_gpu]
+                        - 1
                     )
                     self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
@@ -1801,8 +1801,10 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.copy_to_gpu()
 
             if self.use_async_spec_decode:
-                self.prev_num_computed_tokens_gpu.copy_(self.num_computed_tokens)
                 self.prev_num_draft_tokens = num_draft_tokens.copy()
+                self.prev_num_draft_tokens_gpu[:num_reqs] = torch.from_numpy(
+                    num_draft_tokens
+                ).to(device=self.device, non_blocking=True)
 
         # Hot-Swap lora model
         if self.lora_config:
