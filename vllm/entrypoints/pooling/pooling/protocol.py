@@ -100,9 +100,6 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     data: T
     task: PoolingTask = "plugin"
 
-    def to_pooling_params(self):
-        return PoolingParams(task=self.task)
-
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     request_id: str | None = None
