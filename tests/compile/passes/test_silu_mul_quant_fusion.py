@@ -148,9 +148,6 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
             weight_group_shape=GroupShape(128, 128),
             act_quant_group_shape=GroupShape(1, 128),
             cutlass_block_fp8_supported=False,
-            # this parameter cannot always be True,
-            # it depends on the VLLM_ROCM_USE_AITER
-            # and VLLM_ROCM_USE_AITER_LINEAR environment variables
             use_aiter_and_is_supported=True,
         )
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
@@ -185,6 +182,7 @@ CUDA_KERNELS = [
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
 
+
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -194,6 +192,8 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
         (TestSiluMulNvfp4QuantModel, False, None),
+        # GroupFP8Quant fusion only works with AITER on ROCm.
+        # and the enable_quant_fp8_custom_op must be True.
         (TestSiluMulGroupFp8QuantModel, True, None),
     ],
 )

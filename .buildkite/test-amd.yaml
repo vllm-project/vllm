@@ -1768,7 +1768,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   mirror_hardwares: [amdexperimental, amdproduction, tj]
-  agent_pool: mi325_1
+  agent_pool: mi325_2
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
