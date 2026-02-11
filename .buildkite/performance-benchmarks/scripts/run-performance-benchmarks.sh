@@ -1,3 +1,4 @@
+#!/bin/bash
 # This script assumes that we are already inside the vllm/ directory
 # Benchmarking results will be available inside vllm/benchmarks/results/
 
@@ -143,6 +144,9 @@ ensure_sharegpt_downloaded() {
 
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
+  # example:
+  # input: { "model": "meta-llama/Llama-2-7b-chat-hf", "tensor_parallel_size": 1 }
+  # output: --model meta-llama/Llama-2-7b-chat-hf --tensor-parallel-size 1
   local json_string=$1
   local args=$(
     echo "$json_string" | jq -r '
@@ -156,6 +160,9 @@ json2args() {
 
 json2envs() {
   # transforms the JSON string to environment variables.
+  # example:
+  # input: { "VLLM_CPU_KVCACHE_SPACE": 5 }
+  # output: VLLM_CPU_KVCACHE_SPACE=5
   local json_string=$1
   local args=$(
     echo "$json_string" | jq -r '
@@ -168,7 +175,7 @@ json2envs() {
 }
 
 wait_for_server() {
-  local timeout_val="${1:-1200}"
+  local timeout_val="1200"
   timeout "$timeout_val" bash -c '
     until curl -sf http://localhost:8000/v1/models >/dev/null; do
       sleep 1
@@ -311,7 +318,7 @@ run_latency_tests() { run_benchmark_tests "latency" "$1"; }
 run_startup_tests() { run_benchmark_tests "startup" "$1"; }
 run_throughput_tests() { run_benchmark_tests "throughput" "$1"; }
 
-serving_tests_stream() {
+merge_serving_tests_stream() {
   # Emit merged serving test objects, optionally filtered by MODEL_FILTER/DTYPE_FILTER in DRY_RUN mode.
   # This helper does NOT modify JSON; it only filters the stream in dry-run mode.
   local serving_test_file="$1"
@@ -373,15 +380,15 @@ run_serving_tests() {
   # In dry-run mode, if filters are provided but no tests match, fail fast.
   if [[ "${DRY_RUN:-0}" == "1" && ( "${MODEL_FILTER}${DTYPE_FILTER}" != "" ) ]]; then
     local count
-    count=$(serving_tests_stream "$serving_test_file" | wc -l | tr -d ' ')
+    count=$(merge_serving_tests_stream "$serving_test_file" | wc -l | tr -d ' ')
     if [[ "$count" -eq 0 ]]; then
       echo "No matching serving tests found in $serving_test_file for model='$MODEL_FILTER' dtype='$DTYPE_FILTER'." >&2
-      return 3
+      return 0
     fi
   fi
 
   # Iterate over serving tests (merged + optional filtered stream)
-  serving_tests_stream "$serving_test_file" | while read -r params; do
+  merge_serving_tests_stream "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -450,21 +457,16 @@ run_serving_tests() {
     echo "Server command: $server_command"
     # support remote vllm server
     client_remote_args=""
-    if [[ -z "${REMOTE_HOST}" ]]; then
-      if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        # don't start server in dry-run
-        :
+    if [[ -z "${REMOTE_HOST}" && "${DRY_RUN:-0}" != "1" ]]; then
+      bash -c "$server_command" &
+      server_pid=$!
+      # wait until the server is alive
+      if wait_for_server; then
+        echo ""
+        echo "vLLM server is up and running."
       else
-        bash -c "$server_command" &
-        server_pid=$!
-        # wait until the server is alive
-        if wait_for_server; then
-          echo ""
-          echo "vLLM server is up and running."
-        else
-          echo ""
-          echo "vLLM failed to start within the timeout period."
-        fi
+        echo ""
+        echo "vLLM failed to start within the timeout period."
       fi
     else
       server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"
