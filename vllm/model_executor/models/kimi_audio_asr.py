@@ -30,6 +30,7 @@ from contextlib import suppress
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+import regex as re
 import torch
 from scipy.io import wavfile
 from transformers.feature_extraction_utils import BatchFeature
@@ -466,36 +467,66 @@ class KimiAudioForConditionalGeneration(
         flat_audio_ids = _flatten_seq_inputs(audio_input_ids)
 
         true_input_ids = input_ids
-        if isinstance(flat_text_ids, torch.Tensor) and (
-            not isinstance(input_ids, torch.Tensor)
-            or flat_text_ids.shape[-1] == input_ids.shape[-1]
-        ):
-            # For text-only generation, the model expects to consume the text
-            # stream (audio positions filled with blank/control tokens).
-            true_input_ids = flat_text_ids
-        elif isinstance(flat_audio_ids, torch.Tensor) and (
+        if isinstance(flat_audio_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
             or flat_audio_ids.shape[-1] == input_ids.shape[-1]
         ):
+            # Kimi-Audio uses the audio token stream as the base input ids.
             true_input_ids = flat_audio_ids
+        elif isinstance(flat_text_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or flat_text_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            true_input_ids = flat_text_ids
 
         # Base token embeddings. vLLM uses flattened token tensors, so
         # embed_tokens returns [S, H] for [S] input ids.
         emb = self.model.embed_tokens(true_input_ids)
         device = emb.device
 
+        mask = None
+        if isinstance(flat_mask, torch.Tensor):
+            mask = flat_mask.to(device)
+            if mask.dtype != torch.bool:
+                mask = mask.to(torch.bool)
+            if mask.dim() != 1:
+                mask = mask.reshape(-1)
+
         # Add whisper features on masked positions.
         if isinstance(flat_whisper, torch.Tensor):
             whisper_feats = flat_whisper.to(device=device, dtype=emb.dtype)
 
             if whisper_feats.shape[0] != emb.shape[0]:
-                logger.warning(
-                    "[Kimi-Audio] whisper_input_features length mismatch: "
-                    "expected %d tokens but got %d features; skipping conditioning.",
-                    emb.shape[0],
-                    whisper_feats.shape[0],
-                )
-            else:
+                if mask is not None and mask.shape[0] == emb.shape[0]:
+                    mask_true = int(mask.sum().item())
+                    if mask_true == whisper_feats.shape[0]:
+                        expanded = emb.new_zeros(
+                            (emb.shape[0], whisper_feats.shape[-1])
+                        )
+                        expanded[mask] = whisper_feats
+                        whisper_feats = expanded
+                    else:
+                        logger.warning(
+                            "[Kimi-Audio] whisper/mask length mismatch: "
+                            "mask_true=%d features=%d; skipping conditioning.",
+                            mask_true,
+                            whisper_feats.shape[0],
+                        )
+                        whisper_feats = None
+                else:
+                    logger.warning(
+                        "[Kimi-Audio] whisper_input_features length mismatch: "
+                        "expected %d tokens but got %d "
+                        "features; skipping conditioning.",
+                        emb.shape[0],
+                        whisper_feats.shape[0],
+                    )
+                    whisper_feats = None
+
+            if (
+                isinstance(whisper_feats, torch.Tensor)
+                and whisper_feats.shape[0] == emb.shape[0]
+            ):
                 if whisper_feats.shape[-1] == emb.shape[-1]:
                     whisper_emb = whisper_feats
                 else:
@@ -508,13 +539,7 @@ class KimiAudioForConditionalGeneration(
                     # Use the model's vq_adaptor to project raw Whisper features.
                     whisper_emb = self.model.vq_adaptor(whisper_sbF).squeeze(1)
 
-                if isinstance(flat_mask, torch.Tensor):
-                    mask = flat_mask.to(device)
-                    if mask.dtype != torch.bool:
-                        mask = mask.to(torch.bool)
-                    if mask.dim() != 1:
-                        mask = mask.reshape(-1)
-
+                if mask is not None:
                     mask_f = mask[:, None]
                     whisper_emb = whisper_emb * mask_f
 
@@ -523,13 +548,18 @@ class KimiAudioForConditionalGeneration(
                     sqrt2 = math.sqrt(2.0)
                     encoder_add = (emb + whisper_emb) * sqrt2
                     emb = emb * (~mask_f) + encoder_add * mask_f
+                else:
+                    logger.warning(
+                        "[Kimi-Audio] Missing is_continuous_mask; "
+                        "skipping conditioning."
+                    )
 
         # Add aligned text embeddings (instruction etc.)
         if isinstance(flat_text_ids, torch.Tensor):
             text_ids = flat_text_ids.to(device)
-            text_emb = self.model.embed_tokens(text_ids)
-            text_mask = (text_ids != 0).to(dtype=emb.dtype)[:, None]
-            emb = emb + text_emb * text_mask
+            if text_ids.numel() > 0 and text_ids.sum().item() != 0:
+                text_emb = self.model.embed_tokens(text_ids)
+                emb = emb + text_emb
 
         return emb
 
@@ -541,11 +571,8 @@ class KimiAudioForConditionalGeneration(
 
     def embed_multimodal(self, **kwargs: object):
         # vLLM expects one embedding tensor per multimodal item.
-
         # We don't actually *use* mm embeddings for Kimi-Audio ASR (we construct
-
         # inputs_embeds inside forward()), but we must return correctly-shaped
-
         # placeholders to satisfy vLLM's startup/profile checks.
 
         feats = kwargs.get("whisper_input_features")
@@ -757,8 +784,29 @@ class KimiAudioForConditionalGeneration(
 
     @classmethod
     def post_process_output(cls, text: str) -> str:
-        """Return transcription text without additional cleanup."""
-        return text
+        """Post-process transcription output.
+
+        Kimi-Audio sometimes repeats the same sentence when the text EOS token
+        is not emitted. If we detect a duplicated sentence, return only the
+        first copy. Also normalize common Chinese spacing artifacts.
+        """
+        if not text:
+            return text
+
+        cleaned = text
+
+        if "。" in cleaned:
+            parts = [p.strip() for p in cleaned.split("。") if p.strip()]
+            if len(parts) >= 2:
+                norm0 = "".join(parts[0].split())
+                norm1 = "".join(parts[1].split())
+                if norm0 == norm1:
+                    cleaned = f"{parts[0]}。"
+
+        # Remove extra spaces between CJK characters and punctuation.
+        cleaned = re.sub(r"\s*([，。！？；：])\s*", r"\1", cleaned)
+        cleaned = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", cleaned)
+        return cleaned
 
     def forward(self, *args, **kwargs):  # type: ignore[override]
         # Pull out our extra multimodal tensors
@@ -783,16 +831,16 @@ class KimiAudioForConditionalGeneration(
             input_ids = args[0]
 
         true_input_ids = input_ids
-        if isinstance(text_input_ids, torch.Tensor) and (
-            not isinstance(input_ids, torch.Tensor)
-            or text_input_ids.shape[-1] == input_ids.shape[-1]
-        ):
-            true_input_ids = text_input_ids
-        elif isinstance(audio_input_ids, torch.Tensor) and (
+        if isinstance(audio_input_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
             or audio_input_ids.shape[-1] == input_ids.shape[-1]
         ):
             true_input_ids = audio_input_ids
+        elif isinstance(text_input_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or text_input_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            true_input_ids = text_input_ids
 
         if isinstance(true_input_ids, torch.Tensor) and true_input_ids.dim() == 3:
             true_input_ids = true_input_ids.squeeze(0)
