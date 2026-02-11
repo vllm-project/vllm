@@ -1310,6 +1310,11 @@ class _ValidateDatasetArgs(argparse.Action):
 
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code from huggingface",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--num-prompts",
@@ -2072,32 +2077,38 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
-            new_output_len = output_len
-            if output_len is None or output_len == -1:
-                # check that the request has an 'output_tokens' field
-                if "output_tokens" not in item:
-                    raise ValueError(
-                        "If no output length is provided the "
-                        "custom dataset must contain an 'output_tokens' field."
+            if tokenizer is None:
+                new_output_len = 1
+            else:
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    # check that the request has an 'output_tokens' field
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    # Use number of output tokens from the request data
+                    try:
+                        new_output_len = int(item["output_tokens"])
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Invalid value for 'output_tokens' in custom dataset: "
+                            f"'{item['output_tokens']}'. Must be an integer."
+                        ) from e
+
+            if tokenizer is None:
+                prompt_len = 1
+            else:
+                # apply template
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
                     )
-                # Use number of output tokens from the request data
-                try:
-                    new_output_len = int(item["output_tokens"])
-                except (ValueError, TypeError) as e:
-                    raise ValueError(
-                        f"Invalid value for 'output_tokens' in custom dataset: "
-                        f"'{item['output_tokens']}'. Must be an integer."
-                    ) from e
 
-            # apply template
-            if not skip_chat_template:
-                prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
-
-            prompt_len = len(tokenizer(prompt).input_ids)
+                prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
