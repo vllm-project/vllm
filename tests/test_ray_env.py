@@ -5,10 +5,7 @@
 import os
 from unittest.mock import patch
 
-from vllm.ray.ray_env import (
-    RAY_NON_CARRY_OVER_ENV_VARS,
-    get_env_vars_to_copy,
-)
+from vllm.ray.ray_env import get_env_vars_to_copy
 
 # ---------------------------------------------------------------------------
 # Default prefix matching
@@ -110,15 +107,13 @@ class TestExclusion:
         assert "CUDA_VISIBLE_DEVICES" not in result
 
     @patch.dict(os.environ, {"LMCACHE_LOCAL_CPU": "True"}, clear=False)
+    @patch(
+        "vllm.ray.ray_env.RAY_NON_CARRY_OVER_ENV_VARS",
+        {"LMCACHE_LOCAL_CPU"},
+    )
     def test_non_carry_over_blacklist(self):
-        saved = set(RAY_NON_CARRY_OVER_ENV_VARS)
-        try:
-            RAY_NON_CARRY_OVER_ENV_VARS.add("LMCACHE_LOCAL_CPU")
-            result = get_env_vars_to_copy()
-            assert "LMCACHE_LOCAL_CPU" not in result
-        finally:
-            RAY_NON_CARRY_OVER_ENV_VARS.clear()
-            RAY_NON_CARRY_OVER_ENV_VARS.update(saved)
+        result = get_env_vars_to_copy()
+        assert "LMCACHE_LOCAL_CPU" not in result
 
 
 # ---------------------------------------------------------------------------
