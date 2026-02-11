@@ -383,7 +383,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        # With expert parallel, each rank owns full experts — no need to
+        # shard the MoE LoRA weights across TP ranks.
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -667,7 +672,10 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert isinstance(model_config, PretrainedConfig)
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -930,7 +938,10 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
     ) -> None:
         """Initializes lora matrices with shared outer weights pattern."""
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device

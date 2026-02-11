@@ -619,20 +619,23 @@ def _fused_moe_lora_fused_se_kernel(
         input_ptrs += BLOCK_K_SHRINK * stride_input_k
         a_weight_ptrs += BLOCK_K_SHRINK * stride_a_k
 
-    # Cast intermediate to compute dtype
-    intermediate = intermediate.to(output_ptr.dtype.element_ty)
-
-    # Apply routing weight to intermediate (cheaper than per-N-tile)
+    # Apply routing weight while still in fp32 (better precision)
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(
             topk_weights_ptr + offs_token, mask=token_mask, other=0
         )
         intermediate = intermediate * moe_weight[:, None]
 
+    # Cast to weight dtype for expand dot (matches lora_B dtype, which
+    # may differ from output dtype when output comes from quantized MoE).
+    # Must be AFTER routing weight mul to avoid fp32 promotion from
+    # topk_weights breaking the expand tl.dot dtype match.
+    intermediate = intermediate.to(input_ptr.dtype.element_ty)
+
     # ===== Expand phase =====
     # Loop over N-tiles: output += intermediate[BLOCK_M, RANK] @ lora_B[RANK, BLOCK_N]
     cur_lora_b_ptr = tl.load(lora_b_ptr_table + slice_id).to(
-        tl.pointer_type(output_ptr.dtype.element_ty)
+        tl.pointer_type(input_ptr.dtype.element_ty)
     )
 
     # Output column start for this slice
@@ -669,6 +672,212 @@ def _fused_moe_lora_fused_se_kernel(
         out_mask = token_mask[:, None] & n_mask[None, :]
         existing = tl.load(out_ptrs, mask=out_mask, other=0.0)
         tl.store(out_ptrs, existing + result, mask=out_mask)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_valid_tokens",
+        "EM",
+        "K_input",
+        "output_dim",
+        "offset",
+    ]
+)
+def _fused_moe_lora_persistent_se_kernel(
+    # Input (qcurr_hidden_states)
+    input_ptr,
+    # Weight pointer tables (from _get_ptr)
+    lora_a_ptr_table,
+    lora_b_ptr_table,
+    # Output (final output, 2D view: M*top_k x total_output_dim)
+    output_ptr,
+    # Routing weights
+    topk_weights_ptr,
+    # Merged indexing
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    block_adapter_map_ptr,
+    # Dimensions
+    K_input,
+    output_dim,
+    EM,
+    num_valid_tokens,
+    # Input strides
+    stride_input_m,
+    stride_input_k,
+    # lora_A strides: shape (max_loras, num_experts, rank, K)
+    # passed as (adapter, expert, K, rank) following existing convention
+    stride_a_l,
+    stride_a_e,
+    stride_a_k,
+    stride_a_n,
+    # lora_B strides: shape (max_loras, num_experts, output_dim, rank)
+    # passed as (adapter, expert, rank, output_dim)
+    stride_b_l,
+    stride_b_e,
+    stride_b_k,
+    stride_b_n,
+    # Output strides (2D flattened)
+    stride_out_m,
+    stride_out_n,
+    # Column offset in output
+    offset,
+    # Constexprs
+    RANK: tl.constexpr,
+    top_k: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_K_SHRINK: tl.constexpr,
+    BLOCK_N_EXPAND: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """
+    Persistent fused shrink+expand kernel for MoE LoRA.
+
+    Instead of one CTA per M-block, a fixed number of CTAs (≤ num_SMs)
+    each process multiple contiguous M-blocks in a loop. Consecutive
+    M-blocks in the merged list often share the same (adapter, expert),
+    so lora_A/lora_B tiles stay warm in L2 cache across iterations.
+
+    Degrades gracefully: when num_CTAs >= num_M_blocks, each CTA
+    processes at most 1 block (same as the non-persistent kernel).
+    """
+    pid = tl.program_id(axis=0)
+    slice_id = tl.program_id(axis=1)
+    num_ctas = tl.num_programs(axis=0)
+
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+
+    # Contiguous block assignment for L2 cache locality:
+    # consecutive M-blocks processed by the same CTA are likely
+    # to share (adapter, expert), keeping lora weights warm in L2.
+    blocks_per_cta = tl.cdiv(num_pid_m, num_ctas)
+    start_m = pid * blocks_per_cta
+
+    # Hoist slice-invariant pointer loads
+    cur_lora_a_ptr = tl.load(lora_a_ptr_table + slice_id).to(
+        tl.pointer_type(input_ptr.dtype.element_ty)
+    )
+    cur_lora_b_ptr = tl.load(lora_b_ptr_table + slice_id).to(
+        tl.pointer_type(input_ptr.dtype.element_ty)
+    )
+
+    # Hoist loop-invariant values
+    offs_rank = tl.arange(0, RANK).to(tl.int64)
+    offs_k = tl.arange(0, BLOCK_K_SHRINK)
+    grid_k = tl.cdiv(K_input, BLOCK_K_SHRINK)
+    output_col_start = slice_id * output_dim + offset
+
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+
+    # ===== Persistent loop over contiguous M-blocks =====
+    for local_idx in range(blocks_per_cta):
+        pid_m = start_m + local_idx
+        if pid_m < num_pid_m:
+            # Look up adapter and expert for this M-block
+            lora_id = tl.load(block_adapter_map_ptr + pid_m)
+            if lora_id != -1:
+                expert_id = tl.load(expert_ids_ptr + pid_m)
+                if expert_id != -1:
+                    # Load token IDs for this M-block
+                    offs_token_id = (
+                        pid_m * BLOCK_SIZE_M
+                        + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+                    )
+                    offs_token = tl.load(
+                        sorted_token_ids_ptr + offs_token_id
+                    )
+                    token_mask = offs_token < num_valid_tokens
+
+                    # ===== Shrink phase =====
+                    intermediate = tl.zeros(
+                        (BLOCK_SIZE_M, RANK), dtype=tl.float32
+                    )
+
+                    input_ptrs = input_ptr + (
+                        offs_token[:, None] // top_k * stride_input_m
+                        + offs_k[None, :] * stride_input_k
+                    )
+                    a_weight_ptrs = (
+                        cur_lora_a_ptr
+                        + lora_id * stride_a_l
+                        + expert_id * stride_a_e
+                        + offs_k[:, None] * stride_a_k
+                        + offs_rank[None, :] * stride_a_n
+                    )
+
+                    for k in range(0, grid_k):
+                        k_remaining = K_input - k * BLOCK_K_SHRINK
+                        a_tile = tl.load(
+                            input_ptrs,
+                            mask=token_mask[:, None]
+                            & (offs_k[None, :] < k_remaining),
+                            other=0.0,
+                        )
+                        w_tile = tl.load(
+                            a_weight_ptrs,
+                            mask=offs_k[:, None] < k_remaining,
+                            other=0.0,
+                        )
+                        intermediate += tl.dot(a_tile, w_tile)
+                        input_ptrs += BLOCK_K_SHRINK * stride_input_k
+                        a_weight_ptrs += BLOCK_K_SHRINK * stride_a_k
+
+                    # Apply routing weight while still in fp32
+                    if MUL_ROUTED_WEIGHT:
+                        moe_weight = tl.load(
+                            topk_weights_ptr + offs_token,
+                            mask=token_mask,
+                            other=0,
+                        )
+                        intermediate = intermediate * moe_weight[:, None]
+
+                    # Cast to weight dtype AFTER routing mul to avoid
+                    # fp32 promotion breaking expand tl.dot dtype match
+                    intermediate = intermediate.to(
+                        input_ptr.dtype.element_ty
+                    )
+
+                    # ===== Expand phase =====
+                    b_weight_base = (
+                        cur_lora_b_ptr
+                        + lora_id * stride_b_l
+                        + expert_id * stride_b_e
+                    )
+
+                    for n_start in range(0, output_dim, BLOCK_N_EXPAND):
+                        offs_bn = (
+                            n_start + tl.arange(0, BLOCK_N_EXPAND)
+                        ).to(tl.int64)
+                        n_mask = offs_bn < output_dim
+
+                        b_weight_ptrs = (
+                            b_weight_base
+                            + offs_rank[:, None] * stride_b_k
+                            + offs_bn[None, :] * stride_b_n
+                        )
+                        b_tile = tl.load(
+                            b_weight_ptrs, mask=n_mask[None, :], other=0.0
+                        )
+
+                        result = tl.dot(intermediate, b_tile)
+                        result = result.to(output_ptr.dtype.element_ty)
+
+                        out_col = output_col_start + offs_bn
+                        out_ptrs = (
+                            output_ptr
+                            + offs_token[:, None] * stride_out_m
+                            + out_col[None, :] * stride_out_n
+                        )
+                        out_mask = token_mask[:, None] & n_mask[None, :]
+                        existing = tl.load(
+                            out_ptrs, mask=out_mask, other=0.0
+                        )
+                        tl.store(
+                            out_ptrs, existing + result, mask=out_mask
+                        )
 
 
 @torch.inference_mode()
@@ -1064,9 +1273,10 @@ def _fused_moe_lora_shrink_expand_fused(
     offset: int = 0,
 ) -> None:
     """
-    Fused shrink+expand wrapper. Launches a single kernel that keeps
+    Fused shrink+expand wrapper. Launches a persistent kernel that keeps
     the intermediate (BLOCK_M x rank) in registers instead of writing
-    to global memory.
+    to global memory. A fixed number of CTAs each process multiple
+    contiguous M-blocks, improving L2 cache locality for lora weights.
     """
     a_ptr_table = _get_ptr(lora_a_stacked, device)
     b_ptr_table = _get_ptr(lora_b_stacked, device)
@@ -1081,9 +1291,13 @@ def _fused_moe_lora_shrink_expand_fused(
 
     use_gdc = supports_pdl(qcurr_hidden_states.device)
 
-    grid = (triton.cdiv(EM, block_size_m), num_slices)
+    num_pid_m = triton.cdiv(EM, block_size_m)
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    num_ctas = min(num_sms, num_pid_m) if num_pid_m > 0 else 1
 
-    _fused_moe_lora_fused_se_kernel[grid](
+    grid = (num_ctas, num_slices)
+
+    _fused_moe_lora_persistent_se_kernel[grid](
         qcurr_hidden_states,
         a_ptr_table,
         b_ptr_table,
