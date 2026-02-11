@@ -66,9 +66,7 @@ class CudaGraphManager:
         return len(self.cudagraph_sizes) > 0
 
     def get_cudagraph_size(
-        self,
-        num_tokens: int,
-        uniform_decode: bool = False,
+        self, num_tokens: int, uniform_decode: bool = False
     ) -> int | None:
         if uniform_decode and self.uniform_decode_cudagraph_sizes:
             return self.uniform_decode_cudagraph_sizes.get(num_tokens)
@@ -206,10 +204,7 @@ class CudaGraphManager:
         has_lora: bool = False,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
-        batch_descriptor = BatchDescriptor(
-            num_tokens=num_tokens,
-            has_lora=has_lora,
-        )
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens, has_lora=has_lora)
 
         # Capture run - CUDAGraphWrapper inside torch.compile will auto capture.
         with set_forward_context(
@@ -278,19 +273,13 @@ class CudaGraphManager:
             )
 
     def get_cudagraph_runtime_mode(
-        self,
-        num_reqs: int,
-        num_tokens: int,
-        max_query_len: int,
+        self, num_reqs: int, num_tokens: int, max_query_len: int
     ) -> tuple[CUDAGraphMode, int | None]:
         is_uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             num_tokens == max_query_len * num_reqs
         )
 
-        cudagraph_size = self.get_cudagraph_size(
-            num_tokens,
-            uniform_decode=is_uniform_decode,
-        )
+        cudagraph_size = self.get_cudagraph_size(num_tokens, is_uniform_decode)
         if cudagraph_size is None:
             cudagraph_mode = CUDAGraphMode.NONE
         elif is_uniform_decode:
@@ -357,11 +346,7 @@ def capture_graphs(
 
     with graph_capture(device=device):
         for size in sizes_to_capture:
-            capture_fn(
-                size,
-                capture_cudagraph_mode,
-                **capture_kwargs,
-            )
+            capture_fn(size, capture_cudagraph_mode, **capture_kwargs)
 
 
 def prepare_inputs_to_capture(

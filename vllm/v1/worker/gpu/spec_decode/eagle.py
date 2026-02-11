@@ -105,9 +105,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_descriptor = BatchDescriptor(
-            num_tokens=num_tokens,
-        )
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
