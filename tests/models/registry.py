@@ -753,6 +753,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom model code import ChatTemplateLoadKwargs which was removed "
+            "in Transformers v5."
+        },
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
