@@ -18,8 +18,8 @@ def _calculate_conv_output_length(
     input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
 ) -> torch.Tensor:
     """Calculate Conv1d output length using standard formula."""
-    # Standard formula: floor((input + 2*padding - kernel_size) / stride) + 1
-    return (input_length + 2 * padding - kernel_size) // stride + 1
+    # in sync with `hf_processor._get_audio_token_length`
+    return (input_length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
 
 
 def _as_list_chunk_counts(
