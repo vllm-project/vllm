@@ -897,12 +897,6 @@ class WhisperForConditionalGeneration(
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
-    def get_encoder_outputs(
-        self,
-        input_features: torch.Tensor | list[torch.Tensor] | None,
-    ) -> torch.Tensor | None:
-        return self.model(input_features)
-
     @torch.inference_mode()
     def detect_language(
         self,
