@@ -98,18 +98,6 @@ class InputProcessor:
     ):
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if isinstance(params, SamplingParams):
-            allowed_token_ids = params.allowed_token_ids
-            if allowed_token_ids is not None:
-                if len(allowed_token_ids) == 0:
-                    raise ValueError("allowed_token_ids is not None and empty!")
-
-                if self.tokenizer is not None:
-                    vocab_size = len(self.tokenizer)
-                    if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
-                        raise ValueError(
-                            "allowed_token_ids contains out-of-vocab token id!"
-                        )
-
             params.verify(
                 self.model_config,
                 self.speculative_config,

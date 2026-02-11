@@ -603,10 +603,24 @@ class SamplingParams(
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
+        self._validate_allowed_token_ids(tokenizer)
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_structured_outputs(tokenizer, structured_outputs_config)
+
+    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+        allowed_token_ids = self.allowed_token_ids
+        if allowed_token_ids is not None:
+            if len(allowed_token_ids) == 0:
+                raise ValueError("allowed_token_ids is not None and empty!")
+
+            if tokenizer is not None:
+                vocab_size = len(tokenizer)
+                if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
+                    raise ValueError(
+                        "allowed_token_ids contains out-of-vocab token id!"
+                    )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
