@@ -388,6 +388,8 @@ class MatcherQuantFP8(MatcherCustomOp):
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
                 scale_ue8m0=self.is_e8m0,
+                dummy_is_scale_transposed=self.has_col_major_scales,
+                dummy_is_tma_aligned=self.is_tma_aligned,
             )
             return result, scale
 
