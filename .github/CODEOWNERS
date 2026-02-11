@@ -20,8 +20,21 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
 /vllm/config/cache.py @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
-# API and Input/Output Processing
-/vllm/entrypoints @aarnphm @chaunceyjiang
+# API layer
+/vllm/entrypoints/anthropic @mgoin @DarkLight1337
+/vllm/entrypoints/cli @mgoin @hmellor @DarkLight1337
+/vllm/entrypoints/mcp @heheda12345
+/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/realtime @njhill
+/vllm/entrypoints/openai/speech_to_text @NickLucche
+/vllm/entrypoints/pooling @noooop
+/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve @njhill
+/vllm/entrypoints/*.py @njhill
+/vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/llm.py @DarkLight1337
+
+# Input/Output Processing
 /vllm/sampling_params.py @njhill
 /vllm/pooling_params.py @noooop
 /vllm/tokenizers @njhill @DarkLight1337
@@ -157,7 +170,6 @@ mkdocs.yaml @hmellor
 /examples/pooling @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
-/vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/model_executor/layers/pooler @noooop
 
