@@ -1621,6 +1621,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         hidden_dim=k,
         intermediate_size_per_partition=n,
         num_local_experts=e,
+        num_logical_experts=e,
         activation="silu",
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
