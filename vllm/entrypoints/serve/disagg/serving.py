@@ -99,8 +99,6 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
-        # completed
         engine_prompts = await self._preprocess_completion(
             request,
             prompt_input=request.token_ids,
@@ -132,14 +130,24 @@ class ServingTokens(OpenAIServing):
             tok_params = request.build_tok_params(self.model_config)
             tokenization_kwargs = tok_params.get_encode_kwargs()
 
-            result_generator = self.engine_client.generate(
+            engine_request = self.input_processor.process_inputs(
+                request_id,
                 engine_prompt,
                 sampling_params,
-                request_id,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=request.priority,
+            )
+
+            result_generator = self.engine_client.generate(
+                engine_request,
+                sampling_params,
+                request_id,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=request.priority,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
         except ValueError as e:

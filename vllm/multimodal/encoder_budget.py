@@ -3,10 +3,13 @@
 from collections.abc import Mapping
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
+
+logger = init_logger(__name__)
 
 
 def get_mm_max_toks_per_item(
@@ -59,11 +62,27 @@ class MultiModalBudget:
             processor = mm_registry.create_processor(model_config, cache=cache)
 
             self.cache = cache
+            self.processor = processor
+            mm_config = model_config.get_multimodal_config()
+            enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
+
+            supported_mm_limits = processor.info.supported_mm_limits
             self.mm_limits = mm_limits = processor.info.allowed_mm_limits
 
-            active_modalities = {
-                modality for modality, limit in mm_limits.items() if limit > 0
+            # Modalities that pass through the MM encoder tower
+            tower_modalities = {
+                modality
+                for modality in supported_mm_limits
+                if mm_limits.get(modality, 0) > 0
             }
+            # Modalities that bypass the tower (pre-computed embeddings only)
+            embed_only_modalities = {
+                modality
+                for modality in supported_mm_limits
+                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
+            }
+
+            active_modalities = tower_modalities | embed_only_modalities
 
             all_mm_max_toks_per_item = get_mm_max_toks_per_item(
                 model_config,
@@ -72,19 +91,32 @@ class MultiModalBudget:
                 mm_counts=dict.fromkeys(active_modalities, 1),
             )
 
+        if embed_only_modalities:
+            logger.info_once(
+                "enable_mm_embeds is True; modalities handled as embedding-only: %s",
+                tuple(embed_only_modalities),
+            )
+
         # Some models (e.g., Qwen3Omni with use_audio_in_video=True) share
         # placeholders between modalities, so not all active modalities will
         # have their own entry in the returned dict. We filter to only include
         # modalities that have independent placeholder tokens.
-        mm_max_toks_per_item = {
+        active_mm_max_toks_per_item = {
             modality: all_mm_max_toks_per_item[modality]
             for modality in active_modalities
             if modality in all_mm_max_toks_per_item
         }
+        tower_mm_max_toks_per_item = {
+            modality: active_mm_max_toks_per_item[modality]
+            for modality in tower_modalities
+            if modality in active_mm_max_toks_per_item
+        }
 
+        # Encoder budget is computed from all active modalities (including
+        # embedding-only ones that need encoder cache space).
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
             scheduler_config,
-            mm_max_toks_per_item,
+            active_mm_max_toks_per_item,
         )
 
         self.encoder_compute_budget = encoder_compute_budget
@@ -93,13 +125,15 @@ class MultiModalBudget:
         mm_max_items_per_prompt = dict[str, int]()
         mm_max_items_per_batch = dict[str, int]()
 
-        for modality, max_toks_per_item in mm_max_toks_per_item.items():
+        # Per-prompt/per-batch limits are only relevant for tower modalities
+        # (embedding-only modalities don't go through the encoder tower).
+        for modality, max_toks_per_item in tower_mm_max_toks_per_item.items():
             (
                 mm_max_items_per_prompt[modality],
                 mm_max_items_per_batch[modality],
             ) = self._get_max_items(modality, max_toks_per_item)
 
-        self.mm_max_toks_per_item = mm_max_toks_per_item
+        self.mm_max_toks_per_item = tower_mm_max_toks_per_item
         self.mm_max_items_per_prompt: Mapping[str, int] = mm_max_items_per_prompt
         self.mm_max_items_per_batch: Mapping[str, int] = mm_max_items_per_batch
 
