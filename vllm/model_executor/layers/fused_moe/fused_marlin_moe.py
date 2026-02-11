@@ -561,7 +561,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
