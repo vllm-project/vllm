@@ -273,3 +273,33 @@ async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
     out_text = out["text"]
     out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) < 450  # ~Whisper max output len
+
+
+@pytest.mark.asyncio
+async def test_language_auto_detect_english(whisper_client, mary_had_lamb):
+    """Auto-detect language as English when no language param is provided."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.language == "en"
+    assert "Mary had a little lamb" in transcription.text
+
+
+@pytest.mark.asyncio
+async def test_language_auto_detect_italian(whisper_client, foscolo):
+    """Auto-detect language as Italian for the Foscolo poem audio."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=foscolo,
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.language == "it"
+    # Verify the text is actually Italian (from "A Zacinto" by Foscolo)
+    text_lower = transcription.text.lower()
+    assert any(word in text_lower for word in ["zacinto", "sacre"]), (
+        f"Expected Italian text but got: {transcription.text}"
+    )
