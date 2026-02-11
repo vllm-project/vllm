@@ -189,7 +189,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
-        return [rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()]
+        return [torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default]
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.paged_attn import PagedAttention
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -511,6 +515,116 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
         return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)
 
 
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    layer_name: str = "",
+) -> torch.Tensor:
+    """
+    This impl wraps the AITER call as well as fetching the KV cache and
+    other attention metadata from the forward context. It also returns
+    a dummy tensor, similar to `Attention.unified_kv_cache_update`,
+    that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
+    forward_context = get_forward_context()
+    attn_layer: Attention = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+
+        if attn_layer.backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(0)
+        elif attn_layer.backend == AttentionBackendEnum.TRITON_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(1)
+        elif attn_layer.backend == AttentionBackendEnum.ROCM_ATTN:
+            flash_layout = False
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, attn_layer.num_kv_heads, attn_layer.head_size
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backend for RoPE+KVCache fusion: {attn_layer.backend}"
+            )
+
+        is_fp8_kv_cache = attn_layer.impl.kv_cache_dtype.startswith("fp8")  # type: ignore[attr-defined]
+        if is_fp8_kv_cache:
+            key_cache_og_dtype = key_cache.dtype
+            value_cache_og_dtype = value_cache.dtype
+            key_cache = key_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
+            value_cache = value_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+
+        query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
+            cos,
+            sin,
+            attn_layer._k_scale,
+            attn_layer._v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=is_fp8_kv_cache,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
+        )
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(key_cache_og_dtype)
+            value_cache = value_cache.view(value_cache_og_dtype)
+    # TODO (Rohan138): do I need an else here? To do RoPE during the dummy forward
+    # when the slot_mappings haven't been initialized yet?
+    # I assume not, because this will return the original qkv anyway,
+    # and this is all inside a custom op so Inductor shouldn't
+    # know what we're doing to the tensors inside the custom op
+    # especially since the RoPE would be inplace as well
+
+    dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+    return dummy
+
+
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    layer_name: str = "",
+) -> torch.Tensor:
+    dummy = torch.empty(0, device=query.device, dtype=query.dtype)
+    return dummy
+
+
+direct_register_custom_op(
+    op_name="rocm_aiter_triton_qk_rope_reshape_and_cache",
+    op_func=_rocm_aiter_triton_qk_rope_reshape_and_cache_impl,
+    mutates_args=["query", "key"],
+    fake_impl=_rocm_aiter_triton_qk_rope_reshape_and_cache_fake,
+)
+
+
 class RopeReshapeKVCachePattern:
     """
     This pattern matches the following unfused sequence:
@@ -524,7 +638,7 @@ class RopeReshapeKVCachePattern:
       )
     """
 
-    FUSED_OP = rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()
+    FUSED_OP = torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default
 
     def __init__(
         self,
