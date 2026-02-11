@@ -1203,6 +1203,27 @@ class SupportsTranscription(Protocol):
         return text
 
 
+@runtime_checkable
+class SupportsExplicitLanguageDetection(Protocol):
+    """Optional capability for transcription models that require an explicit
+    language detection step (e.g. Whisper needs a separate forward pass to
+    predict the language token)."""
+
+    @classmethod
+    def get_language_detection_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+    ) -> PromptType: ...
+
+    @classmethod
+    def parse_language_detection_output(
+        cls,
+        token_ids: list[int],
+        tokenizer: object,
+    ) -> str | None: ...
+
+
 @overload
 def supports_transcription(
     model: type[object],

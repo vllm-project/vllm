@@ -64,7 +64,12 @@ from vllm.v1.attention.backend import (
     AttentionType,
 )
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsExplicitLanguageDetection,
+    SupportsMultiModal,
+    SupportsTranscription,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -784,7 +789,10 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
     dummy_inputs=WhisperDummyInputsBuilder,
 )
 class WhisperForConditionalGeneration(
-    nn.Module, SupportsTranscription, SupportsMultiModal
+    nn.Module,
+    SupportsTranscription,
+    SupportsMultiModal,
+    SupportsExplicitLanguageDetection,
 ):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [

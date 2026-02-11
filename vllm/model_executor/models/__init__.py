@@ -3,6 +3,7 @@
 
 from .interfaces import (
     HasInnerState,
+    SupportsExplicitLanguageDetection,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -40,5 +41,6 @@ __all__ = [
     "SupportsPP",
     "supports_pp",
     "SupportsTranscription",
+    "SupportsExplicitLanguageDetection",
     "supports_transcription",
 ]
