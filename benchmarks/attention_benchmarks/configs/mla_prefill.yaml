@@ -36,27 +36,51 @@ batch_specs:
   - "q8k"
 
   # Batched prefill
+  - "2q512"
   - "2q1k"
+  - "2q2k"
+  - "2q4k"
+  - "2q8k"
+  - "4q512"
   - "4q1k"
+  - "4q2k"
+  - "4q4k"
+  - "4q8k"
   - "8q512"
+  - "8q1k"
+  - "8q2k"
+  - "8q4k"
+  - "8q8k"
 
   # Chunked prefill / extend (q_len < kv_len)
   - "q128s1k"
   - "q256s2k"
   - "q512s4k"
   - "q1ks4k"
+  - "2q128s1k"
+  - "2q256s2k"
+  - "2q512s4k"
+  - "2q1ks4k"
+  - "4q128s1k"
+  - "4q256s2k"
+  - "4q512s4k"
+  - "4q1ks4k"
+  - "8q128s1k"
+  - "8q256s2k"
+  - "8q512s4k"
+  - "8q1ks4k"
 
 decode_backends:
   - cutlass_mla
 
 prefill_backends:
   - fa2
-  - fa3
+  # - fa3
   - fa4
   - flashinfer
   - cudnn
   - trtllm
 
 device: "cuda:0"
-repeats: 5
-warmup_iters: 3
+repeats: 20
+warmup_iters: 5
