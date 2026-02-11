@@ -760,7 +760,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
   tensorizer \
   'gpt-oss[eval]==0.0.5' \
   'git+https://github.com/TIGER-AI-Lab/Mantis.git' \
-  --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5' \
+  --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0' \
   --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2' \
   # KV connector dependencies
   -r requirements/kv_connectors.txt \
