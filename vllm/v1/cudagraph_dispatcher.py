@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
 from collections.abc import Set as AbstractSet
+from dataclasses import replace
 from itertools import product
 
 from vllm.config import CUDAGraphMode, VllmConfig
