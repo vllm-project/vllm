@@ -168,10 +168,11 @@ class CPUWorker(Worker):
             assert len(logical_cpu_list) >= world_size_across_dp
             logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
             sim_cpu_num_per_node = len(logical_cpu_list) // world_size_across_dp
+            assert self.parallel_config.data_parallel_rank_local is not None
             start_idx = (
                 self.local_rank
                 + self.parallel_config.world_size
-                * self.parallel_config.data_parallel_rank_local  # type: ignore
+                * self.parallel_config.data_parallel_rank_local
             ) * sim_cpu_num_per_node
             logical_cpu_list = logical_cpu_list[
                 start_idx : (start_idx + sim_cpu_num_per_node)
