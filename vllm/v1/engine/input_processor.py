@@ -79,7 +79,7 @@ class InputProcessor:
 
         self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
         self.mm_encoder_cache_size = 0
-        self.mm_max_items_per_prompt = dict[str, int]()
+        self.mm_max_items_per_prompt: Mapping[str, int] = {}
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
