@@ -119,12 +119,10 @@ class SHMConnector(ECConnectorBase):
         vllm_local_rank = get_world_group().rank
         if transfer_config.ec_role == "ec_producer":
             self.rpc_rank = engine_id * producer_single_size + vllm_local_rank
-            self.is_producer_node = True
         else:
             self.rpc_rank = (
                 producer_size + engine_id * consumer_single_size + vllm_local_rank
             )
-            self.is_producer_node = False
         self.rpc_name = f"worker_{self.rpc_rank}"
         master_port = str(self.listen_ports[0])
 
