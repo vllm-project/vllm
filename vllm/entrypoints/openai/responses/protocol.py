@@ -338,7 +338,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 and response_format.schema_ is not None
             ):
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_  # type: ignore[call-arg]
+                    json=response_format.schema_
                 )
 
         stop = self.stop if self.stop else []
