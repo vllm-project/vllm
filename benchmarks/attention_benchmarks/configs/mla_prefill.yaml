@@ -53,29 +53,57 @@ batch_specs:
   - "8q8k"
 
   # Chunked prefill / extend (q_len < kv_len)
+  # Short context (1k-8k)
   - "q128s1k"
   - "q256s2k"
   - "q512s4k"
   - "q1ks4k"
+  - "q2ks8k"
   - "2q128s1k"
   - "2q256s2k"
   - "2q512s4k"
   - "2q1ks4k"
+  - "2q2ks8k"
   - "4q128s1k"
   - "4q256s2k"
   - "4q512s4k"
   - "4q1ks4k"
+  - "4q2ks8k"
   - "8q128s1k"
   - "8q256s2k"
   - "8q512s4k"
   - "8q1ks4k"
+
+  # Medium context (16k)
+  - "q128s16k"
+  - "q512s16k"
+  - "q1ks16k"
+  - "q2ks16k"
+  - "2q128s16k"
+  - "2q512s16k"
+  - "2q1ks16k"
+  - "2q2ks16k"
+  - "4q128s16k"
+  - "4q512s16k"
+  - "4q1ks16k"
+  - "4q2ks16k"
+
+  # Long context (64k)
+  - "q128s64k"
+  - "q512s64k"
+  - "q1ks64k"
+  - "q2ks64k"
+  - "2q128s64k"
+  - "2q512s64k"
+  - "2q1ks64k"
+  - "2q2ks64k"
 
 decode_backends:
   - cutlass_mla
 
 prefill_backends:
   - fa2
-  # - fa3
+  - fa3
   - fa4
   - flashinfer
   - cudnn
