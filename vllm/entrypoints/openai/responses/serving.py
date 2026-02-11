@@ -298,7 +298,7 @@ class OpenAIServingResponses(OpenAIServing):
         prompt_len = self._extract_prompt_len(engine_prompt)
         max_model_len = self.model_config.max_model_len
 
-        if prompt_len > max_model_len:
+        if prompt_len >= max_model_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
                 f"exceeds the max_model_len {max_model_len}. "
