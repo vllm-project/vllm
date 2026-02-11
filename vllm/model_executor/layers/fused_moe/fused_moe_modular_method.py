@@ -46,6 +46,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         shared_experts: torch.nn.Module | None,
+        inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
@@ -54,16 +55,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
                 moe_parallel_config=moe_layer.moe_parallel_config,
+                inplace=inplace,
             ),
         )
 
     @property
     def supports_eplb(self) -> bool:
         return self.old_quant_method.supports_eplb
-
-    @property
-    def allow_inplace(self) -> bool:
-        return self.old_quant_method.allow_inplace
 
     @property
     def method_name(self) -> str:
@@ -91,6 +89,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_mk is not None
         return self.moe_mk(
@@ -99,9 +98,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=self.allow_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
+            shared_experts_input=shared_experts_input,
         )

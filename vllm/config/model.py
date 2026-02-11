@@ -105,8 +105,8 @@ class ModelConfig:
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object 
-    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    """Original model weights path. Used when the model is pulled from object
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -247,8 +247,8 @@ class ModelConfig:
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
     """The token to use as HTTP bearer authorization for remote files . If
-    `True`, will use the token generated when running `huggingface-cli login`
-    (stored in `~/.huggingface`)."""
+    `True`, will use the token generated when running `hf auth login`
+    (stored in `~/.cache/huggingface/token`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
@@ -297,6 +297,7 @@ class ModelConfig:
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
+    language_model_only: InitVar[bool] = False
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
@@ -324,7 +325,6 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
-            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
@@ -412,6 +412,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
+        language_model_only: bool,
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
@@ -577,6 +578,7 @@ class ModelConfig:
                 mm_encoder_tp_mode = "weights"
 
             mm_config_kwargs = dict(
+                language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
                 enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
@@ -879,6 +881,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "modelopt_mxfp8",
                 "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1116,6 +1119,9 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
             "gemma3",
             "molmo2",
@@ -1218,8 +1224,8 @@ class ModelConfig:
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
-            # Hybrid model Qwen3Next
-            layer_types_value = getattr(self.hf_config, "layer_types", None)
+            # Hybrid model Qwen3Next Qwen3.5 Series
+            layer_types_value = getattr(self.hf_text_config, "layer_types", None)
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
@@ -1413,6 +1419,11 @@ class ModelConfig:
         )
 
     @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
+
+    @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
 
@@ -1509,6 +1520,10 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
+        # Check for embedding_size set by model config (e.g., Voyage models)
+        override = getattr(self.hf_config, "embedding_size", None)
+        if override is not None:
+            return override
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]

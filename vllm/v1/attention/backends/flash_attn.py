@@ -308,15 +308,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            # Times 4 due to:
-            #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
-            # For some tests max_cudagraph_size > max_num_seqs,
-            #   so we need to use the larger one.
             self.scheduler_metadata = torch.zeros(
-                max(self.max_cudagraph_size or 0, max_num_seqs) * 4 + 1,
+                vllm_config.scheduler_config.max_num_seqs + 1,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -774,16 +769,6 @@ class FlashAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
-            return
-
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is not None
-            or key is None
-            or value is None
-        ):
             return
 
         key_cache, value_cache = kv_cache.unbind(0)

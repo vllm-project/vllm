@@ -9,10 +9,11 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
+from .inputs import DictPrompt
+from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 from .protocol import BaseRenderer
 
@@ -45,7 +46,7 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.config
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -54,7 +55,7 @@ class TerratorchRenderer(BaseRenderer):
             content_format="string",
         )
 
-        prompt = self.render_completion([1])  # Dummy token IDs
+        prompt = parse_dec_only_prompt([1])  # Dummy token IDs
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -66,7 +67,7 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.config
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -75,7 +76,7 @@ class TerratorchRenderer(BaseRenderer):
             content_format="string",
         )
 
-        prompt = self.render_completion([1])  # Dummy token IDs
+        prompt = parse_dec_only_prompt([1])  # Dummy token IDs
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:

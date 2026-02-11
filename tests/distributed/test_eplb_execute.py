@@ -295,12 +295,11 @@ def _test_async_transfer_layer_without_mtp_worker(
     for layer_idx in range(num_layers):
         is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
-                old_global_expert_indices=old_indices_cpu,
-                new_global_expert_indices=new_indices_cpu,
-                expert_weights=expert_weights,
+                old_layer_indices=old_indices_cpu[layer_idx],
+                new_layer_indices=new_indices_cpu[layer_idx],
+                expert_weights=expert_weights[layer_idx],
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
-                layer=layer_idx,
                 cuda_stream=cuda_stream,
             )
         )

@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -41,7 +38,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -1511,7 +1507,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace and not disable_inplace():
+    if inplace:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
@@ -1533,6 +1529,8 @@ def fused_experts(
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    assert not inplace or not disable_inplace()
 
     return dispatch_fused_experts_func(inplace)(
         hidden_states=hidden_states,
@@ -1584,6 +1582,11 @@ def _get_config_quant_dtype(
         return "mxfp6_e3m2"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
         return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
+        return torch.bfloat16
+    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
+        return torch.float8_e4m3fn
+
     return None
 
 
@@ -1593,7 +1596,7 @@ def fused_experts_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
+    inplace: bool,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
@@ -1618,17 +1621,10 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {
-            "w_mxfp4_a_mxfp4",
-            "w_mxfp4_a_mxfp6_e3m2",
-            "w_mxfp4_a_mxfp6_e2m3",
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {
-            "w_mxfp6_e3m2_a_mxfp6_e3m2",
-            "w_mxfp6_e2m3_a_mxfp6_e2m3",
-        }:
+        elif ocp_mx_scheme.startswith("w_mxfp6"):
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
                 "hidden size mismatch"
             )
@@ -1712,26 +1708,19 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    if inplace and not disable_inplace():
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
         # TODO: On platforms for which `current_platform.supports_mx()` is True
         # and for which we have a native OCP mx fused MOE kernel,
         # this dequantization step should not be done.
-        if ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None
             w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
@@ -1740,7 +1729,7 @@ def fused_experts_impl(
                 w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
             )
@@ -1783,6 +1772,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
@@ -1850,6 +1840,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         if expert_map is not None:
@@ -2291,15 +2282,3 @@ class TritonWNA16Experts(TritonExperts):
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
-
-
-def modular_triton_fused_moe(
-    moe_config: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-    shared_experts: torch.nn.Module | None = None,
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(moe_config, quant_config),
-        shared_experts,
-    )

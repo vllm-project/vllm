@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
@@ -170,7 +170,9 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
+        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():
@@ -591,7 +593,7 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
-    fast_moe_cold_start = True
+    fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
 
     This is a bit of a hack that assumes that:
@@ -602,8 +604,14 @@ class CompilationConfig:
     When the above two conditions hold, this option greatly decreases cold start
     time for MOE models.
 
-    If the above two conditions don't hold, then this option will lead to silent
-    incorrectness. The only condition in which this doesn't hold is speculative
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on usually but off for speculative decoding
+
+    If conditions 1&2 don't hold then this option will lead to silent
+    incorrectness.
+    The only condition in which this doesn't hold is speculative
     decoding, where there is a draft model that may have MOEs in them.
 
     NB: We're working on a longer-term solution that doesn't need these assumptions.

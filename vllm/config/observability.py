@@ -122,9 +122,9 @@ class ObservabilityConfig:
     @classmethod
     def _validate_otlp_traces_endpoint(cls, value: str | None) -> str | None:
         if value is not None:
-            from vllm.tracing import is_otel_available, otel_import_error_traceback
+            from vllm.tracing import is_tracing_available, otel_import_error_traceback
 
-            if not is_otel_available():
+            if not is_tracing_available():
                 raise ValueError(
                     "OpenTelemetry is not available. Unable to configure "
                     "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "

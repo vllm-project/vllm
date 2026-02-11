@@ -275,6 +275,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "zai-org/GLM-4.7-Flash",
         min_transformers_version="5.0.0",
     ),
+    "GlmMoeDsaForCausalLM": _HfExamplesInfo(
+        "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -481,16 +484,21 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
     ),
-    "Step1ForCausalLM": _HfExamplesInfo(
-        "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
-    ),
-    "Step3p5ForCausalLM": _HfExamplesInfo(
-        "stepfun-ai/step-3.5-flash", is_available_online=False
-    ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
+    "Step1ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
+    ),
+    "Step3p5ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-3.5-Flash",
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={
+            "num_hidden_layers": 4,
+        },
+    ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
@@ -520,6 +528,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "HF_ColBERT": _HfExamplesInfo("answerdotai/answerai-colbert-small-v1"),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -564,6 +573,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
+    "VoyageQwen3BidirectionalEmbedModel": _HfExamplesInfo(
+        "voyageai/voyage-4-nano", trust_remote_code=True
+    ),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
@@ -758,8 +770,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
-        min_transformers_version="5.0.0",
-        is_available_online=False,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
@@ -960,6 +970,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         min_transformers_version="4.57",
     ),
+    "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        speculative_model="Qwen/Qwen3.5-9B-Instruct",
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeMTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
+        min_transformers_version="5.1.0",
+    ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
@@ -1127,8 +1157,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
-        trust_remote_code=True,
         speculative_model="stepfun-ai/Step-3.5-Flash",
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={
+            "num_hidden_layers": 4,
+        },
         is_available_online=False,
     ),
 }

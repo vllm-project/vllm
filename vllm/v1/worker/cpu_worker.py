@@ -54,6 +54,7 @@ class CPUWorker(Worker):
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        # Under numa binding some cores reserved for kv transfer in nixl_connector.py
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
@@ -136,22 +137,38 @@ class CPUWorker(Worker):
             the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
             returned.
         """
+        # simulate multiple numa nodes, for testing
+        sim_multi_numa_nodes = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
 
         allowed_numa_nodes, logical_cpu_list = (
             CpuPlatform.get_allowed_cpu_core_node_list()
         )
-        assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
+        assert (
+            len(allowed_numa_nodes) >= self.parallel_config.world_size
+            or sim_multi_numa_nodes
+        ), (
             f"Not enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             "Please try to bind threads manually."
         )
 
-        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
-        selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.numa_node == selected_numa_node
-        ]
+        if not sim_multi_numa_nodes:
+            # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
+            selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
+            logical_cpu_list = [
+                x for x in logical_cpu_list if x.numa_node == selected_numa_node
+            ]
+        else:
+            assert len(logical_cpu_list) >= self.parallel_config.world_size
+            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
+            sim_cpu_num_per_node = (
+                len(logical_cpu_list) // self.parallel_config.world_size
+            )
+            start_idx = self.local_rank * sim_cpu_num_per_node
+            logical_cpu_list = logical_cpu_list[
+                start_idx : (start_idx + sim_cpu_num_per_node)
+            ]
 
         # Select CPUs from each physical core via cpu_selector
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}

@@ -101,6 +101,7 @@ class CompilerInterface:
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         """
@@ -232,7 +233,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+        supports_aot = is_torch_equal_or_newer("2.10.0")
 
         if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             logger.error(
@@ -256,7 +257,20 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
-        compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+        # Inductor's pre-grad passes don't do anything for vLLM.
+        # The pre-grad passes get run even on cache-hit and negatively impact
+        # vllm cold compile times by O(1s)
+        # Can remove this after the following issue gets fixed
+        # https://github.com/pytorch/pytorch/issues/174502
+        if envs.VLLM_ENABLE_PREGRAD_PASSES:
+            ctx: Any = contextlib.nullcontext()
+        else:
+            ctx = patch(
+                "torch._inductor.compile_fx._recursive_pre_grad_passes",
+                lambda gm, _: gm,
+            )
+        with ctx:
+            compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
             from torch._inductor.standalone_compile import AOTCompiledArtifact
@@ -301,6 +315,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
@@ -525,6 +540,7 @@ class InductorAdaptor(CompilerInterface):
         handle: Any,
         graph: fx.GraphModule,
         example_inputs: list[Any],
+        graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)

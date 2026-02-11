@@ -764,6 +764,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return fused_marlin_moe(
             x,
@@ -785,4 +786,5 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             w2_zeros=layer.w2_qzeros,
             workspace=layer.workspace,
             input_dtype=self.input_dtype,
+            inplace=not self.moe.disable_inplace,
         )
