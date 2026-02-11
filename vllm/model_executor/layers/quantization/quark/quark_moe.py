@@ -907,7 +907,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # secondly, process mxfp weights
         if self.emulate:
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
             return
 
         from aiter.utility.fp4_utils import e8m0_shuffle
