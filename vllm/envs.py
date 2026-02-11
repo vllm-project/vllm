@@ -232,8 +232,6 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
-    VLLM_USE_UCC_ALLGATHER: bool = False
-    VLLM_UCC_NET_DEVICES: str | None = None
     VLLM_USE_ASYNC_DP_SYNC: bool = False
 
 
@@ -1550,17 +1548,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
-    # Enable async UCC allgather for DP rank synchronization.
-    # This allows the CPU-side allgather to overlap with GPU forward pass.
-    "VLLM_USE_UCC_ALLGATHER": lambda: bool(
-        int(os.getenv("VLLM_USE_UCC_ALLGATHER", "0"))
-    ),
-    # UCX network devices for UCC (e.g., 'mlx5_0:1'). Avoids conflicts with
-    # NIXL's UCX by using a separate device.
-    "VLLM_UCC_NET_DEVICES": lambda: os.getenv("VLLM_UCC_NET_DEVICES", None),
     # Enable async DP sync with overlap in execute_model.
-    # When disabled, uses the original synchronous code path.
-    # Set to 1 along with VLLM_USE_UCC_ALLGATHER=1 to enable full async overlap.
+    # When enabled, DP rank synchronization runs with async_op=True on Gloo's
+    # background thread, allowing overlap with _prepare_inputs CPU work.
     "VLLM_USE_ASYNC_DP_SYNC": lambda: bool(
         int(os.getenv("VLLM_USE_ASYNC_DP_SYNC", "0"))
     ),
