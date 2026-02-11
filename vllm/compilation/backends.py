@@ -22,11 +22,6 @@ from torch._dispatch.python import enable_python_dispatcher
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -44,8 +39,12 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+from .partition_rules import (
+    inductor_partition_rule_context,
+    should_split,
+)
+from .passes.inductor_pass import InductorPass, pass_context
+from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
@@ -135,6 +134,7 @@ class CompilerManager:
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
+        self.loaded_artifacts: dict[str, Any] = {}
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -264,11 +264,12 @@ class CompilerManager:
                 now = time.time()
                 elapsed = now - compilation_start_time
                 compilation_config.compilation_time += elapsed
-                logger.info(
+                logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
+                    scope="local",
                 )
             return compiled_graph
 
@@ -282,13 +283,61 @@ class CompilerManager:
             maybe_key += f"{compile_range.start}_{compile_range.end}"
             maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
-            compiled_graph, handle = self.compiler.compile(
-                graph,
-                example_inputs,
-                additional_inductor_config,
-                compile_range,
-                maybe_key,
-            )
+            # There is a compilation time optimization here.
+            #
+            # If the (input metdata, graph, compiler config) are the same, then
+            # we want to avoid compiling the same artifact again. If we didn't
+            # do this optimization, the backend compilation (InductorAdaptor or
+            # InductorStandaloneAdaptor)
+            # is able to cache hit and produce an artifact faster if it was
+            # already created, but it is still a duplicate artifact that
+            # requires unnecessary things e.g. disk IO.
+            #
+            # The optimization is: If the backend compilation cache hits,
+            # then do an early return from the backend compilation and look up
+            # which of the previous in-memory artifacts we created to reuse.
+            #
+            # We implemented this by monkey-patching torch (torch does not
+            # easily expose the cache_key function), but in the future torch
+            # should expose the cache_key function that we can just call
+            # directly before invoking backend compilation.
+            cache_key = None
+            orig = torch._functorch._aot_autograd.autograd_cache.autograd_cache_key
+
+            def autograd_cache_key(*args, **kwargs):
+                result = orig(*args, **kwargs)
+                if result is None:
+                    return None
+                nonlocal cache_key
+                cache_key = result[0]
+                if cache_key in self.loaded_artifacts:
+                    raise StopCompiling()
+                return result
+
+            from unittest.mock import patch
+
+            with (
+                # Graphs that are isometric (different node names but same
+                # structure) should be treated as the same.
+                torch._functorch.config.patch(autograd_cache_normalize_inputs=True),
+                patch(
+                    "torch._functorch._aot_autograd.autograd_cache.autograd_cache_key",
+                    autograd_cache_key,
+                ),
+            ):
+                try:
+                    compiled_graph, handle = self.compiler.compile(
+                        graph,
+                        example_inputs,
+                        additional_inductor_config,
+                        compile_range,
+                        maybe_key,
+                    )
+                except StopCompiling:
+                    assert cache_key is not None
+                    return self.loaded_artifacts[cache_key]
+            if cache_key is not None and compiled_graph is not None:
+                self.loaded_artifacts[cache_key] = compiled_graph
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -324,6 +373,10 @@ class CompilerManager:
             )
 
         return compiled_graph
+
+
+class StopCompiling(BaseException):
+    pass
 
 
 @dataclasses.dataclass
@@ -517,7 +570,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     ) -> Any:
         assert isinstance(target, str)
 
-        output = super().call_module(target, args, kwargs)
+        gm = getattr(self.module, target)
+        outputs = gm.graph.output_node().args[0]
+        output = fx.map_arg(outputs, lambda node: node.meta["example_value"])
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)

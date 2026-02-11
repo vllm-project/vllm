@@ -18,66 +18,6 @@ class SharedFusedMoE(FusedMoE):
     can be interleaved with the fused all2all dispatch communication step.
     """
 
-    def __init__(
-        self,
-        shared_experts: torch.nn.Module | None,
-        gate: torch.nn.Module | None = None,
-        use_overlapped: bool = True,
-        routed_input_transform: torch.nn.Module | None = None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self._shared_experts = shared_experts
-        self._routed_input_transform = routed_input_transform
-
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        backend = self.moe_parallel_config.all2all_backend
-        self.use_overlapped = (
-            use_overlapped
-            and not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_all2allv_kernels
-            )
-            and self._shared_experts is not None
-        )
-
-        self._gate = gate
-
-    @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
-
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
-    def apply_routed_input_transform(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Apply transform for routed experts (e.g., latent projection).
-
-        This is called by FusedMoE.forward_native. The original hidden_states
-        is saved separately so shared experts get [S, hidden_size] while
-        routed experts get the transformed [S, moe_latent_size].
-
-        TODO: For latent MoE bandwidth optimization, fc2_latent_proj could be
-        moved inside SharedFusedMoE to all-reduce on the smaller latent
-        dimension.
-        """
-        if self._routed_input_transform is not None:
-            result = self._routed_input_transform(hidden_states)
-            # ReplicatedLinear returns (output, extra_bias) tuple.
-            # We only need the output tensor; extra_bias is not used here.
-            if isinstance(result, tuple):
-                return result[0]
-            return result
-        return hidden_states
-
     def forward(
         self,
         hidden_states: torch.Tensor,

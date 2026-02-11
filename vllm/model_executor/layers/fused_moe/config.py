@@ -124,6 +124,23 @@ class RoutingMethodType(IntEnum):
     Unspecified = 8.0
 
 
+def get_routing_method_type(
+    scoring_func: str, top_k: int, renormalize: bool
+) -> RoutingMethodType:
+    if scoring_func == "sigmoid":
+        if top_k == 1:
+            return RoutingMethodType.Llama4
+        else:
+            return RoutingMethodType.DeepSeekV3
+    elif scoring_func == "softmax":
+        if renormalize:
+            return RoutingMethodType.Renormalize
+        else:
+            return RoutingMethodType.Default
+    else:
+        return RoutingMethodType.Unspecified
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -369,6 +386,10 @@ class FusedMoEQuantConfig:
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
+    @property
+    def use_mxfp4_w4a8(self) -> bool:
+        return self._a1.dtype == "fp8" and self._w1.dtype == "mxfp4"
+
     def config_name(self, dtype: torch.dtype) -> str | None:
         """
         Return a string used to construct the filename that contains the
@@ -477,6 +498,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "mxfp8",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -484,6 +506,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "int4",
+            "mxfp8",
         }
 
         if weight_dtype is None:
@@ -513,6 +536,8 @@ def fp8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
@@ -530,6 +555,8 @@ def fp8_w8a8_moe_quant_config(
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
         g2_alphas=g2_alphas,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_scale=a1_scale,
         a1_gscale=a1_gscale,
         a2_scale=a2_scale,
@@ -545,6 +572,8 @@ def int8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     """
@@ -556,6 +585,8 @@ def int8_w8a8_moe_quant_config(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
@@ -635,6 +666,26 @@ def mxfp4_mxfp8_moe_quant_config(
     )
 
 
+def mxfp4_w4a8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for fp8 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
+        _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
 def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -672,6 +723,8 @@ def nvfp4_moe_quant_config(
     a2_gscale: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -680,6 +733,8 @@ def nvfp4_moe_quant_config(
         "nvfp4",
         w1_scale=w1_scale,
         w2_scale=w2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_gscale=a1_gscale,
         a2_gscale=a2_gscale,
         g1_alphas=g1_alphas,
@@ -858,11 +913,15 @@ class FusedMoEParallelConfig:
     pcp_rank: int
     dp_rank: int
     ep_rank: int
+    sp_size: int
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
-    is_sequence_parallel: bool  # whether sequence parallelism is used
     enable_eplb: bool  # whether to enable expert load balancing
+
+    @property
+    def is_sequence_parallel(self) -> bool:
+        return self.sp_size > 1
 
     @property
     def use_all2all_kernels(self):
@@ -919,6 +978,7 @@ class FusedMoEParallelConfig:
         tp_size_: int,
         pcp_size_: int,
         dp_size_: int,
+        sp_size_: int,
         vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
         """
@@ -1018,9 +1078,9 @@ class FusedMoEParallelConfig:
                 dp_rank=dp_rank,
                 ep_size=1,
                 ep_rank=0,
+                sp_size=sp_size_,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
-                is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
@@ -1038,9 +1098,9 @@ class FusedMoEParallelConfig:
             dp_rank=dp_rank,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            sp_size=sp_size_,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
-            is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
@@ -1056,10 +1116,10 @@ class FusedMoEParallelConfig:
             dp_rank=0,
             ep_size=1,
             ep_rank=0,
+            sp_size=1,
             use_ep=False,
             all2all_backend="naive",
             enable_eplb=False,
-            is_sequence_parallel=False,
         )
 
 
@@ -1071,6 +1131,7 @@ class FusedMoEConfig:
     hidden_dim: int
     intermediate_size_per_partition: int
     num_local_experts: int
+    num_logical_experts: int
     activation: str
     device: torch.device | str
     routing_method: RoutingMethodType
@@ -1119,6 +1180,14 @@ class FusedMoEConfig:
     @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
+
+    @property
+    def sp_size(self):
+        return self.moe_parallel_config.sp_size
+
+    @property
+    def is_sequence_parallel(self):
+        return self.moe_parallel_config.is_sequence_parallel
 
     @property
     def tp_rank(self):
