@@ -99,6 +99,7 @@ from .interfaces import (
 )
 from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from .qwen3_next import (
+    ChunkGatedDeltaRule,
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextGatedDeltaNet,
@@ -267,6 +268,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -867,8 +870,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
+        mamba_ssm_dtype = vllm_config.model_config.hf_text_config.mamba_ssm_dtype
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype, mamba_ssm_dtype
         )
 
     @classmethod
