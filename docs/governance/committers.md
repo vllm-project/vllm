@@ -154,7 +154,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - FlashAttention: @LucasWilkinson
 - FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon
 - Blackwell Kernels: @mgoin, @yewentao256
-- DeepEP/DeepGEMM/pplx: @mgoin, @yewentao256
+- DeepEP/DeepGEMM: @mgoin, @yewentao256
 
 ### Integrations
 
