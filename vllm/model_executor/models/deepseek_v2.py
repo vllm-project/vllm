@@ -256,6 +256,12 @@ class DeepSeekV2Gate(ReplicatedLinear):
         self._out_dtype: torch.dtype | None = None
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
+        """
+        Set out dtype for the router logits. This is needed after
+        __init__, b/c we need to check if the trtllm kernel is
+        selected before we decide between bf16 and fp32.
+        """
+
         if self._out_dtype is not None:
             raise ValueError("out_dtype has already been set")
         else:
