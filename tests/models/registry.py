@@ -911,7 +911,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nano_vl_dummy", is_available_online=False, trust_remote_code=True
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom model code is not compatible with Transformers v5."
+        },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
