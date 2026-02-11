@@ -116,13 +116,13 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
-from vllm.inputs.parse import get_prompt_len
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -292,10 +292,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = get_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_prompt)
         if self.max_model_len <= prompt_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
@@ -441,8 +441,8 @@ class OpenAIServingResponses(OpenAIServing):
 
                 default_max_tokens = get_max_tokens(
                     self.max_model_len,
-                    request,
-                    engine_prompt,
+                    request.max_output_tokens,
+                    self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
                 )
 
@@ -980,7 +980,9 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
-    def _extract_system_message_from_request(self, request) -> str | None:
+    def _extract_system_message_from_request(
+        self, request: ResponsesRequest
+    ) -> str | None:
         system_msg = None
         if not isinstance(request.input, str):
             for response_msg in request.input:
@@ -988,7 +990,17 @@ class OpenAIServingResponses(OpenAIServing):
                     isinstance(response_msg, dict)
                     and response_msg.get("role") == "system"
                 ):
-                    system_msg = response_msg.get("content")
+                    content = response_msg.get("content")
+                    if isinstance(content, str):
+                        system_msg = content
+                    elif isinstance(content, list):
+                        for param in content:
+                            if (
+                                isinstance(param, dict)
+                                and param.get("type") == "input_text"
+                            ):
+                                system_msg = param.get("text")
+                                break
                     break
         return system_msg
 

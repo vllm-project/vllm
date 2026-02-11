@@ -222,9 +222,13 @@ class SpecDecodeBaseProposer:
                 RocmAttentionMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_enabled() and find_spec(
+            # We check is_enabled() here to avoid importing the backend module during
+            # auto-discovery when VLLM_ROCM_USE_AITER=0, which would trigger aiter
+            # import and JIT compilation warnings. Explicit backend selection via
+            # attention_config still works because the backend module is loaded
+            # directly when selected, not through this auto-discovery path.
+            # Check if backend module exists to allow explicit selection
+            if find_spec(
                 AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
             ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
@@ -1282,6 +1286,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
@@ -1352,6 +1357,8 @@ class SpecDecodeBaseProposer:
                 "Qwen3VLMoeForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+                "Qwen3_5MoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
