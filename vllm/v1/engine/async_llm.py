@@ -709,6 +709,7 @@ class AsyncLLM(EngineClient):
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
+
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
@@ -729,8 +730,8 @@ class AsyncLLM(EngineClient):
         Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. New generation/encoding requests are queued by the
-        engine while paused and flushed on resume.
+        in the engine. New generation/encoding requests will not be scheduled
+        until resume is called.
 
         Args:
             mode: How to handle in-flight requests:

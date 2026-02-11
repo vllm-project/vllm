@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -16,6 +17,20 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
+
+
+class PauseState(enum.IntEnum):
+    """Scheduler pause state.
+
+    - UNPAUSED: Normal operation
+    - PAUSE_NEW: No new requests are scheduled, requests already in
+                 running state are scheduled.
+    - PAUSE_ALL: No requests are scheduled
+    """
+
+    UNPAUSED = 0
+    PAUSED_NEW = 1
+    PAUSED_ALL = 2
 
 
 class SchedulerInterface(ABC):
@@ -120,9 +135,9 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: str | Iterable[str],
+        request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> list[str]:
+    ) -> list[tuple[str, int]]:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
@@ -132,12 +147,12 @@ class SchedulerInterface(ABC):
            de-tokenizing its generated tokens.
 
         Args:
-            request_ids: A single or a list of request IDs.
+            request_ids: A single or a list of request IDs, or None to finish all.
             finished_status: The finished status of the given requests.
 
         Returns:
-            List of request IDs that were actually finished (were in the
-            scheduler and not already finished).
+            Tuple of (req_id, client_index) for requests that were aborted. Will not
+            include any that were already finished.
         """
         raise NotImplementedError
 
@@ -172,16 +187,7 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def get_all_request_ids(self) -> list[str]:
-        """Return all request IDs currently in the scheduler (running or waiting)."""
-        raise NotImplementedError
-
-    def get_request_client_indices(
-        self, request_ids: "Iterable[str]"
-    ) -> "dict[str, int]":
-        """Return request_id -> client_index for requests that exist and are not
-        finished. Used to route abort outputs to the correct client(s).
-        """
+    def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
 
     @abstractmethod
