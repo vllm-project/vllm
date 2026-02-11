@@ -105,18 +105,16 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         response_data = []
         for idx in range(len(model_output)):
             mo = model_output[idx]
-            sparse_embedding = {}
+            sparse_embedding: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
             if len(mo.prompt_token_ids) != len(mo.outputs.data):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
                 mo.prompt_token_ids = mo.prompt_token_ids[1:]
             for token_id, weight in zip(mo.prompt_token_ids, mo.outputs.data):
-                if token_id not in sparse_embedding:
-                    sparse_embedding[token_id] = weight
-                    continue
-                if weight > sparse_embedding[token_id]:
-                    sparse_embedding[token_id] = weight
+                sparse_embedding[token_id] = max(
+                    weight, sparse_embedding.get(token_id, 0.0)
+                )
             response_data.append(
                 SparseEmbeddingResponseData(
                     index=idx, sparse_embedding=sparse_embedding
