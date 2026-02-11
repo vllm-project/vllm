@@ -102,9 +102,6 @@ Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
 # Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
 
 
-AUDIO_CONTEXT = "<so_embedding>"
-
-
 class NanoNemotronVLAudioFeatureInputs(TensorSchema):
     """
     Dimensions:
@@ -1011,10 +1008,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         audio_index = 0
         for idx, part in enumerate(parts):
             if part == AUDIO_CONTEXT:
-                audio = audios[audio_index]
-                audio_len = len(audio)
-                num_tokens = extractor.audio_token_count(audio_len)
-                parts[idx] = AUDIO_CONTEXT * num_tokens
+                audio_repl = self.get_audio_repl(audios[audio_index])
+                parts[idx] = audio_repl.full
                 audio_index += 1
         text = ["".join(parts)]
         audio_inputs = extractor(
@@ -1491,12 +1486,9 @@ class NanoNemotronVLMultiModalProcessor(
                 ),
             ]
 
-        def get_audio_replacement(item_idx: int, extractor: ParakeetExtractor):
+        def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
-            audio_len = audios.get_audio_length(item_idx)
-            num_tokens = extractor.audio_token_count(audio_len)
-            repl_full = AUDIO_CONTEXT * num_tokens
-            return PromptUpdateDetails.select_text(repl_full, AUDIO_CONTEXT)
+            return hf_processor.get_audio_repl(audios.get(item_idx))
 
         if self.info.audio_extractor is not None:
             prompt_repl = [
@@ -1504,9 +1496,7 @@ class NanoNemotronVLMultiModalProcessor(
                 PromptReplacement(
                     modality="audio",
                     target=AUDIO_CONTEXT,
-                    replacement=lambda item_idx: get_audio_replacement(
-                        item_idx, self.info.audio_extractor
-                    ),
+                    replacement=get_audio_replacement,
                 ),
             ]
 
