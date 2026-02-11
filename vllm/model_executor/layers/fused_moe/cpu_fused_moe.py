@@ -206,6 +206,8 @@ class SGLFusedMOE:
 
 
 class CPUFusedMOE:
+    """CPU-based fused MoE implementation."""
+
     def __init__(self, layer: torch.nn.Module) -> None:
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
