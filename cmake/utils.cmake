@@ -52,7 +52,19 @@ endmacro()
 # of CUDA source files. The names of the corresponding "hipified" sources are
 # stored in `OUT_SRCS`.
 #
+# Optional: SEARCH_PROJECT_ROOT - if set, adds --search-project-root flag to
+# hipify.py so that includes can find headers in the project root directory.
+#
 function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+  # Check for optional SEARCH_PROJECT_ROOT argument
+  set(SEARCH_PROJECT_ROOT_FLAG "")
+  if(ARGN)
+    list(FIND ARGN "SEARCH_PROJECT_ROOT" _idx)
+    if(NOT _idx EQUAL -1)
+      set(SEARCH_PROJECT_ROOT_FLAG "--search-project-root")
+    endif()
+  endif()
+
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -76,7 +88,7 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SEARCH_PROJECT_ROOT_FLAG} ${SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on ${NAME} extension source files.")
@@ -479,19 +491,24 @@ endmacro()
 # LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 # USE_SABI <version>         - Use python stable api <version>
+# HIPIFY_SEARCH_PROJECT_ROOT - Add project root to hipify header search paths.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
 function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     ARG
-    "WITH_SOABI"
+    "WITH_SOABI;HIPIFY_SEARCH_PROJECT_ROOT"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
   if (ARG_LANGUAGE STREQUAL "HIP")
-    hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")
+    if (ARG_HIPIFY_SEARCH_PROJECT_ROOT)
+      hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}" SEARCH_PROJECT_ROOT)
+    else()
+      hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")
+    endif()
   endif()
 
   if (ARG_WITH_SOABI)
