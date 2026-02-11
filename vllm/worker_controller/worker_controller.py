@@ -115,7 +115,7 @@ class ResourceAllocator:
 
 
 class WorkerController:
-    def __init__(self) -> None:
+    def __init__(self, start_port: int = 8001) -> None:
         # Modified Executor will create the empty worker processes and return the pipes
         model_config = DummyModelConfig("dummy", enforce_eager=True)
         cache_config = CacheConfig(gpu_memory_utilization=0.85)
@@ -132,7 +132,8 @@ class WorkerController:
         # type: ignore[call-arg]
         self.executor = ProxyExecutor(vllm_config=dummy_vllm_config)
         self.resource_allocator = ResourceAllocator(
-            number_of_gpus=dummy_vllm_config.parallel_config.world_size
+            number_of_gpus=dummy_vllm_config.parallel_config.world_size,
+            start_port=start_port,
         )
         # Set the resource allocator in the executor
         self.executor.resource = self.resource_allocator

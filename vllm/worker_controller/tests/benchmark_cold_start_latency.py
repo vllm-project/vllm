@@ -63,7 +63,7 @@ import vllm.worker_controller.worker_controller_server as wc_server
 from vllm.worker_controller.worker_controller import WorkerController
 from vllm.worker_controller.worker_controller_server import app
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:21000"
 
 # Global reference to server thread
 _server_thread = None
@@ -86,20 +86,20 @@ def start_worker_controller():
     print("Starting Worker Controller...")
 
     # Initialize the WorkerController
-    wc_server.worker_controller = WorkerController()
+    wc_server.worker_controller = WorkerController(start_port=21002)
     print(
         f"WorkerController initialized with {len(wc_server.worker_controller.executor.workers)} workers"
     )
 
     # Create uvicorn config
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+    config = uvicorn.Config(app, host="0.0.0.0", port=21000, log_level="warning")
     _server = uvicorn.Server(config)
 
     # Run in background thread
     _server_thread = threading.Thread(target=_server.run, daemon=True)
     _server_thread.start()
 
-    print("Worker Controller server started on port 8000")
+    print("Worker Controller server started on port 21000")
 
 
 def stop_worker_controller():
