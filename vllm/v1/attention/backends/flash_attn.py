@@ -10,6 +10,10 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -32,7 +36,12 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -310,8 +319,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
+            # The scheduler_metadata size is computed as:
+            #   metadata_size = scheduler_needs_semaphore + b_rounded *
+            #   num_prepare_batch_vectors
+            # where b_rounded = round_up(batch_size, 4) and
+            # num_prepare_batch_vectors can be up to 4
+            # (use_prepare_varlen + use_dynamic_split + varlen_sort_batches
+            # + head_swizzle). We allocate for the worst case to avoid buffer
+            # overflows.
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            max_num_seqs_rounded = (max_num_seqs + 3) // 4 * 4
+            max_scheduler_metadata_size = 1 + max_num_seqs_rounded * 4
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs + 1,
+                max_scheduler_metadata_size,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -584,13 +604,62 @@ class FlashAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
             )
-
         self.supports_quant_query_input = True
         self.supports_per_head_quant_scales = (
             self.vllm_flash_attn_version >= 3
             if self.vllm_flash_attn_version is not None
             else False
         )
+
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        """
+        Check if fused output quantization is supported.
+
+        For FlashAttention 3, fused FP8 output quantization is supported when:
+        - Running on Hopper GPUs (sm90+)
+        - Using FP8 static tensor quantization
+        - Model dtype is bfloat16
+        - NOT using FP8 KV cache
+
+        FA3 cannot write FP8 output directly when using FP8 KV cache.
+        FA3 requires:
+        - BF16/FP16 input → BF16/FP16 output (same dtype)
+        - FP8 input → BF16 output
+
+        Therefore, fused FP8 output quantization is only supported for FA3
+        with non-FP8 KV cache (BF16/FP16 inputs).
+
+        Note: For DCP and cascade attention, quantization is applied after
+        the attention merge step rather than being fused into the kernel.
+        This is transparent to the fusion pass.
+        """
+        from vllm.platforms import current_platform
+
+        # Only FA3 supports fused output quant
+        if self.vllm_flash_attn_version != 3:
+            return False
+
+        # Only Hopper (sm90+) supports this feature
+        if not current_platform.has_device_capability(90):
+            return False
+
+        # Only FP8 static tensor quantization is supported
+        if quant_key != kFp8StaticTensorSym:
+            return False
+
+        # FA3 with FP8 inputs requires bfloat16 output
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            return False
+
+        # FA3 cannot write FP8 output directly. FA3 requires:
+        # - BF16/FP16 input → BF16/FP16 output (same dtype)
+        # - FP8 input → BF16 output
+        # Therefore, fused FP8 output quantization is not supported for FA3
+        # when using FP8 KV cache.
+        return not self.kv_cache_dtype.startswith("fp8")
 
     def forward(
         self,
@@ -624,9 +693,11 @@ class FlashAttentionImpl(AttentionImpl):
             "FlashAttention version not detected."
         )
 
-        if output_scale is not None or output_block_scale is not None:
+        # Block scale quantization is not yet supported
+        if output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "fused block_scale output quantization is not yet supported "
+                "for FlashAttentionImpl"
             )
 
         if attn_metadata is None:
@@ -657,6 +728,7 @@ class FlashAttentionImpl(AttentionImpl):
                 output[:num_actual_tokens],
                 attn_metadata,
                 layer,
+                output_scale=output_scale,
             )
 
         # For decoder and cross-attention, use KV cache as before
@@ -696,6 +768,7 @@ class FlashAttentionImpl(AttentionImpl):
                     q_descale=q_descale,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    output_scale=output_scale,
                 )
                 return output
             else:
@@ -726,6 +799,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    o_scale=output_scale,
                 )
                 return output
 
@@ -755,6 +829,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
             s_aux=self.sinks,
+            output_scale=output_scale,
         )
         return output
 
@@ -803,6 +878,7 @@ class FlashAttentionImpl(AttentionImpl):
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -878,6 +954,16 @@ class FlashAttentionImpl(AttentionImpl):
             query_lse,
         )
 
+        # Apply FP8 output quantization after merging if requested.
+        # DCP attention merges outputs from multiple attention computations,
+        # which requires high-precision arithmetic.
+        # Fused quantization is not supported at the kernel level,
+        # so quantization happens after the merge step.
+        if output_scale is not None:
+            from vllm import _custom_ops as ops
+
+            output[:] = ops.scaled_fp8_quant(output, output_scale)[0]
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -886,6 +972,7 @@ class FlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
 
@@ -896,6 +983,7 @@ class FlashAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+            output_scale: Optional scale for fused FP8 output quantization
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -941,6 +1029,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             num_splits=1 if self.batch_invariant_enabled else 0,
+            o_scale=output_scale,
         )
 
         return output
@@ -1049,6 +1138,7 @@ def cascade_attention(
     k_descale: torch.Tensor | None = None,
     v_descale: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
@@ -1116,3 +1206,13 @@ def cascade_attention(
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+    # Apply FP8 output quantization after merging if requested.
+    # Cascade attention merges prefix and suffix outputs,
+    # which requires high-precision arithmetic.
+    # Fused quantization is not supported at the kernel level,
+    # so quantization happens after the merge step.
+    if output_scale is not None:
+        from vllm import _custom_ops as ops
+
+        output[:] = ops.scaled_fp8_quant(output, output_scale)[0]

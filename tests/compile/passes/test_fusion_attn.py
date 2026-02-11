@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
+from typing import Any
 
 import pytest
+import regex as re
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
+from tests.compile.fusion_test_utils import (
+    CUSTOM_OPS_FP8,
+    MODELS_FP4,
+    MODELS_FP8,
+    Matches,
+    has_cuda_graph_wrapper_metadata,
+    is_blackwell,
+    run_model,
+)
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
@@ -19,6 +31,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -34,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -150,6 +164,18 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             ).permute(0, 1, 3, 2, 4)
+        elif backend == AttentionBackendEnum.FLASH_ATTN:
+            # FA3 uses
+            # NHD: [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache = torch.zeros(
+                2,
+                num_blocks,
+                self.block_size,
+                self.num_kv_heads,
+                self.head_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            )
         else:
             raise ValueError(f"Unsupported backend: {backend}")
         self.attn.kv_cache = [kv_cache]
@@ -259,7 +285,11 @@ if current_platform.is_cuda():
             TestAttentionNvfp4QuantPatternModel,
         )
     ]
-    BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
+    BACKENDS_FP8 = [
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.FLASH_ATTN,
+    ]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
 
 elif current_platform.is_rocm():
@@ -317,7 +347,12 @@ def test_attention_quant_pattern(
     ):
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
-
+    if backend == AttentionBackendEnum.FLASH_ATTN and (
+        not current_platform.has_device_capability((9, 0))
+    ):
+        pytest.skip("FlashAttention 3 FP8 output fusion requires Hopper (SM90+)")
+    if backend == AttentionBackendEnum.FLASH_ATTN and dtype == torch.float16:
+        pytest.skip("FlashAttention 3 with FP8 KV cache requires bfloat16 output")
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     device = torch.device("cuda:0")
@@ -432,44 +467,58 @@ def test_attention_quant_pattern(
                 result_unfused, result_fused_2, atol=1e-2, rtol=1e-2
             )
 
-    # Check attn fusion support
-    quant_key: QuantKey = model_class.quant_key
-    attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key)
-        for key, layer in vllm_config.compilation_config.static_forward_context.items()
-    ]
-    assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
-        "All layers should support attention fusion"
-    )
+        # Check attn fusion support
+        quant_key: QuantKey = model_class.quant_key
+        static_forward_context = vllm_config.compilation_config.static_forward_context
+        attn_fusion_supported = [
+            layer.impl.fused_output_quant_supported(quant_key)
+            for key, layer in static_forward_context.items()
+        ]
+        num_fused = sum(attn_fusion_supported)
 
-    # Check quantization ops in the graph before and after fusion
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
-    )
+        # Check quantization ops in the graph before and after fusion
+        quant_op = (
+            torch.ops.aten.reciprocal
+            if "-quant_fp8" in custom_ops_list
+            else QUANT_OPS[quant_key]
+        )
 
-    # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
-    # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
+        if num_fused > 0:
+            # When fusion is supported, all layers should support it
+            assert num_fused == len(attn_fusion_supported), (
+                "All layers should support attention fusion"
+            )
+            # Note: for fp8, fully_replaced=False because query quant ops remain
+            # in graph.
+            # Only output quant ops are fused into attention.
+            test_backend.check_before_ops(
+                [quant_op],
+                fully_replaced=quant_key is kNvfp4Dynamic,
+            )
 
-    # access the underlying `AttnFusionPass` on the `LazyInitPass`
-    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+        # access the underlying `AttnFusionPass` on the `LazyInitPass`
+        assert attn_pass.pass_.matched_count == num_fused
 
-    # Check attention ops in the graph before and after fusion
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, test_backend.graph_post_pass))
+        # Check attention ops in the graph before and after fusion
+        attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
+        attn_nodes_post = list(find_op_nodes(ATTN_OP, test_backend.graph_post_pass))
 
-    assert len(attn_nodes_pre) > 0, "Should have attention nodes before fusion"
-    assert len(attn_nodes_pre) == len(attn_nodes_post), (
-        "Should have same number of attention nodes before and after fusion"
-    )
-    assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
-        "Attention should not have output_scale before fusion"
-    )
-    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-        "Attention should have output_scale after fusion"
-    )
+        assert len(attn_nodes_pre) > 0, "Should have attention nodes before fusion"
+        assert len(attn_nodes_pre) == len(attn_nodes_post), (
+            "Should have same number of attention nodes before and after fusion"
+        )
+        assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
+            "Attention should not have output_scale before fusion"
+        )
+
+        if num_fused > 0:
+            assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+                "Attention should have output_scale after fusion"
+            )
+        else:
+            assert attn_nodes_post[0].kwargs.get("output_scale") is None, (
+                "Attention should not have output_scale when fusion is not supported"
+            )
 
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
@@ -494,5 +543,90 @@ def test_attention_quant_pattern(
             "Attention should have output_block_scale after FP4 fusion"
         )
 
-    # Check that results are close
-    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+        # Check that results are close
+        torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
+    # quant_fp4 only has the custom impl
+    + list(flat_product(MODELS_FP4, [""])),
+)
+@pytest.mark.parametrize(
+    "inductor_graph_partition",
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_cuda_graph_wrapper_metadata(),
+                reason="This test requires"
+                "torch._inductor.utils.CUDAGraphWrapperMetadata to run",
+            ),
+        ),
+        False,
+    ],
+)
+def test_attn_quant(
+    model_name: str,
+    model_kwargs: dict[str, Any],
+    backend: AttentionBackendEnum,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if not current_platform.has_device_capability(90):
+        pytest.skip("test_attn_quant requires H100 (SM90) or B200 (SM100) GPU")
+    if backend == AttentionBackendEnum.FLASHINFER and (
+        not is_blackwell() or not has_flashinfer()
+    ):
+        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    model_kwargs["attention_config"] = {"backend": backend.name}
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(compilation_config, model_name, **model_kwargs)
+
+    log_matches = re.findall(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
+        log_holder.text,
+    )
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.attention_fusion
