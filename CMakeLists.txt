@@ -276,6 +276,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
+# ucc_allgather extension (CPU-side async collective over IB)
+#
+find_library(UCC_LIBRARY NAMES ucc PATHS ENV UCC_HOME PATH_SUFFIXES lib lib64)
+find_path(UCC_INCLUDE_DIR NAMES ucc/api/ucc.h PATHS ENV UCC_HOME PATH_SUFFIXES include)
+
+if(UCC_LIBRARY AND UCC_INCLUDE_DIR)
+  message(STATUS "Found UCC: ${UCC_LIBRARY}")
+  message(STATUS "UCC include: ${UCC_INCLUDE_DIR}")
+
+  set(VLLM_UCC_EXT_SRC "csrc/ucc/ucc_allgather.cpp")
+
+  define_extension_target(
+    ucc_allgather
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_UCC_EXT_SRC}
+    INCLUDE_DIRECTORIES ${UCC_INCLUDE_DIR}
+    LIBRARIES ${UCC_LIBRARY}
+    USE_SABI 3.8
+    WITH_SOABI)
+else()
+  message(STATUS "UCC not found, skipping ucc_allgather extension")
+endif()
+
+#
 # _C extension
 #
 

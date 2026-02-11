@@ -2,10 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import struct
+import threading
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING, Optional
+
 import numpy as np
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
@@ -14,7 +21,107 @@ from vllm.v1.worker.ubatch_utils import (
     is_last_ubatch_empty,
 )
 
+if TYPE_CHECKING:
+    from vllm.distributed.ucc_allgather import UCCAllgather, UCCHandle
+
 logger = init_logger(__name__)
+
+
+class DPSyncMode(Enum):
+    """Mode for DP rank synchronization."""
+    SYNC = "sync"      # Synchronous (no async started)
+    UCC = "ucc"        # UCC async allgather
+    THREAD = "thread"  # Background thread running Gloo
+
+
+@dataclass
+class DPSyncHandle:
+    """Handle for async DP rank synchronization.
+
+    This holds the state needed to complete an async DP sync operation.
+    Call `finish()` to wait for completion and get results.
+    """
+
+    # Mode of async operation (SYNC, UCC, or THREAD)
+    mode: DPSyncMode
+    # Parameters needed to fall back to sync or finish async
+    should_attempt_ubatching: bool
+    should_attempt_dp_padding: bool
+    num_tokens_unpadded: int
+    num_tokens_padded: int
+    cudagraph_mode: int
+    parallel_config: ParallelConfig
+
+    def finish(self) -> tuple[bool, torch.Tensor | None, int]:
+        """Wait for async DP sync and return results.
+
+        Returns: tuple[
+            should_ubatch: Are all DP ranks going to microbatch
+            num_tokens_after_padding: A tensor containing the total number of
+                tokens per-microbatch for each DP rank including any DP padding.
+            synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        ]
+        """
+        if self.mode == DPSyncMode.UCC:
+            # UCC async was started, wait for completion
+            tensor = _run_ar_async_finish(self.parallel_config)
+        elif self.mode == DPSyncMode.THREAD:
+            # Thread was started, join and get result
+            tensor = _run_ar_thread_finish()
+        else:
+            # Fall back to synchronous all-reduce (SYNC mode)
+            tensor = _run_ar(
+                should_ubatch=self.should_attempt_ubatching,
+                should_dp_pad=self.should_attempt_dp_padding,
+                orig_num_tokens_per_ubatch=self.num_tokens_unpadded,
+                padded_num_tokens_per_ubatch=self.num_tokens_padded,
+                cudagraph_mode=self.cudagraph_mode,
+                parallel_config=self.parallel_config,
+            )
+
+        should_dp_pad = bool(torch.all(tensor[3] == 1).item())
+
+        # DP ranks should all have the same value for should_attempt_dp_padding.
+        assert self.should_attempt_dp_padding == should_dp_pad
+
+        # Check conditions for microbatching
+        should_ubatch = _post_process_ubatch(
+            tensor, self.parallel_config.num_ubatches
+        )
+
+        if should_ubatch and not should_dp_pad:
+            logger.debug_once(
+                "Microbatching has been triggered and requires DP padding. "
+                "Enabling DP padding even though it has been explicitly "
+                "disabled.",
+                scope="global",
+            )
+            should_dp_pad = True
+
+        # Pad all DP ranks up to the maximum token count across ranks if
+        # should_dp_pad is True
+        num_tokens_after_padding = _post_process_dp_padding(
+            tensor,
+            should_dp_pad,
+        )
+
+        # Synchronize cudagraph_mode across ranks (take min)
+        synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+
+        return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
+
+# Module-level state for async UCC allgather
+_ucc_allgather: Optional["UCCAllgather"] = None
+_ucc_recv_buffer: Optional[bytearray] = None
+_ucc_send_buffer: Optional[bytearray] = None
+_ucc_pending_handle: Optional["UCCHandle"] = None
+_ucc_initialized: bool = False
+_ucc_init_attempted: bool = False
+
+# Module-level state for thread-based async (Gloo fallback)
+_thread_handle: Optional[threading.Thread] = None
+_thread_result: Optional[torch.Tensor] = None
+_thread_exception: Optional[Exception] = None
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -54,6 +161,217 @@ def _run_ar(
     tensor[4][dp_rank] = cudagraph_mode
     dist.all_reduce(tensor, group=group)
     return tensor
+
+
+def _oob_allgather(data: bytes) -> list[bytes]:
+    """Out-of-band allgather using gloo CPU group for UCC bootstrap."""
+    cpu_group = get_dp_group().cpu_group
+    dp_size = get_dp_group().world_size
+
+    tensor = torch.tensor(list(data), dtype=torch.uint8)
+    output = [torch.zeros_like(tensor) for _ in range(dp_size)]
+    dist.all_gather(output, tensor, group=cpu_group)
+    return [bytes(t.tolist()) for t in output]
+
+
+def _init_ucc_allgather(parallel_config: ParallelConfig) -> bool:
+    """Initialize UCC allgather if enabled and available.
+
+    Returns True if UCC allgather is initialized and ready to use.
+    """
+    global _ucc_allgather, _ucc_recv_buffer, _ucc_send_buffer
+    global _ucc_initialized, _ucc_init_attempted
+
+    # Only attempt init once
+    if _ucc_init_attempted:
+        return _ucc_initialized
+
+    _ucc_init_attempted = True
+
+    # Check if UCC allgather is enabled via env var
+    if not envs.VLLM_USE_UCC_ALLGATHER:
+        logger.debug("UCC allgather disabled via VLLM_USE_UCC_ALLGATHER")
+        return False
+
+    # Check if UCC is available
+    from vllm.distributed.ucc_allgather import (
+        init_ucc_allgather,
+        is_ucc_available,
+    )
+
+    if not is_ucc_available():
+        logger.warning(
+            "UCC allgather requested but UCC extension not available. "
+            "Falling back to synchronous all-reduce."
+        )
+        return False
+
+    try:
+        dp_size = parallel_config.data_parallel_size
+        dp_rank = parallel_config.data_parallel_rank
+
+        # Initialize UCC allgather
+        _ucc_allgather = init_ucc_allgather(dp_rank, dp_size, _oob_allgather)
+        if _ucc_allgather is None:
+            return False
+
+        # Allocate buffers for async operations
+        # 5 int32 values per rank = 20 bytes per rank
+        bytes_per_rank = 5 * 4
+        _ucc_send_buffer = bytearray(bytes_per_rank)
+        _ucc_recv_buffer = bytearray(bytes_per_rank * dp_size)
+
+        _ucc_initialized = True
+        logger.info(
+            "UCC allgather initialized for DP rank synchronization "
+            "(rank=%d, world_size=%d)",
+            dp_rank,
+            dp_size,
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize UCC allgather: %s. "
+            "Falling back to synchronous all-reduce.",
+            e,
+        )
+        return False
+
+
+def _run_ar_async_start(
+    should_ubatch: bool,
+    should_dp_pad: bool,
+    orig_num_tokens_per_ubatch: int,
+    padded_num_tokens_per_ubatch: int,
+    cudagraph_mode: int,
+    parallel_config: ParallelConfig,
+) -> bool:
+    """Start async allgather. Call BEFORE GPU forward pass.
+
+    Returns True if async operation was started, False if fallback to sync.
+    """
+    global _ucc_pending_handle, _ucc_send_buffer, _ucc_recv_buffer
+    global _ucc_allgather
+
+    if not _init_ucc_allgather(parallel_config):
+        return False
+
+    if _ucc_allgather is None or _ucc_send_buffer is None:
+        return False
+
+    # Pack 5 int32 values into send buffer
+    struct.pack_into(
+        "5i",
+        _ucc_send_buffer,
+        0,
+        orig_num_tokens_per_ubatch,
+        padded_num_tokens_per_ubatch,
+        1 if should_ubatch else 0,
+        1 if should_dp_pad else 0,
+        cudagraph_mode,
+    )
+
+    # Start async allgather
+    _ucc_pending_handle = _ucc_allgather.allgather_async(
+        memoryview(_ucc_send_buffer), _ucc_recv_buffer
+    )
+    return True
+
+
+def _run_ar_async_finish(parallel_config: ParallelConfig) -> torch.Tensor:
+    """Wait for async allgather and return results. Call AFTER GPU forward pass.
+
+    Returns tensor in same format as _run_ar.
+    """
+    global _ucc_pending_handle, _ucc_recv_buffer
+
+    if _ucc_pending_handle is None:
+        raise RuntimeError("No pending async operation")
+
+    # Wait for completion
+    _ucc_pending_handle.wait()
+    _ucc_pending_handle = None
+
+    # Unpack results into tensor
+    dp_size = parallel_config.data_parallel_size
+    result = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
+
+    bytes_per_rank = 5 * 4
+    for rank in range(dp_size):
+        values = struct.unpack_from("5i", _ucc_recv_buffer, rank * bytes_per_rank)
+        for i, v in enumerate(values):
+            result[i, rank] = v
+
+    return result
+
+
+def _run_ar_thread_start(
+    should_ubatch: bool,
+    should_dp_pad: bool,
+    orig_num_tokens_per_ubatch: int,
+    padded_num_tokens_per_ubatch: int,
+    cudagraph_mode: int,
+    parallel_config: ParallelConfig,
+) -> bool:
+    """Start Gloo all-reduce in background thread.
+
+    This allows the main thread to continue while Gloo blocks on network I/O.
+    When Gloo is waiting for network, it releases the GIL, allowing overlap.
+
+    Returns True if thread was started successfully.
+    """
+    global _thread_handle, _thread_result, _thread_exception
+
+    # Clear any previous state
+    _thread_result = None
+    _thread_exception = None
+
+    def _run_ar_in_thread():
+        global _thread_result, _thread_exception
+        try:
+            _thread_result = _run_ar(
+                should_ubatch=should_ubatch,
+                should_dp_pad=should_dp_pad,
+                orig_num_tokens_per_ubatch=orig_num_tokens_per_ubatch,
+                padded_num_tokens_per_ubatch=padded_num_tokens_per_ubatch,
+                cudagraph_mode=cudagraph_mode,
+                parallel_config=parallel_config,
+            )
+        except Exception as e:
+            _thread_exception = e
+
+    _thread_handle = threading.Thread(target=_run_ar_in_thread, daemon=True)
+    _thread_handle.start()
+    return True
+
+
+def _run_ar_thread_finish() -> torch.Tensor:
+    """Wait for background thread and return results.
+
+    Returns tensor in same format as _run_ar.
+    """
+    global _thread_handle, _thread_result, _thread_exception
+
+    if _thread_handle is None:
+        raise RuntimeError("No pending thread operation")
+
+    # Wait for thread to complete
+    _thread_handle.join()
+    _thread_handle = None
+
+    # Check for exceptions
+    if _thread_exception is not None:
+        exc = _thread_exception
+        _thread_exception = None
+        raise exc
+
+    # Get result
+    if _thread_result is None:
+        raise RuntimeError("Thread completed but no result available")
+
+    result = _thread_result
+    _thread_result = None
+    return result
 
 
 def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
@@ -128,10 +446,13 @@ def _synchronize_dp_ranks(
     """
     assert num_tokens_padded >= num_tokens_unpadded
 
-    # Coordinate between the DP ranks via an All Reduce
+    # Coordinate between the DP ranks via an All Reduce (or async UCC allgather)
     # to determine the total number of tokens that each rank
     # will run and if we are using ubatching or not.
-    tensor = _run_ar(
+    #
+    # Try async UCC path first if enabled - this releases the GIL during
+    # the collective operation, allowing other Python threads to run.
+    use_ucc = _run_ar_async_start(
         should_ubatch=should_attempt_ubatching,
         should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -139,6 +460,20 @@ def _synchronize_dp_ranks(
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
     )
+
+    if use_ucc:
+        # UCC async started successfully, wait for completion
+        tensor = _run_ar_async_finish(parallel_config)
+    else:
+        # Fall back to synchronous all-reduce
+        tensor = _run_ar(
+            should_ubatch=should_attempt_ubatching,
+            should_dp_pad=should_attempt_dp_padding,
+            orig_num_tokens_per_ubatch=num_tokens_unpadded,
+            padded_num_tokens_per_ubatch=num_tokens_padded,
+            cudagraph_mode=cudagraph_mode,
+            parallel_config=parallel_config,
+        )
 
     should_dp_pad = bool(torch.all(tensor[3] == 1).item())
 
@@ -238,3 +573,103 @@ def coordinate_batch_across_dp(
     )
 
     return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)
+
+
+def coordinate_batch_across_dp_start(
+    num_tokens_unpadded: int,
+    allow_microbatching: bool,
+    allow_dp_padding: bool,
+    parallel_config: ParallelConfig,
+    num_tokens_padded: int | None = None,
+    uniform_decode: bool | None = None,
+    num_scheduled_tokens_per_request: np.ndarray | None = None,
+    cudagraph_mode: int = 0,
+) -> DPSyncHandle | None:
+    """Start async DP coordination. Call this BEFORE doing other CPU work.
+
+    This starts the async UCC allgather (if enabled) or a background thread
+    running Gloo (if UCC is unavailable but async is enabled). The actual
+    collective runs in the background while the caller does other work.
+
+    Args:
+        Same as coordinate_batch_across_dp()
+
+    Returns:
+        DPSyncHandle to be passed to finish(), or None if DP size is 1.
+    """
+    if parallel_config.data_parallel_size == 1:
+        # Early exit - no coordination needed
+        return None
+
+    # If the caller has explicitly enabled microbatching.
+    should_attempt_ubatching = False
+    if allow_microbatching:
+        # Check preconditions for microbatching
+        assert uniform_decode is not None
+        should_attempt_ubatching = check_ubatch_thresholds(
+            parallel_config,
+            num_tokens_unpadded,
+            uniform_decode=uniform_decode,
+        )
+
+    if num_tokens_padded is None:
+        num_tokens_padded = num_tokens_unpadded
+
+    # Try to start async UCC allgather first (preferred path)
+    use_ucc = _run_ar_async_start(
+        should_ubatch=should_attempt_ubatching,
+        should_dp_pad=allow_dp_padding,
+        orig_num_tokens_per_ubatch=num_tokens_unpadded,
+        padded_num_tokens_per_ubatch=num_tokens_padded,
+        cudagraph_mode=cudagraph_mode,
+        parallel_config=parallel_config,
+    )
+
+    if use_ucc:
+        mode = DPSyncMode.UCC
+    elif envs.VLLM_USE_ASYNC_DP_SYNC:
+        # UCC not available but async enabled, try thread-based fallback.
+        # This runs Gloo in a background thread while the main thread continues.
+        # When Gloo waits on network I/O, it releases the GIL, allowing overlap.
+        use_thread = _run_ar_thread_start(
+            should_ubatch=should_attempt_ubatching,
+            should_dp_pad=allow_dp_padding,
+            orig_num_tokens_per_ubatch=num_tokens_unpadded,
+            padded_num_tokens_per_ubatch=num_tokens_padded,
+            cudagraph_mode=cudagraph_mode,
+            parallel_config=parallel_config,
+        )
+        mode = DPSyncMode.THREAD if use_thread else DPSyncMode.SYNC
+    else:
+        # Neither UCC nor async enabled, will use sync in finish()
+        mode = DPSyncMode.SYNC
+
+    return DPSyncHandle(
+        mode=mode,
+        should_attempt_ubatching=should_attempt_ubatching,
+        should_attempt_dp_padding=allow_dp_padding,
+        num_tokens_unpadded=num_tokens_unpadded,
+        num_tokens_padded=num_tokens_padded,
+        cudagraph_mode=cudagraph_mode,
+        parallel_config=parallel_config,
+    )
+
+
+def coordinate_batch_across_dp_finish(
+    handle: DPSyncHandle | None,
+    cudagraph_mode: int = 0,
+) -> tuple[bool, torch.Tensor | None, int]:
+    """Finish async DP coordination. Call this AFTER doing other CPU work.
+
+    Args:
+        handle: Handle from coordinate_batch_across_dp_start(), or None if DP size is 1.
+        cudagraph_mode: Fallback cudagraph mode if handle is None.
+
+    Returns:
+        Same as coordinate_batch_across_dp()
+    """
+    if handle is None:
+        # DP size is 1, no coordination needed
+        return False, None, cudagraph_mode
+
+    return handle.finish()
