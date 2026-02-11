@@ -22,19 +22,21 @@ SHAPES = [
 def _bench_us(fn, warmup: int, iters: int, graph_calls: int) -> tuple[float, str]:
     # Prefer CUDA graphs for stable timings, but fall back to eager if capture fails.
     divisor = 1
-    try:
-        divisor = max(1, graph_calls)
-        stream = torch.cuda.Stream()
-        graph = torch.cuda.CUDAGraph()
-        fn()
-        torch.cuda.synchronize()
-        with torch.cuda.graph(graph, stream=stream):
-            for _ in range(divisor):
-                fn()
-        fn = graph.replay
-        mode = "cudagraph"
-    except Exception:
-        mode = "eager"
+    mode = "eager"
+    if graph_calls > 1:
+        try:
+            divisor = graph_calls
+            stream = torch.cuda.Stream()
+            graph = torch.cuda.CUDAGraph()
+            fn()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(graph, stream=stream):
+                for _ in range(divisor):
+                    fn()
+            fn = graph.replay
+            mode = "cudagraph"
+        except Exception:
+            mode = "eager"
 
     for _ in range(warmup):
         fn()
@@ -58,7 +60,7 @@ def main() -> int:
     )
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--graph-calls", type=int, default=10)
+    parser.add_argument("--graph-calls", type=int, default=1)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "both"], default="both")
     parser.add_argument("--output-json", type=str, default="")
     args = parser.parse_args()
