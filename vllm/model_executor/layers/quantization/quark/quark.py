@@ -371,38 +371,45 @@ class QuarkConfig(QuantizationConfig):
 
         return True
 
-    def _is_ocp_mx(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+    def _is_w_ocp_mx_a_x(
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
-        # Confirm weights and input quantized.
-        if weight_quant is None or input_quant is None:
+        """
+        This check returns True only if it is an OCP-MX weight quantization.
+        The activation can be any data type (e.g., FP16/BF16, FP8, or OCP-MX format).
+        The rationale for checking only the weight type is that
+        the model loading concept and process primarily concerns the weights themselves.
+        """
+        # Confirm weights quantized.
+        if weight_quant is None:
             logger.debug(
-                "Quark model is not in OCP MX format: "
-                "weight_quant or input_quant not set"
+                "Quark model's weight quantization is incompatible with OCP_MX format: "
+                "weight_quant is not set."
             )
             return False
 
         # Input and weight qscheme needs to be per group.
-        if (
-            weight_quant.get("qscheme") != "per_group"
-            or input_quant.get("qscheme") != "per_group"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not per_group")
+        if weight_quant.get("qscheme") != "per_group":
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "weight is not per_group."
+            )
             return False
 
         # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32 or input_quant.get("group_size") != 32:
-            logger.debug("Quark model is not in OCP MX format: not group_size=32")
+        if weight_quant.get("group_size") != 32:
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "group_size of weight is not 32."
+            )
             return False
 
         # Activations and weight scales need to be in e8m0 format.
-        if (
-            weight_quant.get("scale_format") != "e8m0"
-            or input_quant.get("scale_format") != "e8m0"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not scale_format e8m0")
+        if weight_quant.get("scale_format") != "e8m0":
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "scale_format of weight is not e8m0."
+            )
             return False
 
         # Input and weight dtypes need to be any of fp4,
@@ -411,13 +418,30 @@ class QuarkConfig(QuantizationConfig):
             "fp4",
             "fp6_e3m2",
             "fp6_e2m3",
-        } or input_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}:
+        }:
             logger.debug(
-                "Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3"
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
             )
             return False
 
         return True
+
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        For Quark, determine if it's OCP MXFP4 by checking config directly.
+        This allows hidden_size rounding to happen before moe_config creation.
+        """
+        layer_quant_config = self._find_matched_config(prefix, layer)
+        weight_config = layer_quant_config.get("weight")
+        input_config = layer_quant_config.get("input_tensors")
+
+        return (
+            self._is_w_ocp_mx_a_x(weight_config, input_config)
+            and weight_config is not None
+            and weight_config.get("dtype") == "fp4"
+            and getattr(torch, "float4_e2m1fn_x2", None) is not None
+        )
 
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module
@@ -492,7 +516,7 @@ class QuarkConfig(QuantizationConfig):
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
             )
-        elif self._is_ocp_mx(weight_config, input_config):
+        elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(weight_config, input_config)
 
         raise NotImplementedError(
