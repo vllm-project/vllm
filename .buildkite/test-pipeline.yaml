@@ -959,7 +959,6 @@ steps:
 
 - label: Model strategy test
   mirror_hardwares: [amdexperimental]
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models
