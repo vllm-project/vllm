@@ -111,6 +111,46 @@ def check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
+def test_parse_language_detection_output():
+    """Unit test for WhisperForConditionalGeneration.parse_language_detection_output.
+
+    No GPU or model loading required.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.model_executor.models.whisper import (
+        WhisperForConditionalGeneration,
+    )
+
+    cls = WhisperForConditionalGeneration
+
+    def make_tokenizer(return_value: str) -> MagicMock:
+        tok = MagicMock()
+        tok.decode = MagicMock(return_value=return_value)
+        return tok
+
+    # English
+    assert (
+        cls.parse_language_detection_output([50259], make_tokenizer("<|en|>")) == "en"
+    )
+
+    # German
+    assert (
+        cls.parse_language_detection_output([50261], make_tokenizer("<|de|>")) == "de"
+    )
+
+    # Unsupported language code
+    assert (
+        cls.parse_language_detection_output([99999], make_tokenizer("<|xx|>")) is None
+    )
+
+    # No special token format
+    assert cls.parse_language_detection_output([1], make_tokenizer("hello")) is None
+
+    # Empty token_ids
+    assert cls.parse_language_detection_output([], make_tokenizer("anything")) is None
+
+
 @pytest.mark.core_model
 @pytest.mark.cpu_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
