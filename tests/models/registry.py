@@ -1028,8 +1028,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
-        # disable this temporarily until we support HF format
-        is_available_online=False,
     ),
     "VoxtralRealtimeGeneration": _HfExamplesInfo(
         "<place-holder>",
