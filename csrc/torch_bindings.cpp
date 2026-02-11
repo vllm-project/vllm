@@ -194,7 +194,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
       "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
-      "Tensor scale, float epsilon) -> "
+      "Tensor scale, float epsilon, int group_size=0) -> "
       "()");
   ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
            &rms_norm_static_fp8_quant);
@@ -203,7 +203,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! residual, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
+      "Tensor scale, float epsilon, int group_size=0) -> ()");
   ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
            &fused_add_rms_norm_static_fp8_quant);
 

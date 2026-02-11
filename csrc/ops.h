@@ -116,13 +116,14 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
+                               double epsilon, int64_t group_size = 0);
 
 void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& input,
                                          torch::Tensor& residual,
                                          torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
+                                         torch::Tensor& scale, double epsilon,
+                                         int64_t group_size = 0);
 
 void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor const& input,

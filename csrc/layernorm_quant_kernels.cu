@@ -3,6 +3,7 @@
  * The kernels correspond to the kernels in layernorm_kernels.cu, except they
  * also produce quantized output directly.
  * Currently, only static fp8 quantization is supported.
+ * Extended to support per-group quantization (group_size > 0).
  */
 
 #include "type_convert.cuh"
@@ -24,8 +25,9 @@ __global__ void rms_norm_static_fp8_quant_kernel(
     const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float* __restrict__ scale,      // [1]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float* __restrict__ scale,      // [num_groups] or [1]
+    const float epsilon, const int num_tokens, const int hidden_size,
+    const int group_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -54,19 +56,21 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   }
   __syncthreads();
 
-  // invert scale to avoid division
-  float const scale_inv = 1.0f / *scale;
-
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+  const float per_tensor_scale_inv = (group_size > 0) ? 0.0f : 1.0f / scale[0];
   for (int idx = threadIdx.x; idx < hidden_size / VEC_SIZE; idx += blockDim.x) {
     vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
     vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
+      int col = idx * VEC_SIZE + j;
+      float const scale_inv = (group_size > 0)
+                                  ? (1.0f / scale[col / group_size])
+                                  : per_tensor_scale_inv;
       float x = static_cast<float>(src1.val[j]);
       float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
-      out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
+      out[blockIdx.x * hidden_size + col] =
           scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
     }
   }
@@ -84,8 +88,9 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float* __restrict__ scale,      // [1]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float* __restrict__ scale,      // [num_groups] or [1]
+    const float epsilon, const int num_tokens, const int hidden_size,
+    const int group_size) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -122,9 +127,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   }
   __syncthreads();
 
-  // invert scale to avoid division
-  float const scale_inv = 1.0f / *scale;
-
+  const float per_tensor_scale_inv = (group_size > 0) ? 0.0f : 1.0f / scale[0];
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
@@ -132,6 +135,10 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     temp *= weight_v[idx];
 #pragma unroll
     for (int i = 0; i < width; ++i) {
+      int col = idx * width + i;
+      float const scale_inv = (group_size > 0)
+                                  ? (1.0f / scale[col / group_size])
+                                  : per_tensor_scale_inv;
       out[id * width + i] =
           scaled_fp8_conversion<true, fp8_type>(float(temp.data[i]), scale_inv);
     }
@@ -149,8 +156,9 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float* __restrict__ scale,      // [1]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float* __restrict__ scale,      // [num_groups] or [1]
+    const float epsilon, const int num_tokens, const int hidden_size,
+    const int group_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -171,10 +179,10 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   }
   __syncthreads();
 
-  // invert scale to avoid division
-  float const scale_inv = 1.0f / *scale;
-
+  const float per_tensor_scale_inv = (group_size > 0) ? 0.0f : 1.0f / scale[0];
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float const scale_inv = (group_size > 0) ? (1.0f / scale[idx / group_size])
+                                             : per_tensor_scale_inv;
     float x = (float)residual[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
     out[blockIdx.x * hidden_size + idx] =
@@ -187,8 +195,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                torch::Tensor& input,   // [..., hidden_size]
                                torch::Tensor& weight,  // [hidden_size]
-                               torch::Tensor& scale,   // [1]
-                               double epsilon) {
+                               torch::Tensor& scale,   // [num_groups] or [1]
+                               double epsilon, int64_t group_size) {
   TORCH_CHECK(out.is_contiguous());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
@@ -215,7 +223,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                         out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
                         input_stride, weight.data_ptr<scalar_t>(),
                         scale.data_ptr<float>(), epsilon, num_tokens,
-                        hidden_size);
+                        hidden_size, static_cast<int>(group_size));
               });
             });
       });
@@ -232,7 +240,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                       out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
                       input_stride, residual.data_ptr<scalar_t>(),           \
                       weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
+                      epsilon, num_tokens, hidden_size,                      \
+                      static_cast<int>(group_size));                         \
             });                                                              \
       });
 void fused_add_rms_norm_static_fp8_quant(
@@ -240,8 +249,8 @@ void fused_add_rms_norm_static_fp8_quant(
     torch::Tensor& input,     // [..., hidden_size]
     torch::Tensor& residual,  // [..., hidden_size]
     torch::Tensor& weight,    // [hidden_size]
-    torch::Tensor& scale,     // [1]
-    double epsilon) {
+    torch::Tensor& scale,     // [num_groups] or [1]
+    double epsilon, int64_t group_size) {
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(residual.is_contiguous());
   TORCH_CHECK(residual.scalar_type() == input.scalar_type());
