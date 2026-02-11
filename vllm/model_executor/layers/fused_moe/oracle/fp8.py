@@ -52,6 +52,7 @@ class Fp8MoeBackend(Enum):
     AITER = "AITER"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
+    XPU = "XPU"
 
 
 def backend_to_kernel_cls(
@@ -123,6 +124,13 @@ def backend_to_kernel_cls(
 
         return CutlassBatchedExpertsFp8
 
+    elif backend == Fp8MoeBackend.XPU:
+        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+            XPUExpertsFp8,
+        )
+
+        return XPUExpertsFp8
+
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
@@ -154,6 +162,7 @@ def select_fp8_moe_backend(
         Fp8MoeBackend.TRITON,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.XPU,
     ]
 
     # NOTE(rob): We need to peak into the P/F selection to determine
@@ -393,6 +402,7 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.BATCHED_TRITON,
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
