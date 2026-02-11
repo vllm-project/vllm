@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -60,6 +61,21 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        self.hf_config = get_config(
+            model=model_name,
+            trust_remote_code=False,  # or get from model_config if available
+            revision=revision,
+            config_format="auto",
+        )
+
+        quant_config = getattr(self.hf_config, "quantization_config", None)
+        if quant_config is not None:
+            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+            model_type = self.hf_config.model_type
+            if quant_dtype == "fp4" and model_type == "deepseek_v3":
+                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -111,6 +127,7 @@ class QuarkConfig(QuantizationConfig):
         ):
             if prefix == "lm_head" or not getattr(self, "dynamic_mxfp4_quant", False):
                 return UnquantizedLinearMethod()
+
             scheme = self.get_scheme(
                 layer=layer,
                 layer_name=prefix,
