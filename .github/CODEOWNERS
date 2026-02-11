@@ -22,7 +22,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # API layer
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
-/vllm/entrypoints/cli @mgoin @hmellor @DarkLight1337
+/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
 /vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/openai/realtime @njhill
@@ -37,8 +37,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Input/Output Processing
 /vllm/sampling_params.py @njhill
 /vllm/pooling_params.py @noooop
-/vllm/tokenizers @njhill @DarkLight1337
-/vllm/renderers @njhill @DarkLight1337
+/vllm/tokenizers @DarkLight1337 @njhill
+/vllm/renderers @DarkLight1337 @njhill
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/tool_parsers @aarnphm @chaunceyjiang
 
