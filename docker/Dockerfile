@@ -506,6 +506,7 @@ RUN apt-get update -y \
         curl \
         sudo \
         python3-pip \
+        git \
         ffmpeg \
         libsm6 \
         libxext6 \
