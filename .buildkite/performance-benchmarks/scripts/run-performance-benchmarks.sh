@@ -7,70 +7,10 @@
 set -x
 set -o pipefail
 
-usage() {
-  cat <<'EOF'
-Usage:
-  run-performance-benchmarks.sh [--dry-run [--model <hf_model_id>] [--dtype <dtype>]]
-
-Notes:
-  - Default CI behavior is unchanged (ON_CPU default remains whatever your environment sets; CPU CI uses ON_CPU=1).
-  - --dry-run is debugging only: emit commands and write *.commands files, but do not execute vLLM.
-  - --model/--dtype are ONLY allowed with --dry-run and act as filters (no JSON override).
-  - Serving JSON selection follows existing logic:
-      * if SERVING_JSON env is set, it will be used
-      * otherwise serving-tests$ARCH.json is used (ARCH derived from existing ON_CPU detection)
-
-Options (dry-run only):
-  --dry-run Print commands and write *.commands files, but do not execute vLLM.
-  --model   Filter: only emit serving tests whose model matches this id in the selected JSON file.
-  --dtype   Filter: only emit serving tests whose dtype matches this value in the selected JSON file.
-EOF
-}
-
-# Parsed CLI filters (dry-run only)
-MODEL_FILTER=""
-DTYPE_FILTER=""
-
-parse_args() {
-  local dry_run_seen=0
-  local model_seen=0
-  local dtype_seen=0
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run)
-        dry_run_seen=1
-        export DRY_RUN=1
-        shift 1
-        ;;
-      --model)
-        MODEL_FILTER="${2:-}"
-        model_seen=1
-        shift 2
-        ;;
-      --dtype)
-        DTYPE_FILTER="${2:-}"
-        dtype_seen=1
-        shift 2
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        echo "ERROR: Unknown argument: $1" >&2
-        usage
-        exit 2
-        ;;
-    esac
-  done
-
-  if [[ $dry_run_seen -eq 0 && ( $model_seen -eq 1 || $dtype_seen -eq 1 ) ]]; then
-    echo "ERROR: --model/--dtype are only supported with --dry-run." >&2
-    usage
-    exit 2
-  fi
-}
+# Environment-driven debug controls (like ON_CPU=1)
+DRY_RUN="${DRY_RUN:-0}"
+MODEL_FILTER="${MODEL_FILTER:-}"
+DTYPE_FILTER="${DTYPE_FILTER:-}"
 
 check_gpus() {
   if command -v nvidia-smi; then
@@ -535,7 +475,6 @@ run_serving_tests() {
 }
 
 main() {
-  parse_args "$@"
 
   local ARCH
   ARCH=''

@@ -202,10 +202,11 @@ For performance reference, users may also consult the [vLLM Performance Dashboar
 #### Dry-Run
 
 For users only need to get the optimized runtime configurations without running benchmark, a Dry-Run mode is provided.
-By adding --dry-run with run-performance-benchmarks.sh, all commands will be generated under `./benchmark/results/`.
+By passing an environment variable DRY_RUN=1 with run-performance-benchmarks.sh,
+all commands will be generated under `./benchmark/results/`.
 
 ```bash
-ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
+ON_CPU=1 DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 By providing different JSON file, users can get runtime configurations for different models such as Embedded Models.
@@ -214,10 +215,10 @@ By providing different JSON file, users can get runtime configurations for diffe
 ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
 ```
 
-By providing Model ID and Data Type, only commands for related model ID and Data Type will be generated.
+By providing MODEL_FILTER and DTYPE_FILTER, only commands for related model ID and Data Type will be generated.
 
 ```bash
-ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run --model Qwen/Qwen3-8B --dtype bfloat16
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
 ```
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
