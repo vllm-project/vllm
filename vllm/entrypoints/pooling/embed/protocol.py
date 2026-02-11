@@ -1,154 +1,114 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field
 
 from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestMixin,
     CompletionRequestMixin,
+    EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+logger = init_logger(__name__)
 
 
-class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixin):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
+def _get_max_total_output_tokens(
+    model_config: ModelConfig,
+) -> tuple[int | None, int]:
+    max_total_tokens = model_config.max_model_len
+    pooler_config = model_config.pooler_config
 
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
+    if pooler_config is None:
+        return max_total_tokens, 0
 
-    # --8<-- [start:embedding-extra-params]
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:embedding-extra-params]
+    if pooler_config.enable_chunked_processing:
+        return None, 0
+
+    max_embed_len = pooler_config.max_embed_len or max_total_tokens
+    max_output_tokens = max_total_tokens - max_embed_len
+    return max_total_tokens, max_output_tokens
+
+
+class EmbeddingCompletionRequest(
+    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
+):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
+        )
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
+            task="embed",
             dimensions=self.dimensions,
-            use_activation=self.normalize,
+            use_activation=self.use_activation,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 
-class EmbeddingChatRequest(PoolingBasicRequestMixin):
-    messages: list[ChatCompletionMessageParam]
+class EmbeddingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
+):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
 
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
 
-    # --8<-- [start:chat-embedding-extra-params]
-    add_generation_prompt: bool = Field(
-        default=False,
-        description=(
-            "If true, the generation prompt will be added to the chat template. "
-            "This is a parameter used by chat template in tokenizer config of the "
-            "model."
-        ),
-    )
-    continue_final_message: bool = Field(
-        default=False,
-        description=(
-            "If this is set, the chat will be formatted so that the final "
-            "message in the chat is open-ended, without any EOS tokens. The "
-            "model will continue this message rather than starting a new one. "
-            'This allows you to "prefill" part of the model\'s response for it. '
-            "Cannot be used at the same time as `add_generation_prompt`."
-        ),
-    )
-    add_special_tokens: bool = Field(
-        default=False,
-        description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt "
-            "on top of what is added by the chat template. "
-            "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."
-        ),
-    )
-    chat_template: str | None = Field(
-        default=None,
-        description=(
-            "A Jinja template to use for this conversion. "
-            "As of transformers v4.44, default chat template is no longer "
-            "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."
-        ),
-    )
-    chat_template_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template."
-        ),
-    )
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:chat-embedding-extra-params]
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
-                "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
-            )
-        return data
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
+        )
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            task="embed",
             dimensions=self.dimensions,
-            use_activation=self.normalize,
+            use_activation=self.use_activation,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 

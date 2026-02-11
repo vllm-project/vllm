@@ -19,18 +19,13 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm,
-    deep_gemm_moe_fp8,
-)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -43,11 +38,18 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -1401,11 +1403,6 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
@@ -1496,11 +1493,6 @@ direct_register_custom_op(
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
     fake_impl=outplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
@@ -1515,7 +1507,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace and not disable_inplace():
+    if inplace:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
@@ -1534,66 +1526,38 @@ def fused_experts(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
-    allow_deep_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    # For now, disable DeepGemm for small N (<= 512) until better
-    # permute/unpermute ops are available.
-    # However, on B200, we use DeepGemm for all cases because they only support
-    # E8M0 scale, which means we requantize the weight and input to the specific
-    # scale. Fallen back to cutlass or triton for some cases would cause
-    # accuracy issue.
-    if (
-        allow_deep_gemm
-        and quant_config.use_fp8_w8a8
-        and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
-    ):
-        assert quant_config is not None
-        return deep_gemm_moe_fp8(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    else:
-        return dispatch_fused_experts_func(inplace)(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            use_fp8_w8a8=quant_config.use_fp8_w8a8,
-            use_int8_w8a8=quant_config.use_int8_w8a8,
-            use_int8_w8a16=quant_config.use_int8_w8a16,
-            use_int4_w4a16=quant_config.use_int4_w4a16,
-            ocp_mx_scheme=quant_config.ocp_mx_scheme,
-            per_channel_quant=quant_config.per_act_token_quant,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            w1_zp=quant_config.w1_zp,
-            w2_zp=quant_config.w2_zp,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            block_shape=quant_config.block_shape,
-            w1_bias=quant_config.w1_bias,
-            w2_bias=quant_config.w2_bias,
-        )
+    assert not inplace or not disable_inplace()
+
+    return dispatch_fused_experts_func(inplace)(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=activation,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        use_fp8_w8a8=quant_config.use_fp8_w8a8,
+        use_int8_w8a8=quant_config.use_int8_w8a8,
+        use_int8_w8a16=quant_config.use_int8_w8a16,
+        use_int4_w4a16=quant_config.use_int4_w4a16,
+        ocp_mx_scheme=quant_config.ocp_mx_scheme,
+        per_channel_quant=quant_config.per_act_token_quant,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        w1_zp=quant_config.w1_zp,
+        w2_zp=quant_config.w2_zp,
+        a1_scale=quant_config.a1_scale,
+        a2_scale=quant_config.a2_scale,
+        block_shape=quant_config.block_shape,
+        w1_bias=quant_config.w1_bias,
+        w2_bias=quant_config.w2_bias,
+    )
 
 
 def _get_config_quant_dtype(
@@ -1618,6 +1582,11 @@ def _get_config_quant_dtype(
         return "mxfp6_e3m2"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
         return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
+        return torch.bfloat16
+    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
+        return torch.float8_e4m3fn
+
     return None
 
 
@@ -1627,7 +1596,7 @@ def fused_experts_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
+    inplace: bool,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
@@ -1652,17 +1621,10 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {
-            "w_mxfp4_a_mxfp4",
-            "w_mxfp4_a_mxfp6_e3m2",
-            "w_mxfp4_a_mxfp6_e2m3",
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {
-            "w_mxfp6_e3m2_a_mxfp6_e3m2",
-            "w_mxfp6_e2m3_a_mxfp6_e2m3",
-        }:
+        elif ocp_mx_scheme.startswith("w_mxfp6"):
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
                 "hidden size mismatch"
             )
@@ -1746,26 +1708,19 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    if inplace and not disable_inplace():
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
         # TODO: On platforms for which `current_platform.supports_mx()` is True
         # and for which we have a native OCP mx fused MOE kernel,
         # this dequantization step should not be done.
-        if ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None
             w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
@@ -1774,7 +1729,7 @@ def fused_experts_impl(
                 w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
             )
@@ -1817,6 +1772,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
@@ -1884,6 +1840,7 @@ def fused_experts_impl(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
 
         if expert_map is not None:
@@ -1924,18 +1881,60 @@ def fused_experts_impl(
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda_alike()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        p = current_platform
+        if p.is_rocm():
+            from vllm.platforms.rocm import on_gfx9
+
+            is_rocm_on_gfx9 = on_gfx9()
+        else:
+            is_rocm_on_gfx9 = False
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
+
+        if not device_supports_fp8:
+            return (weight_key, activation_key) == (None, None)
+
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu", "swigluoai", "swiglustep"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     def supports_chunking(self) -> bool:
         return True
@@ -2111,11 +2110,43 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class TritonWNA16Experts(TritonExperts):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def apply(
         self,
@@ -2251,13 +2282,3 @@ class TritonWNA16Experts(TritonExperts):
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
-
-
-def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
-        shared_experts,
-    )

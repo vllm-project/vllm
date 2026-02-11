@@ -26,6 +26,10 @@ logger = init_logger(__name__)
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V32_INDEXER"
+
+    @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [1 if current_platform.is_rocm() else 64]
 
@@ -63,6 +67,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seqlen_ks: torch.Tensor
     cu_seqlen_ke: torch.Tensor
     cu_seq_lens: torch.Tensor
+    token_to_seq: torch.Tensor
     total_seq_lens: int
     token_start: int
     token_end: int
@@ -81,6 +86,8 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    use_large_context_topk: bool
+    offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
 @dataclass
@@ -234,6 +241,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         token_start = query_start_loc_cpu[reqs_start].item()
         token_end = query_start_loc_cpu[reqs_end].item()
         total_seq_lens = seq_lens_cpu[reqs_start:reqs_end].sum()
+        seq_idx = torch.arange(0, reqs_end - reqs_start, dtype=torch.int32)
+        token_to_seq = torch.repeat_interleave(
+            seq_idx, seq_lens_cpu[reqs_start:reqs_end]
+        ).to(self.device)
         assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = (
             torch.cat(
@@ -249,6 +260,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             cu_seqlen_ks=cu_seqlen_ks,
             cu_seqlen_ke=cu_seqlen_ke,
             cu_seq_lens=cu_seq_lens,
+            token_to_seq=token_to_seq,
             total_seq_lens=total_seq_lens,
             block_table=block_table[reqs_start:reqs_end],
             token_start=token_start,
@@ -310,6 +322,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Use CPU to avoid GPU sync; breaking async scheduling
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
 
+            # Decide which top-k kernel to use based on batch size and sequence length
+            batch_size = num_decodes
+            _is_large_context = common_attn_metadata.max_seq_len > 8192
+
+            # Decision logic based on micro-benchmark results:
+            # - large_context_topk wins for batch <= 128 and seq_len > 8K
+            # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
+            use_large_context_topk = batch_size <= 128 and _is_large_context
+
+            next_n = 1 + self.num_speculative_tokens
+            if next_n > 1:
+                offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
+            else:
+                offsets = None
+
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             if is_deep_gemm_supported():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
@@ -321,6 +348,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                use_large_context_topk=use_large_context_topk,
+                offsets=offsets,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

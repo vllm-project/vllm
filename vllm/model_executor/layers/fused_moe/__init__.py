@@ -88,6 +88,9 @@ if HAS_TRITON:
         fused_experts,
         get_config_file_name,
     )
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
         fused_topk,
     )
@@ -97,8 +100,13 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
     )
+    from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        XPUExperts,
+        XPUExpertsFp8,
+    )
 
     __all__ += [
+        "AiterExperts",
         "fused_topk",
         "fused_experts",
         "get_config_file_name",
@@ -113,6 +121,8 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
+        "XPUExperts",
+        "XPUExpertsFp8",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

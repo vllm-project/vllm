@@ -14,7 +14,25 @@ IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def __init__(self, vllm_config: VllmConfig):
+        super().__init__()
+
         self.vllm_config = vllm_config
+
+    @abstractmethod
+    def parse_data(self, data: object) -> IOProcessorInput:
+        raise NotImplementedError
+
+    def merge_sampling_params(
+        self,
+        params: SamplingParams | None = None,
+    ) -> SamplingParams:
+        return params or SamplingParams()
+
+    def merge_pooling_params(
+        self,
+        params: PoolingParams | None = None,
+    ) -> PoolingParams:
+        return params or PoolingParams()
 
     @abstractmethod
     def pre_process(
@@ -55,31 +73,15 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
             [(i, item) async for i, item in model_output], key=lambda output: output[0]
         )
         collected_output = [output[1] for output in sorted_output]
-        return self.post_process(collected_output, request_id, **kwargs)
-
-    @abstractmethod
-    def parse_request(self, request: Any) -> IOProcessorInput:
-        raise NotImplementedError
-
-    def validate_or_generate_params(
-        self, params: SamplingParams | PoolingParams | None = None
-    ) -> SamplingParams | PoolingParams:
-        return params or PoolingParams()
-
-    @abstractmethod
-    def output_to_response(
-        self, plugin_output: IOProcessorOutput
-    ) -> IOProcessorResponse:
-        raise NotImplementedError
+        return self.post_process(collected_output, request_id=request_id, **kwargs)
 ```
 
-The `parse_request` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
+The `parse_data` method is used for validating the user data and converting it into the input expected by the `pre_process*` methods.
+The `merge_sampling_params` and `merge_pooling_params` methods merge input `SamplingParams` or `PoolingParams` (if any) with the default one.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
-The `validate_or_generate_params` method is used for validating with the plugin any `SamplingParameters`/`PoolingParameters` received with the user request, or to generate new ones if none are specified. The function always returns the validated/generated parameters.
-The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/pooling` serving endpoint is available here [vllm/entrypoints/openai/serving_pooling.py](../../vllm/entrypoints/pooling/pooling/serving.py).
 
-An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/IBM/terratorch/tree/main/terratorch/vllm/plugins/segmentation). Please, also refer to our online ([examples/pooling/plugin/prithvi_geospatial_mae_client.py](../../examples/pooling/plugin/prithvi_geospatial_mae_client.py)) and offline ([examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py](../../examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py)) inference examples.
+An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/IBM/terratorch/tree/main/terratorch/vllm/plugins/segmentation). Please, also refer to our online ([examples/pooling/plugin/prithvi_geospatial_mae_online.py](../../examples/pooling/plugin/prithvi_geospatial_mae_online.py)) and offline ([examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py](../../examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py)) inference examples.
 
 ## Using an IO Processor plugin
 

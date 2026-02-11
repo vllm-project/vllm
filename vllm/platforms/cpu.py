@@ -16,6 +16,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -198,19 +199,26 @@ class CpuPlatform(Platform):
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
-        ) and cache_config.cache_dtype != "auto":
+        ) and is_quantized_kv_cache(cache_config.cache_dtype):
             raise RuntimeError(
                 "Chunked-prefill and prefix-cache on the CPU "
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype != "auto":
+        if cache_config.cache_dtype.startswith("fp8"):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
             cache_config.cache_dtype = "auto"
 
         cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
+
+        # reserve at least one core for nixl_connector under p/d case
+        if vllm_config.kv_transfer_config and (
+            envs.VLLM_CPU_NUM_OF_RESERVED_CPU == 0
+            or envs.VLLM_CPU_NUM_OF_RESERVED_CPU is None
+        ):
+            os.environ["VLLM_CPU_NUM_OF_RESERVED_CPU"] = "1"
 
         parallel_config = vllm_config.parallel_config
         if (
@@ -394,6 +402,60 @@ class CpuPlatform(Platform):
             ]
 
         return allowed_numa_nodes_list, logical_cpu_list
+
+    @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        """
+        Discover NUMA topology and keep the last physical core of each numa
+        into one core group list for nixl start_kv_load()
+        """
+        SYS_NODE = "/sys/devices/system/node"
+        SYS_CPU = "/sys/devices/system/cpu"
+
+        if not (os.path.exists(SYS_NODE) and os.path.exists(SYS_CPU)):
+            return []
+
+        core_rsv_for_kv = []
+        for node in os.listdir(SYS_NODE):
+            if not node.startswith("node") or not node[4:].isdigit():
+                continue
+            node_path = f"{SYS_NODE}/{node}"
+
+            seen_phys = set()
+            for cpu in os.listdir(node_path):
+                if not cpu.startswith("cpu") or not cpu[3:].isdigit():
+                    continue
+
+                cpu_id = int(cpu[3:])
+                # thread_siblings based on cpu_id
+                path = f"{SYS_CPU}/cpu{cpu_id}/topology/thread_siblings_list"
+
+                if os.path.exists(path):
+                    try:
+                        with open(path) as f:
+                            s = f.read()
+                        cpus: list[int] = []
+                        for part in s.strip().split(","):
+                            if "-" in part:
+                                a, b = map(int, part.split("-"))
+                                cpus.extend(range(a, b + 1))
+                            else:
+                                cpus.append(int(part))
+                        siblings = cpus if cpus else [cpu_id]
+                    except (OSError, ValueError):
+                        siblings = [cpu_id]
+                else:
+                    siblings = [cpu_id]
+
+                phys = min(siblings)
+
+                if phys not in seen_phys:
+                    seen_phys.add(phys)
+
+            if len(seen_phys) > 0:
+                core_rsv_for_kv.append(list(seen_phys))
+
+        return core_rsv_for_kv
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

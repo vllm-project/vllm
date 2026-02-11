@@ -7,7 +7,10 @@ import torch
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -16,7 +19,7 @@ def vllm_topk_softmax(
     topk_indices: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
-    renormalize: bool,
+    renormalize: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -29,12 +32,38 @@ def vllm_topk_softmax(
     return topk_weights, topk_indices
 
 
-def dispatch_topk_func(
+def vllm_topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+) -> tuple[torch.Tensor, ...]:
+    ops.topk_sigmoid(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+    )
+
+    return topk_weights, topk_indices
+
+
+def dispatch_topk_softmax_func(
     use_rocm_aiter: bool = False,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     if use_rocm_aiter:
         return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
+
+
+def dispatch_topk_sigmoid_func(
+    use_rocm_aiter: bool = False,
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
+        return rocm_aiter_ops.topk_sigmoid
+    return vllm_topk_sigmoid
 
 
 def fused_topk(
@@ -43,6 +72,7 @@ def fused_topk(
     topk: int,
     renormalize: bool,
     indices_type: torch.dtype | None = None,
+    scoring_func: str = "softmax",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -61,12 +91,26 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
-    topk_weights, topk_ids = topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-    )
+    if scoring_func == "softmax":
+        topk_func = dispatch_topk_softmax_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
+        topk_weights, topk_ids = topk_func(
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        )
 
-    return topk_weights, topk_ids, token_expert_indices
+        return topk_weights, topk_ids, token_expert_indices
+    elif scoring_func == "sigmoid":
+        topk_func = dispatch_topk_sigmoid_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
+        topk_weights, topk_ids = topk_func(
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        )
+
+        return topk_weights, topk_ids, token_expert_indices
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
 
 class FusedTopKRouter(BaseRouter):
@@ -82,7 +126,6 @@ class FusedTopKRouter(BaseRouter):
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
-        assert scoring_func == "softmax", "FusedTopKRouter only supports softmax."
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
@@ -91,13 +134,14 @@ class FusedTopKRouter(BaseRouter):
             indices_type_getter=indices_type_getter,
         )
         self.renormalize = renormalize
+        self.scoring_func = scoring_func
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
+        return get_routing_method_type(
+            scoring_func=self.scoring_func,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
         )
 
     def _compute_routing(
@@ -113,6 +157,7 @@ class FusedTopKRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
             indices_type=indices_type,
+            scoring_func=self.scoring_func,
         )
 
         return topk_weights, topk_ids
