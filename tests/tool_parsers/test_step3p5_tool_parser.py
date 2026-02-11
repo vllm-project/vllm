@@ -386,6 +386,57 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
+def test_extract_tool_calls_missing_function_name(step3p5_tool_parser, sample_tools):
+    """Tool call without function name should fallback to content."""
+    model_output = (
+        "<tool_call><parameter=pattern>*.py</parameter></function></tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
+def test_extract_tool_calls_empty_function_name(step3p5_tool_parser, sample_tools):
+    """Tool call with empty function name should fallback to content."""
+    model_output = (
+        "<tool_call><function=><parameter=pattern>*.py</parameter>"
+        "</function></tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
+def test_extract_tool_calls_empty_function_name_single_quotes(
+    step3p5_tool_parser, sample_tools
+):
+    """Tool call with empty function name (single quotes) should fallback."""
+    model_output = (
+        "<tool_call><function=><parameter=pattern>*.py</parameter></tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
 def test_extract_tool_calls_type_conversion(step3p5_tool_parser):
     """Test parameter type conversion based on tool schema"""
     tools = [
@@ -623,7 +674,7 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test streaming returns complete tool calls when parsed."""
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -647,11 +698,10 @@ def test_extract_tool_calls_streaming(
                     tool_states[idx] = {
                         "id": None,
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                         "type": None,
                     }
 
-                # First chunk should have id, name, and type
                 if tool_call.id:
                     tool_states[idx]["id"] = tool_call.id
 
@@ -666,8 +716,15 @@ def test_extract_tool_calls_streaming(
                         tool_states[idx]["name"] = tool_call.function.name
 
                     if tool_call.function.arguments is not None:
-                        # Accumulate arguments incrementally
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        # Arguments should be complete JSON when emitted.
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     # Verify final content
     assert other_content == (expected_content or "")  # Handle None case
@@ -682,7 +739,7 @@ def test_extract_tool_calls_streaming(
         assert state["type"] == "function"
         assert state["name"] == expected_tool.function.name
 
-        # Parse accumulated arguments
+        # Parse arguments
         arguments_str = state["arguments"]
         assert arguments_str is not None
         actual_args = json.loads(arguments_str)
@@ -770,7 +827,7 @@ fahrenheit
                     tool_states[idx] = {
                         "id": None,
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                         "type": None,
                     }
 
@@ -786,7 +843,14 @@ fahrenheit
                         tool_states[idx]["name"] = tool_call.function.name
 
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     # Verify content was streamed
     assert "Let me check the weather for you:" in other_content
@@ -806,62 +870,69 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
-def test_extract_tool_calls_streaming_incremental(
+def test_extract_tool_calls_streaming_missing_function_name(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test that streaming is truly incremental"""
-    model_output = """I'll check the weather.<tool_call>
-<function=get_current_weather>
-<parameter=city>
-Dallas
-</parameter>
-<parameter=state>
-TX
-</parameter>
-</function>
-</tool_call>"""
+    """Streaming: missing function name should be treated as content."""
+    model_output = (
+        "<tool_call><parameter=pattern>*.py</parameter></function></tool_call>"
+    )
 
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
-    chunks = []
-    for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+    other_content = ""
+    tool_calls = []
+
+    for delta_message in stream_delta_message_generator_from_chunks(
+        step3p5_tool_parser,
+        step3p5_tokenizer,
+        [
+            "<tool_call><parameter=pattern>",
+            "*.py</parameter>",
+            "</function></tool_call>",
+        ],
+        request,
     ):
-        chunks.append(delta_message)
+        if delta_message.content:
+            other_content += delta_message.content
+        if delta_message.tool_calls:
+            tool_calls.extend(delta_message.tool_calls)
 
-    # Should have multiple chunks
-    assert len(chunks) > 3
+    assert other_content == model_output
+    assert tool_calls == []
 
-    # First chunk(s) should be content
-    assert chunks[0].content is not None
-    assert chunks[0].tool_calls is None or chunks[0].tool_calls == []
 
-    # Should have a chunk with tool header (id, name, type)
-    header_found = False
-    for chunk in chunks:
-        if chunk.tool_calls and chunk.tool_calls[0].id:
-            header_found = True
-            assert chunk.tool_calls[0].function.name == "get_current_weather"
-            assert chunk.tool_calls[0].type == "function"
-            # Empty initially
-            assert chunk.tool_calls[0].function.arguments == ""
-            break
-    assert header_found
+def test_extract_tool_calls_streaming_empty_function_name(
+    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+):
+    """Streaming: empty function name should be treated as content."""
+    model_output = (
+        "<tool_call><function=''><parameter=pattern>*.py</parameter>"
+        "</function></tool_call>"
+    )
 
-    # Should have chunks with incremental arguments
-    arg_chunks = []
-    for chunk in chunks:
-        if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
-            arg_chunks.append(chunk.tool_calls[0].function.arguments)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
-    # Arguments should be streamed incrementally
-    assert len(arg_chunks) > 1
+    other_content = ""
+    tool_calls = []
 
-    # Concatenated arguments should form valid JSON
-    full_args = "".join(arg_chunks)
-    parsed_args = json.loads(full_args)
-    assert parsed_args["city"] == "Dallas"
-    assert parsed_args["state"] == "TX"
+    for delta_message in stream_delta_message_generator_from_chunks(
+        step3p5_tool_parser,
+        step3p5_tokenizer,
+        [
+            "<tool_call><function=",
+            "''><parameter=pattern>*.py</parameter>",
+            "</function></tool_call>",
+        ],
+        request,
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+        if delta_message.tool_calls:
+            tool_calls.extend(delta_message.tool_calls)
+
+    assert other_content == model_output
+    assert tool_calls == []
 
 
 def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
@@ -951,7 +1022,7 @@ rectangle
                     tool_states[idx] = {
                         "id": None,
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                         "type": None,
                     }
 
@@ -967,7 +1038,14 @@ rectangle
                         tool_states[idx]["name"] = tool_call.function.name
 
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     # Should have exactly two complete tool calls
     assert len(tool_states) == 2, "Should have exactly two complete tool calls"
@@ -1164,7 +1242,7 @@ rectangle
                     tool_states[idx] = {
                         "id": None,
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                         "type": None,
                     }
                 if tool_call.id:
@@ -1175,7 +1253,14 @@ rectangle
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     # Should have exactly two complete tool calls
     assert len(tool_states) == 2, "Should have exactly two complete tool calls"
@@ -1266,7 +1351,7 @@ rectangle
                     tool_states[idx] = {
                         "id": None,
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                         "type": None,
                     }
 
@@ -1282,7 +1367,14 @@ rectangle
                         tool_states[idx]["name"] = tool_call.function.name
 
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     # Should have exactly two complete tool calls
     assert len(tool_states) == 2, "Should have exactly two complete tool calls"
@@ -1344,20 +1436,26 @@ rectangle""",
     for delta_message in stream_delta_message_generator_from_chunks(
         step3p5_tool_parser, step3p5_tokenizer, delta_text_chunks, request
     ):
-        print(delta_message)
         if delta_message.tool_calls:
             for tool_call in delta_message.tool_calls:
                 idx = tool_call.index
                 if idx not in tool_states:
                     tool_states[idx] = {
                         "name": None,
-                        "arguments": "",
+                        "arguments": None,
                     }
                 if tool_call.function:
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        json.loads(tool_call.function.arguments)
+                        if tool_states[idx]["arguments"] is None:
+                            tool_states[idx]["arguments"] = tool_call.function.arguments
+                        else:
+                            assert (
+                                tool_states[idx]["arguments"]
+                                == tool_call.function.arguments
+                            )
 
     assert len(tool_states) == 2
     assert all(state["name"] for state in tool_states.values())
@@ -1368,7 +1466,7 @@ rectangle""",
 def test_extract_tool_calls_non_streaming_multiple_tool_calls_no_content_between(
     step3p5_tool_parser, sample_tools
 ):
-    """Test non-streaming extraction with tool calls and no content between them.
+    """Test non-streaming extraction with multiple tool calls.
 
     Scenario: Model outputs "hello" + tool call + tool call.
     Expected: "hello" as content, first tool call parsed (index=0),
