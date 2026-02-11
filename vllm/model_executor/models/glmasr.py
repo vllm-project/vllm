@@ -729,7 +729,9 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **(mm_processor_kwargs or {})
+        )
         sampling_rate = feature_extractor.sampling_rate
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio") if mm_options else None

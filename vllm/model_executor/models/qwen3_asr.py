@@ -151,7 +151,9 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **(mm_processor_kwargs or {})
+        )
 
         target_audio_length = (
             min(

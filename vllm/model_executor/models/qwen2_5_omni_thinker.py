@@ -364,7 +364,9 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **(mm_processor_kwargs or {})
+        )
 
         target_audio_length = (
             min(
