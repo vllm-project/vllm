@@ -1730,16 +1730,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
         ray.shutdown()
     gc.collect()
-    from vllm.platforms import current_platform
-
-    empty_cache = current_platform.empty_cache
-    if empty_cache is not None:
-        empty_cache()
-    try:
-        if not current_platform.is_cpu():
-            torch._C._host_emptyCache()
-    except AttributeError:
-        logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
+    torch.accelerator.empty_cache()
 
 
 def in_the_same_node_as(
