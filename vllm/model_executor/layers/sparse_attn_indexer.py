@@ -20,7 +20,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
+    from vllm._xpu_ops import xpu_ops as ops
 
 logger = init_logger(__name__)
 
