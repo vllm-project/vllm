@@ -48,7 +48,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
-    Qwen3MoeDecoderLayer,
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
     Qwen3MoeSparseMoeBlock,
@@ -83,27 +82,6 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        decoder_layer_type: type[torch.nn.Module] = Qwen3MoeDecoderLayer,
-    ):
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            decoder_layer_type=decoder_layer_type,
-        )
-        vision_config = vllm_config.model_config.hf_config.vision_config
-        if not get_pp_group().is_first_rank and hasattr(
-            vision_config, "deepstack_visual_indexes"
-        ):
-            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
-                "start_layer should be greater than or equal to "
-                "len(deepstack_visual_indexes)"
-            )
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -352,7 +330,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3MoeForCausalLM, self).__init__()
-        self.config = vllm_config.model_config.hf_config.text_config
+        self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = Qwen3MoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -473,8 +451,18 @@ class Qwen3VLMoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
-                vllm_config=vllm_config,
+                vllm_config=vllm_config.with_hf_config(config.text_config),
                 prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.language_model.start_layer >= len(
+                config.vision_config.deepstack_visual_indexes
+            ), (
+                "start_layer should be greater than or equal to "
+                "len(deepstack_visual_indexes)"
             )
 
         # Whether to include the gate_up_proj mapping is determined by
