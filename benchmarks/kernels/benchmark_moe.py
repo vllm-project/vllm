@@ -51,7 +51,7 @@ def clear_triton_cache():
 
     # Clear CUDA memory cache
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     # Try to clear Triton's runtime cache
     try:
