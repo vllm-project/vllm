@@ -3378,37 +3378,11 @@ class GPUModelRunner(
                 seq_lens_list.append(N)
 
             else:
-                # No transferred hidden states — use the original 1 token.
-                # Get it from the original input_ids (already on GPU).
-                num_computed = int(orig_cad.seq_lens[req_idx].item()) - 1
-                tok_ids = self.input_batch.token_ids_cpu[
-                    req_idx, num_computed : num_computed + 1
-                ]
-                tok_ids_gpu = torch.tensor(
-                    tok_ids, dtype=torch.int32, device=self.device
+                raise RuntimeError(
+                    f"Request {req_id} is missing transferred hidden "
+                    f"states. All requests in a P/D EAGLE injection "
+                    f"batch must have transferred hidden states."
                 )
-                pos = torch.tensor([num_computed], device=self.device, dtype=torch.long)
-                # Single-token slot mapping.
-                bn = block_table[req_idx, (pos // block_size).long()]
-                sm = bn * block_size + pos % block_size
-                # Use the 1 hidden state from the target forward.
-                # (There's only 1 scheduled token per request here.)
-                hs_1 = self.input_ids  # placeholder — we won't reach
-                # this in the common P/D case where all reqs have HS.
-                # For safety, fall back to zeros matching hidden_size.
-                hs_1 = torch.zeros(
-                    1,
-                    transferred_hs[next(iter(transferred_hs))].shape[-1],
-                    dtype=torch.bfloat16,
-                    device=self.device,
-                )
-
-                all_token_ids.append(tok_ids_gpu)
-                all_positions.append(pos)
-                all_hidden_states.append(hs_1)
-                all_slot_mappings.append(sm)
-                query_starts.append(query_starts[-1] + 1)
-                seq_lens_list.append(int(orig_cad.seq_lens[req_idx].item()))
 
         # ── Concatenate into batch tensors.
         target_token_ids = torch.cat(all_token_ids)

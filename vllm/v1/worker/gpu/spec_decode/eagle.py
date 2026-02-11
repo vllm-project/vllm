@@ -386,24 +386,11 @@ class EagleSpeculator:
                 all_hidden_states.append(hs)
                 query_lens.append(N)
             else:
-                # Fallback: 1-token decode (same as normal path).
-                num_sampled_i = int(num_sampled[batch_idx].item())
-                if num_sampled_i > 0:
-                    tok = last_sampled[req_state_idx].view(1).to(torch.int32)
-                else:
-                    tok = input_batch.input_ids[
-                        int(input_batch.query_start_loc[batch_idx].item())
-                    ].view(1)
-                # Position = seq_len - 1  (last computed position).
-                pos = (input_batch.seq_lens[batch_idx] - 1).view(1).long()
-                # Use target hidden state at this request's position.
-                start = int(input_batch.query_start_loc[batch_idx].item())
-                hs_1 = target_hidden_states[start : start + 1]
-
-                all_input_ids.append(tok)
-                all_positions.append(pos)
-                all_hidden_states.append(hs_1)
-                query_lens.append(1)
+                raise RuntimeError(
+                    f"Request {req_id} is missing transferred hidden "
+                    f"states. All requests in a P/D EAGLE injection "
+                    f"batch must have transferred hidden states."
+                )
 
         # ── Concatenate into batch tensors ──
         cat_input_ids = torch.cat(all_input_ids)
