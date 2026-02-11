@@ -1527,6 +1527,7 @@ def fused_experts(
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
 ) -> torch.Tensor:
+    """Run fused MoE expert computation using Triton kernels."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
@@ -1879,6 +1880,8 @@ def fused_experts_impl(
 
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    """Triton-based fused MoE expert implementation."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

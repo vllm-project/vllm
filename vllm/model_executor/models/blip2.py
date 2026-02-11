@@ -73,6 +73,7 @@ class Blip2ImageEmbeddingInputs(TensorSchema):
 
 
 Blip2ImageInputs: TypeAlias = Blip2ImagePixelInputs | Blip2ImageEmbeddingInputs
+"""Alias for supported BLIP-2 image input types."""
 
 
 class Blip2QFormerMultiHeadAttention(nn.Module):
