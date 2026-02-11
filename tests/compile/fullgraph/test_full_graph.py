@@ -194,15 +194,13 @@ def test_custom_compile_config(
 )
 @pytest.mark.parametrize(
     "model, backend",
-    (
-        [
-            ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-            (
-                "deepseek-ai/DeepSeek-V2-Lite",
-                AttentionBackendEnum.FLASHINFER_MLA,
-            ),  # MLA (Multi-head Latent Attention) model
-        ],
-    ),
+    [
+        ("Qwen/Qwen2-0.5B", None),  # Standard attention model
+        (
+            "deepseek-ai/DeepSeek-V2-Lite",
+            AttentionBackendEnum.FLASHINFER_MLA,
+        ),  # MLA (Multi-head Latent Attention) model
+    ],
 )
 def test_fp8_kv_scale_compile(
     compilation_mode: int,
