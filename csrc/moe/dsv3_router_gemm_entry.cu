@@ -19,7 +19,6 @@
  */
 
 #include <ATen/ATen.h>
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include <cuda_bf16.h>
@@ -97,9 +96,9 @@ struct LoopUnroller<kEnd, kEnd, kNumExperts, kHiddenDim> {
   }
 };
 
-void dsv3_router_gemm(torch::Tensor& output,       // [num_tokens, num_experts]
-                      const torch::Tensor& mat_a,  // [num_tokens, hidden_dim]
-                      const torch::Tensor& mat_b   // [num_experts, hidden_dim]
+void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
+                      const at::Tensor& mat_a,  // [num_tokens, hidden_dim]
+                      const at::Tensor& mat_b   // [num_experts, hidden_dim]
 ) {
   TORCH_CHECK(output.dim() == 2 && mat_a.dim() == 2 && mat_b.dim() == 2);
 
@@ -120,18 +119,17 @@ void dsv3_router_gemm(torch::Tensor& output,       // [num_tokens, num_experts]
   TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
               "currently num_tokens must be less than or equal to 16 for "
               "router_gemm");
-  TORCH_CHECK(mat_a.dtype() == torch::kBFloat16, "mat_a must be bf16");
-  TORCH_CHECK(mat_b.dtype() == torch::kBFloat16, "mat_b must be bf16");
-  TORCH_CHECK(
-      output.dtype() == torch::kFloat32 || output.dtype() == torch::kBFloat16,
-      "output must be float32 or bf16");
+  TORCH_CHECK(mat_a.dtype() == at::kBFloat16, "mat_a must be bf16");
+  TORCH_CHECK(mat_b.dtype() == at::kBFloat16, "mat_b must be bf16");
+  TORCH_CHECK(output.dtype() == at::kFloat || output.dtype() == at::kBFloat16,
+              "output must be float32 or bf16");
 
   auto const sm = getSMVersion();
   TORCH_CHECK(sm >= 90, "required CUDA ARCH >= SM_90");
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (output.dtype() == torch::kFloat32) {
+  if (output.dtype() == at::kFloat) {
     if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_float_output(
@@ -145,7 +143,7 @@ void dsv3_router_gemm(torch::Tensor& output,       // [num_tokens, num_experts]
               reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
               reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
     }
-  } else if (output.dtype() == torch::kBFloat16) {
+  } else if (output.dtype() == at::kBFloat16) {
     if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_bf16_output(
