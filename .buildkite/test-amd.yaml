@@ -590,7 +590,9 @@ steps:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
   # TODO: clean up this comment if not needed. It is used to 
   # keep track of the tests changes during vLLM IR Ops refactoring.
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  # Use `find` to launch multiple instances of pytest.
+  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+
 
 # corresponds to .buildkite/test_areas/pytorch.yaml
 - label: PyTorch Fullgraph Smoke Test # 15min
