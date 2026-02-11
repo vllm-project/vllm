@@ -915,6 +915,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
         enforce_eager=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
+                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
