@@ -2182,7 +2182,8 @@ def dsv3_router_gemm(
         device=hidden_states.device,
         dtype=output_dtype,
     )
-    return torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+    return output
 
 
 def topk_softmax(
