@@ -125,7 +125,7 @@ def test_no_sync_with_spec_decode(
     assert len(outputs[0].outputs[0].text) > 0
 
     del llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     sync_tracker.assert_no_sync()
