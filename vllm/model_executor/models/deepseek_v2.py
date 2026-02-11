@@ -258,7 +258,7 @@ class DeepSeekV2Gate(ReplicatedLinear):
             and x.shape[0] <= 16  # batch size
             and x.shape[1] == 7168  # hidden size
         ):
-            return ops.dsv3_router_gemm(x, self.weight, out_dtype=torch.float32)
+            return ops.dsv3_router_gemm(x, self.weight, torch.float32)
         else:
             return super().forward(x)
 
