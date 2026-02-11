@@ -131,7 +131,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3nProcessor | None,
+        processor: Gemma3nProcessor,
     ) -> str:
         """
         Get the replacement text for image tokens.
@@ -139,9 +139,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return PromptUpdateDetails.select_token_id(
             processor.full_image_sequence, processor.image_token_id
         )
@@ -149,7 +146,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
     def get_audio_repl(
         self,
         *,
-        processor: Gemma3nProcessor | None,
+        processor: Gemma3nProcessor,
     ) -> str:
         """
         Get the replacement text for audio tokens.
@@ -157,9 +154,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         For Gemma3n, this should return the full_audio_sequence which includes
         BOA token, repeated audio tokens, and EOA token.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
-
         # Return the full audio sequence as defined by the processor
         return PromptUpdateDetails.select_token_id(
             processor.full_audio_sequence, processor.audio_token_id
