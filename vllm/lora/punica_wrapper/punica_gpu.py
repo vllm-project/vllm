@@ -231,6 +231,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer (Optional[torch.Tensor]): Defaults to None.
         """
 
+        print(f"x_shape: {x.view(-1, x.shape[-1]).shape}")
+        print(f"num_slices: {len(output_slices)}")
+        for i in range(len(output_slices)):
+            print(f"a{i} shape: {lora_a_stacked[i].shape}")
+            print(f"b{i} shape: {lora_b_stacked[i].shape}")
+        print("y_shape", y.shape)
+
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
         assert buffer is None, (
