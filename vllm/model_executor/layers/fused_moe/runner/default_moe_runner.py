@@ -561,6 +561,13 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
+        # Ensure moe_quant_config is initialized. This is needed because
+        # forward_native (which also calls ensure_moe_quant_config_init)
+        # is compiled by torch.compile/dynamo, and the attribute mutation
+        # side effect is not replayed at runtime. forward_impl runs inside
+        # the moe_forward custom op, so it is not compiled by dynamo.
+        layer.ensure_moe_quant_config_init()
+
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
