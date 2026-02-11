@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import aux_stream, current_stream, direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
@@ -32,10 +33,10 @@ def _lora_apply_impl(
     """Custom op implementation."""
     layer = _lora_layer_registry[layer_key]
 
-    lora_delta = torch.empty(
+    lora_delta = torch.zeros(
         (x.shape[0], output_size),
-        dtype=layer.lora_config.lora_dtype,
-        device=layer.device,
+        dtype=x.dtype,
+        device=x.device,
     )
 
     layer.lora_stream.wait_stream(current_stream())
@@ -188,6 +189,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
+    """
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         original_shape = x.shape if x.ndim == 3 else None
         x_flat = x.flatten(0, 1) if x.ndim == 3 else x
@@ -197,8 +199,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if original_shape is not None:
             return output_flat.view(*original_shape[:-1], -1)
         return output_flat
-
     """
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
@@ -223,7 +225,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.reshape(original_shape)
 
         return output
-    """
 
     @property
     def weight(self) -> torch.Tensor:

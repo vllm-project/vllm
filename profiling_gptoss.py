@@ -4,9 +4,10 @@
 import os
 
 os.environ["VLLM_NVTX_SCOPES_FOR_PROFILING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["VLLM_MXFP4_USE_MARLIN"] = "1"
 os.environ["VLLM_ENABLE_LORA_STREAM"] = "1"
+# os.environ["VLLM_TUNED_CONFIG_FOLDER"] = "/home/ubuntu/qwen_32B_max_lora_8"
 # os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
 
 
@@ -17,7 +18,7 @@ from vllm.lora.request import LoRARequest
 
 prompts = [
     # "What are frogs?" * 1,
-    "What are frogs?" * 1,
+    "What are frogs?" * 400,
 ]
 
 # jeeejeee/gpt-oss-20b-lora-adapter-text2sql
@@ -34,11 +35,11 @@ if use_lora:
     llm = LLM(
         model="Qwen/Qwen3-32B",
         trust_remote_code=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=4,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.95,
         enable_lora=True,
-        max_loras=1,
+        max_loras=8,
         max_lora_rank=32,
         max_cpu_loras=max_loras,
         # enforce_eager=True
