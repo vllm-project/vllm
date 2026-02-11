@@ -5,7 +5,7 @@ import queue
 import signal
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -40,7 +40,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
     EngineCoreOutput,
@@ -49,10 +49,8 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
-    PauseState,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
-    UtilityFuture,
     UtilityOutput,
     UtilityResult,
 )
@@ -213,11 +211,7 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # Pause state; all non-UNPAUSED states queue new adds in _paused_adds_queue.
-        self._scheduler_pause_state = PauseState.UNPAUSED
-        # Requests received while paused; flushed on resume_scheduler().
-        # Contains tuples of (request, request_wave)
-        self._paused_adds_queue: deque[tuple[Request, int]] = deque()
+        self.per_step_hooks: set[Callable] = set()
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -297,9 +291,6 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
-        if self._scheduler_pause_state != PauseState.UNPAUSED:
-            self._paused_adds_queue.append((request, request_wave))
-            return
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -327,145 +318,13 @@ class EngineCore:
 
         self.scheduler.add_request(request)
 
-    def abort_requests(self, request_ids: list[str]) -> list[str]:
-        """Abort requests from the scheduler.
+    def abort_requests(self, request_ids: list[str]):
+        """Abort requests from the scheduler."""
 
-        When running in a process with an output_queue (e.g. EngineCoreProc),
-        also emits abort outputs so each client receives the abort for its
-        request(s). Outputs are routed by client_index so the waiting client
-        gets the finish.
-
-        Requests in _paused_adds_queue whose request_id is in request_ids are
-        added to the scheduler (and removed from the queue) so they can be
-        aborted and the client notified.
-
-        Returns:
-            List of request IDs that were actually aborted (were in the
-            scheduler).
-        """
-        request_ids_set = set(request_ids)
-        # Add any paused-adds that should be aborted into the scheduler, then
-        # remove them from the queue so they are found by finish_requests below.
-        if self._paused_adds_queue:
-            new_queue: deque[tuple[Request, int]] = deque()
-            while self._paused_adds_queue:
-                request, request_wave = self._paused_adds_queue.popleft()
-                if request.request_id in request_ids_set:
-                    self.scheduler.add_request(request)
-                else:
-                    new_queue.append((request, request_wave))
-            self._paused_adds_queue = new_queue
-
-        # Get client_index for each request before finish_requests removes them.
-        client_indices = self.scheduler.get_request_client_indices(request_ids)
-        aborted_ids = self.scheduler.finish_requests(
-            request_ids, RequestStatus.FINISHED_ABORTED
-        )
-        output_queue = getattr(self, "output_queue", None)
-        if aborted_ids and output_queue is not None:
-            # Map client_index to list of request_ids that belong to that client.
-            by_client: dict[int, list[str]] = {}
-            for rid in aborted_ids:
-                client_idx = client_indices[rid]
-                by_client.setdefault(client_idx, []).append(rid)
-            for client_index, rids in by_client.items():
-                output_queue.put_nowait(
-                    (
-                        client_index,
-                        EngineCoreOutputs(
-                            finished_requests=set(rids),
-                            outputs=[
-                                EngineCoreOutput(
-                                    request_id=rid,
-                                    new_token_ids=[],
-                                    finish_reason=FinishReason.ABORT,
-                                )
-                                for rid in rids
-                            ],
-                        ),
-                    ),
-                )
-        return aborted_ids
-
-    def pause_scheduler(
-        self,
-        mode: PauseMode = "abort",
-        clear_cache: bool = True,
-    ) -> UtilityFuture:
-        """Pause generation; behavior depends on mode.
-
-        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
-        PAUSE_WAIT allows step() so in-flight requests can drain.
-
-        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
-          outputs to be sent (when running with output_queue), clear caches,
-          then complete the returned Future.
-        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
-          set PAUSE_KEEP, clear caches, complete the returned Future.
-        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
-          output queue is empty.
-        """
-
-        if not hasattr(self, "_pending_step_completions"):
-            raise RuntimeError(
-                "pause_scheduler with deferrable modes requires "
-                "_pending_step_completions (use EngineCoreProc, not EngineCore)"
-            )
-        if not hasattr(self, "output_queue"):
-            raise RuntimeError(
-                "pause_scheduler requires output_queue (use EngineCoreProc)"
-            )
-        else:
-            output_queue = self.output_queue
-
-        future: Future[Any] = Future()
-
-        def _step_queue_empty() -> None:
-            if not output_queue.empty():
-                return
-            future.set_result(None)
-
-        if mode == "abort":
-            self._scheduler_pause_state = PauseState.PAUSE_ABORT
-            request_ids = self.scheduler.get_all_request_ids()
-            if request_ids:
-                self.abort_requests(request_ids)
-            if clear_cache:
-                self.reset_prefix_cache()
-                self.reset_mm_cache()
-                self.reset_encoder_cache()
-            return UtilityFuture(future, _step_queue_empty)
-        elif mode == "keep":
-            self._scheduler_pause_state = PauseState.PAUSE_KEEP
-            return UtilityFuture(future, _step_queue_empty)
-
-        elif mode == "wait":
-            # wait: PAUSE_WAIT so adds are queued but step() still runs to drain.
-            self._scheduler_pause_state = PauseState.PAUSE_WAIT
-
-            def _step_wait() -> None:
-                if self.scheduler.has_unfinished_requests():
-                    return
-                self._scheduler_pause_state = PauseState.PAUSE_KEEP
-                if clear_cache:
-                    self.reset_prefix_cache()
-                    self.reset_mm_cache()
-                    self.reset_encoder_cache()
-                future.set_result(None)
-
-            return UtilityFuture(future, _step_wait)
-        else:
-            raise ValueError(f"Invalid pause mode: {mode}")
-
-    def resume_scheduler(self) -> None:
-        """Resume the scheduler and flush any requests queued while paused."""
-        self._scheduler_pause_state = PauseState.UNPAUSED
-        while self._paused_adds_queue:
-            self.add_request(*self._paused_adds_queue.popleft())
-
-    def is_scheduler_paused(self) -> bool:
-        """Return whether the scheduler is in any pause state."""
-        return self._scheduler_pause_state != PauseState.UNPAUSED
+        # TODO: The scheduler doesn't really need to know the
+        # specific finish reason, TBD whether we propagate that
+        # (i.e. client-aborted vs stop criteria met).
+        self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -520,13 +379,6 @@ class EngineCore:
         was executed.
         """
 
-        # If paused (abort/keep), don't schedule any work. PAUSE_WAIT allows step.
-        if self._scheduler_pause_state in (
-            PauseState.PAUSE_ABORT,
-            PauseState.PAUSE_KEEP,
-        ):
-            return {}, False
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -577,12 +429,6 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        # If paused (abort/keep), don't schedule any work. PAUSE_WAIT allows step.
-        if self._scheduler_pause_state in (
-            PauseState.PAUSE_ABORT,
-            PauseState.PAUSE_KEEP,
-        ):
-            return {}, False
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -833,8 +679,6 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        # Deferred utilities: engine calls .step() each loop until .future is done.
-        self._pending_step_completions: list[UtilityFuture] = []
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -1159,8 +1003,8 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
-            # 3) Run step-based completion checks (e.g. pause_scheduler futures).
-            self._process_pending_step_completions()
+            # 3) Run per-step hooks.
+            self._process_per_step_hooks()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1170,8 +1014,6 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
-            and self._scheduler_pause_state == PauseState.UNPAUSED
-            and not self._pending_step_completions
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1211,24 +1053,12 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
-    def _process_pending_step_completions(self) -> None:
-        """Run step() on deferred utilities; remove any whose future is done."""
-        pending = self._pending_step_completions
-        if not pending:
-            return
-        still_pending: list[UtilityFuture] = []
-        for uf in pending:
-            if uf.future.done():
-                continue
-            try:
-                uf.step()
-            except BaseException as e:
-                logger.exception("Step completion check failed")
-                uf.future.set_exception(e)
-                continue
-            if not uf.future.done():
-                still_pending.append(uf)
-        self._pending_step_completions = still_pending
+    def _process_per_step_hooks(self) -> None:
+        if self.per_step_hooks:
+            for hook in list(self.per_step_hooks):
+                finished = hook()
+                if finished:
+                    self.per_step_hooks.discard(hook)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1242,36 +1072,41 @@ class EngineCoreProc(EngineCore):
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
-            try:
-                method = getattr(self, method_name)
-                result = method(*self._convert_msgspec_args(method, args))
-
-                if isinstance(result, UtilityFuture):
-                    result.register_done(
-                        self.output_queue, client_idx, call_id, method_name
-                    )
-                    self._pending_step_completions.append(result)
-                else:
-                    output = UtilityOutput(call_id)
-                    output.result = UtilityResult(result)
-                    self.output_queue.put_nowait(
-                        (client_idx, EngineCoreOutputs(utility_output=output))
-                    )
-            except BaseException as e:
-                logger.exception("Invocation of %s method failed", method_name)
-                output = UtilityOutput(call_id)
-                output.failure_message = (
-                    f"Call to {method_name} method failed: {str(e)}"
-                )
-                self.output_queue.put_nowait(
-                    (client_idx, EngineCoreOutputs(utility_output=output))
-                )
+            output = UtilityOutput(call_id)
+            self._invoke_utility_method(method_name, None, client_idx, output, args)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
             )
+
+    def _invoke_utility_method(
+        self,
+        method_name: str,
+        method: Callable | None,
+        client_idx: int,
+        output: UtilityOutput,
+        args=(),
+    ):
+        try:
+            if method is None:
+                method = getattr(self, method_name)
+            result = method(*self._convert_msgspec_args(method, args))
+            if isinstance(result, Future):
+                result.add_done_callback(
+                    lambda f: self._invoke_utility_method(
+                        method_name, f.result, client_idx, output
+                    )
+                )
+                return
+            output.result = UtilityResult(result)
+        except Exception as e:
+            logger.exception("Invocation of %s method failed", method_name)
+            output.failure_message = f"Call to {method_name} method failed: {str(e)}"
+        self.output_queue.put_nowait(
+            (client_idx, EngineCoreOutputs(utility_output=output))
+        )
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -1478,6 +1313,78 @@ class EngineCoreProc(EngineCore):
                 ),
             )
         )
+
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """Pause generation; behavior depends on mode.
+
+        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
+        PAUSE_WAIT allows step() so in-flight requests can drain.
+
+        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), clear caches,
+          then complete the returned Future.
+        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
+          set PAUSE_KEEP, clear caches, complete the returned Future.
+        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
+          output queue is empty.
+        """
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+
+        if mode == "keep":
+            # TODO could integrate with forced-preemption here for cache reset case
+            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+            return None
+
+        future: Future[Any] = Future()
+
+        def _wait_for_running_to_finish() -> bool:
+            if not self.scheduler.has_requests():
+                if clear_cache:
+                    self.reset_prefix_cache()
+                    self.reset_mm_cache()
+                    self.reset_encoder_cache()
+                future.set_result(None)
+                return True
+            return False
+
+        if mode == "abort":
+            aborted = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            if aborted:
+                # Map client_index to list of request_ids that belong to that client.
+                by_client = defaultdict[int, set[str]](set)
+                for req_id, client_index in aborted:
+                    by_client[client_index].add(req_id)
+                for client_index, req_ids in by_client.items():
+                    outputs = [
+                        EngineCoreOutput(
+                            request_id=rid,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ABORT,
+                        )
+                        for rid in req_ids
+                    ]
+                    eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+                    self.output_queue.put_nowait((client_index, eco))
+
+        self.scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        if not _wait_for_running_to_finish():
+            self.per_step_hooks.add(_wait_for_running_to_finish)
+            return future
+        return None
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler and flush any requests queued while paused."""
+        self.scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    def is_scheduler_paused(self) -> bool:
+        return False  # TODO
+        """Return whether the scheduler is in any pause state."""
+        # return self._scheduler_pause_state != PauseState.UNPAUSED
 
 
 class DPEngineCoreProc(EngineCoreProc):

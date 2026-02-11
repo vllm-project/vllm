@@ -38,7 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -271,6 +271,8 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
+        self.pause_state: PauseState = PauseState.UNPAUSED
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -338,6 +340,10 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        if self.pause_state == PauseState.PAUSED_ALL:
+            # Do not schedule any requests when paused.
+            token_budget = 0
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -525,12 +531,12 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
-        # Use a temporary RequestQueue to collect requests that need to be
-        # skipped and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_request_queue(self.policy)
-
         # Next, schedule the WAITING requests.
-        if not preempted_reqs:
+        if not preempted_reqs and self.pause_state == PauseState.UNPAUSED:
+            # Use a temporary RequestQueue to collect requests that need to be
+            # skipped and put back at the head of the waiting queue later
+            skipped_waiting_requests = create_request_queue(self.policy)
+
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -797,9 +803,10 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
-        # Put back any skipped requests at the head of the waiting queue
-        if skipped_waiting_requests:
-            self.waiting.prepend_requests(skipped_waiting_requests)
+
+            # Put back any skipped requests at the head of the waiting queue
+            if skipped_waiting_requests:
+                self.waiting.prepend_requests(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1641,20 +1648,6 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
 
-    def get_all_request_ids(self) -> list[str]:
-        """Return all request IDs currently in the scheduler (running or waiting)."""
-        return list(self.requests.keys())
-
-    def get_request_client_indices(self, request_ids: Iterable[str]) -> dict[str, int]:
-        """Return request_id -> client_index for requests that exist and are not
-        finished.
-        """
-        return {
-            rid: self.requests[rid].client_index
-            for rid in request_ids
-            if rid in self.requests and not self.requests[rid].is_finished()
-        }
-
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
@@ -1678,22 +1671,26 @@ class Scheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
-        self, request_ids: str | Iterable[str], finished_status: RequestStatus
-    ) -> list[str]:
+        self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
+    ) -> list[tuple[str, int]]:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
         disconnects.
 
+        If request_ids is None, all requests will be finished.
+
         Returns:
-            List of request IDs that were actually finished (were in the
-            scheduler and not already finished).
+            Tuple of (req_id, client_index) for requests that were aborted. Will not
+            include any that were already finished.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
-        else:
+        elif request_ids is not None:
             request_ids = set(request_ids)
+        else:
+            request_ids = self.requests.keys()
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []
@@ -1733,7 +1730,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
-        return [r.request_id for r in valid_requests]
+        return [(r.request_id, r.client_index) for r in valid_requests]
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
@@ -1758,7 +1755,14 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free(request)
         del self.requests[request.request_id]
 
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        self.pause_state = pause_state
+
     def get_num_unfinished_requests(self) -> int:
+        if self.pause_state == PauseState.PAUSED_ALL:
+            return 0
+        if self.pause_state == PauseState.PAUSED_NEW:
+            return len(self.running)
         num_waiting = len(self.waiting) - self.num_waiting_for_streaming_input
         return num_waiting + len(self.running)
 
