@@ -992,10 +992,13 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     content = response_msg.get("content")
                     if isinstance(content, str):
-                        system_msg = response_msg.get("content")
+                        system_msg = content
                     elif isinstance(content, list):
                         for param in content:
-                            if param.get("type") == "input_text":
+                            if (
+                                isinstance(param, dict)
+                                and param.get("type") == "input_text"
+                            ):
                                 system_msg = param.get("text")
                                 break
                     break
