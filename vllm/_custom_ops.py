@@ -2171,6 +2171,20 @@ def moe_wna16_gemm(
     )
 
 
+def dsv3_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=output_dtype,
+    )
+    return torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,

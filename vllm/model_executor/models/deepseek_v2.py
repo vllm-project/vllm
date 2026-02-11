@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -220,6 +221,48 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+class DeepSeekV2Gate(ReplicatedLinear):
+    def __init__(
+        self,
+        hidden_size: int,
+        n_experts: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        assert quant_config is None
+        super().__init__(
+            hidden_size,
+            n_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
+
+        self.allow_dsv3_router_gemm = True
+
+    def _set_allow_dsv3_router_gemm(self) -> None:
+        self.allow_dsv3_router_gemm = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability((9, 0))
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Use specialized GEMM for low batch size for DSV3 and KIMI.
+        """
+        if (
+            self.allow_dsv3_router_gemm
+            and x.shape[0] <= 16  # batch size
+            and x.shape[1] == 7168  # hidden size
+        ):
+            return ops.dsv3_router_gemm(x, self.weight, out_dtype=torch.float32)
+        else:
+            return super().forward(x)
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -248,10 +291,9 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = DeepSeekV2Gate(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
