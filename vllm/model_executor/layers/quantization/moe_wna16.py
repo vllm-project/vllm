@@ -376,6 +376,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
             f"Only SiLU activation is supported, not {layer.activation}."
         )
 
+        # Lazy init: moe_quant_config may not yet be set if
+        # ensure_moe_quant_config_init() hasn't run (e.g. during the first
+        # compiled forward pass with piecewise backends).
+        if self.moe_quant_config is None:
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
         return fused_experts(
             x,
             layer.w13_qweight,
