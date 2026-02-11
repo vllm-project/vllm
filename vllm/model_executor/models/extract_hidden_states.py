@@ -15,11 +15,9 @@ import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import (
-    get_attention_context,
-    set_default_quant_scales,
-)
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
@@ -41,33 +39,47 @@ from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCache
 logger = init_logger(__name__)
 
 
-def reshape_hidden_states_for_kv_cache(
-    hidden_states: torch.Tensor, num_heads: int, head_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reshape hidden states into key and value tensors for KV cache.
+########## Custom Ops ########
 
-    Args:
-        hidden_states: shape [batch_size, 2 * num_heads * head_size ]
-            where num_heads = (original_num_heads // 2) * num_hidden_layers
-            e.g. hidden_states = torch.cat([h_1, h_2, ..., h_n], dim=1)
-        num_heads: Number of attention heads
-        head_size: Size of each attention head
 
-    Returns:
-        key, value: each of shape [batch_size, num_heads, head_size]
+def unified_kv_cache_update(
+    to_cache: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
     """
+    Returns a dummy that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
-    batch_size = hidden_states.shape[0]
-    # Split into two equal parts for key and value
-    split_size = hidden_states.shape[1] // 2
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        attn_layer.impl.do_kv_cache_update(
+            attn_layer,
+            to_cache,
+            kv_cache,
+            layer_slot_mapping,
+        )
 
-    key, value = torch.split(hidden_states, [split_size, split_size], dim=1)
-    # key/value shape: [batch_size, hidden_size * num_hidden_states / 2]
+    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
-    # Reshape to attention head format
-    key = key.view(batch_size, num_heads, head_size)
-    value = value.view(batch_size, num_heads, head_size)
-    return key, value
+
+@maybe_transfer_kv_layer
+def dummy_attention(layer_name):
+    # Note: layer_name arg required by @maybe_transfer_kv_layer
+    pass
+
+
+######### CacheOnlyAttentionBackend ########
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
@@ -80,7 +92,10 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -106,7 +121,9 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
+        # We also don't use a k/v (2) dim
+        return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
@@ -137,11 +154,6 @@ class CacheOnlyAttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.model_config = vllm_config.model_config
-        self.parallel_config = vllm_config.parallel_config
-        self.cache_config = vllm_config.cache_config
-        self.block_size = kv_cache_spec.block_size
-        self.kv_cache_spec = kv_cache_spec
 
     def build(
         self,
@@ -160,9 +172,8 @@ class CacheOnlyAttentionMetadataBuilder(
                 "Non-causal attention not supported by CacheOnlyAttention"
             )
 
-        slot_mapping = common_attn_metadata.slot_mapping
         return CacheOnlyAttentionMetadata(
-            slot_mapping=slot_mapping,
+            slot_mapping=common_attn_metadata.slot_mapping,
         )
 
 
@@ -173,92 +184,41 @@ class CacheOnlyAttentionImpl(AttentionImpl):
         self,
         num_heads: int,
         head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: str | None = None,
-        **kwargs,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.attn_type = attn_type
-        self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
-        self.logits_soft_cap = logits_soft_cap
-        self.alibi_slopes = None
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(f"Unsupported attention type: {attn_type}")
-        if sliding_window is not None:
-            raise NotImplementedError("Sliding window is not supported")
-        if alibi_slopes is not None:
-            raise NotImplementedError("ALiBi slopes not supported")
-        if logits_soft_cap is not None:
-            raise NotImplementedError("Logits soft cap not supported")
-        if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing not supported")
         if is_quantized_kv_cache(kv_cache_dtype):
             raise NotImplementedError("Quantized KV cache not supported")
 
         self.num_queries_per_kv = 1
 
-    def forward(
+    def do_kv_cache_update(
         self,
-        layer: torch.nn.Module,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: CacheOnlyAttentionMetadata,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Cache key/value states without computing attention.
+        layer,
+        to_cache,
+        kv_cache,
+        slot_mapping,
+    ):
+        # todo(fynn): Implement reshape_and_cache_flash custom op
 
-        Args:
-            layer: Attention layer module
-            query: Not used (can be None)
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: Metadata for caching
-            output: Output tensor (filled with zeros)
+        # reshape_and_cache_flash(
+        #     to_cache,
+        #     kv_cache,
+        #     slot_mapping,
+        #     self.kv_cache_dtype,
+        #     layer._k_scale, # do I need these?
+        #     layer._v_scale,
+        # )
+        pass
 
-        Returns:
-            output tensor filled with zeros
-        """
-        assert output is not None, "Output tensor required"
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError("Fused output quantization not supported")
 
-        if attn_metadata is None:
-            # Profiling run
-            return output.fill_(0)
-
-        assert self.attn_type == AttentionType.DECODER
-
-        # Cache the key/value states
-        key_cache, value_cache = kv_cache.unbind(0)
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
-
-        # Return dummy output (not used)
-        return output.fill_(0)
+############## CacheOnlyAttentionLayer (replaces Attention) ############
 
 
 class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
@@ -296,6 +256,10 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             self.block_size = 16
 
+        assert kv_cache_dtype in ["auto", "bfloat16", "float16"], (
+            "CacheOnlyAttentionLayer doesn't currently support quantized kv cache but"
+            f"kv cache dtype was set to {kv_cache_dtype}"
+        )
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -303,25 +267,18 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         set_default_quant_scales(self, register_buffer=True)
 
-        # Default dtype
-        dtype = torch.get_default_dtype()
-        self.dtype = dtype
-
         # Attention backend
         self.attn_backend = CacheOnlyAttentionBackend
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(
             num_heads,
             head_size,
-            1.0,  # scale
-            num_heads,  # num kv heads
-            None,  # alibi_slopes
-            None,  # sliding_window
             kv_cache_dtype,
-            None,  # logits_soft_cap
             attn_type,
-            None,  # kv_sharing_target_layer_name
-            **extra_impl_args,
+        )
+
+        assert not self.attn_backend.forward_includes_kv_cache_update, (
+            "KV cache update should occur before forward"
         )
 
         # Placeholder KV cache (replaced by bind_kv_cache)
@@ -336,30 +293,25 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, to_cache: torch.Tensor):
         """Cache hidden states as KV pairs without computing attention.
 
         Args:
-            hidden_states: shape [num_tokens, hidden_size * num_hidden_states]
+            hidden_states: shape [num_tokens, num_heads, head_size]
 
         Returns:
             Dummy output tensor (not used)
         """
-        output = torch.empty(
-            hidden_states.shape[0],  # num_tokens
-            self.num_heads,
-            self.head_size,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # Note: we set num_heads to num_hidden_layers and
+        # head_size to hidden_size for hidden states storage
+        output = torch.empty(0, device=to_cache.device, dtype=to_cache.dtype)
 
-        # Reshape hidden states into key/value format
-        key, value = reshape_hidden_states_for_kv_cache(
-            hidden_states, self.num_heads, self.head_size
-        )
+        # todo(fynn): determine if we need to use a custom op here
+        # or if direct call is sufficient
+        _ = unified_kv_cache_update(to_cache, self.layer_name)
 
-        # Cache the KV states (with optional KV transfer)
-        cache_only_attention_with_kv_transfer(None, key, value, output, self.layer_name)
+        # Triggers kv_connector transfer via decorator
+        dummy_attention(self.layer_name)
 
         return output
 
@@ -373,32 +325,6 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
         )
-
-
-@maybe_transfer_kv_layer
-def cache_only_attention_with_kv_transfer(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-) -> None:
-    """Cache KV states with optional KV transfer support."""
-    attn_metadata, self, kv_cache = get_attention_context(layer_name)
-
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
 
 
 class ExtractHiddenStatesModel(nn.Module):
