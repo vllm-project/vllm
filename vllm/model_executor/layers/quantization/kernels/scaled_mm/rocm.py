@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from contextlib import nullcontext
+
 import torch
 
 import vllm.envs as envs
@@ -9,7 +11,6 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.utils import record_function_or_nullcontext
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -34,7 +35,12 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
         and K % 16 == 0  # K
         and ((bias is None) or (bias.dtype == out_dtype))
     ):
-        with record_function_or_nullcontext(f"wvSplitKQ {M}x{N}x{K}"):
+        ctx = (
+            nullcontext()
+            if torch.compiler.is_compiling()
+            else torch.profiler.record_function(f"wvSplitKQ {M}x{N}x{K}")
+        )
+        with ctx:
             output = ops.wvSplitKQ(
                 B.t(),
                 A,
