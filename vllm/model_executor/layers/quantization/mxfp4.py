@@ -810,6 +810,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 replace_parameter(layer, "w13_bias", w13_bias)
                 replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
                 replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
+                replace_parameter(layer, "w13_weight", w13_weight)
+                replace_parameter(layer, "w2_weight", w2_weight)
             else:
                 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -838,9 +840,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.w2_precision_config = PrecisionConfig(
                     weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
                 )
-
-            replace_parameter(layer, "w13_weight", w13_weight)
-            replace_parameter(layer, "w2_weight", w2_weight)
+                self.w13_weight = w13_weight
+                self.w2_weight = w2_weight
+                del layer.w13_weight
+                del layer.w2_weight
+                layer.w13_weight = w13_weight
+                layer.w2_weight = w2_weight
 
         else:
             raise ValueError(
