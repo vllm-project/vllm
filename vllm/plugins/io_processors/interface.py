@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -18,7 +17,67 @@ IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def __init__(self, vllm_config: VllmConfig):
+        super().__init__()
+
         self.vllm_config = vllm_config
+
+    def parse_data(self, data: object) -> IOProcessorInput:
+        if callable(parse_request := getattr(self, "parse_request", None)):
+            warnings.warn(
+                "`parse_request` has been renamed to `parse_data`. "
+                "Please update your IO Processor Plugin to use the new name. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return parse_request(data)  # type: ignore
+
+        raise NotImplementedError
+
+    def merge_sampling_params(
+        self,
+        params: SamplingParams | None = None,
+    ) -> SamplingParams:
+        if callable(
+            validate_or_generate_params := getattr(
+                self, "validate_or_generate_params", None
+            )
+        ):
+            warnings.warn(
+                "`validate_or_generate_params` has been split into "
+                "`merge_sampling_params` and `merge_pooling_params`."
+                "Please update your IO Processor Plugin to use the new methods. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return validate_or_generate_params(params)  # type: ignore
+
+        return params or SamplingParams()
+
+    def merge_pooling_params(
+        self,
+        params: PoolingParams | None = None,
+    ) -> PoolingParams:
+        if callable(
+            validate_or_generate_params := getattr(
+                self, "validate_or_generate_params", None
+            )
+        ):
+            warnings.warn(
+                "`validate_or_generate_params` has been split into "
+                "`merge_sampling_params` and `merge_pooling_params`."
+                "Please update your IO Processor Plugin to use the new methods. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return validate_or_generate_params(params)  # type: ignore
+
+        return params or PoolingParams(task="plugin")
 
     @abstractmethod
     def pre_process(
@@ -59,19 +118,4 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
             [(i, item) async for i, item in model_output], key=lambda output: output[0]
         )
         collected_output = [output[1] for output in sorted_output]
-        return self.post_process(collected_output, request_id, **kwargs)
-
-    @abstractmethod
-    def parse_request(self, request: Any) -> IOProcessorInput:
-        raise NotImplementedError
-
-    def validate_or_generate_params(
-        self, params: SamplingParams | PoolingParams | None = None
-    ) -> SamplingParams | PoolingParams:
-        return params or PoolingParams()
-
-    @abstractmethod
-    def output_to_response(
-        self, plugin_output: IOProcessorOutput
-    ) -> IOProcessorResponse:
-        raise NotImplementedError
+        return self.post_process(collected_output, request_id=request_id, **kwargs)
