@@ -113,8 +113,8 @@ def _wait_for_server_ready(address: str, timeout: float = 5.0) -> bool:
     import time
 
     host, port = address.rsplit(":", 1)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             with socket.create_connection((host, int(port)), timeout=0.5):
                 return True
