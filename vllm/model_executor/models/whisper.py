@@ -17,6 +17,7 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
+from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -590,9 +591,10 @@ class WhisperDecoder(nn.Module):
 class WhisperModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.encoder = WhisperEncoder(
-            vllm_config=vllm_config, prefix=f"{prefix}.encoder"
-        )
+        with set_model_tag("WhisperEncoder", is_encoder=True):
+            self.encoder = WhisperEncoder(
+                vllm_config=vllm_config, prefix=f"{prefix}.encoder"
+            )
         self.decoder = WhisperDecoder(
             vllm_config=vllm_config, prefix=f"{prefix}.decoder"
         )
