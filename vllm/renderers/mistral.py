@@ -15,10 +15,10 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
+from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 

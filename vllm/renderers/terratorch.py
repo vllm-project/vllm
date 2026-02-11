@@ -12,10 +12,10 @@ from vllm.entrypoints.chat_utils import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
+from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
