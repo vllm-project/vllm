@@ -544,16 +544,17 @@ class FusedMoE(CustomOp):
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
         unpadded_hidden_size = hidden_size
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
         hidden_size = maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
+            model_type=self.model_type,
             is_mxfp4_quant=(
                 quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
@@ -1171,7 +1172,9 @@ class FusedMoE(CustomOp):
                     dim2 = loaded_weight.shape[2]
                     param.data[:, :dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
-            elif self.quant_config.get_name() == "quark":
+            elif (
+                self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss"
+            ):
                 # When self._is_mxfp4 is true, model_dtype must be gpt_oss
                 expert_data = param.data[expert_id]
                 if "input_scale" in weight_name:
