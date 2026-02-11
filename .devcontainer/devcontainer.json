@@ -1,4 +1,7 @@
 {
-  "image": "mcr.microsoft.com/devcontainers/universal:2",
-  "features": {}
+  "name": "vLLM Dev Container",
+  "build": {
+    "dockerfile": "../docker/Dockerfile",
+    "target": "dev"
+  }
 }
