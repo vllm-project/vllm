@@ -57,7 +57,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
@@ -219,64 +219,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
-
-
-# TODO(rob): move this down to the kernel.
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    moe_parallel_config: FusedMoEParallelConfig,
-    is_lora_enabled: bool,
-    model_type: str | None,
-    is_mxfp4_quant: bool,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-        model_type: for checking if gpt-oss
-        is_mxfp4_quant: whether the layer is quantized with mxfp4
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            hidden_size = round_up(hidden_size, 256)
-
-    return hidden_size
 
 
 # --8<-- [start:fused_moe]

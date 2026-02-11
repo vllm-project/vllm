@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
     get_padding_alignment,
+    maybe_roundup_hidden_size_for_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -268,22 +269,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             is_lora_enabled=is_lora_enabled,
             model_type=model_type,
         )
-
-        if model_type == "gpt_oss":
-            current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-            if (
-                current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-            ):
-                hidden_size = round_up(hidden_size, 128)
-            elif (
-                current_platform.is_rocm()
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-            ):
-                hidden_size = round_up(hidden_size, 256)
-
-        return hidden_size
+        return maybe_roundup_hidden_size_for_fused_moe(
+            hidden_size, model_type, self.mxfp4_backend
+        )
 
     def create_weights(
         self,

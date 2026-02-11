@@ -32,6 +32,9 @@ from vllm.model_executor.layers.quantization.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    maybe_roundup_hidden_size_for_fused_moe,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -741,22 +744,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             is_lora_enabled=is_lora_enabled,
             model_type=model_type,
         )
-
-        if model_type == "gpt_oss":
-            current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-            if (
-                current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-            ):
-                hidden_size = round_up(hidden_size, 128)
-            elif (
-                current_platform.is_rocm()
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-            ):
-                hidden_size = round_up(hidden_size, 256)
-
-        return hidden_size
+        return maybe_roundup_hidden_size_for_fused_moe(
+            hidden_size, self.ocp_mx_scheme, self.fp4_dtype
+        )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "mxfp4":
