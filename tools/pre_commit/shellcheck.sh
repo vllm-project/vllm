@@ -49,7 +49,8 @@ new_errors="$(comm -23 "$current" <(sort -u "$baseline") || true)"
 if [ -n "$new_errors" ]; then
   echo "$new_errors" | cut -d: -f1 | sort -u | while IFS= read -r file; do
     if [[ -f "$file" ]]; then
-      shellcheck -s bash "$file" 2>&1 || true
+      codes=$(echo "$new_errors" | awk -F: -v f="$file" '$1==f {print $2}' | paste -sd ',' -)
+      shellcheck -s bash --include="$codes" "$file" 2>&1 || true
     fi
   done
   exit 1
