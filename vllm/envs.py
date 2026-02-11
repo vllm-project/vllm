@@ -1090,16 +1090,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
     ),
     # Comma-separated prefixes of env vars to copy from the driver to Ray
-    # workers. Merged with the built-in defaults (VLLM_, LMCACHE_, NCCL_,
-    # UCX_). Example: "MYLIB_,ANOTHER_"
+    # workers. Any env var whose name starts with one of these prefixes is
+    # forwarded.  Override to replace the defaults entirely.
+    # Default: "VLLM_,LMCACHE_,NCCL_,UCX_,HF_,HUGGING_FACE_"
     "VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
-        "VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY", ""
+        "VLLM_RAY_ENV_VAR_PREFIXES_TO_COPY",
+        "VLLM_,LMCACHE_,NCCL_,UCX_,HF_,HUGGING_FACE_",
     ),
-    # Comma-separated individual env var names to copy from the driver to
-    # Ray workers. Merged with the built-in defaults (HF_TOKEN,
-    # HUGGING_FACE_HUB_TOKEN, PYTHONHASHSEED). Example: "MY_SECRET,MY_FLAG"
+    # Comma-separated individual env var names (without a common prefix)
+    # to copy from the driver to Ray workers.
+    # Default: "PYTHONHASHSEED"
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
-        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "PYTHONHASHSEED"
     ),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",

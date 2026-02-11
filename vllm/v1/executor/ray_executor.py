@@ -336,6 +336,7 @@ class RayDistributedExecutor(Executor):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
 
