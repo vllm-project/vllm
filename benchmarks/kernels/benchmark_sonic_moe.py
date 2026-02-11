@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from functools import partial
 
 import torch
@@ -17,6 +18,21 @@ SHAPES = [
     (256, 512, 2048, 16, 2),
     (512, 1024, 4096, 16, 4),
 ]
+
+
+def _has_tuned_triton_config(num_experts: int, n_half: int) -> bool:
+    # Triton MoE tuning files are keyed by (E, N, device_name), where
+    # N is the post-activation width (i.e., n // 2 in this benchmark).
+    from vllm.model_executor.layers.fused_moe import fused_moe as fm
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_config_file_name
+
+    cfg_file = get_config_file_name(num_experts, n_half, dtype=None)
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.realpath(fm.__file__)),
+        "configs",
+        cfg_file,
+    )
+    return os.path.exists(cfg_path)
 
 
 def _bench_us(fn, warmup: int, iters: int, graph_calls: int) -> tuple[float, str]:
@@ -97,7 +113,21 @@ def main() -> int:
     )
 
     rows: list[dict] = []
+    tuned_shapes: list[tuple[int, int, int, int, int]] = []
     for m, k, n, e, topk in SHAPES:
+        if _has_tuned_triton_config(e, n // 2):
+            tuned_shapes.append((m, k, n, e, topk))
+        else:
+            print(
+                f"Skipping untuned Triton shape: e={e}, n={n} "
+                f"(expects config for N={n // 2})"
+            )
+
+    if not tuned_shapes:
+        print("No tuned Triton shapes found for this device; skipping benchmark.")
+        return 0
+
+    for m, k, n, e, topk in tuned_shapes:
         for dtype in dtypes:
             hidden_states = torch.randn((m, k), device="cuda", dtype=dtype) / 10
             w1 = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
