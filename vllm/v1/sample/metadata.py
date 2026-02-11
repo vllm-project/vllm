@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.config.model import LogprobsList, LogprobsMode
 from vllm.v1.sample.logits_processor import LogitsProcessors
 
 
@@ -42,3 +43,6 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Override the logprobs_mode
+    logprobs_mode_override: LogprobsMode | LogprobsList | None = None
