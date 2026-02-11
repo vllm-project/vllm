@@ -62,6 +62,7 @@ class MultiModalBudget:
             processor = mm_registry.create_processor(model_config, cache=cache)
 
             self.cache = cache
+            self.processor = processor
             mm_config = model_config.get_multimodal_config()
             enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
