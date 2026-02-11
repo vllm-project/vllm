@@ -498,21 +498,24 @@ class KimiAudioForConditionalGeneration(
 
             if whisper_feats.shape[0] != emb.shape[0]:
                 if mask is not None and mask.shape[0] == emb.shape[0]:
-                    mask_true = int(mask.sum().item())
-                    if mask_true == whisper_feats.shape[0]:
-                        expanded = emb.new_zeros(
-                            (emb.shape[0], whisper_feats.shape[-1])
-                        )
-                        expanded[mask] = whisper_feats
-                        whisper_feats = expanded
-                    else:
-                        logger.warning(
-                            "[Kimi-Audio] whisper/mask length mismatch: "
-                            "mask_true=%d features=%d; skipping conditioning.",
-                            mask_true,
-                            whisper_feats.shape[0],
-                        )
+                    if torch.cuda.is_current_stream_capturing():
                         whisper_feats = None
+                    else:
+                        mask_true = int(mask.sum().item())
+                        if mask_true == whisper_feats.shape[0]:
+                            expanded = emb.new_zeros(
+                                (emb.shape[0], whisper_feats.shape[-1])
+                            )
+                            expanded[mask] = whisper_feats
+                            whisper_feats = expanded
+                        else:
+                            logger.warning(
+                                "[Kimi-Audio] whisper/mask length mismatch: "
+                                "mask_true=%d features=%d; skipping conditioning.",
+                                mask_true,
+                                whisper_feats.shape[0],
+                            )
+                            whisper_feats = None
                 else:
                     logger.warning(
                         "[Kimi-Audio] whisper_input_features length mismatch: "
@@ -557,9 +560,9 @@ class KimiAudioForConditionalGeneration(
         # Add aligned text embeddings (instruction etc.)
         if isinstance(flat_text_ids, torch.Tensor):
             text_ids = flat_text_ids.to(device)
-            if text_ids.numel() > 0 and text_ids.sum().item() != 0:
-                text_emb = self.model.embed_tokens(text_ids)
-                emb = emb + text_emb
+            text_emb = self.model.embed_tokens(text_ids)
+            text_mask = (text_ids != 0).to(dtype=emb.dtype)[:, None]
+            emb = emb + text_emb * text_mask
 
         return emb
 

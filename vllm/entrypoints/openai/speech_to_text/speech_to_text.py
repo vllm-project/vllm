@@ -186,6 +186,38 @@ class OpenAISpeechToText(OpenAIServing):
                 "First request may experience higher latency.",
             )
 
+    @cached_property
+    def _kimia_extra_tokens(self):
+        from kimia_infer.utils.special_tokens import instantiate_extra_tokens
+
+        tokenizer = self.input_processor.tokenizer
+        if tokenizer is None:
+            tokenizer = get_tokenizer(
+                tokenizer_name=self.model_config.tokenizer,
+                tokenizer_mode=self.model_config.tokenizer_mode,
+            )
+        tokenizer_any = cast(Any, tokenizer)
+        if not hasattr(tokenizer_any, "pad_id"):
+            tokenizer_any.pad_id = getattr(tokenizer_any, "pad_token_id", 0)
+        return instantiate_extra_tokens(tokenizer_any)
+
+    def _apply_kimia_sampling_params(self, sampling_params) -> None:
+        sampling_params.temperature = 0.0
+        sampling_params.top_k = 5
+        sampling_params.top_p = 1.0
+        sampling_params.min_p = 0.0
+        sampling_params.repetition_penalty = 1.0
+
+        extra_tokens = self._kimia_extra_tokens
+        stop_ids = {
+            extra_tokens.kimia_text_eos,
+            extra_tokens.msg_end,
+            extra_tokens.media_end,
+        }
+        if sampling_params.stop_token_ids:
+            stop_ids.update(sampling_params.stop_token_ids)
+        sampling_params.stop_token_ids = sorted(stop_ids)
+
     def _warmup_input_processor(self) -> None:
         """Warm up input processor with dummy audio to avoid first-request latency.
 
@@ -245,38 +277,6 @@ class OpenAISpeechToText(OpenAIServing):
                 "Input processor warmup failed (non-fatal): %s. "
                 "First request may experience higher latency."
             )
-
-    @cached_property
-    def _kimia_extra_tokens(self):
-        from kimia_infer.utils.special_tokens import instantiate_extra_tokens
-
-        tokenizer = self.input_processor.tokenizer
-        if tokenizer is None:
-            tokenizer = get_tokenizer(
-                tokenizer_name=self.model_config.tokenizer,
-                tokenizer_mode=self.model_config.tokenizer_mode,
-            )
-        tokenizer_any = cast(Any, tokenizer)
-        if not hasattr(tokenizer_any, "pad_id"):
-            tokenizer_any.pad_id = getattr(tokenizer_any, "pad_token_id", 0)
-        return instantiate_extra_tokens(tokenizer_any)
-
-    def _apply_kimia_sampling_params(self, sampling_params) -> None:
-        sampling_params.temperature = 0.0
-        sampling_params.top_k = 5
-        sampling_params.top_p = 1.0
-        sampling_params.min_p = 0.0
-        sampling_params.repetition_penalty = 1.0
-
-        extra_tokens = self._kimia_extra_tokens
-        stop_ids = {
-            extra_tokens.kimia_text_eos,
-            extra_tokens.msg_end,
-            extra_tokens.media_end,
-        }
-        if sampling_params.stop_token_ids:
-            stop_ids.update(sampling_params.stop_token_ids)
-        sampling_params.stop_token_ids = sorted(stop_ids)
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
