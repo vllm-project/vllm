@@ -41,6 +41,7 @@ def fused_grouped_topk(
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
+        print(f"{gating_output.dtype=}")
         topk_values, topk_indices = ops.grouped_topk(
             gating_output,  # raw logits
             num_expert_group,

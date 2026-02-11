@@ -238,26 +238,45 @@ class DeepSeekV2Gate(ReplicatedLinear):
             prefix=f"{prefix}.gate",
         )
 
-        self.allow_dsv3_router_gemm = True
+        # Unquantized only, will be called "weight".
+        assert hasattr(self, "weight")
+        is_hopper_or_blackwell = current_platform.is_device_capability(
+            (9, 0)
+        ) or current_platform.is_device_capability_family(100)
+        SUPPORTED_NUM_EXPERTS = [256, 384]
+        SUPPORTED_HIDDEN_SIZES = [7168]
 
-    def _set_allow_dsv3_router_gemm(self) -> None:
         self.allow_dsv3_router_gemm = (
             current_platform.is_cuda()
-            and current_platform.has_device_capability((9, 0))
+            and is_hopper_or_blackwell
+            and n_experts in SUPPORTED_NUM_EXPERTS
+            and hidden_size in SUPPORTED_HIDDEN_SIZES
         )
+
+        self._out_dtype: torch.dtype | None = None
+
+    def set_out_dtype(self, out_dtype: torch.dtype) -> None:
+        if self._out_dtype is not None:
+            raise ValueError("out_dtype has already been set")
+        else:
+            self._out_dtype = out_dtype
+
+    @property
+    def out_dtype(self) -> torch.dtype:
+        if self._out_dtype is None:
+            raise ValueError("out_dtype has not been set yet")
+        return self._out_dtype
 
     def forward(
         self,
         x: torch.Tensor,
+        out_dtype: torch.dtype,
     ) -> torch.Tensor:
         """
         Use specialized GEMM for low batch size for DSV3 and KIMI.
         """
-        if (
-            self.allow_dsv3_router_gemm
-            and x.shape[0] <= 16  # batch size
-            and x.shape[1] == 7168  # hidden size
-        ):
+        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+            # NOTE: this sets the topk output to be float32
             return ops.dsv3_router_gemm(x, self.weight, torch.float32), None
         else:
             return super().forward(x)
@@ -364,6 +383,13 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
+        )
+
+        # NOTE(rob): this is a hack until we finish off the PR for
+        # merging TRTLLM kernels into the MK framework. Then we can
+        # query the MonolithicMK for the expected router logits.
+        self.gate.set_out_dtype(
+            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
