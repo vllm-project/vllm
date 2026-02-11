@@ -415,6 +415,21 @@ class EagleProposer:
         ).clone()
         # Initialize continue mask for confidence-based early stopping
         self.continue_mask[:batch_size] = True
+        # FlashAttention (without DCP) does not read seq_lens_cpu during
+        # build_for_drafting, so we can accumulate increments on GPU and
+        # sync once after the loop. Other backends (FlashInfer, ROCm AITER
+        # FA, FlexAttention, etc.) read seq_lens_cpu every iteration inside
+        # build(), so they require a per-iteration GPU-CPU sync.
+        needs_per_iter_cpu_sync = (
+            not isinstance(attn_metadata, FlashAttentionMetadata)
+            or attn_metadata.dcp_context_kv_lens is not None
+        )
+        if not needs_per_iter_cpu_sync:
+            total_seq_len_increments = torch.zeros(
+                batch_size,
+                dtype=common_attn_metadata.seq_lens.dtype,
+                device=common_attn_metadata.seq_lens.device,
+            )
         for token_index in range(draft_length - 1):
             # Snapshot which requests are still emitting draft tokens before this
             # iteration mutates the continue mask.
@@ -452,23 +467,26 @@ class EagleProposer:
 
             # Increment sequence lengths only for active requests so metadata stays
             # consistent with actual KV writes (inactive ones are masked out).
-            # For data integrity when async scheduling, we use out-of-place operations
-            # in case they are modified in next step's `prepare_input` of main model.
             length_increments = active_mask.to(common_attn_metadata.seq_lens.dtype)
             common_attn_metadata.seq_lens += length_increments
-            # This is an out-of-place operation to avoid modifying the original tensor.
-            common_attn_metadata.seq_lens_cpu = (
-                common_attn_metadata.seq_lens_cpu
-                + active_mask.cpu().to(common_attn_metadata.seq_lens_cpu.dtype)
-            )
+            if needs_per_iter_cpu_sync:
+                # Some backends (FlashInfer, ROCm AITER FA, etc.) read
+                # seq_lens_cpu inside build_for_drafting, so we must sync
+                # every iteration. This is an out-of-place op to avoid
+                # mutating tensors that async scheduling may still read.
+                common_attn_metadata.seq_lens_cpu = (
+                    common_attn_metadata.seq_lens_cpu
+                    + active_mask.cpu().to(
+                        common_attn_metadata.seq_lens_cpu.dtype)
+                )
+                common_attn_metadata.num_computed_tokens_cpu = (
+                    common_attn_metadata.seq_lens_cpu - 1
+                )
+            else:
+                total_seq_len_increments += length_increments
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
-
-            common_attn_metadata.num_computed_tokens_cpu = (
-                common_attn_metadata.seq_lens_cpu - 1
-            )
 
             # Compute the slot mapping.
             if self.uses_mrope:
@@ -545,6 +563,20 @@ class EagleProposer:
             confidence = probs.max(dim=-1).values
             self.continue_mask[:batch_size] &= confidence >= self.confidence_threshold
             draft_token_ids_list.append(draft_token_ids)
+
+        # When using the deferred sync path, update seq_lens_cpu once after
+        # the loop instead of syncing active_mask to CPU every iteration.
+        # This is an out-of-place op to avoid mutating tensors that async
+        # scheduling may still read.
+        if not needs_per_iter_cpu_sync:
+            common_attn_metadata.seq_lens_cpu = (
+                common_attn_metadata.seq_lens_cpu
+                + total_seq_len_increments.cpu().to(
+                    common_attn_metadata.seq_lens_cpu.dtype)
+            )
+            common_attn_metadata.num_computed_tokens_cpu = (
+                common_attn_metadata.seq_lens_cpu - 1
+            )
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
