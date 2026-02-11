@@ -6,7 +6,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
-# TODO(bnell): Add shared + fused combo function? e.g. +
+# TODO(bnell): Remove this entirely
 class SharedFusedMoE(FusedMoE):
     """
     A FusedMoE operation that also computes the results of shared experts.
