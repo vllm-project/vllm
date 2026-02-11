@@ -238,7 +238,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 cache_config.calculate_kv_scales = False
 
         # Check if per-head quant scales are required based on kv_cache_scheme
-        requires_per_head_quant_scales = (
+        use_per_head_quant_scales = (
             kv_cache_scheme is not None
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
@@ -279,7 +279,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
-                requires_per_head_quant_scales=requires_per_head_quant_scales,
+                use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
             )
         else:

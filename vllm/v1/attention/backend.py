@@ -229,7 +229,7 @@ class AttentionBackend(ABC):
         has_sink: bool,
         use_sparse: bool,
         use_mm_prefix: bool,
-        requires_per_head_quant_scales: bool,
+        use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -258,7 +258,7 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("sparse not supported")
             else:
                 invalid_reasons.append("non-sparse not supported")
-        if requires_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+        if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
             invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
