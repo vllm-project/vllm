@@ -7,8 +7,8 @@ from typing import Any, Literal, get_args
 
 from vllm.config.utils import config
 
-ECProducer = Literal["ec_producer"]
-ECConsumer = Literal["ec_consumer"]
+ECProducer = Literal["ec_producer", "ec_both"]
+ECConsumer = Literal["ec_consumer", "ec_both"]
 ECRole = Literal[ECProducer, ECConsumer]
 
 
@@ -33,7 +33,7 @@ class ECTransferConfig:
 
     ec_role: ECRole | None = None
     """Whether this vLLM instance produces, consumes EC cache, or both. Choices
-    are 'ec_producer', 'ec_consumer'."""
+    are 'ec_producer', 'ec_consumer', 'ec_both'."""
 
     ec_rank: int | None = None
     """The rank of this vLLM instance in the EC cache transfer. Typical value:
