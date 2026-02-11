@@ -1115,9 +1115,12 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             env = dict(env or os.environ)
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-            # Run tests.utils module which has a __main__ block that reads
-            # the pickled function from stdin and executes it
-            cmd = [sys.executable, "-m", "tests.utils"]
+            # Run tests/utils.py directly as a script. It has a __main__ block
+            # that reads the pickled function from stdin and executes it.
+            # We use the script path instead of `python -m tests.utils` to avoid
+            # module path ambiguity with other `tests` directories in the repo.
+            utils_script = str(VLLM_PATH / "tests" / "utils.py")
+            cmd = [sys.executable, utils_script]
 
             returned = subprocess.run(
                 cmd, input=input_bytes, capture_output=True, env=env
