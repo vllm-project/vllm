@@ -15,7 +15,7 @@ import soundfile as sf
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "openai/whisper-large-v3-turbo"
+MODEL_NAME = "openai/whisper-large-v3"
 
 
 @pytest.fixture(scope="module")
