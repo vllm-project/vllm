@@ -104,7 +104,7 @@ class TTModelRunner:
         # mrope requires keeping "rope_deltas" between prefill/decode phases.
         self.request_specific_rope = bool(
             self.model_config.uses_mrope) or bool(
-                uses_mrope(self.model_config.hf_config.text_config))
+                uses_mrope(self.model_config.hf_config.get_text_config()))
         if self.request_specific_rope:
             self.previous_req_ids: set[str] = set()
 
