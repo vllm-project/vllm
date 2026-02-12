@@ -3,7 +3,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
 from typing import Literal
 
 import numpy as np
@@ -167,7 +167,7 @@ class VoxtralRealtimeBuffer:
     async def append_audio(self, audio_array: np.ndarray | None) -> None:
         await self._audio_queue.put(audio_array)
 
-    async def append_tokens(self, tokens: list[int]) -> None:
+    async def append_tokens(self, tokens: Iterable[int]) -> None:
         for token in tokens:
             await self._token_queue.put(token)
 

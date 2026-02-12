@@ -144,7 +144,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
         ):
             tokens = resp.outputs[0].token_ids[-1:]
             output_tokens.extend(tokens)
-            await buffer.append_tokens(list(tokens))
+            await buffer.append_tokens(tokens)
 
         output_tokens_list.append(output_tokens)
 
