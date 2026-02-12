@@ -351,11 +351,11 @@ class SamplingParams(
         if self.bad_words is None:
             self.bad_words = []
 
-        if self.logprobs is True:
-            self.logprobs = 1
+        if self.logprobs is not None and self.logprobs == 0:
+            self.logprobs = None
 
-        if self.prompt_logprobs is True:
-            self.prompt_logprobs = 1
+        if self.prompt_logprobs is not None and self.prompt_logprobs == 0:
+            self.prompt_logprobs = None
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
