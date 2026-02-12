@@ -347,6 +347,8 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        self.kv_cache_manager.new_step_starts()
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -982,10 +984,8 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
-        # Update block hashes for the new tokens
-        # (mirrors Request.append_output_token_ids)
-        if session.get_hash_new_full_blocks is not None:
-            session.block_hashes.extend(session.get_hash_new_full_blocks())
+        # Update block hashes for the new tokens.
+        session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
@@ -1155,7 +1155,12 @@ class Scheduler(SchedulerInterface):
                 and (num_computed_tokens + num_new_tokens)
                 < (start_pos + num_encoder_tokens)
             ):
-                num_new_tokens = start_pos - num_computed_tokens
+                # Account for EAGLE shift when rolling back to avoid
+                # encoder cache miss. This ensures the scheduled range
+                # stops before start_pos even with the shift.
+                num_new_tokens = max(
+                    0, start_pos - (num_computed_tokens + shift_computed_tokens)
+                )
                 break
             if not self.encoder_cache_manager.can_allocate(
                 request, i, encoder_compute_budget, num_embeds_to_schedule
