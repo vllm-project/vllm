@@ -327,6 +327,8 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        # TODO: enum type Required for flashinfer==0.6.3, remove with update
+        # https://github.com/flashinfer-ai/flashinfer/pull/2508
         activation_type=ActivationType(activation_type),
     )
 
@@ -351,6 +353,7 @@ def fi_trtllm_fp8_per_tensor_moe_fake(
     use_routing_scales_on_input: bool,
     routing_method_type: int,
     routed_scaling_factor: float = 1.0,
+    activation_type: int = 3,  # Swiglu
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 

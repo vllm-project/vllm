@@ -303,7 +303,6 @@ def flashinfer_trtllm_fp4_moe(
         Output tensor from the MoE layer
     """
     import flashinfer
-    from flashinfer.fused_moe.core import ActivationType
 
     from vllm.model_executor.models.llama4 import Llama4MoE
 
@@ -368,7 +367,7 @@ def flashinfer_trtllm_fp4_moe(
         routed_scaling_factor=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
-        activation_type=ActivationType(activation_type),
+        activation_type=activation_type,
     )[0]
 
     return out
