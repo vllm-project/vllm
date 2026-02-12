@@ -271,7 +271,7 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
-        self.pause_state: PauseState = PauseState.UNPAUSED
+        self._pause_state: PauseState = PauseState.UNPAUSED
 
     def _mamba_block_aligned_split(
         self,
@@ -340,7 +340,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        if self.pause_state == PauseState.PAUSED_ALL:
+        if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
 
@@ -532,7 +532,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self.pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             # Use a temporary RequestQueue to collect requests that need to be
             # skipped and put back at the head of the waiting queue later
             skipped_waiting_requests = create_request_queue(self.policy)
@@ -1755,13 +1755,17 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free(request)
         del self.requests[request.request_id]
 
+    @property
+    def pause_state(self) -> PauseState:
+        return self._pause_state
+
     def set_pause_state(self, pause_state: PauseState) -> None:
-        self.pause_state = pause_state
+        self._pause_state = pause_state
 
     def get_num_unfinished_requests(self) -> int:
-        if self.pause_state == PauseState.PAUSED_ALL:
+        if self._pause_state == PauseState.PAUSED_ALL:
             return 0
-        if self.pause_state == PauseState.PAUSED_NEW:
+        if self._pause_state == PauseState.PAUSED_NEW:
             return len(self.running)
         num_waiting = len(self.waiting) - self.num_waiting_for_streaming_input
         return num_waiting + len(self.running)

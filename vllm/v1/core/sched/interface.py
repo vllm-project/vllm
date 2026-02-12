@@ -186,6 +186,12 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    @property
+    @abstractmethod
+    def pause_state(self) -> PauseState:
+        """Current pause state of the scheduler."""
+        raise NotImplementedError
+
     @abstractmethod
     def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
