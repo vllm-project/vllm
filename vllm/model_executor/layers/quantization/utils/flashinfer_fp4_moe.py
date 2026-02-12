@@ -519,9 +519,10 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
         )
         if not block_quant:
+            min_alignment = 16 if is_gated else 128
             w13, w13_scale, w2, w2_scale, padded_intermediate = (
                 align_fp4_moe_weights_for_fi(
-                    w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment=128
+                    w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
                 )
             )
             layer.intermediate_size_per_partition = padded_intermediate
