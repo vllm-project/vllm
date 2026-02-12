@@ -714,10 +714,6 @@ class FunASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Qwen3Config:
         return self.ctx.get_hf_config(Qwen3Config)
 
-    @property
-    def skip_prompt_length_check(self) -> bool:
-        return True  # Because the encoder prompt is padded
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -726,6 +722,13 @@ class FunASRProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, FunASRFeatureExtractor)
         return feature_extractor
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+        )
 
     def get_target_channels(self) -> int:
         return 1
@@ -765,13 +768,6 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
 
 
 class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
