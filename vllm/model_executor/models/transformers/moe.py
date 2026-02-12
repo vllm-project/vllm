@@ -94,7 +94,7 @@ def transformers_moe_forward(
     self = forward_context.no_compile_layers[layer_name]
     self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
-    return self.forward_impl(hidden_states.clone(), topk_weights)
+    return self.runner.forward(hidden_states.clone(), topk_weights)
 
 
 def transformers_moe_forward_fake(
