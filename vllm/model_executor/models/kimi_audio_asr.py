@@ -81,11 +81,10 @@ _KIMIA_PROMPT_MANAGER_KEY: tuple[str, int, int] | None = None
 
 def _write_wav_tmp(audio: np.ndarray, sample_rate: int) -> str:
     """Write float32 waveform to a temporary wav file."""
-    x = np.clip(audio, -1.0, 1.0)
-    pcm16 = (x * 32767.0).astype(np.int16)
+    x = np.clip(audio, -1.0, 1.0).astype(np.float32)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_name = tmp.name
-    wavfile.write(tmp_name, sample_rate, pcm16)
+    wavfile.write(tmp_name, sample_rate, x)
     return tmp_name
 
 
@@ -561,6 +560,7 @@ class KimiAudioForConditionalGeneration(
             not isinstance(input_ids, torch.Tensor)
             or flat_text_ids.shape[-1] == input_ids.shape[-1]
         ):
+            # Fallback to text token stream if audio ids are unavailable.
             true_input_ids = flat_text_ids
 
         # Base token embeddings. vLLM uses flattened token tensors, so
@@ -582,24 +582,19 @@ class KimiAudioForConditionalGeneration(
 
             if whisper_feats.shape[0] != emb.shape[0]:
                 if mask is not None and mask.shape[0] == emb.shape[0]:
-                    if torch.cuda.is_current_stream_capturing():
+                    expanded = emb.new_zeros((emb.shape[0], whisper_feats.shape[-1]))
+                    try:
+                        expanded[mask] = whisper_feats
+                    except RuntimeError:
+                        logger.warning(
+                            "[Kimi-Audio] whisper/mask length mismatch: "
+                            "features=%d mask_len=%d; skipping conditioning.",
+                            whisper_feats.shape[0],
+                            mask.shape[0],
+                        )
                         whisper_feats = None
                     else:
-                        mask_true = int(mask.sum().item())
-                        if mask_true == whisper_feats.shape[0]:
-                            expanded = emb.new_zeros(
-                                (emb.shape[0], whisper_feats.shape[-1])
-                            )
-                            expanded[mask] = whisper_feats
-                            whisper_feats = expanded
-                        else:
-                            logger.warning(
-                                "[Kimi-Audio] whisper/mask length mismatch: "
-                                "mask_true=%d features=%d; skipping conditioning.",
-                                mask_true,
-                                whisper_feats.shape[0],
-                            )
-                            whisper_feats = None
+                        whisper_feats = expanded
                 else:
                     logger.warning(
                         "[Kimi-Audio] whisper_input_features length mismatch: "
@@ -645,8 +640,10 @@ class KimiAudioForConditionalGeneration(
         if isinstance(flat_text_ids, torch.Tensor):
             text_ids = flat_text_ids.to(device)
             text_emb = self.model.embed_tokens(text_ids)
-            text_mask = (text_ids != 0).to(dtype=emb.dtype)[:, None]
-            emb = emb + text_emb * text_mask
+            # Match original model behavior: if any text ids are non-zero,
+            # add the full text embedding stream (including padding tokens).
+            has_text = (text_ids != 0).any()
+            emb = emb + text_emb * has_text.to(dtype=emb.dtype)
 
         return emb
 
@@ -806,7 +803,7 @@ class KimiAudioForConditionalGeneration(
             ):
                 # Some Kimi-Audio preprocessing paths return whisper features only
                 # for masked (continuous) positions. Expand to full token length so
-                # the model forward path stays CUDA-graph friendly.
+                # the model forward path can avoid data-dependent scattering.
                 if whisper_feats.shape[0] != 1:
                     logger.warning(
                         "[Kimi-Audio] Unexpected batch size for whisper features: %d",
