@@ -16,7 +16,8 @@ class Error : public std::exception {
  public:
   explicit Error(const std::string& func, const std::string& file, int lineno,
                  const std::string& msg)
-      : msg_(func + " at " + file + ":" + std::to_string(lineno) + ": " + msg) {}
+      : msg_(func + " at " + file + ":" + std::to_string(lineno) + ": " + msg) {
+  }
   const char* what() const noexcept override { return msg_.c_str(); }
 };
 
@@ -27,12 +28,12 @@ class Error : public std::exception {
   throw vllm::Error(__FUNCTION__, __FILE__, __LINE__, message)
 
 // CUDA error checking macro
-#define FLASHINFER_CUDA_CALL(func, ...)                                        \
-  {                                                                            \
-    cudaError_t e = (func);                                                    \
-    if (e != cudaSuccess) {                                                    \
-      return e;                                                                \
-    }                                                                          \
+#define FLASHINFER_CUDA_CALL(func, ...) \
+  {                                     \
+    cudaError_t e = (func);             \
+    if (e != cudaSuccess) {             \
+      return e;                         \
+    }                                   \
   }
 
 // Dispatch macro for vectorization size
@@ -85,17 +86,20 @@ __forceinline__ __device__ float ptx_rcp(float x) {
 
 // Math utilities
 template <typename T1, typename T2>
-__forceinline__ __device__ __host__ constexpr T1 ceil_div(const T1 x, const T2 y) noexcept {
+__forceinline__ __device__ __host__ constexpr T1 ceil_div(const T1 x,
+                                                          const T2 y) noexcept {
   return (x + y - 1) / y;
 }
 
 template <typename T1, typename T2>
-__forceinline__ __device__ __host__ constexpr T1 round_up(const T1 x, const T2 y) noexcept {
+__forceinline__ __device__ __host__ constexpr T1 round_up(const T1 x,
+                                                          const T2 y) noexcept {
   return ceil_div(x, y) * y;
 }
 
 template <typename T1, typename T2>
-__forceinline__ __device__ __host__ constexpr T1 round_down(const T1 x, const T2 y) noexcept {
+__forceinline__ __device__ __host__ constexpr T1 round_down(
+    const T1 x, const T2 y) noexcept {
   return (x / y) * y;
 }
 

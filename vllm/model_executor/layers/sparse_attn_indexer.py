@@ -177,7 +177,7 @@ def sparse_attn_indexer(
                     + 1
                     + decode_metadata.offsets
                 ).flatten()
-    
+
             topk_workspace.zero_()
             torch.ops._C.flashinfer_radix_topk(
                 logits, lengths, topk_indices, topk_workspace, topk_tokens
@@ -259,6 +259,7 @@ class SparseAttnIndexer(CustomOp):
         max_model_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
+        topk_workspace: torch.Tensor,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -268,13 +269,8 @@ class SparseAttnIndexer(CustomOp):
         self.head_dim = head_dim
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
-        self.topk_indices_buffer = topk_indices_buffer        
-        self.topk_workspace = torch.zeros(
-            1024 * 1024,
-            dtype=torch.uint8,
-            device=topk_indices_buffer.device,
-        )        
-
+        self.topk_indices_buffer = topk_indices_buffer
+        self.topk_workspace = topk_workspace
 
     def forward_native(
         self,

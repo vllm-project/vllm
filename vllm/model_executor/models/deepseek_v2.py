@@ -599,6 +599,7 @@ class Indexer(nn.Module):
         quant_config: QuantizationConfig | None,
         cache_config: CacheConfig | None,
         topk_indices_buffer: torch.Tensor | None,
+        topk_workspace: torch.Tensor | None,
         prefix: str = "",
     ):
         super().__init__()
@@ -638,6 +639,7 @@ class Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_workspace = topk_workspace
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
@@ -662,6 +664,7 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            self.topk_workspace,
         )
 
     def forward(
@@ -736,6 +739,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        topk_workspace: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -846,6 +850,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 quant_config,
                 cache_config,
                 topk_indices_buffer,
+                topk_workspace,
                 f"{prefix}.indexer",
             )
         else:
@@ -903,6 +908,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        topk_workspace: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -953,6 +959,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            topk_workspace=topk_workspace,
         )
 
         if (
@@ -1052,8 +1059,14 @@ class DeepseekV2Model(nn.Module):
                 dtype=torch.int32,
                 device=self.device,
             )
+            topk_workspace = torch.empty(
+                1024 * 1024,
+                dtype=torch.uint8,
+                device=self.device,
+            )
         else:
             topk_indices_buffer = None
+            topk_workspace = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1067,7 +1080,10 @@ class DeepseekV2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV2DecoderLayer(
-                vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
+                vllm_config,
+                prefix,
+                topk_indices_buffer=topk_indices_buffer,
+                topk_workspace=topk_workspace,
             ),
             prefix=f"{prefix}.layers",
         )
