@@ -80,7 +80,6 @@ async def test_prithvi_mae_plugin_online(
     plugin: str,
     expected_hash: str,
 ):
-    image_url = models_config[model_name]["image_url"]
     request_payload_url = {
         "data": {
             "data": image_url,
