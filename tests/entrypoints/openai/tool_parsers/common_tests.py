@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 
 from tests.entrypoints.openai.tool_parsers.utils import run_tool_extraction
-from vllm.tool_parsers import ToolParserManager
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParserManager
 
 
 @dataclass
