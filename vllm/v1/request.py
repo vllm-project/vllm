@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from typing_extensions import deprecated
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -172,6 +173,17 @@ class Request:
         self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
+
+    @property
+    @deprecated(
+        "Request.eos_token_id will be removed in v0.18. "
+        "Please use Request.sampling_params.eos_token_id instead."
+    )
+    def eos_token_id(self) -> int | None:
+        if self.sampling_params is None:
+            return None
+
+        return self.sampling_params.eos_token_id
 
     @classmethod
     def from_engine_core_request(
