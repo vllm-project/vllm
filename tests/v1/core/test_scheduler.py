@@ -550,7 +550,7 @@ def test_check_stop_min_tokens():
         max_tokens=20,
         min_tokens=0,
     )
-    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    sampling_params_no_min.update_from_generation_config({}, EOS_TOKEN_ID)
     request_no_min = Request(
         request_id="1",
         prompt_token_ids=[0, 1, 2],
@@ -570,7 +570,7 @@ def test_check_stop_min_tokens():
         min_tokens=5,
         stop_token_ids=[42],
     )
-    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    sampling_params_stop.update_from_generation_config({}, EOS_TOKEN_ID)
     request_stop = Request(
         request_id="2",
         prompt_token_ids=[0, 1, 2],
