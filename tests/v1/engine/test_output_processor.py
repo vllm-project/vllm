@@ -1341,3 +1341,196 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("stream_interval_ms", [0, 100])
+def test_stream_interval_ms(
+    stream_interval_ms: int,
+    dummy_test_vectors,
+):
+    """Test time-based stream interval throttling."""
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=1,
+        stream_interval_ms=stream_interval_ms,
+    )
+
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            eos_token_id=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=[],
+                include_stop_str_in_output=False,
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+    ]
+
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_strings: dict[str, str] = {}
+    total_outputs = 0
+    while True:
+        outputs = engine_core.get_outputs()
+        if not outputs:
+            break
+        processed = output_processor.process_outputs(outputs)
+        total_outputs += len(processed.request_outputs)
+        for ro in processed.request_outputs:
+            gen_strings.setdefault(ro.request_id, "")
+            gen_strings[ro.request_id] += ro.outputs[0].text
+
+    # Final text must always be correct regardless of interval.
+    for idx, ref in enumerate(dummy_test_vectors.generation_strings):
+        assert gen_strings[f"request-{idx}"] == ref
+
+    if stream_interval_ms > 0:
+        # With time-based batching, total outputs should be fewer than
+        # one-per-token since iterations are faster than the interval.
+        total_tokens = sum(len(t) for t in dummy_test_vectors.generation_tokens)
+        assert total_outputs < total_tokens + len(requests)
+
+
+def test_per_request_stream_interval_override(dummy_test_vectors):
+    """Per-request stream_interval in SamplingParams overrides global."""
+    # Global: no batching (stream_interval=1)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=1,
+        stream_interval_ms=0,
+    )
+
+    per_request_interval = 5
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            eos_token_id=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=[],
+                include_stop_str_in_output=False,
+                stream_interval=per_request_interval,
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+    ]
+
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_strings: dict[str, str] = {}
+    gen_token_chunks: dict[str, list[int]] = {}
+    while True:
+        outputs = engine_core.get_outputs()
+        if not outputs:
+            break
+        processed = output_processor.process_outputs(outputs)
+        for ro in processed.request_outputs:
+            rid = ro.request_id
+            new_tokens = ro.outputs[0].token_ids
+            gen_strings.setdefault(rid, "")
+            gen_strings[rid] += ro.outputs[0].text
+            gen_token_chunks.setdefault(rid, [])
+            gen_token_chunks[rid].append(len(new_tokens))
+
+    # Final text must be correct.
+    for idx, ref in enumerate(dummy_test_vectors.generation_strings):
+        assert gen_strings[f"request-{idx}"] == ref
+
+    # Each non-first, non-final emission should have >= per_request_interval tokens.
+    for rid, chunk_sizes in gen_token_chunks.items():
+        for i, size in enumerate(chunk_sizes):
+            if i == 0:
+                assert size == 1, f"First token should emit immediately, got {size}"
+            elif i < len(chunk_sizes) - 1:
+                assert size >= per_request_interval, f"{size=}, {per_request_interval=}"
+
+
+def test_both_intervals_whichever_first(dummy_test_vectors):
+    """When both stream_interval and stream_interval_ms are set,
+    whichever threshold is reached first triggers emission."""
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=100,  # very high token threshold (won't trigger)
+        stream_interval_ms=1,  # very low time threshold (triggers fast)
+    )
+
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        eos_token_id=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+            stop=[],
+            include_stop_str_in_output=False,
+        ),
+        pooling_params=None,
+    )
+
+    engine_core = MockEngineCore(
+        tokens_list=[dummy_test_vectors.generation_tokens[0]],
+        request_ids=["request-0-int"],
+    )
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    gen_string = ""
+    output_count = 0
+    while True:
+        outputs = engine_core.get_outputs()
+        if not outputs:
+            break
+        # Sleep 2ms so the 1ms time threshold fires each iteration.
+        time.sleep(0.002)
+        processed = output_processor.process_outputs(outputs)
+        output_count += len(processed.request_outputs)
+        for ro in processed.request_outputs:
+            gen_string += ro.outputs[0].text
+
+    # Final text must be correct.
+    assert gen_string == dummy_test_vectors.generation_strings[0]
+    # Time threshold (1ms) fires frequently since we sleep 2ms between iterations.
+    # Token threshold (100) would rarely fire for short sequences.
+    # So we should get many outputs despite the high token threshold.
+    assert output_count > 2

@@ -411,6 +411,9 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
+                    if request.stream and request.stream_options:
+                        request.stream_options.apply_to_sampling_params(sampling_params)
+
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,

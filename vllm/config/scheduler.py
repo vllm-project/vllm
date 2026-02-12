@@ -139,6 +139,11 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    stream_interval_ms: int = Field(default=0, ge=0)
+    """Time-based streaming interval in milliseconds. 0 means disabled.
+    When both stream_interval and stream_interval_ms are set,
+    whichever threshold is reached first triggers emission."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

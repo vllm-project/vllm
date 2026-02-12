@@ -160,6 +160,15 @@ AnyResponseFormat: TypeAlias = (
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = True
     continuous_usage_stats: bool | None = False
+    stream_interval: int | None = None
+    stream_interval_ms: int | None = None
+
+    def apply_to_sampling_params(self, sampling_params: SamplingParams) -> None:
+        """Apply per-request stream interval overrides to sampling params."""
+        if self.stream_interval is not None:
+            sampling_params.stream_interval = self.stream_interval
+        if self.stream_interval_ms is not None:
+            sampling_params.stream_interval_ms = self.stream_interval_ms
 
 
 class FunctionDefinition(OpenAIBaseModel):

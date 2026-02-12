@@ -185,6 +185,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         sampling_params,
                     )
 
+                    if request.stream and request.stream_options:
+                        request.stream_options.apply_to_sampling_params(sampling_params)
+
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(

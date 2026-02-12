@@ -98,6 +98,7 @@ class LLMEngine:
             self.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
+            stream_interval_ms=self.vllm_config.scheduler_config.stream_interval_ms,
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
