@@ -54,7 +54,7 @@ def get_sample_multi_modal_llama_inputs():
 def get_sample_multi_modal_inputs(model: str, multi_image: bool):
     """
     Build sample multi-modal inputs for vision-language models.
-    Currently supports Qwen2.5-VL and Gemma-3.
+    Currently supports Qwen2.5-VL, Qwen3-VL and Gemma-3.
 
     Args:
         model (str): Hugging Face model identifier
@@ -111,7 +111,7 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
     ]
 
     content = []
-    if "Qwen2.5-VL" in model:
+    if "Qwen2.5-VL" in model or "Qwen3-VL" in model:
         # [INFO] Qwen-VL currently does not support a mixture of
         # text-image and text-only inputs
         content += single_image_prompts_content
@@ -134,16 +134,16 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
         )
 
         image_inputs = None
-        if "Qwen2.5-VL" in model:
+        if "Qwen2.5-VL" in model or "Qwen3-VL" in model:
             assert not multi_image, (
-                "Multi-image inputs not supported yet for Qwen2.5-VL"
+                "Multi-image inputs not supported yet for Qwen2.5-VL or Qwen3-VL"
             )
             # Lazy import only when needed
             try:
                 from qwen_vl_utils import process_vision_info
             except ModuleNotFoundError as err:
                 raise ModuleNotFoundError(
-                    "`qwen-vl-utils` is required for Qwen2.5-VL models. "
+                    "`qwen-vl-utils` is required for Qwen2.5-VL or Qwen3-VL models. "
                     "Install it with: pip install qwen-vl-utils"
                 ) from err
 
@@ -259,6 +259,7 @@ def run_inference(
         supported_models = [
             "Llama-3.2",
             "Qwen2.5-VL",
+            "Qwen3-VL",
             "gemma",
         ]
         assert any(name in model for name in supported_models), (
@@ -350,7 +351,7 @@ def run_inference(
             print("Ignoring prompts json for multi-modal inference")
             if "Llama-3.2" in model:
                 prompts = get_sample_multi_modal_llama_inputs()
-            elif any(name in model for name in ["Qwen2.5-VL", "gemma"]):
+            elif any(name in model for name in ["Qwen2.5-VL", "Qwen3-VL", "gemma"]):
                 prompts = get_sample_multi_modal_inputs(model, multi_image)
             else:
                 raise ValueError(
@@ -386,7 +387,7 @@ def run_inference(
         else:
             if "Llama-3.2" in model:
                 IMAGE_TOKEN_ID = 128256  # Specific to multi-modal llama
-            elif "Qwen2.5-VL" in model:
+            elif "Qwen2.5-VL" in model or "Qwen3-VL" in model:
                 IMAGE_TOKEN_ID = 151655  # Specific to multi-modal qwen
             elif "gemma" in model:
                 IMAGE_TOKEN_ID = 262144  # Specific to multi-modal gemma

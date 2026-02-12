@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.tt_loader import TTModelLoader
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.platforms.tt import TTPlatform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import LayerBlockType, cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -101,7 +102,9 @@ class TTModelRunner:
 
         # Detect if the model has "mrope" rope_scaling type.
         # mrope requires keeping "rope_deltas" between prefill/decode phases.
-        self.request_specific_rope = bool(self.model_config.uses_mrope)
+        self.request_specific_rope = bool(
+            self.model_config.uses_mrope) or bool(
+                uses_mrope(self.model_config.hf_config.text_config))
         if self.request_specific_rope:
             self.previous_req_ids: set[str] = set()
 

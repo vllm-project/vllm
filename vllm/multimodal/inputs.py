@@ -601,6 +601,99 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         return next(iter(modalities))
 
 
+class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
+    """
+    A dictionary of processed multi-modal inputs by modality.
+
+    For example, given a processor that processes
+    images into `pixel_values` and `image_grid_thw`,
+    and audios into `input_audio_features`,
+    a prompt with 2 images and 1 audio will be processed
+    into a `MultiModalKwargsItems` with the following structure:
+
+    ```python
+    MultiModalKwargsItems(
+        {
+            "image": [
+                # For the first image
+                MultiModalKwargsItem({"pixel_values": ...,
+                                    "image_grid_thw": ...}),
+                # For the second imgae
+                MultiModalKwargsItem({"pixel_values": ...,
+                                    "image_grid_thw": ...}),
+            ],
+            "audio": [
+                # For the first audio
+                MultiModalKwargsItem({"input_audio_features": ...}),
+            ],
+        }
+    )
+    ```
+
+    Unlike HF processing which returns all items
+    in a single dictionary with batched keyword arguments,
+    we split up the items because some of them may already be cached.
+    Also, items from multiple requests may be 
+    batched together to improve throughput,
+    using the logic defined by the
+    [`BaseMultiModalField`][vllm.multimodal.inputs.BaseMultiModalField]
+    for each keyword argument.
+    """
+
+    @staticmethod
+    def from_hf_inputs(
+        hf_inputs: "BatchFeature",
+        config_by_key: Mapping[str, MultiModalFieldConfig],
+    ):
+        # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
+        # We assume that those fields are not used in vLLM
+        elems_by_key = dict[str, Sequence[MultiModalFieldElem]]()
+        keys_by_modality = defaultdict[str, set[str]](set)
+        for key, config in config_by_key.items():
+            batch = hf_inputs.get(key)
+            if batch is not None:
+                elems = config.build_elems(key, batch)
+                if len(elems) > 0:
+                    elems_by_key[key] = elems
+                    keys_by_modality[config.modality].add(key)
+
+        items_by_modality = dict[str, list[MultiModalKwargsItem]]()
+        for modality, keys in keys_by_modality.items():
+            elems_in_modality = {k: elems_by_key[k] for k in keys}
+            batch_sizes = {k: len(v) for k, v in elems_in_modality.items()}
+
+            if len(set(batch_sizes.values())) > 1:
+                raise ValueError(
+                    f"Cannot merge different batch sizes for {modality=}! "
+                    f"Found: {batch_sizes=}")
+
+            batch_size = next(iter(batch_sizes.values()))
+            items_by_modality[modality] = [
+                MultiModalKwargsItem({
+                    k: v[i]
+                    for k, v in elems_in_modality.items()
+                }) for i in range(batch_size)
+            ]
+
+        return MultiModalKwargsItems(items_by_modality)
+
+    def __getitem__(self, modality: str) -> Sequence[MultiModalKwargsItem]:
+        if modality not in self:
+            raise KeyError(f"Modality {modality!r} not found. "
+                           f"Available modalities: {set(self.keys())}")
+
+        return super().__getitem__(modality)  # type: ignore[return-value]
+
+    def require_data(self) -> "MultiModalKwargsItems":
+        for modality, items in self.items():
+            for i, item in enumerate(items):
+                if item is None:
+                    raise RuntimeError(
+                        f"Found empty mm_items[{modality}][{i}]")
+
+        return self  # type: ignore[return-value]
+
+
 # NOTE: UserDict is for V0 compatibility.
 # V1 should access individual items via `get_item`.
 class MultiModalKwargs(UserDict[str, NestedTensors]):
