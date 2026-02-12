@@ -8,81 +8,32 @@ import contextlib
 import sys
 from unittest.mock import patch
 
+import pytest
 
-def test_help_flag_skips_platform_detection():
-    """Test that --help doesn't trigger platform detection."""
-    # Reset platform detection state
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["vllm", "--help"],
+        ["vllm", "serve", "--help"],
+        ["vllm", "-h"],
+        ["vllm", "bench", "--help"],
+    ],
+)
+def test_help_flag_skips_platform_detection(argv):
+    """Test that help flags don't trigger platform detection."""
     import vllm.platforms
 
     vllm.platforms._current_platform = None
 
-    # Mock sys.argv to simulate --help
-    with patch.object(sys, "argv", ["vllm", "--help"]), patch.object(sys, "exit"):
-        from vllm.entrypoints.cli.main import main
-
-        with contextlib.suppress(SystemExit):
-            main()
-
-    # Verify platform was NOT detected
-    assert vllm.platforms._current_platform is None, (
-        "Platform should not be detected when showing help"
-    )
-
-
-def test_serve_help_flag_skips_platform_detection():
-    """Test that serve --help doesn't trigger platform detection."""
-    import vllm.platforms
-
-    vllm.platforms._current_platform = None
-
-    with (
-        patch.object(sys, "argv", ["vllm", "serve", "--help"]),
-        patch.object(sys, "exit"),
-    ):
+    with patch.object(sys, "argv", argv), patch.object(sys, "exit"):
         from vllm.entrypoints.cli.main import main
 
         with contextlib.suppress(SystemExit):
             main()
 
     assert vllm.platforms._current_platform is None, (
-        "Platform not detected when showing help for serve subcommand"
-    )
-
-
-def test_h_flag_skips_platform_detection():
-    """Test that -h doesn't trigger platform detection."""
-    import vllm.platforms
-
-    vllm.platforms._current_platform = None
-
-    with patch.object(sys, "argv", ["vllm", "-h"]), patch.object(sys, "exit"):
-        from vllm.entrypoints.cli.main import main
-
-        with contextlib.suppress(SystemExit):
-            main()
-
-    assert vllm.platforms._current_platform is None, (
-        "Platform not detected when showing help with -h flag"
-    )
-
-
-def test_bench_help_flag_skips_platform_detection():
-    """Test that bench --help doesn't trigger platform detection."""
-    import vllm.platforms
-
-    vllm.platforms._current_platform = None
-
-    with (
-        patch.object(sys, "argv", ["vllm", "bench", "--help"]),
-        patch.object(sys, "exit"),
-    ):
-        from vllm.entrypoints.cli.main import main
-
-        with contextlib.suppress(SystemExit):
-            main()
-
-    assert vllm.platforms._current_platform is None, (
-        "Platform not detected when showing help for bench subcommand"
+        f"Platform should not be detected when showing help with {argv}"
     )
 
 

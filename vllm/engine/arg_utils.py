@@ -233,7 +233,7 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
 
 NEEDS_HELP = (
-    any(arg in ("--help", "-h") for arg in sys.argv)  # vllm SUBCOMMAND --help/-h
+    any(arg in {"--help", "-h"} for arg in sys.argv)  # vllm SUBCOMMAND --help/-h
     or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
     or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
 )
