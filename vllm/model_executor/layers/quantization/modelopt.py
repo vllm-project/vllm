@@ -1240,15 +1240,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_key=kNvfp4Static,
             activation_key=kNvfp4Dynamic,
         )
-        # TODO: move this type of check into the oracle.
-        if not self.moe.is_act_and_mul and self.nvfp4_backend not in {
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        }:
-            raise NotImplementedError(
-                "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS and TRTLLM NvFP4 MoE backends."
-            )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
@@ -1519,11 +1510,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
         )
-        SUPPORTED_ACTIVATIONS = ["silu", "relu2_no_mul"]
-        assert layer.activation in SUPPORTED_ACTIVATIONS, (
-            f"Expected one of {SUPPORTED_ACTIVATIONS} activations but got "
-            + layer.activation
-        )
+
         return flashinfer_trtllm_fp4_moe(
             layer=layer,
             x=x,
@@ -1550,11 +1537,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
             assert layer.enable_eplb
-            SUPPORTED_ACTIVATIONS = ["silu", "relu2_no_mul"]
-            assert layer.activation in SUPPORTED_ACTIVATIONS, (
-                f"Expected one of {SUPPORTED_ACTIVATIONS} activations but got "
-                + layer.activation
-            )
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
                 x=x,
