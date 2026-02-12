@@ -16,6 +16,8 @@ IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
+    """Abstract interface for pre/post-processing of engine I/O."""
+
     def __init__(self, vllm_config: VllmConfig):
         super().__init__()
 
