@@ -854,6 +854,5 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
             "video_backend": "opencv_dynamic_openpangu",
             "frames_indices": frames_indices,
             "do_sample_frames": False,
-            "sample_frame_timestamps": sample_frame_timestamps,
         }
         return frames, metadata
