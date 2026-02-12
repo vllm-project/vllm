@@ -229,7 +229,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         )
 
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
-        self.n_delay_tokens = audio_config.num_delay_tokens
+        self.n_delay_tokens = audio_config.get_num_delay_tokens()
 
     # for realtime transcription
     @classmethod
