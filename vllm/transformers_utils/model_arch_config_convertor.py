@@ -312,31 +312,10 @@ class ModelArchConfigConvertorBase:
         return model_arch_config
 
 
-class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
+class AttentionFreeModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Generic convertor for models without attention (e.g. Mamba,
+    Medusa, MLPSpeculator, Terratorch)."""
 
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
-class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
-
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
-class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
-
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
-class MLPSpeculatorModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return 0
 
@@ -445,11 +424,11 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
-    "mamba": MambaModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
-    "timm_wrapper": TerratorchModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
-    "mlp_speculator": MLPSpeculatorModelArchConfigConvertor,
+    "mamba": AttentionFreeModelArchConfigConvertor,
+    "falcon_mamba": AttentionFreeModelArchConfigConvertor,
+    "timm_wrapper": AttentionFreeModelArchConfigConvertor,
+    "medusa": AttentionFreeModelArchConfigConvertor,
+    "mlp_speculator": AttentionFreeModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
