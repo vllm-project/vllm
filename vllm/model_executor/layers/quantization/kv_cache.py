@@ -162,8 +162,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         else:
             prob_scale = 1.0
 
-        is_singleton_float = lambda x: (
-            isinstance(x, float)
+        is_singleton_float = (
+            lambda x: isinstance(x, float)
             or isinstance(x, torch.Tensor)
             and x.numel() == 1
             and x.is_floating_point()
