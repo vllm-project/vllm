@@ -561,7 +561,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -637,6 +637,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class MarlinExperts(MarlinExpertsBase):
+    """Marlin-based fused MoE expert implementation."""
+
     def supports_expert_map(self) -> bool:
         return True
 
@@ -738,6 +740,8 @@ class MarlinExperts(MarlinExpertsBase):
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):
+    """Batched Marlin-based fused MoE expert implementation."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
