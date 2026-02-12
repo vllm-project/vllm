@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import os
 from abc import abstractmethod
 from typing import Any
 
@@ -64,6 +65,116 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptNvFp4LinearMethod",
     "PetitNvFp4LinearMethod",
 ]
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    value = os.getenv(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r. Falling back to %d", name, value, default)
+        return default
+
+
+_TP_ROW_NUMERIC_DEBUG = os.getenv("VLLM_DEBUG_TP_ROW_NUMERICS", "0") == "1"
+_TP_ROW_NUMERIC_DEBUG_ABORT = os.getenv("VLLM_DEBUG_TP_ROW_NUMERICS_ABORT", "0") == "1"
+_TP_ROW_NUMERIC_DEBUG_LAYER_FILTER = os.getenv(
+    "VLLM_DEBUG_TP_ROW_NUMERICS_LAYER_FILTER", ""
+)
+_TP_ROW_NUMERIC_DEBUG_MAX_LOGS = _parse_int_env(
+    "VLLM_DEBUG_TP_ROW_NUMERICS_MAX_LOGS", 200
+)
+_TP_ROW_NUMERIC_DEBUG_CALLS = 0
+_TP_ROW_NUMERIC_DEBUG_LOGS = 0
+
+
+def _has_non_finite(tensor: torch.Tensor) -> bool:
+    if not torch.is_floating_point(tensor):
+        return False
+    return bool(torch.isnan(tensor).any().item() or torch.isinf(tensor).any().item())
+
+
+def _tensor_summary(name: str, tensor: torch.Tensor) -> str:
+    shape = tuple(tensor.shape)
+    dtype = str(tensor.dtype).replace("torch.", "")
+    numel = tensor.numel()
+    if numel == 0:
+        return f"{name}[{dtype}{shape}] empty"
+
+    if not torch.is_floating_point(tensor):
+        min_val = tensor.min().item()
+        max_val = tensor.max().item()
+        return f"{name}[{dtype}{shape}] min={min_val} max={max_val}"
+
+    nan_count = int(torch.isnan(tensor).sum().item())
+    inf_count = int(torch.isinf(tensor).sum().item())
+    finite = torch.isfinite(tensor)
+    finite_count = int(finite.sum().item())
+    if finite_count > 0:
+        finite_vals = tensor[finite]
+        min_val = float(finite_vals.min().item())
+        max_val = float(finite_vals.max().item())
+        abs_max = float(finite_vals.abs().max().item())
+        range_str = f"min={min_val:.4e} max={max_val:.4e} abs_max={abs_max:.4e}"
+    else:
+        range_str = "min=nan max=nan abs_max=nan"
+    return (
+        f"{name}[{dtype}{shape}] nonfinite(nan={nan_count},inf={inf_count}) "
+        f"finite={finite_count}/{numel} {range_str}"
+    )
+
+
+def _log_tp_row_numeric_debug(
+    *,
+    layer_prefix: str,
+    input_parallel: torch.Tensor,
+    output_parallel: torch.Tensor,
+) -> None:
+    global _TP_ROW_NUMERIC_DEBUG_CALLS, _TP_ROW_NUMERIC_DEBUG_LOGS
+    if not _TP_ROW_NUMERIC_DEBUG:
+        return
+    if (
+        _TP_ROW_NUMERIC_DEBUG_LAYER_FILTER
+        and _TP_ROW_NUMERIC_DEBUG_LAYER_FILTER not in layer_prefix
+    ):
+        return
+
+    _TP_ROW_NUMERIC_DEBUG_CALLS += 1
+    call_id = _TP_ROW_NUMERIC_DEBUG_CALLS
+    input_non_finite = _has_non_finite(input_parallel)
+    output_non_finite = _has_non_finite(output_parallel)
+
+    if output_non_finite and not input_non_finite:
+        source = "introduced_in_row_parallel_linear"
+    elif input_non_finite and output_non_finite:
+        source = "propagated_from_row_linear_input"
+    elif input_non_finite and not output_non_finite:
+        source = "input_non_finite_but_output_finite"
+    else:
+        source = "all_finite"
+
+    if (
+        input_non_finite or output_non_finite
+    ) and _TP_ROW_NUMERIC_DEBUG_LOGS < _TP_ROW_NUMERIC_DEBUG_MAX_LOGS:
+        _TP_ROW_NUMERIC_DEBUG_LOGS += 1
+        logger.warning(
+            "TP_ROW_NUMERIC_DEBUG call=%d rank=%d layer=%s "
+            "input_non_finite=%s output_non_finite=%s source=%s | %s | %s",
+            call_id,
+            get_tensor_model_parallel_rank(),
+            layer_prefix,
+            input_non_finite,
+            output_non_finite,
+            source,
+            _tensor_summary("input_parallel", input_parallel),
+            _tensor_summary("output_parallel", output_parallel),
+        )
+
+    if _TP_ROW_NUMERIC_DEBUG_ABORT and (input_non_finite or output_non_finite):
+        raise RuntimeError(
+            "TP_ROW_NUMERIC_DEBUG detected non-finite tensors "
+            f"(call={call_id}, layer={layer_prefix}, source={source})."
+        )
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -569,7 +680,7 @@ class ColumnParallelLinear(LinearBase):
             if output_dim is not None:
                 assert final_shape[output_dim] % self.tp_size == 0
                 final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
+            param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -848,7 +959,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             if (
-                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                isinstance(param, PackedColumnParameter | PackedvLLMParameter)
                 and param.packed_dim == param.output_dim
             ):
                 shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
@@ -1035,7 +1146,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             if (
-                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                isinstance(param, PackedColumnParameter | PackedvLLMParameter)
                 and param.packed_dim == param.output_dim
             ):
                 shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
@@ -1451,6 +1562,12 @@ class RowParallelLinear(LinearBase):
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        if self.reduce_results and self.tp_size > 1:
+            _log_tp_row_numeric_debug(
+                layer_prefix=self.prefix,
+                input_parallel=input_parallel,
+                output_parallel=output_parallel,
+            )
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)

@@ -95,20 +95,8 @@ if flashinfer_comm is not None:
             return default
 
     _AR_RMS_NUMERIC_DEBUG = os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS", "0") == "1"
-    _AR_RMS_NUMERIC_DEBUG_LOG_ALL = (
-        os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS_LOG_ALL", "0") == "1"
-    )
     _AR_RMS_NUMERIC_DEBUG_ABORT = (
         os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS_ABORT", "0") == "1"
-    )
-    _AR_RMS_NUMERIC_DEBUG_ABORT_ON_NEW = (
-        os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS_ABORT_ON_NEW", "0") == "1"
-    )
-    _AR_RMS_NUMERIC_DEBUG_FORCE_NO_ONESHOT = (
-        os.getenv("VLLM_DEBUG_AR_RMS_FORCE_NO_ONESHOT", "0") == "1"
-    )
-    _AR_RMS_NUMERIC_DEBUG_FORCE_ONESHOT = (
-        os.getenv("VLLM_DEBUG_AR_RMS_FORCE_ONESHOT", "0") == "1"
     )
     _AR_RMS_NUMERIC_DEBUG_MAX_LOGS = _parse_int_env(
         "VLLM_DEBUG_AR_RMS_NUMERICS_MAX_LOGS", 200
@@ -221,10 +209,6 @@ if flashinfer_comm is not None:
         use_oneshot = (
             max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
         )
-        if _AR_RMS_NUMERIC_DEBUG_FORCE_NO_ONESHOT:
-            use_oneshot = False
-        elif _AR_RMS_NUMERIC_DEBUG_FORCE_ONESHOT:
-            use_oneshot = True
 
         assert _FI_WORKSPACE is not None, (
             "Flashinfer must be enabled when using flashinfer"
@@ -262,9 +246,9 @@ if flashinfer_comm is not None:
                 ("scale_factor", scale_factor),
             )
             input_non_finite = any(_has_non_finite(t) for _, t in debug_inputs)
-            if (
-                input_non_finite or _AR_RMS_NUMERIC_DEBUG_LOG_ALL
-            ) and _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS:
+            if input_non_finite and (
+                _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS
+            ):
                 _AR_RMS_NUMERIC_DEBUG_LOGS += 1
                 logger.warning(
                     "AR_RMS_NUMERIC_DEBUG before call=%d rank=%d pattern=%s "
@@ -306,42 +290,20 @@ if flashinfer_comm is not None:
                 ("scale_out_post", scale_out),
             )
             output_non_finite = any(_has_non_finite(t) for _, t in debug_outputs)
-            if output_non_finite and not input_non_finite:
-                numeric_debug_source = "introduced_inside_fused_op"
-            elif input_non_finite and output_non_finite:
-                numeric_debug_source = "upstream_non_finite_input"
-            elif input_non_finite and not output_non_finite:
-                numeric_debug_source = "input_non_finite_but_output_finite"
-            else:
-                numeric_debug_source = "all_finite"
             if (
-                input_non_finite or output_non_finite or _AR_RMS_NUMERIC_DEBUG_LOG_ALL
+                input_non_finite or output_non_finite
             ) and _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS:
                 _AR_RMS_NUMERIC_DEBUG_LOGS += 1
                 logger.warning(
                     "AR_RMS_NUMERIC_DEBUG after call=%d rank=%d pattern=%s "
-                    "use_oneshot=%s input_non_finite=%s output_non_finite=%s "
-                    "source=%s | %s",
+                    "use_oneshot=%s input_non_finite=%s output_non_finite=%s | %s",
                     call_id,
                     get_tensor_model_parallel_rank(),
                     _pattern_name(pattern_code),
                     use_oneshot,
                     input_non_finite,
                     output_non_finite,
-                    numeric_debug_source,
                     " | ".join(_tensor_summary(n, t) for n, t in debug_outputs),
-                )
-
-            if (
-                _AR_RMS_NUMERIC_DEBUG_ABORT_ON_NEW
-                and output_non_finite
-                and (not input_non_finite)
-            ):
-                raise RuntimeError(
-                    "AR_RMS_NUMERIC_DEBUG detected newly introduced non-finite "
-                    "values inside fused op "
-                    f"(call={call_id}, pattern={_pattern_name(pattern_code)}, "
-                    f"use_oneshot={use_oneshot})."
                 )
 
             if _AR_RMS_NUMERIC_DEBUG_ABORT and (input_non_finite or output_non_finite):
