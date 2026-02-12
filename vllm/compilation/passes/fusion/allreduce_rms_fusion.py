@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
 from importlib.util import find_spec
 from types import ModuleType
 
@@ -85,6 +86,84 @@ if flashinfer_comm is not None:
     _FI_WORKSPACE = None
     MiB = 1024 * 1024
 
+    def _parse_int_env(name: str, default: int) -> int:
+        value = os.getenv(name, str(default))
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning("Invalid %s=%r. Falling back to %d", name, value, default)
+            return default
+
+    _AR_RMS_NUMERIC_DEBUG = os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS", "0") == "1"
+    _AR_RMS_NUMERIC_DEBUG_LOG_ALL = (
+        os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS_LOG_ALL", "0") == "1"
+    )
+    _AR_RMS_NUMERIC_DEBUG_ABORT = (
+        os.getenv("VLLM_DEBUG_AR_RMS_NUMERICS_ABORT", "0") == "1"
+    )
+    _AR_RMS_NUMERIC_DEBUG_MAX_LOGS = _parse_int_env(
+        "VLLM_DEBUG_AR_RMS_NUMERICS_MAX_LOGS", 200
+    )
+    _AR_RMS_NUMERIC_DEBUG_CALLS = 0
+    _AR_RMS_NUMERIC_DEBUG_LOGS = 0
+
+    def _pattern_name(pattern_code: int) -> str:
+        fi_comm = flashinfer_comm
+        if fi_comm is None:
+            return str(pattern_code)
+        pattern_enum = fi_comm.AllReduceFusionPattern
+        for name in (
+            "kARResidualRMSNorm",
+            "kARResidualRMSNormFP8Quant",
+            "kARResidualRMSNormFP4Quant",
+        ):
+            code = getattr(pattern_enum, name, None)
+            if code is not None and int(code) == int(pattern_code):
+                return name
+        return str(pattern_code)
+
+    def _has_non_finite(tensor: torch.Tensor | None) -> bool:
+        if tensor is None or not torch.is_floating_point(tensor):
+            return False
+        return bool(
+            torch.isnan(tensor).any().item() or torch.isinf(tensor).any().item()
+        )
+
+    def _tensor_summary(name: str, tensor: torch.Tensor | None) -> str:
+        if tensor is None:
+            return f"{name}=None"
+        shape = tuple(tensor.shape)
+        dtype = str(tensor.dtype).replace("torch.", "")
+        numel = tensor.numel()
+        if numel == 0:
+            return f"{name}[{dtype}{shape}] empty"
+
+        if torch.is_floating_point(tensor):
+            nan_count = int(torch.isnan(tensor).sum().item())
+            inf_count = int(torch.isinf(tensor).sum().item())
+            finite = torch.isfinite(tensor)
+            finite_count = int(finite.sum().item())
+            if finite_count > 0:
+                finite_vals = tensor[finite]
+                min_val = float(finite_vals.min().item())
+                max_val = float(finite_vals.max().item())
+                abs_max = float(finite_vals.abs().max().item())
+                range_str = f"min={min_val:.4e} max={max_val:.4e} abs_max={abs_max:.4e}"
+            else:
+                range_str = "min=nan max=nan abs_max=nan"
+            return (
+                f"{name}[{dtype}{shape}] nonfinite(nan={nan_count},inf={inf_count}) "
+                f"finite={finite_count}/{numel} {range_str}"
+            )
+
+        min_val = tensor.min().item()
+        max_val = tensor.max().item()
+        summary = f"{name}[{dtype}{shape}] min={min_val} max={max_val}"
+        if tensor.dtype == torch.uint8:
+            zero_count = int((tensor == 0).sum().item())
+            summary += f" zero={zero_count}/{numel}"
+        return summary
+
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -100,6 +179,7 @@ if flashinfer_comm is not None:
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
     ) -> None:
+        global _AR_RMS_NUMERIC_DEBUG_CALLS, _AR_RMS_NUMERIC_DEBUG_LOGS
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
@@ -133,6 +213,36 @@ if flashinfer_comm is not None:
             # as flashinfer does not support rms_norm
             # and allreduce_out together
             residual_out = allreduce_in
+
+        input_non_finite = False
+        call_id = 0
+        if _AR_RMS_NUMERIC_DEBUG:
+            _AR_RMS_NUMERIC_DEBUG_CALLS += 1
+            call_id = _AR_RMS_NUMERIC_DEBUG_CALLS
+            debug_inputs = (
+                ("allreduce_in_pre", allreduce_in),
+                ("residual_pre", residual),
+                ("rms_gamma", rms_gamma),
+                ("scale_factor", scale_factor),
+                ("norm_out_pre", norm_out),
+                ("quant_out_pre", quant_out),
+                ("scale_out_pre", scale_out),
+            )
+            input_non_finite = any(_has_non_finite(t) for _, t in debug_inputs)
+            if (
+                input_non_finite or _AR_RMS_NUMERIC_DEBUG_LOG_ALL
+            ) and _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS:
+                _AR_RMS_NUMERIC_DEBUG_LOGS += 1
+                logger.warning(
+                    "AR_RMS_NUMERIC_DEBUG before call=%d rank=%d pattern=%s "
+                    "use_oneshot=%s | %s",
+                    call_id,
+                    get_tensor_model_parallel_rank(),
+                    _pattern_name(pattern_code),
+                    use_oneshot,
+                    " | ".join(_tensor_summary(n, t) for n, t in debug_inputs),
+                )
+
         # For the sizes that are smaller than the max size,
         # we only use flashinfer one shot allreduce
         flashinfer_comm.allreduce_fusion(
@@ -153,6 +263,38 @@ if flashinfer_comm is not None:
             layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
             scale_factor=scale_factor,
         )
+
+        if _AR_RMS_NUMERIC_DEBUG:
+            debug_outputs = (
+                ("allreduce_in_post", allreduce_in),
+                ("residual_post", residual),
+                ("norm_out_post", norm_out),
+                ("quant_out_post", quant_out),
+                ("scale_out_post", scale_out),
+            )
+            output_non_finite = any(_has_non_finite(t) for _, t in debug_outputs)
+            if (
+                input_non_finite or output_non_finite or _AR_RMS_NUMERIC_DEBUG_LOG_ALL
+            ) and _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS:
+                _AR_RMS_NUMERIC_DEBUG_LOGS += 1
+                logger.warning(
+                    "AR_RMS_NUMERIC_DEBUG after call=%d rank=%d pattern=%s "
+                    "use_oneshot=%s input_non_finite=%s output_non_finite=%s | %s",
+                    call_id,
+                    get_tensor_model_parallel_rank(),
+                    _pattern_name(pattern_code),
+                    use_oneshot,
+                    input_non_finite,
+                    output_non_finite,
+                    " | ".join(_tensor_summary(n, t) for n, t in debug_outputs),
+                )
+
+            if _AR_RMS_NUMERIC_DEBUG_ABORT and (input_non_finite or output_non_finite):
+                raise RuntimeError(
+                    "AR_RMS_NUMERIC_DEBUG detected non-finite tensors "
+                    f"(call={call_id}, pattern={_pattern_name(pattern_code)}, "
+                    f"use_oneshot={use_oneshot})."
+                )
 
     def call_trtllm_fused_allreduce_norm_fake(
         allreduce_in: torch.Tensor,
