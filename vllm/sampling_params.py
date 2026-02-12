@@ -223,6 +223,7 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
+    _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
@@ -484,6 +485,7 @@ class SamplingParams(
         if model_eos_token_id is not None:
             # Add the eos token id into the sampling_params to support
             # min_tokens processing.
+            self._eos_token_id = model_eos_token_id
             self._all_stop_token_ids.add(model_eos_token_id)
 
         # Update eos_token_id for generation
@@ -549,6 +551,10 @@ class SamplingParams(
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    @property
+    def eos_token_id(self) -> int | None:
+        return self._eos_token_id
 
     @property
     def all_stop_token_ids(self) -> set[int]:

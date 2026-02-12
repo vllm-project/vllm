@@ -145,9 +145,8 @@ def test_request_interface():
     req = Request(
         request_id="test_request",
         prompt_token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=10),
+        sampling_params=SamplingParams(max_tokens=10, stop_token_ids=[100]),
         pooling_params=None,
-        eos_token_id=100,
         lora_request=None,
     )
     assumes(req, "mm_features", is_instance_of=(list, NoneType))

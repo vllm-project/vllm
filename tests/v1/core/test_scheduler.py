@@ -514,13 +514,13 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=5,
+        stop_token_ids=[EOS_TOKEN_ID],
     )
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1, 2],
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=EOS_TOKEN_ID,
     )
     # Simulate having generated 3 output tokens (less than min_tokens=5)
     request.append_output_token_ids([10, 11, EOS_TOKEN_ID])  # EOS token present
@@ -550,13 +550,13 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=0,
+        stop_token_ids=[EOS_TOKEN_ID],
     )
     request_no_min = Request(
         request_id="1",
         prompt_token_ids=[0, 1, 2],
         sampling_params=sampling_params_no_min,
         pooling_params=None,
-        eos_token_id=EOS_TOKEN_ID,
     )
     request_no_min.append_output_token_ids([10, EOS_TOKEN_ID])
 
@@ -569,14 +569,13 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=5,
-        stop_token_ids=[42],
+        stop_token_ids=[42, EOS_TOKEN_ID],
     )
     request_stop = Request(
         request_id="2",
         prompt_token_ids=[0, 1, 2],
         sampling_params=sampling_params_stop,
         pooling_params=None,
-        eos_token_id=EOS_TOKEN_ID,
     )
     # Only 3 output tokens, less than min_tokens=5, but has stop token
     request_stop.append_output_token_ids([10, 11, 42])
@@ -1874,7 +1873,7 @@ def create_requests_with_priority(
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
+        stop_token_ids=(stop_token_ids or []) + [EOS_TOKEN_ID],
         prompt_logprobs=prompt_logprobs,
     )
     requests = []
@@ -1938,7 +1937,6 @@ def create_requests_with_priority(
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
             arrival_time=arrival_times[i],
             priority=priorities[i],
             block_hasher=block_hasher,
@@ -2428,6 +2426,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         ignore_eos=False,
         max_tokens=16,
         structured_outputs=structured_outputs_params,
+        stop_token_ids=[EOS_TOKEN_ID],
     )
     request = Request(
         request_id="0",
@@ -2435,7 +2434,6 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         mm_features=None,
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=EOS_TOKEN_ID,
     )
     scheduler.add_request(request)
     output = scheduler.schedule()

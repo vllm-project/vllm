@@ -229,9 +229,11 @@ class RequestRunner:
         req = Request(
             request_id=str(self.req_id),
             prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(max_tokens=1000),
+            sampling_params=SamplingParams(
+                max_tokens=1000,
+                stop_token_ids=[EOS_TOKEN_ID],
+            ),
             pooling_params=None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=self._block_hasher,
         )
 

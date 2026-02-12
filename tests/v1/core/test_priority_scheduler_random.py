@@ -51,6 +51,7 @@ def _create_random_request(
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
+        stop_token_ids=[EOS_TOKEN_ID],
     )
     mm_features = []
     for j, position in enumerate(mm_positions):
@@ -79,7 +80,6 @@ def _create_random_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=mm_features if mm_features else None,
-        eos_token_id=EOS_TOKEN_ID,
         arrival_time=arrival_time,
         priority=priority,
         block_hasher=block_hasher,

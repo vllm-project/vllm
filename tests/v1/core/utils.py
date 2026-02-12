@@ -190,7 +190,7 @@ def create_requests(
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
+        stop_token_ids=(stop_token_ids or []) + [EOS_TOKEN_ID],
         prompt_logprobs=prompt_logprobs,
     )
     requests = []
@@ -250,7 +250,6 @@ def create_requests(
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=block_hasher,
         )
         requests.append(request)

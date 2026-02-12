@@ -63,7 +63,6 @@ class EngineCoreRequest(
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
-    eos_token_id: int | None
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
