@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -469,11 +470,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
                 scale=self._k_scale,
             )
 
-        # Match production code: view uint8 cache as fp8 dtype so backends
-        # see the correct tensor dtype (mla_attention.py lines 533-534).
         if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
-            from vllm.platforms import current_platform
-
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         # Determine decode vs prefill split
