@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Any, TypeAlias
+from typing import Annotated, Any, TypeAlias
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -156,7 +156,7 @@ class TokenizeResponse(OpenAIBaseModel):
 
 class DetokenizeRequest(OpenAIBaseModel):
     model: str | None = None
-    tokens: list[int]
+    tokens: list[Annotated[int, Field(ge=0, le=2**63 - 1)]]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
