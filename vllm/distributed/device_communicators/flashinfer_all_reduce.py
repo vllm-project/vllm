@@ -24,11 +24,19 @@ try:
 except ImportError:
     pass
 
+# Global workspace for standalone allreduce and non-quant ar+rms fusion
 _fi_ar_workspace = None
+# Extra workspace for quant fusion patterns (only supported by trtllm backend)
+# Only created if primary workspace is not already trtllm
+_fi_ar_quant_workspace = None
 
 
 def get_fi_ar_workspace():
     return _fi_ar_workspace
+
+
+def get_fi_ar_quant_workspace():
+    return _fi_ar_quant_workspace
 
 
 def initialize_fi_ar_workspace(
@@ -78,8 +86,61 @@ def initialize_fi_ar_workspace(
     )
 
 
+def initialize_fi_ar_quant_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+) -> None:
+    """
+    Initialize the workspace used by quantization fusion patterns.
+
+    Currently this always creates a workspace for trtllm backend as only it
+    supports quantization fusion (FP8/FP4). If the primary workspace
+    is already trtllm, the quant workspace aliases to it.
+    """
+    global _fi_ar_quant_workspace
+    if _fi_ar_quant_workspace is not None:
+        return
+
+    # If primary workspace is already trtllm, reuse it
+    if _fi_ar_workspace is not None and _fi_ar_workspace.backend == "trtllm":
+        _fi_ar_quant_workspace = _fi_ar_workspace
+        return
+
+    comm_backend = TorchDistBackend(group=group)
+    _fi_ar_quant_workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+        backend="trtllm",
+        world_size=world_size,
+        rank=rank,
+        max_token_num=max_token_num,
+        hidden_dim=hidden_dim,
+        dtype=dtype,
+        comm_backend=comm_backend,
+    )
+    assert _fi_ar_quant_workspace is not None
+    logger.debug(
+        "Initialized FlashInfer All Reduce workspace: backend=trtllm, "
+        "world_size=%d, rank=%d, max_token_num=%d, hidden_dim=%d, dtype=%s",
+        world_size,
+        rank,
+        max_token_num,
+        hidden_dim,
+        dtype,
+    )
+
+
 def destroy_fi_ar_workspace():
     global _fi_ar_workspace
+    global _fi_ar_quant_workspace
+    if (
+        _fi_ar_quant_workspace is not None
+        and _fi_ar_quant_workspace is not _fi_ar_workspace
+    ):
+        _fi_ar_quant_workspace.destroy()
+    _fi_ar_quant_workspace = None
     if _fi_ar_workspace is not None:
         _fi_ar_workspace.destroy()
         _fi_ar_workspace = None

@@ -83,9 +83,14 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
 
 if flashinfer_comm is not None:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        destroy_fi_ar_workspace,
+        get_fi_ar_quant_workspace,
         get_fi_ar_workspace,
+        initialize_fi_ar_quant_workspace,
         initialize_fi_ar_workspace,
     )
+
+    ar_fusion_patterns = flashinfer_comm.AllReduceFusionPattern
 
     MiB = 1024 * 1024
 
@@ -126,7 +131,15 @@ if flashinfer_comm is not None:
             max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
         )
 
-        workspace = get_fi_ar_workspace()
+        # Select workspace based on pattern: quant patterns use the
+        # trtllm quant workspace, non-quant patterns use the primary workspace.
+        if pattern_code in (
+            ar_fusion_patterns.kARResidualRMSNormFP8Quant,
+            ar_fusion_patterns.kARResidualRMSNormFP4Quant,
+        ):
+            workspace = get_fi_ar_quant_workspace()
+        else:
+            workspace = get_fi_ar_workspace()
         assert workspace is not None, (
             "Flashinfer workspace must be initialized when using flashinfer"
         )
@@ -740,22 +753,26 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             scope="global",
         )
 
-        try:
-            initialize_fi_ar_workspace(
-                world_size=self.tp_size,
-                rank=rank,
-                max_token_num=self.max_token_num,
-                hidden_dim=self.hidden_dim,
-                dtype=self.model_dtype,
-                group=self.group,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                "AllReduce fusion pass will be disabled.",
-                e,
-            )
-            return
+        for workspace_init_fn in [
+            initialize_fi_ar_workspace,
+            initialize_fi_ar_quant_workspace,
+        ]:
+            try:
+                workspace_init_fn(
+                    world_size=self.tp_size,
+                    rank=rank,
+                    max_token_num=self.max_token_num,
+                    hidden_dim=self.hidden_dim,
+                    dtype=self.model_dtype,
+                    group=self.group,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize FlashInfer All Reduce workspace: %s. "
+                    "AllReduce fusion pass will be disabled.",
+                    e,
+                )
+                return
 
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
@@ -767,7 +784,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def register_patterns(self) -> None:
-        supports_quantization = get_fi_ar_workspace().backend == "trtllm"
+        supports_quantization = get_fi_ar_quant_workspace() is not None
         for epsilon in [1e-5, 1e-6]:
             if supports_quantization:
                 AllReduceFusedRMSNormStaticQuantFP8Pattern(
@@ -832,6 +849,5 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
-        if get_fi_ar_workspace() is not None:
-            with contextlib.suppress(Exception):
-                get_fi_ar_workspace().destroy()
+        with contextlib.suppress(Exception):
+            destroy_fi_ar_workspace()
