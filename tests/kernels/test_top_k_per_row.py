@@ -8,9 +8,6 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-
-import flashinfer
-
 # Test parameters
 NUM_ROWS = [1, 32, 2050]
 TOP_K_VALUES = [2048, 3000]
@@ -395,7 +392,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("top_k", [256, 2048])
 @torch.inference_mode()
-def test_deepseek_hybrid_topk(clean_logits: bool, top_k: int) -> None:
+def test_deepseek_flashinfer_topk(clean_logits: bool, top_k: int) -> None:
     torch.set_default_device("cuda:0")
 
     top_k = 2048
@@ -438,7 +435,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool, top_k: int) -> None:
     num_rows_long = batch_size_long * next_n
 
     seq_lens_long = torch.randint(
-        8192, 16384, (batch_size_long,), dtype=torch.int32, device="cuda"
+        32000, 163840, (batch_size_long,), dtype=torch.int32, device="cuda"
     )
 
     row_starts_long = torch.zeros(num_rows_long, dtype=torch.int32, device="cuda")
@@ -457,9 +454,9 @@ def test_deepseek_hybrid_topk(clean_logits: bool, top_k: int) -> None:
     else:
         offsets = torch.arange(next_n, device=logits_long.device, dtype=torch.int32)
         lengths = (seq_lens_long.unsqueeze(1) - next_n + 1 + offsets).flatten()
-
-    offsets = torch.zeros(batch_size_long, device="cuda", dtype=torch.int32)
-    indices = flashinfer.top_k_ragged_transform(logits_long, offsets, lengths, top_k)
+    
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")        
+    torch.ops._C.flashinfer_radix_topk(logits_long, lengths, indices, workspace, top_k)
 
     torch_indices_short = torch.empty(
         (num_rows_short, top_k), dtype=torch.int32, device="cuda"
