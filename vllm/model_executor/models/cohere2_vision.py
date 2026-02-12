@@ -178,7 +178,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         return image_processor.get_number_of_image_patches(
             image_height,
             image_width,
-            mm_kwargs,
+            self.ctx.get_merged_kwargs(mm_kwargs),
         )
 
 

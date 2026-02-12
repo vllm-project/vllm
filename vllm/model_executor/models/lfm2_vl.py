@@ -195,6 +195,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     ) -> tuple[int, int, int]:
         image_processor: Lfm2VlImageProcessorFast = processor.image_processor
 
+        mm_kwargs = self.ctx.get_merged_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
             "downsample_factor", image_processor.downsample_factor
         )
@@ -310,6 +311,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     ) -> tuple[int, int]:
         image_processor: Lfm2VlImageProcessorFast = processor.image_processor
 
+        mm_kwargs = self.ctx.get_merged_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
             "downsample_factor", image_processor.downsample_factor
         )
