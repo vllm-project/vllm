@@ -10,7 +10,6 @@ from transformers import AutoTokenizer
 
 from vllm.config import ModelConfig
 from vllm.config.utils import getattr_iter
-from vllm.platforms import current_platform
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 from ...utils import RemoteOpenAIServer
@@ -80,10 +79,9 @@ def server(request):
             else [str(extra_args)]
         )
 
-    if current_platform.is_rocm():
-        # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
-        envs = os.environ.copy()
-        envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    envs = os.environ.copy()
+    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
+    envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
         yield remote_server
