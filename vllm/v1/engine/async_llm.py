@@ -69,6 +69,8 @@ class InputStreamError(Exception):
 
 
 class AsyncLLM(EngineClient):
+    """An asynchronous wrapper for the vLLM engine."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,

@@ -224,7 +224,7 @@ fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
     # via cupy-cuda12x
-fastsafetensors==0.1.10
+fastsafetensors==0.2.2
     # via -r requirements/test.in
 filelock==3.16.1
     # via
@@ -1174,7 +1174,6 @@ torch==2.10.0+cu129
     #   bitsandbytes
     #   efficientnet-pytorch
     #   encodec
-    #   fastsafetensors
     #   kornia
     #   lightly
     #   lightning
