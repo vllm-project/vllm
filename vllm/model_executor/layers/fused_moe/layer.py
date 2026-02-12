@@ -20,6 +20,7 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -500,7 +501,7 @@ class FusedMoE(CustomOp):
         # TODO(bnell): end attributes
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
-        self.activation = activation
+        self.activation = MoEActivation.from_str(activation)
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -554,7 +555,7 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
-            activation=activation,
+            activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
@@ -700,7 +701,7 @@ class FusedMoE(CustomOp):
 
     @property
     def gate(self) -> torch.nn.Module | None:
-        return self._gate
+        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -725,7 +726,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self._gate is not None
+        return self.gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,
@@ -1457,7 +1458,6 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        self.ensure_moe_quant_config_init()
         return self.runner.forward(
             hidden_states,
             router_logits,

@@ -73,7 +73,6 @@ def async_engine() -> AsyncLLM:
     return AsyncLLM.from_engine_args(engine_args)
 
 
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
 def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
     audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
@@ -218,7 +217,6 @@ class RealTimeAudioInput:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
 
