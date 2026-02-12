@@ -16,7 +16,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.renderers import renderer_from_config
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
     DecoderOnlyDictPrompt,
@@ -56,6 +56,7 @@ class InputPreprocessor:
         self,
         model_config: ModelConfig,
         observability_config: ObservabilityConfig | None = None,
+        renderer: BaseRenderer | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -63,7 +64,7 @@ class InputPreprocessor:
 
         self.model_config = model_config
         self.observability_config = observability_config
-        self.renderer = renderer_from_config(model_config)
+        self.renderer = renderer or renderer_from_config(model_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
