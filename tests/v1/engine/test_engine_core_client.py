@@ -26,7 +26,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreRequest, UtilityFuture
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
@@ -280,19 +280,22 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
-def future_echo(self, value: Any, num_wait_loops: int = 2) -> UtilityFuture:
-    """Utility that returns a UtilityFuture whose future is completed by the
-    step_fn after num_wait_loops engine steps (tests deferred utility path).
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
+    """Utility that returns a Future completed by a per_step_hook after
+    num_wait_loops engine steps (tests deferred utility path).
     """
     future: Future = Future()
     remaining = [num_wait_loops]
 
-    def _step() -> None:
+    def _step(engine: EngineCore) -> bool:
         remaining[0] -= 1
         if remaining[0] <= 0:
             future.set_result(value)
+            return True  # remove hook
+        return False
 
-    return UtilityFuture(future, _step)
+    self.per_step_hooks.add(_step)
+    return future
 
 
 # --- Fixtures for subprocess patching ---
@@ -410,7 +413,6 @@ def subprocess_future_echo_patch(monkeypatch, tmp_path):
                 "from concurrent.futures import Future",
                 "from typing import Any",
                 "",
-                "from vllm.v1.engine import UtilityFuture",
                 "from vllm.v1.engine.core import EngineCore",
                 inspect.getsource(future_echo),
                 "EngineCore.future_echo = future_echo",
@@ -831,8 +833,8 @@ async def test_engine_core_client_future_utility_async(
     monkeypatch: pytest.MonkeyPatch,
     subprocess_future_echo_patch,
 ):
-    """Test that a utility returning UtilityFuture completes when the future
-    is done (step_fn sets result after N steps; engine uses add_done_callback).
+    """Test that a utility returning a Future (completed by a per_step_hook
+    after N steps) completes when the future is done (engine uses add_done_callback).
     """
     with monkeypatch.context() as m:
         m.setattr(EngineCore, "future_echo", future_echo, raising=False)
