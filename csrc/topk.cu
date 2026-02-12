@@ -15,6 +15,11 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+#include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include "topk.cuh"
+
 namespace vllm {
 
 constexpr int TopK = 2048;              // DeepSeek V3 sparse attention top-k
@@ -370,4 +375,43 @@ void large_context_topk(
   const cudaError_t result = cudaGetLastError();
   TORCH_CHECK(result == cudaSuccess,
               "large_context_topk kernel failed: ", cudaGetErrorString(result));
+}
+
+void flashinfer_radix_topk(const torch::Tensor& logits,
+                           const torch::Tensor& lengths, torch::Tensor& output,
+                           torch::Tensor& workspace, int64_t k) {
+  TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
+  TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
+  TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
+  TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
+  TORCH_CHECK(logits.dtype() == torch::kFloat32, "Only float32 supported");
+  TORCH_CHECK(lengths.dtype() == torch::kInt32, "lengths must be int32");
+  TORCH_CHECK(output.dtype() == torch::kInt32, "output must be int32");
+  TORCH_CHECK(workspace.dtype() == torch::kUInt8, "workspace must be uint8");
+  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(lengths.dim() == 1, "lengths must be 1D");
+  TORCH_CHECK(output.dim() == 2, "output must be 2D");
+  TORCH_CHECK(workspace.dim() == 1, "workspace must be 1D");
+
+  const int64_t num_rows = logits.size(0);
+  const int64_t max_len = logits.size(1);
+
+  TORCH_CHECK(lengths.size(0) == num_rows, "lengths size mismatch");
+  TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k,
+              "output size mismatch");
+  TORCH_CHECK(k > 0 && k <= max_len, "k out of range");
+  TORCH_CHECK(workspace.size(0) >= 1024 * 1024,
+              "workspace buffer too small, need at least 1MB (1048576 bytes)");
+
+  cudaError_t status =
+      vllm::sampling::TopKRaggedTransformDispatch<float, int32_t>(
+          logits.data_ptr<float>(), output.data_ptr<int32_t>(),
+          lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
+          static_cast<uint32_t>(k), static_cast<uint32_t>(max_len),
+          reinterpret_cast<vllm::sampling::RadixRowState*>(
+              workspace.data_ptr()),
+          at::cuda::getCurrentCUDAStream());
+
+  TORCH_CHECK(status == cudaSuccess, "TopKRaggedTransformDispatch failed: ",
+              cudaGetErrorString(status));
 }

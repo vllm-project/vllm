@@ -196,6 +196,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "row_starts_opt) -> ()");
   ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
 
+  ops.def(
+      "flashinfer_radix_topk(Tensor logits, Tensor lengths, Tensor output, "
+      "Tensor workspace, int k) -> ()");
+  ops.impl("flashinfer_radix_topk", torch::kCUDA, &flashinfer_radix_topk);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

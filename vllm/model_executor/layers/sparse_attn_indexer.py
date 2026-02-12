@@ -39,6 +39,7 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
+    topk_workspace: torch.Tensor,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -65,6 +66,7 @@ def sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            topk_workspace,
         )
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
@@ -126,15 +128,6 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
-            # Compute lengths from row spans
-            # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
-            # torch.ops._C.large_context_topk(
-            #    logits,
-            #    topk_indices,
-            #    lengths,
-            #    chunk.cu_seqlen_ks,  # row_starts
-            # )
-
     if has_decode:
         decode_metadata = attn_metadata.decode
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
@@ -185,11 +178,9 @@ def sparse_attn_indexer(
                     + decode_metadata.offsets
                 ).flatten()
 
-            torch.ops._C.large_context_topk(
-                logits,
-                topk_indices,
-                lengths,
-                None,
+            topk_workspace.zero_()
+            torch.ops._C.flashinfer_radix_topk(
+                logits, lengths, topk_indices, topk_workspace, topk_tokens
             )
         else:
             torch.ops._C.top_k_per_row_decode(
@@ -231,6 +222,7 @@ def sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    topk_workspace: torch.Tensor | None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -238,7 +230,7 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer", "topk_workspace"],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -267,6 +259,7 @@ class SparseAttnIndexer(CustomOp):
         max_model_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
+        topk_workspace: torch.Tensor,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -277,6 +270,7 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_workspace = topk_workspace
 
     def forward_native(
         self,
@@ -316,6 +310,7 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            self.topk_workspace,
         )
 
     def forward_hip(
