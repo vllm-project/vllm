@@ -88,7 +88,7 @@ class InputPreprocessor:
 
         if dec_start_token_id is None:
             logger.warning_once(
-                "Falling back on <BOS> for decoder start token ID"
+                "Falling back on <BOS> for decoder start token id "
                 "because decoder start token id is not available."
             )
             dec_start_token_id = self.renderer.get_bos_token_id()
