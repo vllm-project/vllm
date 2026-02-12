@@ -52,12 +52,9 @@ if has_triton_kernels():
         except ImportError:
             if current_platform.is_rocm():
                 logger.warning_once("Using legacy triton_kernels on ROCm")
+                use_legacy_triton_kernels = True
             else:
-                logger.warning_once(
-                    "SparseMatrix not available in triton_kernels; "
-                    "falling back to legacy routing."
-                )
-            use_legacy_triton_kernels = True
+                raise
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
