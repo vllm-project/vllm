@@ -393,6 +393,15 @@ class KimiAudioForCausalLMConfig(VerifyAndUpdateConfig):
             "ASR quality."
         )
 
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is not None:
+            if not mm_config.enable_mm_embeds:
+                mm_config.enable_mm_embeds = True
+                logger.info("Enabling mm embeds by default for Kimi-Audio.")
+            if not mm_config.skip_mm_profiling:
+                mm_config.skip_mm_profiling = True
+                logger.info("Skipping mm profiling by default for Kimi-Audio.")
+
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
