@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only NemotronH model."""
+"""Inference-only Nemotron3 model."""
 
 import typing
 from collections.abc import Callable, Iterable
@@ -78,13 +78,13 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.transformers_utils.configs import Nemotron3Config
 
 
-class NemotronHMLP(nn.Module):
+class Nemotron3MLP(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
@@ -121,10 +121,10 @@ class NemotronHMLP(nn.Module):
         return x
 
 
-class NemotronHMoE(nn.Module):
+class Nemotron3MoE(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
@@ -178,7 +178,7 @@ class NemotronHMoE(nn.Module):
                 config.moe_shared_expert_intermediate_size * config.n_shared_experts
             )
 
-            self.shared_experts = NemotronHMLP(
+            self.shared_experts = Nemotron3MLP(
                 config=config,
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -279,10 +279,10 @@ class NemotronHMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
-class NemotronHMLPDecoderLayer(nn.Module):
+class Nemotron3MLPDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -303,7 +303,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
         else:
             intermediate_size = config.intermediate_size
 
-        self.mixer = NemotronHMLP(
+        self.mixer = Nemotron3MLP(
             config,
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
@@ -330,10 +330,10 @@ class NemotronHMLPDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class NemotronHMoEDecoderLayer(nn.Module):
+class Nemotron3MoEDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -348,7 +348,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
         layer_config = get_layer_config(layer_idx) if get_layer_config else config
 
-        self.mixer = NemotronHMoE(
+        self.mixer = Nemotron3MoE(
             layer_config,
             quant_config=quant_config,
             parallel_config=parallel_config,
@@ -373,10 +373,10 @@ class NemotronHMoEDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class NemotronHMambaDecoderLayer(nn.Module):
+class Nemotron3MambaDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -422,10 +422,10 @@ class NemotronHMambaDecoderLayer(nn.Module):
         return output, residual
 
 
-class NemotronHAttention(nn.Module):
+class Nemotron3Attention(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -499,10 +499,10 @@ class NemotronHAttention(nn.Module):
         return output
 
 
-class NemotronHAttentionDecoderLayer(nn.Module):
+class Nemotron3AttentionDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronHConfig,
+        config: Nemotron3Config,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -516,7 +516,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
         layer_config = get_layer_config(layer_idx) if get_layer_config else config
 
-        self.mixer = NemotronHAttention(
+        self.mixer = Nemotron3Attention(
             layer_config,
             layer_idx,
             model_config,
@@ -545,19 +545,19 @@ class NemotronHAttentionDecoderLayer(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
-    "M": NemotronHMambaDecoderLayer,
-    "-": NemotronHMLPDecoderLayer,
-    "*": NemotronHAttentionDecoderLayer,
-    "E": NemotronHMoEDecoderLayer,
+    "M": Nemotron3MambaDecoderLayer,
+    "-": Nemotron3MLPDecoderLayer,
+    "*": Nemotron3AttentionDecoderLayer,
+    "E": Nemotron3MoEDecoderLayer,
 }
 
 
 @support_torch_compile
-class NemotronHModel(nn.Module):
+class Nemotron3Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config: NemotronHConfig = vllm_config.model_config.hf_config
+        config: Nemotron3Config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -714,11 +714,13 @@ class NemotronHModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
 
             # load other params
             else:
                 is_expert_weight = False
+                # Load expert weights with non batched format
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
@@ -750,9 +752,21 @@ class NemotronHModel(nn.Module):
                         return_success=True,
                     )
                     if success:
-                        name = name_mapped
+                        loaded_params.add(name_mapped)
                         break
                 else:
+                    # Todo - can we detect better if this is a batched format?
+                    if self._is_batched_expert_weight(name, loaded_weight):
+                        self._load_batched_expert_params(
+                            expert_params_mapping,
+                            params_dict,
+                            loaded_params,
+                            name,
+                            loaded_weight,
+                        )
+                        continue
+                    # Check if it is a batched expert weight
+                    # if so load it with the corresponding weight loader
                     if is_expert_weight:
                         continue
 
@@ -764,12 +778,73 @@ class NemotronHModel(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
 
-            loaded_params.add(name)
         return loaded_params
 
+    def _get_projection_type(name: str) -> str | None:
+        if ".experts.down_proj" in name:
+            return "down_proj"
+        elif ".experts.up_proj" in name:
+            return "up_proj"
+        else:
+            raise ValueError(
+                f"Weight name {name} does not correspond to down_proj or up_proj"
+            )
 
-class NemotronHForCausalLM(
+    def _is_batched_expert_weight(self, name: str, weight: torch.Tensor) -> bool:
+        if ".experts.down_proj" not in name and ".experts.up_proj" not in name:
+            return False
+        # Batched format has shape [num_experts, ...]
+        return weight.ndim >= 3 and weight.shape[0] == self.n_routed_experts
+
+    def _load_batched_expert_params(
+        self, expert_params_mapping, params_dict, loaded_params, name, loaded_weight
+    ) -> None:
+        """
+        Load expert weights in batched format where all experts' weights are
+        stored in a single tensor with an extra leading dimension for
+        expert_id. The main difference between the batched and the non batched
+        is that here we loop over the experts in the weight tensor and loads
+        *all* of the relevant expert param, while in the non batched we loop
+        over the expert params and try to find the corresponding expert weight
+        in the checkpoint.
+        """
+
+        # should be either down_proj or up_proj
+        projection_type = self._get_projection_type(name)
+        for mapping in expert_params_mapping:
+            param_name, weight_name, expert_id, shard_id = mapping
+
+            # Make sure we load only the weigts of the current type
+            if projection_type not in weight_name:
+                continue
+
+            suffix = f"{param_name}weight"
+            name_mapped = name.replace(f"experts.{projection_type}", suffix)
+            current_loaded_weight = loaded_weight[expert_id]
+
+            if is_pp_missing_parameter(name_mapped, self):
+                continue
+
+            param = params_dict[name_mapped]
+            # We should ask the weight loader to return success or not
+            # here since otherwise we may skip experts with other
+            # available replicas.
+            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+            success = weight_loader(
+                param,
+                current_loaded_weight,
+                name_mapped,
+                shard_id=shard_id,
+                expert_id=expert_id,
+                return_success=True,
+            )
+            if success:
+                loaded_params.add(name_mapped)
+
+
+class Nemotron3ForCausalLM(
     nn.Module,
     HasInnerState,
     SupportsLoRA,
@@ -860,7 +935,7 @@ class NemotronHForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = NemotronHModel(
+        self.model = Nemotron3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -884,7 +959,7 @@ class NemotronHForCausalLM(
             self.moe_layers = []
             example_moe = None
             for layer in self.model.layers:
-                if isinstance(layer, NemotronHMoEDecoderLayer):
+                if isinstance(layer, Nemotron3MoEDecoderLayer):
                     # Pick last one layer since the first ones
                     # may be dense layers.
                     example_moe = layer.mixer
@@ -908,7 +983,7 @@ class NemotronHForCausalLM(
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
-            if isinstance(layer, NemotronHMoEDecoderLayer):
+            if isinstance(layer, Nemotron3MoEDecoderLayer):
                 moe = layer.mixer
                 moe.n_local_physical_experts = num_local_physical_experts
                 moe.n_physical_experts = num_physical_experts

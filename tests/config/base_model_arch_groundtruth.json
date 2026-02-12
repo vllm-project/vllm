@@ -358,10 +358,10 @@
     },
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
         "architectures": [
-            "NemotronHForCausalLM"
+            "Nemotron3ForCausalLM"
         ],
-        "model_type": "nemotron_h",
-        "text_model_type": "nemotron_h",
+        "model_type": "nemotron_3",
+        "text_model_type": "nemotron_3",
         "hidden_size": 2688,
         "total_num_hidden_layers": 52,
         "total_num_attention_heads": 32,
