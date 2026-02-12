@@ -942,7 +942,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             f"Expected one of {SUPPORTED_ACTIVATIONS} activations but got "
             + layer.activation
         )
-        assert not layer.renormalize
         return apply_fi_trtllm_fp8_per_tensor_moe(
             layer=layer,
             hidden_states=x,

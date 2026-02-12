@@ -35,8 +35,8 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
-    return False
+    """Supports non-gated MoE."""
+    return True
 
 
 def _supports_quant_scheme(
@@ -52,8 +52,7 @@ def _supports_quant_scheme(
 
 
 def _supports_activation(activation: MoEActivation) -> bool:
-    """Supports silu activation only."""
-    return activation == MoEActivation.SILU
+    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
 
 def _supports_routing_method(
@@ -74,6 +73,7 @@ def _supports_routing_method(
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
