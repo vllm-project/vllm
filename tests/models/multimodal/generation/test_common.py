@@ -748,7 +748,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         hf_model_kwargs={"trust_remote_code": True},
-        # Custom inputs to test all Moondream3 skills
+        # Custom inputs to test Moondream3 query and caption skills
         custom_test_opts=[
             CustomTestOptions(
                 inputs=custom_inputs.moondream3_skill_inputs(),

@@ -1241,8 +1241,74 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
 
-    # Patch generate to use native Moondream3 generation
-    original_model = hf_model.model
+    # Patch generate to use native Moondream3 vision + text pipeline.
+    # The native model uses functional APIs and its own KV cache, so we
+    # cannot use HuggingFace's standard generate(). Instead we run the
+    # vision encoder, prefill, and greedy-decode using the native model's
+    # internal methods.
+    native_model = hf_model.model.model  # MoondreamModel instance
+
+    from torch.nn import functional as F
+    from vllm.model_executor.models.moondream3 import reconstruct_from_crops
+
+    # Derive <image> placeholder token IDs from the tokenizer at runtime
+    # to avoid hard-coding values that may drift across tokenizer versions.
+    image_placeholder_ids = moondream_processor.tokenizer.encode(
+        "<image>", add_special_tokens=False
+    )
+
+    def _normalize_tiling(tilings):
+        """Extract (h, w) tuple from various tiling container formats."""
+        tiling = tilings
+        if isinstance(tiling, torch.Tensor):
+            tiling = tuple(tiling.squeeze().tolist())
+        elif isinstance(tiling, (list, tuple)):
+            t0 = tiling[0]
+            if isinstance(t0, torch.Tensor):
+                tiling = tuple(t0.tolist())
+            elif isinstance(t0, (list, tuple)):
+                tiling = tuple(t0)
+        return tiling
+
+    def _encode_vision(pixel_values, tilings):
+        """Run preprocessed crops through vision encoder + projection."""
+        device = native_model.device
+        dtype = native_model.vision.pos_emb.dtype
+        config = native_model.config
+
+        pv = pixel_values
+        while pv.dim() > 4:
+            pv = pv.squeeze(0)
+        pv = pv.to(device=device, dtype=dtype)
+
+        features = native_model._vis_enc(pv)
+        grid_size = (
+            config.vision.crop_size // config.vision.enc_patch_size
+        )
+        global_feat = features[0]
+
+        if features.shape[0] > 1 and tilings is not None:
+            tiling = _normalize_tiling(tilings)
+            local = features[1:].view(
+                -1, grid_size, grid_size, config.vision.enc_dim
+            )
+            reconstructed = reconstruct_from_crops(
+                local, tiling, config.vision.overlap_margin, patch_size=1,
+            )
+        else:
+            reconstructed = global_feat.view(
+                grid_size, grid_size, config.vision.enc_dim
+            )
+
+        return native_model._vis_proj(global_feat, reconstructed)
+
+    def _find_subsequence(seq, subseq):
+        """Find start index of subseq in seq, or None."""
+        n = len(subseq)
+        for i in range(len(seq) - n + 1):
+            if seq[i : i + n] == subseq:
+                return i
+        return None
 
     def _generate(
         self,
@@ -1252,33 +1318,157 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         attention_mask=None,
         **kwargs,
     ):
-        # Use the model's native query method if available
-        if hasattr(original_model, "query") and pixel_values is not None:
-            # Convert pixel_values back to images for native query
-            # For testing, we fall through to regular generate
-            pass
+        max_new_tokens = kwargs.get("max_new_tokens", 128)
+        return_dict = kwargs.get("return_dict_in_generate", False)
+        output_hs = kwargs.get("output_hidden_states", False)
 
-        # Prepare inputs for standard generate
-        model_inputs = {"input_ids": input_ids}
-        if attention_mask is not None:
-            model_inputs["attention_mask"] = attention_mask
+        if pixel_values is None:
+            sequences = input_ids
+            if return_dict:
+                return types.SimpleNamespace(
+                    sequences=sequences,
+                    hidden_states=() if output_hs else None,
+                )
+            return sequences
 
-        if pixel_values is not None and hasattr(original_model, "vision"):
-            # Get vision embeddings and merge with text embeddings
-            # This is a simplified version for testing
-            text_embeds = original_model.text.wte(input_ids)
+        hf_model.model._setup_caches()
+        native_model.use_flex_decoding = False
 
-            # Find image token positions and replace
-            # For Moondream3, the image tokens are the '<' token (id 48)
-            image_token_id = 48
-            is_image = input_ids == image_token_id
-            if is_image.any():
-                # Simple merge: replace image token positions
-                model_inputs["inputs_embeds"] = text_embeds
-                model_inputs.pop("input_ids", None)
+        device = native_model.device
+        config = native_model.config
 
-        # Use model's generate
-        return original_model.generate(**model_inputs, **kwargs)
+        with torch.inference_mode():
+            # Reset KV caches for fresh generation
+            for block in native_model.text.blocks:
+                block.kv_cache.k_cache.zero_()
+                block.kv_cache.v_cache.zero_()
+
+            img_emb = _encode_vision(pixel_values, tilings)
+
+            # --- Prefill BOS + vision embeddings ---
+            bos_emb = F.embedding(
+                torch.tensor(
+                    [[config.tokenizer.bos_id]], device=device
+                ),
+                native_model.text.wte,
+            )
+            img_input = torch.cat(
+                [bos_emb, img_emb.unsqueeze(0)], dim=1
+            )
+            prefix_len = img_input.size(1)  # 730
+
+            mask = native_model.attn_mask[:, :, :prefix_len, :]
+            pos_ids = torch.arange(
+                prefix_len, dtype=torch.long, device=device
+            )
+            native_model._prefill(img_input, mask, pos_ids, None)
+
+            # --- Extract prompt tokens after BOS + <image> ---
+            ids = input_ids.squeeze(0).tolist()
+            img_start = _find_subsequence(ids, image_placeholder_ids)
+
+            if img_start is None:
+                sequences = input_ids
+                if return_dict:
+                    return types.SimpleNamespace(
+                        sequences=sequences,
+                        hidden_states=() if output_hs else None,
+                    )
+                return sequences
+
+            prompt_tokens = ids[img_start + len(image_placeholder_ids):]
+
+            # --- Prefill prompt tokens and get first logits ---
+            if not prompt_tokens:
+                sequences = input_ids
+                if return_dict:
+                    return types.SimpleNamespace(
+                        sequences=sequences,
+                        hidden_states=() if output_hs else None,
+                    )
+                return sequences
+
+            prompt_tensor = torch.tensor(
+                [prompt_tokens], device=device
+            )
+            prompt_emb = F.embedding(
+                prompt_tensor, native_model.text.wte
+            )
+            prompt_len = prompt_emb.size(1)
+
+            mask = native_model.attn_mask[
+                :, :, prefix_len : prefix_len + prompt_len, :
+            ]
+            pos_ids = torch.arange(
+                prefix_len,
+                prefix_len + prompt_len,
+                dtype=torch.long,
+                device=device,
+            )
+            hidden = native_model._prefill(
+                prompt_emb, mask, pos_ids, None
+            )
+            pos = prefix_len + prompt_len
+
+            # Compute logits from last hidden state
+            hidden_last = native_model.text.post_ln(
+                hidden[:, -1:, :]
+            )
+            logits = native_model.text.lm_head(
+                hidden_last.squeeze(1)
+            )
+
+            # --- Greedy decode ---
+            generated = []
+            all_hidden_states = []
+            # Track hidden state that produced current logits so we can
+            # record the state that *predicted* each generated token.
+            # Entry 0 = prefill (predicts first token), entry i = decode
+            # step i-1 (predicts token i).  This matches the HF
+            # GenerateOutput.hidden_states layout expected by conftest's
+            # _hidden_states_to_logprobs.
+            prev_hs = hidden_last
+            for _ in range(max_new_tokens):
+                next_token = logits.argmax(dim=-1).item()
+                # Stop on EOS (token 0 = <|endoftext|>)
+                if next_token == 0:
+                    break
+                generated.append(next_token)
+                if output_hs:
+                    all_hidden_states.append((prev_hs,))
+
+                next_emb = F.embedding(
+                    torch.tensor([[next_token]], device=device),
+                    native_model.text.wte,
+                )
+                mask = native_model.attn_mask[
+                    :, :, pos : pos + 1, :
+                ]
+                pos_ids_step = torch.tensor(
+                    [pos], dtype=torch.long, device=device
+                )
+                hidden = native_model._prefill(
+                    next_emb, mask, pos_ids_step, None
+                )
+                hidden_last = native_model.text.post_ln(
+                    hidden[:, -1:, :]
+                )
+                prev_hs = hidden_last
+                logits = native_model.text.lm_head(
+                    hidden_last.squeeze(1)
+                )
+                pos += 1
+
+            result_ids = ids + generated
+            sequences = torch.tensor([result_ids], device=device)
+
+            if return_dict:
+                return types.SimpleNamespace(
+                    sequences=sequences,
+                    hidden_states=tuple(all_hidden_states)
+                    if output_hs else None,
+                )
+            return sequences
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
