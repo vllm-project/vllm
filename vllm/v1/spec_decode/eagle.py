@@ -1286,6 +1286,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
@@ -1356,6 +1357,8 @@ class SpecDecodeBaseProposer:
                 "Qwen3VLMoeForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+                "Qwen3_5MoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":

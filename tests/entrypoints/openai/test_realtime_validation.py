@@ -129,5 +129,5 @@ async def test_multi_chunk_streaming(
                 " First words I spoke in the original phonograph."
                 " A little piece of practical poetry. Mary had a little lamb,"
                 " it sleeps with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go"
+                " the lamb was sure to go."
             )
