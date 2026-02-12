@@ -216,6 +216,7 @@ class KimiAudioASRDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, Any] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         # IMPORTANT: Always return dict-of-tensors, never a file path.
         # Returning a string would be parsed by vLLM's core audio parser
