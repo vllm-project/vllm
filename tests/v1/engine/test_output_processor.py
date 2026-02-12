@@ -694,7 +694,7 @@ def test_stop_token(
         generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
         prompt_logprobs_raw=None,
         eos_token_id=sampling_params.eos_token_id,
-        stop_token_ids=list(sampling_params.all_stop_token_ids),
+        stop_token_ids=sampling_params.stop_token_ids,
         ignore_eos=ignore_eos,
         request_ids=[request.request_id],
     )
