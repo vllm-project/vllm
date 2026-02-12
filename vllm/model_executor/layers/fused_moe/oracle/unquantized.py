@@ -78,7 +78,10 @@ def select_unquantized_moe_backend(
         activation_format=activation_format,
     )
     flashinfer_trtllm_moe_enabled = (
-        has_flashinfer() and envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported
+        has_flashinfer()
+        and envs.VLLM_USE_FLASHINFER_MOE_FP16
+        and trtllm_supported
+        and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
     )
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_moe_enabled = (
@@ -98,11 +101,19 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
         elif flashinfer_cutlass_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
+            if trtllm_supported:
+                logger.info_once(
+                    "FlashInfer TRTLLM MoE is available but not enabled, "
+                    "consider setting VLLM_FLASHINFER_MOE_BACKEND=latency "
+                    "to enable it for better performance.",
+                    scope="local",
+                )
         else:
             if not envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported:
                 logger.info_once(
                     "FlashInfer TRTLLM MoE is available but not enabled, "
                     "consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 "
+                    "and VLLM_FLASHINFER_MOE_BACKEND=latency "
                     "to enable it for better performance.",
                     scope="local",
                 )
@@ -154,11 +165,9 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> tuple[mk.FusedMoEModularKernel | None, bool]:
-    use_inplace = True
-
+) -> mk.FusedMoEModularKernel | None:
     if backend in UNSUPPORTED_BACKEND:
-        return None, use_inplace
+        return None
 
     if backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -171,8 +180,9 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=False,
         )
-        use_inplace = False
+
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
@@ -184,6 +194,7 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=not moe_config.disable_inplace,
         )
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
@@ -194,6 +205,7 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=not moe_config.disable_inplace,
         )
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe import XPUExperts
@@ -204,5 +216,6 @@ def make_unquantized_moe_kernel(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
+            inplace=not moe_config.disable_inplace,
         )
-    return kernel, use_inplace
+    return kernel

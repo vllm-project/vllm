@@ -17,8 +17,6 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
-from vllm.inputs import PromptType
-from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -224,10 +222,6 @@ def get_device_indices(
             f'"{os.getenv(device_control_env_var)}"'
         ) from e
     return value
-
-
-def get_prompt_text(prompt: PromptType) -> str | None:
-    return get_prompt_components(prompt)[0]
 
 
 class CoreEngineActorManager:
