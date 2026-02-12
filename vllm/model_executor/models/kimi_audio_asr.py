@@ -249,6 +249,7 @@ def _update_hash_with_array(hasher: hashlib._Hash, value: object) -> None:
 
 
 def _build_cache_salt(
+    audio: np.ndarray,
     audio_input_ids: object,
     text_input_ids: object,
     is_continuous_mask: object,
@@ -258,6 +259,7 @@ def _build_cache_salt(
     to_language: str | None,
 ) -> str:
     hasher = hashlib.sha1()
+    _update_hash_with_array(hasher, audio)
     _update_hash_with_array(hasher, audio_input_ids)
     _update_hash_with_array(hasher, text_input_ids)
     _update_hash_with_array(hasher, is_continuous_mask)
@@ -857,6 +859,7 @@ class KimiAudioForConditionalGeneration(
             }
 
             cache_salt = _build_cache_salt(
+                audio=audio,
                 audio_input_ids=audio_ids,
                 text_input_ids=text_ids,
                 is_continuous_mask=is_continuous_mask,
