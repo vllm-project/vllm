@@ -188,9 +188,15 @@ class VoxtralRealtimeBuffer:
 
             audio_array = np.concatenate(audio_arrays)
             frame = audio_array[:frame_size]
+
+            # The current stride took look_ahead_in_samples audio of the next sample
+            # In addition the next sample will take look_back_in_samples audio of
+            # the current sample => So let's put both of this into the leftover
             stride = (
                 frame_size - self._look_ahead_in_samples - self._look_back_in_samples
             )
+            assert stride > 0, f"{stride=} must be positive"
+
             self._leftover = audio_array[stride:]
 
             yield StreamingInput(
