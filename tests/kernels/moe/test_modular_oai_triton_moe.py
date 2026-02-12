@@ -7,6 +7,7 @@ Test modular OAI Triton MoE
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
@@ -192,7 +193,7 @@ def oai_triton_moe_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        activation="swigluoai",
+        activation=MoEActivation.SWIGLUOAI,
         global_num_experts=num_experts,
         expert_map=None,
         apply_router_weight_on_input=False,

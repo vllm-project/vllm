@@ -9,6 +9,7 @@ steps:
   - tests/cuda
   commands:
     - pytest -v -s cuda/test_cuda_context.py
+    - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: Cudagraph
   timeout_in_minutes: 20

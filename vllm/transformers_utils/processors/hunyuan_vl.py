@@ -23,7 +23,6 @@ class HunYuanVLProcessor(ProcessorMixin):
         self,
         image_processor=None,
         tokenizer=None,
-        video_processor=None,
         chat_template=None,
         **kwargs,
     ):
@@ -42,9 +41,7 @@ class HunYuanVLProcessor(ProcessorMixin):
         )
         self.pad_id = 120002  # self.tokenizer.pad_token_id
 
-        super().__init__(
-            image_processor, tokenizer, video_processor, chat_template=chat_template
-        )
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     def __call__(
         self,

@@ -134,7 +134,6 @@ WORKDIR /vllm-workspace
 # Copy test requirements
 COPY requirements/test.in requirements/cpu-test.in
 
-# TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
 RUN \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \

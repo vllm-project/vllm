@@ -40,6 +40,7 @@ from vllm.config import (
     DeviceConfig,
     ECTransferConfig,
     EPLBConfig,
+    KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -453,6 +454,7 @@ class EngineArgs:
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
@@ -506,8 +508,6 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
-    logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
-
     speculative_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -536,6 +536,10 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
+    enable_flashinfer_autotune: bool = get_field(
+        KernelConfig, "enable_flashinfer_autotune"
+    )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -582,10 +586,12 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    weight_transfer_config: WeightTransferConfig | None = None
-    """Configuration for weight transfer during RL training. 
-    Accepts a JSON string or dict with backend-specific options.
-    Example: '{"backend": "nccl"}'"""
+    weight_transfer_config: WeightTransferConfig | None = get_field(
+        VllmConfig,
+        "weight_transfer_config",
+    )
+
+    fail_on_environ_validation: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -595,6 +601,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.kernel_config, dict):
+            self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
@@ -700,9 +708,6 @@ class EngineArgs:
         )
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
-        model_group.add_argument(
-            "--logits-processor-pattern", **model_kwargs["logits_processor_pattern"]
-        )
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
         )
@@ -969,6 +974,9 @@ class EngineArgs:
             description=MultiModalConfig.__doc__,
         )
         multimodal_group.add_argument(
+            "--language-model-only", **multimodal_kwargs["language_model_only"]
+        )
+        multimodal_group.add_argument(
             "--limit-mm-per-prompt", **multimodal_kwargs["limit_per_prompt"]
         )
         multimodal_group.add_argument(
@@ -1163,6 +1171,17 @@ class EngineArgs:
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
 
+        # Kernel arguments
+        kernel_kwargs = get_kwargs(KernelConfig)
+        kernel_group = parser.add_argument_group(
+            title="KernelConfig",
+            description=KernelConfig.__doc__,
+        )
+        kernel_group.add_argument(
+            "--enable-flashinfer-autotune",
+            **kernel_kwargs["enable_flashinfer_autotune"],
+        )
+
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
@@ -1189,6 +1208,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
@@ -1215,6 +1235,14 @@ class EngineArgs:
             action="store_true",
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
+        )
+
+        parser.add_argument(
+            "--fail-on-environ-validation",
+            help="If set, the engine will raise an error if "
+            "environment validation fails.",
+            default=False,
+            action=argparse.BooleanOptionalAction,
         )
         return parser
 
@@ -1272,6 +1300,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
+            language_model_only=self.language_model_only,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
@@ -1286,7 +1315,6 @@ class EngineArgs:
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
@@ -1372,6 +1400,8 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
+        envs.validate_environ(self.fail_on_environ_validation)
+
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
@@ -1393,7 +1423,7 @@ class EngineArgs:
         self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
-        self._check_feature_supported(model_config)
+        self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
@@ -1717,6 +1747,17 @@ class EngineArgs:
             else:
                 attention_config.backend = self.attention_backend
 
+        # Kernel config overrides
+        kernel_config = copy.deepcopy(self.kernel_config)
+        if self.enable_flashinfer_autotune is not None:
+            if kernel_config.enable_flashinfer_autotune is not None:
+                raise ValueError(
+                    "enable_flashinfer_autotune and "
+                    "kernel_config.enable_flashinfer_autotune "
+                    "are mutually exclusive"
+                )
+            kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1767,6 +1808,7 @@ class EngineArgs:
             device_config=device_config,
             load_config=load_config,
             attention_config=attention_config,
+            kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,
@@ -1783,11 +1825,8 @@ class EngineArgs:
 
         return config
 
-    def _check_feature_supported(self, model_config: ModelConfig):
+    def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
-            _raise_unsupported_error(feature_name="--logits-processor-pattern")
-
         # No Concurrent Partial Prefills so far.
         if (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills

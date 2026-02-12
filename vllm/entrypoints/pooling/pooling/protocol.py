@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
 from pydantic import Field
 
@@ -65,11 +65,6 @@ class PoolingChatRequest(
 ):
     task: PoolingTask | None = None
 
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -104,9 +99,6 @@ T = TypeVar("T")
 class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic[T]):
     data: T
     task: PoolingTask = "plugin"
-
-    def to_pooling_params(self):
-        return PoolingParams(task=self.task)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):

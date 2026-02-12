@@ -521,7 +521,6 @@ class MockModelConfig:
     hf_config = MockHFConfig()
     hf_text_config = MockHFConfig()
     logits_processors: list[str] | None = None
-    logits_processor_pattern = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None
@@ -529,6 +528,7 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

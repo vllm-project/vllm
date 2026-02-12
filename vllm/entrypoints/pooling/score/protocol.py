@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -23,13 +23,6 @@ from vllm.utils import random_uuid
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    # --8<-- [start:score-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    # --8<-- [end:score-extra-params]
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -105,13 +98,6 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     query: ScoreInput
     documents: ScoreInputs
     top_n: int = Field(default_factory=lambda: 0)
-
-    # --8<-- [start:rerank-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    # --8<-- [end:rerank-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}

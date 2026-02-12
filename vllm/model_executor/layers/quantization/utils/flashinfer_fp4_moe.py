@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -63,9 +65,9 @@ def _supports_quant_scheme(
     return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-def _supports_activation(activation: str) -> bool:
+def _supports_activation(activation: MoEActivation) -> bool:
     """Supports silu activation only."""
-    return activation in ["silu"]
+    return activation in [MoEActivation.SILU]
 
 
 def _supports_routing_method(
@@ -82,8 +84,12 @@ def _supports_routing_method(
 
 
 def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """Supports EP."""
-    return True
+    """
+    TRTLLM is a monolithic kernel that requires dispatch_router_logits() for
+    the naive dispatch/combine path. DeepEP HT only implements dispatch() for
+    the modular kernel path, so TRTLLM is incompatible with DeepEP HT.
+    """
+    return not moe_parallel_config.use_deepep_ht_kernels
 
 
 def is_supported_config_trtllm(
@@ -262,7 +268,7 @@ def flashinfer_trtllm_fp4_moe(
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
     num_expert_group: int | None,
     topk_group: int | None,
@@ -292,7 +298,7 @@ def flashinfer_trtllm_fp4_moe(
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2404
-    assert activation == "silu", (
+    assert activation == MoEActivation.SILU, (
         "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
         f"{activation} found instead."
     )
@@ -312,11 +318,7 @@ def flashinfer_trtllm_fp4_moe(
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
 
-    # Prepare routing bias
-    routing_bias = e_score_correction_bias
-    if routing_bias is not None:
-        routing_bias = routing_bias.to(torch.bfloat16)
-
+    # Cast to Fp32 (required by kernel).
     router_logits = (
         router_logits.to(torch.float32)
         if routing_method_type == RoutingMethodType.DeepSeekV3
@@ -326,7 +328,7 @@ def flashinfer_trtllm_fp4_moe(
     # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
         routing_logits=router_logits,
-        routing_bias=routing_bias,
+        routing_bias=e_score_correction_bias,
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
@@ -364,7 +366,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
 ) -> torch.Tensor:
     """
@@ -386,7 +388,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     import flashinfer
 
     # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2535
-    assert activation == "silu", (
+    assert activation == MoEActivation.SILU, (
         "Only SiLU activation is supported for FlashInfer TRTLLM FP4 Routed MoE. "
         f"{activation} found instead."
     )
@@ -443,7 +445,7 @@ def flashinfer_trtllm_fp4_routed_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: torch.nn.Module,
+    layer: "FusedMoE",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,

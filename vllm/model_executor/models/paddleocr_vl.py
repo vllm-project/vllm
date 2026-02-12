@@ -204,6 +204,7 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -994,6 +995,13 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        if hasattr(config, "text_config"):
+            text_config = config.text_config.to_dict()
+            unsafe_keys = ["model_type", "architectures", "tie_word_embeddings"]
+            for key in unsafe_keys:
+                text_config.pop(key, None)
+            config.update(text_config)
+
         quant_config = vllm_config.quant_config
 
         self.config = config

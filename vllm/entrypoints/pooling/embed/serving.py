@@ -28,10 +28,11 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.renderers.inputs import TokPrompt
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.serial_utils import EmbedDType, Endianness
@@ -68,16 +69,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
 
         pooler_config = self.model_config.pooler_config
-
-        # Avoid repeated attribute lookups
-        self.supports_chunked_processing = bool(
-            pooler_config and pooler_config.enable_chunked_processing
-        )
-        self.max_embed_len = (
-            pooler_config.max_embed_len
-            if pooler_config and pooler_config.max_embed_len
-            else None
-        )
+        assert pooler_config is not None
+        self.pooler_config = pooler_config
 
     async def _preprocess(
         self,
@@ -239,7 +232,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         """Check if chunked processing should be used for this request."""
         return (
             isinstance(request, (EmbeddingCompletionRequest, EmbeddingChatRequest))
-            and self.supports_chunked_processing
+            and self.pooler_config.enable_chunked_processing
         )
 
     async def _process_chunked_request(
@@ -309,14 +302,14 @@ class OpenAIServingEmbedding(OpenAIServing):
             max_pos_embeddings = self._get_max_position_embeddings()
 
             # Determine the effective max length for validation
-            if self.max_embed_len is not None:
+            if self.pooler_config.max_embed_len:
                 # Use max_embed_len for validation instead of max_model_len
                 length_type = "maximum embedding input length"
-                max_length_value = self.max_embed_len
+                max_length_value = self.pooler_config.max_embed_len
             else:
                 # Fall back to max_model_len validation (original behavior)
                 length_type = "maximum context length"
-                max_length_value = self.max_model_len
+                max_length_value = self.model_config.max_model_len
 
             validation_error_msg = (
                 "This model's {length_type} is {max_length_value} tokens. "
@@ -369,7 +362,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: TokPrompt,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,

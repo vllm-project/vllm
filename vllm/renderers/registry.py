@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .protocol import BaseRenderer
+from .base import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
