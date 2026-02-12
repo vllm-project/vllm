@@ -74,7 +74,7 @@ def mary_had_lamb_audio_chunks() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-# @pytest.mark.skip(reason="Voxtral streaming is not yet public")
+@pytest.mark.skip(reason="Voxtral streaming is not yet public")
 async def test_multi_chunk_streaming(
     model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
 ):
