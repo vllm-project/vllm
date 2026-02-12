@@ -41,10 +41,40 @@ if find_spec("flashinfer"):
             _flashinfer_comm, "create_allreduce_fusion_workspace"
         ):
             flashinfer_comm = _flashinfer_comm
+            from flashinfer.comm.mnnvl import TorchDistBackend
+
+            class _TPCommBackend(TorchDistBackend):
+                """CommBackend scoped to the TP process group.
+
+                Fixes two flashinfer issues:
+                1. TorchDistBackend.bcast passes a group-local root as a
+                   global rank to broadcast_object_list. We use group_src
+                   instead.
+                2. IPC socket opIds collide across TP groups because
+                   random.randint produces identical values under vllm's
+                   deterministic seeding. We offset the opId by the
+                   global rank of the group root.
+                """
+
+                def __init__(self, group):
+                    super().__init__(group=group)
+                    self._global_root = self._dist.get_global_rank(group, 0)
+
+                def bcast(self, data, root=0):
+                    object_list = [data]
+                    self._dist.broadcast_object_list(
+                        object_list, group_src=root, group=self._group
+                    )
+                    result = object_list[0]
+                    # Offset opId by global root rank so each TP group
+                    # gets a unique IPC socket path.  Only opIds (int)
+                    # flow through bcast in the TRTLLM backend path.
+                    if isinstance(result, int):
+                        result += self._global_root
+                    return result
+
     except ImportError:
         pass
-
-logger = init_logger(__name__)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
@@ -687,6 +717,15 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         if self.tp_size <= 1:
             logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
             return
+        if config.parallel_config.data_parallel_size > 1:
+            # flashinfer uses device_idx=tp_rank in SymmDeviceMemory,
+            # which maps to the wrong GPU for DP groups > 0.
+            # See: https://github.com/vllm-project/vllm/issues/34401
+            logger.warning_once(
+                "AllReduce fusion pass is disabled for DP+TP due to "
+                "a flashinfer device assignment limitation."
+            )
+            return
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="all_reduce_fusion_pass"
         )
@@ -736,6 +775,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             max_token_num=self.max_token_num,
             hidden_dim=self.hidden_dim,
             dtype=self.model_dtype,
+            comm_backend=_TPCommBackend(group=self.group),
         )
 
         global _FI_WORKSPACE
