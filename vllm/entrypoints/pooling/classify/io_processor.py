@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any, Final
+from typing import Any
 
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -23,23 +23,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 
 
-class ClassifyPreProcessor:
-    def __init__(
-        self,
-        models: OpenAIServingModels,
-        *,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
-    ):
-        self.models = models
-        self.renderer = self.models.renderer
-        self.model_config = self.models.model_config
-        self.chat_template = chat_template
-        self.chat_template_content_format: Final = chat_template_content_format
-        self.trust_request_chat_template = trust_request_chat_template
-
-    async def __call__(
+class ClassifyIOProcessor(PoolingIOProcessor):
+    async def pre_process(
         self, request: ClassificationCompletionRequest | ClassificationChatRequest
     ) -> list[TokPrompt] | None:
         if isinstance(request, ClassificationChatRequest):
@@ -159,3 +144,6 @@ class ClassifyPreProcessor:
                 "Refused request with untrusted chat template."
             )
         return None
+
+    async def post_process(self):
+        pass

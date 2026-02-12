@@ -13,14 +13,14 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.openai.engine.serving import ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.classify.protocol import (
+from vllm.logger import init_logger
+
+from .io_processor import ClassifyIOProcessor
+from .protocol import (
     ClassificationData,
     ClassificationRequest,
     ClassificationResponse,
 )
-from vllm.logger import init_logger
-
-from .preprocessor import ClassifyPreProcessor
 
 logger = init_logger(__name__)
 
@@ -48,8 +48,9 @@ class ServingClassification(PoolingServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
-        self.preprocessor = ClassifyPreProcessor(
-            models=models,
+        self.io_processor = ClassifyIOProcessor(
+            model_config=models.model_config,
+            renderer=models.renderer,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             trust_request_chat_template=trust_request_chat_template,
@@ -59,7 +60,7 @@ class ServingClassification(PoolingServing):
         self,
         ctx: ServeContext,
     ) -> None:
-        ctx.engine_prompts = await self.preprocessor(ctx.request)
+        ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
 
     async def _build_response(
         self,

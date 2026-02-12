@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
 
 from fastapi import Request
 
@@ -15,7 +16,20 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.score.protocol import (
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.async_utils import merge_async_iterators
+
+from ...chat_utils import ChatTemplateContentFormatOption
+from .io_processor import (
+    CrossEncoderIOProcessor,
+    EmbeddingScoreIOProcessor,
+    LateInteractionIOProcessor,
+)
+from .protocol import (
     RerankDocument,
     RerankRequest,
     RerankResponse,
@@ -25,7 +39,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from vllm.entrypoints.pooling.score.utils import (
+from .utils import (
     ScoreData,
     ScoreInputs,
     _cosine_similarity,
@@ -33,13 +47,17 @@ from vllm.entrypoints.pooling.score.utils import (
     compute_maxsim_score,
     validate_score_input,
 )
-from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
+
+
+ScoreType = Literal["cross_encoder", "late_interaction", "embedding"]
+
+ScoreIOProcessors: dict[ScoreType, PoolingIOProcessor] = {
+    "cross_encoder": CrossEncoderIOProcessor,
+    "late_interaction": LateInteractionIOProcessor,
+    "embedding": EmbeddingScoreIOProcessor,
+}
 
 
 class ServingScores(OpenAIServing):
@@ -50,6 +68,8 @@ class ServingScores(OpenAIServing):
         *,
         request_logger: RequestLogger | None,
         score_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
@@ -58,7 +78,6 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
-        self.score_template = score_template
 
         tokenizer = self.renderer.get_tokenizer()
         if isinstance(tokenizer, MistralTokenizer):
@@ -67,42 +86,31 @@ class ServingScores(OpenAIServing):
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
         self.is_cross_encoder = self.model_config.is_cross_encoder
-        self.is_multimodal_model = self.model_config.is_multimodal_model
         self.architecture = self.model_config.architecture
+        self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_late_interaction = self.model_config.is_late_interaction
 
+        self.score_type: ScoreType
         if self.is_cross_encoder:
-            from .preprocessor import CrossEncoderPreProcessor
+            self.score_type = "cross_encoder"
+        elif self.is_late_interaction:
+            self.score_type = "late_interaction"
+        else:
+            self.score_type = "embedding"
 
-            self.preprocessor = CrossEncoderPreProcessor(
-                model_config=self.model_config,
-                renderer=self.renderer,
-                io_processor=self.io_processor,
-                input_processor=self.input_processor,
-                score_template=self.score_template,
-            )
+        self.io_processor = ScoreIOProcessors[self.score_type](
+            model_config=models.model_config,
+            renderer=models.renderer,
+            chat_template=score_template,
+            chat_template_content_format=chat_template_content_format,
+            trust_request_chat_template=trust_request_chat_template,
+        )
+
+        if self.is_cross_encoder:
             self._score_func = self._cross_encoding_score
         elif self.is_late_interaction:
-            from .preprocessor import LateInteractionPreProcessor
-
-            self.preprocessor = LateInteractionPreProcessor(
-                model_config=self.model_config,
-                renderer=self.renderer,
-                io_processor=self.io_processor,
-                input_processor=self.input_processor,
-                score_template=self.score_template,
-            )
             self._score_func = self._late_interaction_score
         else:
-            from .preprocessor import EmbeddingScorePreProcessor
-
-            self.preprocessor = EmbeddingScorePreProcessor(
-                model_config=self.model_config,
-                renderer=self.renderer,
-                io_processor=self.io_processor,
-                input_processor=self.input_processor,
-                score_template=self.score_template,
-            )
             self._score_func = self._embedding_score
 
     async def _embedding_score(
@@ -115,7 +123,7 @@ class ServingScores(OpenAIServing):
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         tokenizer = self.renderer.get_tokenizer()
-        input_texts, engine_prompts = await self.preprocessor(
+        input_texts, engine_prompts = await self.io_processor.pre_process(
             data_1=data_1,
             data_2=data_2,
             request=request,
@@ -196,7 +204,7 @@ class ServingScores(OpenAIServing):
         """
 
         tokenizer = self.renderer.get_tokenizer()
-        input_texts, engine_prompts = await self.preprocessor(
+        input_texts, engine_prompts = await self.io_processor.pre_process(
             data_1=data_1,
             data_2=data_2,
             request=request,
@@ -299,7 +307,7 @@ class ServingScores(OpenAIServing):
 
         default_pooling_params = request.to_pooling_params("score")
 
-        engine_prompts, request_prompts = await self.preprocessor(
+        engine_prompts, request_prompts = await self.io_processor.pre_process(
             data_1=data_1,
             data_2=data_2,
             request=request,
