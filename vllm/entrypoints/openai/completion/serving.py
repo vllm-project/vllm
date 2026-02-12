@@ -66,9 +66,6 @@ class OpenAIServingCompletion(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
-
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
 

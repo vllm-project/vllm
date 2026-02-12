@@ -129,9 +129,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
-
         # set up reasoning parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
