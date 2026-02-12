@@ -176,9 +176,12 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
 
         # Determine trace handler: use custom handler if provided,
-        # otherwise default to tensorboard trace handler
+        # skip trace export if disabled, otherwise default to
+        # tensorboard trace handler
         if on_trace_ready is not None:
             trace_handler = on_trace_ready
+        elif not profiler_config.torch_profiler_export_trace:
+            trace_handler = lambda _prof: None  # noqa: E731
         else:
             trace_handler = torch.profiler.tensorboard_trace_handler(
                 torch_profiler_trace_dir,

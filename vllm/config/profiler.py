@@ -54,6 +54,11 @@ class ProfilerConfig:
     torch_profiler_use_gzip: bool = True
     """If `True`, saves torch profiler traces in gzip format. Enabled by default"""
 
+    torch_profiler_export_trace: bool = True
+    """If `True`, exports Chrome trace files (via tensorboard_trace_handler).
+    If `False`, skips trace export but still collects the summary table.
+    Enabled by default."""
+
     torch_profiler_dump_cuda_time_total: bool = True
     """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
 
