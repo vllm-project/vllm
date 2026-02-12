@@ -304,7 +304,7 @@ class InputProcessor:
         if envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION:
             logger.warning_once(
                 "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION is set and will be "
-                "deprecated in a future release. Duplicate externally-provided "
+                "removed in a future release. Duplicate externally-provided "
                 "request IDs may cause failures and/or subtle correctness errors."
             )
         else:
