@@ -12,13 +12,10 @@ using Pivot-based Truncation and Selection" By Park et al.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
-_TRITON_TABLE_CACHE: dict[
-    tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]
-] = {}
-_TRITON_BUFFER_CACHE: dict[
-    tuple[torch.device, torch.dtype, int, int], torch.Tensor
-] = {}
+_TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+_TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
 
 # fmt: off
 _NORMAL_CDF_TO_SIGMA_TABLE = [
@@ -384,7 +381,6 @@ def _topk_topp_kernel(
                                     other=-float("inf"),
                                 )
 
-                                outlier_mask = (probs_blk > min_logit) & mask_n_2
                                 probs_blk = probs_blk - max_logit
                                 probs_blk = tl.exp(probs_blk)
                                 probs_blk = probs_blk / sum_exp_logits
@@ -898,8 +894,6 @@ def apply_top_k_top_p_triton(
     assert logits.is_cuda
 
     batch_size, vocab_size = logits.shape
-    num_sm = torch.cuda.get_device_properties(logits.device).multi_processor_count
-    NUM_PROGRAMS = min(num_sm, batch_size)
 
     topk_enabled = k is not None
     topp_enabled = p is not None
@@ -923,25 +917,21 @@ def apply_top_k_top_p_triton(
     NUM_PROGRAMS = min(num_sm, batch_size)
 
     # Cache per-Triton Program buffer on each device.
-    buf_key = (logits.device, logits.dtype, NUM_PROGRAMS, vocab_size)
+    buf_key = (logits.device, logits.dtype, vocab_size)
     buffer = _TRITON_BUFFER_CACHE.get(buf_key)
-    if buffer is None or buffer.numel() < NUM_PROGRAMS * vocab_size:
-        buffer = torch.empty(
-            (NUM_PROGRAMS, vocab_size), device=logits.device, dtype=logits.dtype
-        )
+    if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
+        size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
+        buffer = logits.new_empty((size, vocab_size))
         _TRITON_BUFFER_CACHE[buf_key] = buffer
+    if NUM_PROGRAMS < buffer.shape[0]:
+        buffer = buffer[:NUM_PROGRAMS]
 
     # Cache lookup table entries on each device.
-    tbl_key = (logits.device, torch.float32)
-    tables = _TRITON_TABLE_CACHE.get(tbl_key)
+    tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
-        normal_cdf_to_sigma_table = torch.tensor(
-            _NORMAL_CDF_TO_SIGMA_TABLE, device=logits.device, dtype=torch.float32
-        )
-        percentile_to_std_table = torch.tensor(
-            _PERCENTILE_TO_STD_TABLE, device=logits.device, dtype=torch.float32
-        )
-        _TRITON_TABLE_CACHE[tbl_key] = (
+        normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
+        percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
+        _TRITON_TABLE_CACHE[logits.device] = (
             normal_cdf_to_sigma_table,
             percentile_to_std_table,
         )
