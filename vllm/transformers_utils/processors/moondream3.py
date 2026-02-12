@@ -180,11 +180,14 @@ class Moondream3Processor(ProcessorMixin):
         )
 
         # Configure special tokens for Moondream3
-        # BOS=0 (<|endoftext|>), EOS=1 (<|md_reserved_0|>)
+        # BOS and EOS are both token 0 (<|endoftext|>), matching the native
+        # config (TokenizerConfig.bos_id=0, eos_id=0). This is standard for
+        # GPT-2 style models where <|endoftext|> signals both start and end.
+        # Token 1 (<|md_reserved_0|>) is a template delimiter, NOT the EOS.
         tokenizer.bos_token = "<|endoftext|>"
         tokenizer.bos_token_id = 0
-        tokenizer.eos_token = "<|md_reserved_0|>"
-        tokenizer.eos_token_id = 1
+        tokenizer.eos_token = "<|endoftext|>"
+        tokenizer.eos_token_id = 0
 
         # Extract processor-specific kwargs
         crop_size = kwargs.pop("crop_size", 378)

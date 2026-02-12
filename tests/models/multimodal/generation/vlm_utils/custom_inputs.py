@@ -157,26 +157,27 @@ def video_with_metadata_glm4_1v():
 
 
 def moondream3_skill_inputs():
-    """Builds inputs for Moondream3 testing all four skills.
+    """Builds inputs for Moondream3 testing query and caption skills.
 
-    Skills:
-    - Query: Question answering
-    - Caption: Image captioning
-    - Detect: Object detection (returns bounding boxes)
-    - Point: Object pointing (returns coordinates)
+    Only query and caption are supported via standard autoregressive
+    generation. Point and detect require a custom decoding loop
+    (coordinate encoding/decoding) that is incompatible with vLLM's
+    standard pipeline.
     """
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
 
-    # Moondream3 prompt format: <|endoftext|><image> \n\n{task}
-    # Note: space after <image> is required for correct tokenization
+    # Moondream3 prompt format: <|endoftext|><image>{task}
+    # Note: space after <image> is needed before regular text to prevent
+    # BPE merges with '>'. Not needed before special tokens like
+    # <|md_reserved_0|> which the tokenizer extracts before BPE.
 
     # Test different skills with appropriate prompts
     prompts = [
         # Query skill - question answering
         "<|endoftext|><image> \n\nQuestion: What is shown in this image?\n\nAnswer:",
-        # Caption skill - image description
-        "<|endoftext|><image> \n\nDescribe this image.\n\n",
+        # Caption skill - uses dedicated caption template format
+        "<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>normal<|md_reserved_2|>",
         # Query skill - specific question
         "<|endoftext|><image> \n\nQuestion: What colors do you see?\n\nAnswer:",
     ]

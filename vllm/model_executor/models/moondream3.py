@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
@@ -986,7 +986,7 @@ class Moondream3ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
-        # Moondream3 produces 729 vision tokens (27x27)
+        # 729 = 27x27 patches from 378x378 crop / 14 patch size
         return 729
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -1002,7 +1002,6 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         # Use space after <image> to ensure tokenization preserves the
         # placeholder pattern [<, image, >] separately from following tokens
-        # Start with BOS token (<|endoftext|> = token ID 0)
         return "<|endoftext|><image> \n\nQuestion: What is this?\n\nAnswer:"
 
     def get_dummy_mm_data(
@@ -1067,19 +1066,16 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
         image_size = self.info.get_image_size_with_most_features()
-        num_tokens = self.info.get_num_image_tokens(
+        num_image_tokens = self.info.get_num_image_tokens(
             image_width=image_size.width,
             image_height=image_size.height,
         )
-        # Use a single token repeated num_tokens times as the replacement.
-        # Each position corresponds to one vision embedding.
-        # We use the first token of the placeholder pattern as the replacement token.
         replacement_token = self.image_placeholder_tokens[0]
         return [
             PromptReplacement(
                 modality="image",
                 target=self.image_placeholder_tokens,
-                replacement=[replacement_token] * num_tokens,
+                replacement=[replacement_token] * num_image_tokens,
             ),
         ]
 
@@ -1346,15 +1342,15 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return projected
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """Generate embeddings from multimodal inputs."""
+        """Generate 729 vision embeddings per image (27x27 patches)."""
         image_inputs = self._parse_image_inputs(**kwargs)
         if not image_inputs:
             return []
 
-        results = [
-            self._encode_image_input(image_input) for image_input in image_inputs
+        return [
+            self._encode_image_input(image_input)
+            for image_input in image_inputs
         ]
-        return results
 
     def forward(
         self,
