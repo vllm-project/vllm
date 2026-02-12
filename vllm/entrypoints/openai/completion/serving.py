@@ -34,16 +34,14 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
-from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
-from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -68,9 +66,6 @@ class OpenAIServingCompletion(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
-
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -79,7 +74,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[TokensPrompt | EmbedsPrompt] | ErrorResponse:
+    ) -> list[TokPrompt] | ErrorResponse:
         """
         render completion request by validating and preprocessing inputs.
 
@@ -158,16 +153,17 @@ class OpenAIServingCompletion(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    prompt=engine_prompt,
-                    default_sampling_params=self.default_sampling_params,
+                    max_model_len,
+                    request.max_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -178,12 +174,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                    )
-                    validate_logits_processors_parameters(
-                        self.logits_processors,
-                        sampling_params,
                     )
 
                 request_id_item = f"{request_id}-{i}"
@@ -278,11 +269,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     engine_prompt = engine_prompts[i]
-                    final_res.prompt = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    final_res.prompt = self._extract_prompt_text(engine_prompt)
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -318,7 +305,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[TokensPrompt | EmbedsPrompt],
+        engine_prompts: list[TokPrompt],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -352,11 +339,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
                 if prompt_text is None:
                     engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = (
-                        None
-                        if is_embeds_prompt(engine_prompt)
-                        else engine_prompt.get("prompt")
-                    )
+                    prompt_text = self._extract_prompt_text(engine_prompt)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
