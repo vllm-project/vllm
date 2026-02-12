@@ -138,6 +138,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+    def start_load_kv(self, *args, **kwargs: Any) -> None:
+        pass  # Empty implementation of abstract method
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        pass  # Empty implementation of abstract method
+
+    def wait_for_save(self):
+        pass  # Empty implementation of abstract method
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         from vllm.model_executor.models.extract_hidden_states import (
             CacheOnlyAttentionLayer,

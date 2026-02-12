@@ -32,7 +32,11 @@ from vllm.v1.attention.backend import (
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
-from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 
 ########## Custom Ops ########
 
@@ -101,6 +105,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         "auto",
         "bfloat16",
     ]
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -222,6 +227,10 @@ class CacheOnlyAttentionImpl(AttentionImpl):
         # todo(fynn): Implement more performant op (maybe custom triton op?)
         basic_cache(to_cache, kv_cache, slot_mapping)
 
+    def forward(self, *args, **kwargs):
+        # Empty implementation of abstract method
+        pass
+
 
 ############## CacheOnlyAttentionLayer (replaces Attention) ############
 
@@ -277,7 +286,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
         assert not self.attn_backend.forward_includes_kv_cache_update, (
-            "KV cache update should occur before forward"
+            "KV cache update should be independent of forward"
         )
 
         # Placeholder KV cache (replaced by bind_kv_cache)
@@ -318,7 +327,10 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+        # Note: we use MLAAttentionSpec here to because it will
+        # produce page sizes of (block_size * num_kv_heads * head_size * dtype_size)
+        # whereas FullAttentionSpec will add an additional factor of 2
+        return MLAAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
