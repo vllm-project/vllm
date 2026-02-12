@@ -24,6 +24,8 @@ Fix:
   dimension regardless of cache state.
 """
 
+import os
+
 import httpx
 import pytest
 import torch
@@ -45,6 +47,18 @@ pytestmark = [
         "on CUDA the argmax may not flip for this test prompt",
     ),
 ]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _disable_skinny_gemm():
+    """Disable ROCm skinny GEMM to isolate prefix cache tiling behavior."""
+    old = os.environ.get("VLLM_ROCM_USE_SKINNY_GEMM")
+    os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    yield
+    if old is None:
+        os.environ.pop("VLLM_ROCM_USE_SKINNY_GEMM", None)
+    else:
+        os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = old
 
 
 @pytest.fixture(scope="module")
