@@ -46,16 +46,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // that it is divisible by the block size.
   m.def(
       "moe_lora_align_block_size(Tensor topk_ids,"
+      "                     Tensor lora_ids,"
+      "                     Tensor adapter_enabled,"
       "                     Tensor token_lora_mapping,"
-      "                     int num_experts,"
-      "                     int block_size, int max_loras, "
-      "                     int max_num_tokens_padded, "
-      "                     int max_num_m_blocks, "
+      "                     Tensor lora_id_to_slot,"
+      "                     int num_virtual_experts,"
+      "                     int num_loras,"
+      "                     int max_loras,"
+      "                     int block_size,"
       "                     Tensor !sorted_token_ids,"
-      "                     Tensor !experts_ids,"
+      "                     Tensor !expert_ids,"
       "                     Tensor !num_tokens_post_pad,"
-      "                     Tensor !adapter_enabled,"
-      "                     Tensor !lora_ids,"
       "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 

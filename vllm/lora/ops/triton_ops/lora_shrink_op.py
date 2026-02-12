@@ -135,6 +135,7 @@ def _lora_shrink(
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
+    lora_id_to_slot: torch.Tensor,  # unused, for API compat with meta_args()
     scaling: float,
 ) -> None:
     """
@@ -268,6 +269,7 @@ def _lora_shrink_fake(
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
     num_active_loras: int,
+    lora_id_to_slot: torch.Tensor,  # unused, for API compat with meta_args()
     scaling: float,
 ) -> None:
     return

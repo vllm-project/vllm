@@ -458,10 +458,15 @@ class PunicaWrapperBase(PunicaWrapperABC):
         adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        naive_block_assignment: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
+
+        Returns:
+            tuple of (sorted_ids, expert_ids, num_tokens_post_pad)
+            token_lora_mapping and lora_ids are available from meta_args().
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
@@ -484,11 +489,12 @@ class PunicaWrapperBase(PunicaWrapperABC):
         mul_routed_weight=False,
         fully_sharded: bool = False,
         offset: int = 0,
-        token_lora_mapping: torch.Tensor | None = None,
     ):
         """
         Performs a fused forward computation for LoRA of
         Mixture-of-Experts (MoE) layer.
+
+        token_lora_mapping and lora_ids are obtained from meta_args().
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
