@@ -269,8 +269,6 @@ class KimiAudioASRMultiModalProcessor(
 ):
     """Minimal processor for Kimi-Audio ASR.
 
-    PLACEHOLDER_TOKEN_ID = 151666
-
     Key point: Kimi-Audio does not ship a HuggingFace `ProcessorMixin`.
     Its tokenizer is a custom TikTokenTokenizer, so we must bypass
     vLLM's default HF-processor path.
@@ -280,6 +278,8 @@ class KimiAudioASRMultiModalProcessor(
     - pass through our precomputed dict-of-tensors (whisper_input_features,
       is_continuous_mask, text_input_ids)
     """
+
+    PLACEHOLDER_TOKEN_ID = 151666
 
     # NOTE: Do not override `_get_data_parser` / `build_data_parser`.
     # vLLM routes data parsing through `ProcessingInfo.get_data_parser()`.
