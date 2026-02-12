@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
+from vllm.model_executor.layers.quantization.utils.moe_online_weight_quantizer import (
     MoeOnlineQuantizer,
     MoeOnlineWeightQuantizer,
 )

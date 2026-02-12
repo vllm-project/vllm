@@ -75,7 +75,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
+from vllm.model_executor.layers.quantization.utils.moe_online_weight_quantizer import (
     MoeOnlineQuantizer,
     MoeOnlineWeightQuantizer,
 )
