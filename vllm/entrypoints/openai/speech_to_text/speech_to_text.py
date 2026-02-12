@@ -457,16 +457,9 @@ class OpenAISpeechToText(OpenAIServing):
                 default_max_tokens = min(
                     self.model_config.max_model_len, request.max_completion_tokens
                 )
-            default_sampling_params = (
-                self.asr_config.default_sampling_params
-                if self.asr_config.default_sampling_params is not None
-                else self.default_sampling_params
-            )
             sampling_params = request.to_sampling_params(
-                default_max_tokens, default_sampling_params
+                default_max_tokens, self.default_sampling_params
             )
-            if self.asr_config.skip_reading_prefix_cache:
-                sampling_params.skip_reading_prefix_cache = True
             if request.response_format == "verbose_json":
                 sampling_params.logprobs = 1
 
@@ -549,7 +542,6 @@ class OpenAISpeechToText(OpenAIServing):
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
             text = "".join(text_parts)
-            text = self.model_cls.post_process_output(text)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
