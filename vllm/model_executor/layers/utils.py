@@ -197,7 +197,8 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny is not True:
-        return torch.nn.functional.linear(x, weight, bias)
+        with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
+            return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
     if m > 8 and 0 < n <= 4:
@@ -209,7 +210,9 @@ def rocm_unquantized_gemm_impl(
         with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
             out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
-    return torch.nn.functional.linear(x, weight, bias)
+
+    with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
+        return torch.nn.functional.linear(x, weight, bias)
 
 
 def rocm_unquantized_gemm_fake(
