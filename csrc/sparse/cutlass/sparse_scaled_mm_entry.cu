@@ -6,11 +6,11 @@
 #include "cutlass_extensions/common.hpp"
 
 bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability) {
-  // sparse CUTLASS kernels need at least
+  // sparse CUTLASS kernels need exactly hopper and are not forward compatible
   //   CUDA 12.2 and SM90 (Hopper)
 
 #if defined CUDA_VERSION
-  return CUDA_VERSION >= 12020 && cuda_device_capability >= 90;
+  return CUDA_VERSION >= 12020 && cuda_device_capability == 90;
 #endif
 
   return false;
@@ -98,7 +98,7 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
 
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_sparse_compress for a compute capability less than "
+      "No compiled cutlass_sparse_compress for a compute capability equal to "
       "CUDA device capability: ",
       version_num);
 }
