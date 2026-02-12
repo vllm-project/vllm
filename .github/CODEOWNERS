@@ -20,7 +20,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
 /vllm/config/cache.py @heheda12345
 
-# User-facing Inference APIs
+# Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
