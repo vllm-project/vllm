@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    maybe_roundup_hidden_size_for_fused_moe,
+    maybe_roundup_mxfp4_fused_moe_sizes,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -48,7 +48,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -729,24 +728,27 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "The current mode supports native MoE MXFP4 computation"
             )
 
-    def maybe_roundup_hidden_size(
+    def maybe_roundup_sizes(
         self,
         hidden_size: int,
+        intermediate_size_per_partition: int,
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
-        is_lora_enabled: bool,
-        model_type: str | None,
-    ) -> int:
-        hidden_size = super().maybe_roundup_hidden_size(
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
             hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
-            is_lora_enabled=is_lora_enabled,
-            model_type=model_type,
         )
-        return maybe_roundup_hidden_size_for_fused_moe(
-            hidden_size, model_type, self.mxfp4_backend
+        rounded_hidden_size, rounded_intermediate_size_per_partition = (
+            maybe_roundup_mxfp4_fused_moe_sizes(
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                mxfp4_backend=self.mxfp4_backend,
+            )
         )
+        return rounded_hidden_size, rounded_intermediate_size_per_partition
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "mxfp4":
@@ -773,23 +775,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         params_dtype = torch.uint8
-        if self.model_type == "gpt_oss":
-            if current_platform.is_rocm():
-                intermediate_size_per_partition_after_pad = round_up(
-                    intermediate_size_per_partition, 256
-                )
-            else:
-                intermediate_size_per_partition_after_pad = round_up(
-                    intermediate_size_per_partition, 64
-                )
-        else:
-            intermediate_size_per_partition_after_pad = intermediate_size_per_partition
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition_after_pad,
+                2 * intermediate_size_per_partition,
                 self.get_packed_dim(hidden_size, self.weight_dtype),
                 dtype=params_dtype,
             ),
@@ -803,9 +794,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                self.get_packed_dim(
-                    intermediate_size_per_partition_after_pad, self.weight_dtype
-                ),
+                self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -818,7 +807,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition_after_pad,
+                2 * intermediate_size_per_partition,
                 hidden_size // OCP_MX_BLOCK_SIZE,
                 dtype=params_dtype,
             ),
@@ -828,7 +817,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             torch.ones(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition_after_pad // OCP_MX_BLOCK_SIZE,
+                intermediate_size_per_partition // OCP_MX_BLOCK_SIZE,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -843,7 +832,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition_after_pad,
+                    2 * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,

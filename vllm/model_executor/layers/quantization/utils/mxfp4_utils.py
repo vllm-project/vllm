@@ -109,27 +109,55 @@ def _can_support_mxfp4(
     )
 
 
-def maybe_roundup_hidden_size_for_fused_moe(
+def maybe_roundup_mxfp4_fused_moe_sizes(
     hidden_size: int,
-    model_type: str | None,
+    intermediate_size_per_partition: int,
     mxfp4_backend,
-) -> int:
+) -> tuple[int, int]:
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Backend
 
-    if model_type == "gpt_oss" and mxfp4_backend is not None:
-        if (
-            mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            hidden_size = round_up(hidden_size, 256)
+    rounded_hidden_size = hidden_size
+    rounded_intermediate = intermediate_size_per_partition
 
-    return hidden_size
+    if mxfp4_backend == Mxfp4Backend.MARLIN:
+        # The moe marlin kernel requires that for each linear
+        # n % 256 == 0 and k % 128 == 0.
+        # In gate_up_proj:
+        #    n = 2 * intermediate_size_per_partition_after_pad
+        #    k = hidden_size
+        # In down_proj
+        #    n = hidden_size
+        #    k = intermediate_size_per_partition_after_pad
+        if rounded_intermediate is not None:
+            rounded_intermediate = round_up(rounded_intermediate, 128)
+        if current_platform.is_xpu():
+            rounded_hidden_size = round_up(hidden_size, 128)
+        else:
+            rounded_hidden_size = round_up(hidden_size, 256)
+    elif (
+        mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+        or mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
+    ):
+        if rounded_intermediate is not None:
+            rounded_intermediate = round_up(rounded_intermediate, 256)
+        rounded_hidden_size = round_up(hidden_size, 256)
+    elif (
+        mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+        or mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+    ):
+        if rounded_intermediate is not None:
+            rounded_intermediate = round_up(rounded_intermediate, 128)
+        rounded_hidden_size = round_up(hidden_size, 128)
+    elif current_platform.is_rocm():
+        pad_align = get_padding_alignment()
+        if rounded_intermediate is not None:
+            rounded_intermediate = round_up(rounded_intermediate, pad_align)
+        rounded_hidden_size = round_up(hidden_size, pad_align)
+    else:
+        if rounded_intermediate is not None:
+            rounded_intermediate = round_up(rounded_intermediate, 64)
+
+    return rounded_hidden_size, rounded_intermediate
 
 
 def get_padding_alignment():

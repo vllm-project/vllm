@@ -482,39 +482,6 @@ class FusedMoE(CustomOp):
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
-
-        self.quant_config = quant_config
-
-        def _get_quant_method() -> FusedMoEMethodBase:
-            """
-            Helper method to ensure self.quant_method is never None and
-            of the proper type.
-            """
-            quant_method = None
-            if self.quant_config is not None:
-                quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None:
-                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
-            assert isinstance(quant_method, FusedMoEMethodBase)
-            return quant_method
-
-        # Note: get_quant_method will look at the layer's local_num_experts
-        # for heuristic purposes, so it must be initialized first.
-        self.quant_method: FusedMoEMethodBase = _get_quant_method()
-
-        # Round up hidden size before creating moe_config.
-        # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size = self.quant_method.maybe_roundup_hidden_size(
-            hidden_size=hidden_size,
-            act_dtype=moe_in_dtype,
-            moe_parallel_config=self.moe_parallel_config,
-            is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
-        )
         self.hidden_size = hidden_size
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
@@ -544,6 +511,25 @@ class FusedMoE(CustomOp):
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
+
+        self.quant_config = quant_config
+
+        def _get_quant_method() -> FusedMoEMethodBase:
+            """
+            Helper method to ensure self.quant_method is never None and
+            of the proper type.
+            """
+            quant_method = None
+            if self.quant_config is not None:
+                quant_method = self.quant_config.get_quant_method(self, prefix)
+            if quant_method is None:
+                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+            assert isinstance(quant_method, FusedMoEMethodBase)
+            return quant_method
+
+        # Note: get_quant_method will look at the layer's local_num_experts
+        # for heuristic purposes, so it must be initialized first.
+        self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -578,6 +564,20 @@ class FusedMoE(CustomOp):
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
+        # Round up hidden size before creating moe_config.
+        # This way moe_config is created with the correct hidden_size from the start.
+        hidden_size_padded, intermediate_size_per_partition_padded = (
+            self.quant_method.maybe_roundup_sizes(
+                hidden_size,
+                self.intermediate_size_per_partition,
+                moe_in_dtype,
+                self.moe_parallel_config,
+            )
+        )
+        moe_quant_params["hidden_size"] = hidden_size_padded
+        moe_quant_params["intermediate_size_per_partition"] = (
+            intermediate_size_per_partition_padded
+        )
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         # Chunked all2all staging tensor
