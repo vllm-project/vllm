@@ -469,8 +469,7 @@ def test_stop_via_update_from_output():
 
     # Test case 4: Ignore EOS flag
     scheduler = create_scheduler(num_speculative_tokens=2)
-    requests = create_requests(num_requests=1, max_tokens=10)
-    requests[0].sampling_params.ignore_eos = True
+    requests = create_requests(num_requests=1, max_tokens=10, ignore_eos=True)
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
     scheduler.running.append(requests[0])
