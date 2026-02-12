@@ -45,17 +45,29 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability,
+    num_heads: int | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if use_mla:
         if device_capability.major == 10:
+            # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+            if num_heads is not None and num_heads <= 16:
+                sparse_backends = [
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                ]
+            else:
+                sparse_backends = [
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                ]
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
-                AttentionBackendEnum.FLASHMLA_SPARSE,
+                *sparse_backends,
             ]
         else:
             return [
@@ -182,6 +194,8 @@ class CudaPlatformBase(Platform):
             use_flashmla = False
             use_cutlass_mla = False
             use_flashinfer_mla = False
+            use_flashmla_sparse = False
+            use_flashinfer_mla_sparse = False
 
             from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
@@ -217,6 +231,10 @@ class CudaPlatformBase(Platform):
                 use_flashmla = backend == AttentionBackendEnum.FLASHMLA
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
                 use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
+                use_flashmla_sparse = backend == AttentionBackendEnum.FLASHMLA_SPARSE
+                use_flashinfer_mla_sparse = (
+                    backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+                )
 
             if (
                 use_flashmla
@@ -242,12 +260,24 @@ class CudaPlatformBase(Platform):
                     "Forcing kv cache block size to 64 for FlashInferMLA backend."
                 )
 
-            # TODO(Chen): remove this hacky code
-            if use_sparse and cache_config.block_size != 64:
-                cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashMLASparse backend."
-                )
+            if use_sparse:
+                if not (use_flashmla_sparse or use_flashinfer_mla_sparse):
+                    use_flashmla_sparse = True
+
+                if use_flashmla_sparse and cache_config.block_size != 64:
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashMLASparse backend."
+                    )
+                elif use_flashinfer_mla_sparse and cache_config.block_size not in (
+                    32,
+                    64,
+                ):
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashInferMLASparse "
+                        "backend."
+                    )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
@@ -276,6 +306,7 @@ class CudaPlatformBase(Platform):
         cls,
         device_capability: DeviceCapability,
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -284,7 +315,9 @@ class CudaPlatformBase(Platform):
         invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla, device_capability
+            attn_selector_config.use_mla,
+            device_capability,
+            num_heads,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -307,6 +340,7 @@ class CudaPlatformBase(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -336,6 +370,7 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
         )
         reasons_str = (
             "{"
