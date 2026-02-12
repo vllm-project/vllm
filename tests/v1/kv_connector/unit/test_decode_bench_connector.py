@@ -93,13 +93,13 @@ class DecodeBenchTestRunner:
         """Create a new request with given token IDs."""
         self.req_id += 1
 
+        sampling_params = SamplingParams(max_tokens=100)
+        sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+
         req = Request(
             request_id=str(self.req_id),
             prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(
-                max_tokens=100,
-                stop_token_ids=[EOS_TOKEN_ID],
-            ),
+            sampling_params=sampling_params,
             pooling_params=None,
             block_hasher=self._block_hasher,
         )

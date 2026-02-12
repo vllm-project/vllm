@@ -514,8 +514,8 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=5,
-        stop_token_ids=[EOS_TOKEN_ID],
     )
+    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1, 2],
@@ -550,8 +550,8 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=0,
-        stop_token_ids=[EOS_TOKEN_ID],
     )
+    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
     request_no_min = Request(
         request_id="1",
         prompt_token_ids=[0, 1, 2],
@@ -569,8 +569,9 @@ def test_check_stop_min_tokens():
         ignore_eos=False,
         max_tokens=20,
         min_tokens=5,
-        stop_token_ids=[42, EOS_TOKEN_ID],
+        stop_token_ids=[42],
     )
+    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
     request_stop = Request(
         request_id="2",
         prompt_token_ids=[0, 1, 2],
@@ -2426,8 +2427,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         ignore_eos=False,
         max_tokens=16,
         structured_outputs=structured_outputs_params,
-        stop_token_ids=[EOS_TOKEN_ID],
     )
+    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],

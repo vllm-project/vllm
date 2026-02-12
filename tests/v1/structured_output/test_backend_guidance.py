@@ -81,9 +81,11 @@ def test_grammar_bitmask_with_specdec():
             structured_outputs=StructuredOutputsParams(
                 json='{"type": "object"}',
             ),
-            stop_token_ids=[tokenizer.eos_token_id],
         )
         sampling_params.structured_outputs._backend = "guidance"
+        sampling_params.update_from_generation_config(
+            {}, eos_token_id=tokenizer.eos_token_id
+        )
 
         my_req_id = f"my_req_id_{i}"
         request = Request(
@@ -145,9 +147,11 @@ def test_grammar_init_async_and_sync(async_grammar):
         structured_outputs=StructuredOutputsParams(
             json='{"type": "object"}',
         ),
-        stop_token_ids=[tokenizer.eos_token_id],
     )
     sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.update_from_generation_config(
+        {}, eos_token_id=tokenizer.eos_token_id
+    )
 
     request = Request(
         "test_request",
