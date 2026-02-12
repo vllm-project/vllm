@@ -1240,3 +1240,25 @@ async def test_system_prompt_override_follows_personality(
     assert any(kw in output_text for kw in pirate_indicators), (
         f"Expected pirate language, got: {response.output_text}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_prompt_structured_content(client: OpenAI, model_name: str):
+    """System message with structured input_text content format."""
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": "You are a helpful assistant."}
+                ],
+            },
+            {"role": "user", "content": "What is 2 + 2?"},
+        ],
+        temperature=0.0,
+    )
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output_text is not None
