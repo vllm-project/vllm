@@ -8,10 +8,6 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
@@ -47,11 +43,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
@@ -114,6 +107,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             expand_config = get_config_func(M)
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
+
+        # Override block sizes to match LoRA rank dimensions.
+        # Shrink: N = max_lora_rank, so BLOCK_SIZE_N should match rank.
+        # Expand: K = max_lora_rank, so BLOCK_SIZE_K should match rank.
+        # Without this, the default MoE block sizes (e.g. 64/32) cause
+        # redundant computation when rank < BLOCK_SIZE.
+        shrink_config["BLOCK_SIZE_N"] = min(rank, 64)
+        expand_config["BLOCK_SIZE_K"] = min(rank, 32)
+
         return shrink_config, expand_config
 
     def _inject_lora_into_fused_moe(self):
@@ -195,7 +197,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     curr_topk_ids,
                     num_tokens,
                     shrink_config["BLOCK_SIZE_M"],
-                    self.base_layer.local_num_experts,
+                    self.base_layer.global_num_experts,
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
@@ -381,7 +383,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        # With expert parallel, each rank owns full experts — no need to
+        # shard the MoE LoRA weights across TP ranks.
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -417,6 +424,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.lora_b_stacked.append(
                     self.w13_lora_b_stacked[1][lora_id][experts_id]
                 )
+
+    def _slice_ep_experts(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Slice per-expert tensor from global to local experts for EP."""
+        if not self.base_layer.use_ep or tensor.ndim < 3:
+            return tensor
+        expert_map = self.base_layer._expert_map
+        if expert_map is None:
+            return tensor
+        # Work on CPU since expert_map is on GPU but tensor may be on CPU
+        expert_map_cpu = expert_map.cpu()
+        # Find global expert indices assigned to this rank, ordered by
+        # local index
+        local_mask = expert_map_cpu >= 0
+        global_indices = local_mask.nonzero(as_tuple=True)[0]
+        local_indices = expert_map_cpu[global_indices]
+        sorted_order = local_indices.argsort()
+        return tensor[global_indices[sorted_order]]
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
         """
@@ -503,6 +527,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # Slice per-expert weights to local experts for EP
+        w1_lora_a = self._slice_ep_experts(w1_lora_a)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
+        w3_lora_a = self._slice_ep_experts(w3_lora_a)
+        w1_lora_b = self._slice_ep_experts(w1_lora_b)
+        w2_lora_b = self._slice_ep_experts(w2_lora_b)
+        w3_lora_b = self._slice_ep_experts(w3_lora_b)
 
         # Handle compact shared MoE LoRA format where some weights are 2D (shared)
         # Expand 2D shared weights to 3D by repeating across experts
@@ -640,7 +672,10 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert isinstance(model_config, PretrainedConfig)
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -693,19 +728,30 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
 
+        # Use global_num_experts for reshape (correct for both EP and non-EP)
+        actual_num_experts = self.base_layer.global_num_experts
         # (num_experts,rank,input_size)
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
+        w13_lora_a = w13_lora_a.reshape(actual_num_experts, -1,
+                                        w13_lora_a.shape[-1])
+        w2_lora_a = w2_lora_a.reshape(actual_num_experts, -1,
+                                      w2_lora_a.shape[-1])
         # (output_size,num_experts,rank)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
+        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0],
+                                        actual_num_experts, -1)
+        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0],
+                                      actual_num_experts, -1)
         # (num_experts,output_size,rank)
         w13_lora_b = w13_lora_b.permute(1, 0, 2)
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
+
+        # Slice to local experts for EP
+        w13_lora_a = self._slice_ep_experts(w13_lora_a)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
+        w13_lora_b = self._slice_ep_experts(w13_lora_b)
+        w2_lora_b = self._slice_ep_experts(w2_lora_b)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
@@ -794,11 +840,8 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
         BaseLayerWithLoRA.__init__(self)
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
@@ -895,7 +938,10 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
     ) -> None:
         """Initializes lora matrices with shared outer weights pattern."""
         self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
+        if getattr(self.base_layer, "use_ep", False):
+            self.fully_sharded = False
+        else:
+            self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -1060,6 +1106,11 @@ class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
         w3_lora_a = self._extract_shared_weight(w3_lora_a, 2, "w3_lora_a")
         # w2 LoRA B should be (hidden, rank) after extraction
         w2_lora_b = self._extract_shared_weight(w2_lora_b, 2, "w2_lora_b")
+
+        # Slice per-expert weights to local experts for EP
+        w1_lora_b = self._slice_ep_experts(w1_lora_b)
+        w3_lora_b = self._slice_ep_experts(w3_lora_b)
+        w2_lora_a = self._slice_ep_experts(w2_lora_a)
 
         # Slice shared weights (no expert dim)
         sliced_w1_lora_a = self._slice_w13_a_shared(w1_lora_a)
