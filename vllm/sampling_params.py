@@ -588,6 +588,12 @@ class SamplingParams(
         self._validate_spec_decode(speculative_config)
         self._validate_structured_outputs(structured_outputs_config, tokenizer)
 
+        from vllm.v1.sample.logits_processor import (
+            validate_logits_processors_parameters,
+        )
+
+        validate_logits_processors_parameters(model_config.logits_processors, self)
+
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
         if max_logprobs == -1:
