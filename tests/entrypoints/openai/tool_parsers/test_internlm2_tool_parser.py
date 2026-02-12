@@ -9,12 +9,12 @@ from tests.entrypoints.openai.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 
 class TestInternLM2ToolParser(ToolParserTests):
     @pytest.fixture
-    def tokenizer(self, default_tokenizer: AnyTokenizer) -> AnyTokenizer:
+    def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
         """Add some internlm2 specific tokens to the default vocab."""
 
         tokenizer_vocab = default_tokenizer.get_vocab()

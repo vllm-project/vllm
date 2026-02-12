@@ -8,12 +8,12 @@ from tests.entrypoints.openai.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
 class TestDeepSeekV3ToolParser(ToolParserTests):
     @pytest.fixture(scope="class")
-    def tokenizer(self) -> AnyTokenizer:
+    def tokenizer(self) -> TokenizerLike:
         return get_tokenizer("deepseek-ai/DeepSeek-V3")
 
     @pytest.fixture

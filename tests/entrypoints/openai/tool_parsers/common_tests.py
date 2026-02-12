@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 
 from tests.entrypoints.openai.tool_parsers.utils import run_tool_extraction
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tool_parsers import ToolParserManager
+from vllm.tokenizers import TokenizerLike
 
 
 @dataclass
@@ -120,12 +120,12 @@ class ToolParserTests:
         )
 
     @pytest.fixture
-    def tokenizer(self, default_tokenizer: AnyTokenizer) -> AnyTokenizer:
+    def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
         """Override this to provide parser-specific tokenizer."""
         return default_tokenizer
 
     @pytest.fixture
-    def tool_parser(self, test_config: ToolParserTestConfig, tokenizer: AnyTokenizer):
+    def tool_parser(self, test_config: ToolParserTestConfig, tokenizer: TokenizerLike):
         return ToolParserManager.get_tool_parser(test_config.parser_name)(tokenizer)
 
     @pytest.fixture(params=[True, False])
