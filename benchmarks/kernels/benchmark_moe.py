@@ -16,6 +16,7 @@ import torch
 from ray.experimental.tqdm_ray import tqdm
 
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -211,7 +212,8 @@ def benchmark_config(
                         hidden_dim=hidden_size,
                         intermediate_size_per_partition=shard_intermediate_size,
                         num_local_experts=num_experts,
-                        activation="silu",
+                        num_logical_experts=num_experts,
+                        activation=MoEActivation.SILU,
                         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                         in_dtype=init_dtype,
                         routing_method=RoutingMethodType.TopK,
@@ -226,9 +228,10 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
+            inplace = not disable_inplace()
             if use_deep_gemm:
                 return deep_gemm_experts(
-                    x, w1, w2, topk_weights, topk_ids, inplace=True
+                    x, w1, w2, topk_weights, topk_ids, inplace=inplace
                 )
             return fused_experts(
                 x,
@@ -236,7 +239,7 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=True,
+                inplace=inplace,
                 quant_config=quant_config,
             )
 
