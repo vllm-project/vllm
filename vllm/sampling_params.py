@@ -15,7 +15,6 @@ from pydantic.dataclasses import dataclass
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logits_process import LogitsProcessor
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
@@ -207,11 +206,6 @@ class SamplingParams(
     """Whether to skip special tokens in the output."""
     spaces_between_special_tokens: bool = True
     """Whether to add spaces between special tokens in the output."""
-    # `list[LogitsProcessor] | None` type. We use Any here because
-    # `list[LogitsProcessor] | None` type is not supported by msgspec.
-    logits_processors: Any | None = None
-    """Functions that modify logits based on previously generated tokens, and
-    optionally prompt tokens as a first argument."""
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
@@ -277,7 +271,6 @@ class SamplingParams(
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        logits_processors: list[LogitsProcessor] | None = None,
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
@@ -318,7 +311,6 @@ class SamplingParams(
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
             structured_outputs=structured_outputs,
@@ -455,11 +447,6 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
-        if self.logits_processors:
-            # TODO: Remove `logits_processors` attribute
-            raise ValueError(
-                "vLLM V1 does not support per request user-provided logits processors."
-            )
         if self.truncate_prompt_tokens is not None and (
             self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
         ):
@@ -573,28 +560,11 @@ class SamplingParams(
         return self._bad_words_token_ids
 
     def clone(self) -> "SamplingParams":
-        """Deep copy, but maybe not the LogitsProcessor objects.
-
-        LogitsProcessor objects may contain an arbitrary, nontrivial amount of
-        data that is expensive to copy. However, if not copied, the processor
-        needs to support parallel decoding for multiple sequences
-        See https://github.com/vllm-project/vllm/issues/3087
-
-        If skip_clone is True, uses shallow copy instead of deep copy.
-        """
-
+        """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
             return copy.copy(self)
 
-        logit_processor_refs = (
-            None
-            if self.logits_processors is None
-            else {
-                id(lp): lp.clone() if hasattr(lp, "clone") else lp
-                for lp in self.logits_processors
-            }
-        )
-        return copy.deepcopy(self, memo=logit_processor_refs)
+        return copy.deepcopy(self)
 
     def verify(
         self,
@@ -605,6 +575,7 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
+        self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
         self._validate_structured_outputs(structured_outputs_config, tokenizer)
@@ -657,6 +628,13 @@ class SamplingParams(
                 parameter="logit_bias",
                 value=invalid_token_ids,
             )
+
+    def _validate_logits_processors(self, model_config: ModelConfig) -> None:
+        from vllm.v1.sample.logits_processor import (
+            validate_logits_processors_parameters,
+        )
+
+        validate_logits_processors_parameters(model_config.logits_processors, self)
 
     def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
         allowed_token_ids = self.allowed_token_ids

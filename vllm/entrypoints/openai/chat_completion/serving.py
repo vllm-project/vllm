@@ -86,7 +86,6 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
-from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -129,9 +128,6 @@ class OpenAIServingChat(OpenAIServing):
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
-
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
 
         # set up reasoning parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
@@ -403,12 +399,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                    )
-                    validate_logits_processors_parameters(
-                        self.logits_processors,
-                        sampling_params,
                     )
 
                 self._log_inputs(

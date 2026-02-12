@@ -45,7 +45,6 @@ class MockModelConfig:
     multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     logits_processors: list[str] | None = None
-    logits_processor_pattern: str | None = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None

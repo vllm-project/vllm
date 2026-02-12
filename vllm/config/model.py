@@ -252,10 +252,6 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    logits_processor_pattern: str | None = None
-    """Optional regex pattern specifying valid logits processor qualified names
-    that can be passed with the `logits_processors` extra completion argument.
-    Defaults to `None`, which allows no processors."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -342,7 +338,6 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
-            "logits_processor_pattern",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",

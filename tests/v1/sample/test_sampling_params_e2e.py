@@ -144,20 +144,6 @@ def test_bad_words(llm):
     assert not contains_bad_word(new_text, new_tokens, bad_words_2)
 
 
-def test_logits_processor(llm):
-    """Check that we reject logits processor."""
-
-    # This sample logits processor gives infinite score to the i-th token,
-    # where i is the length of the input sequence.
-    # We therefore expect the output token sequence to be [0, 1, 2, ...]
-    def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = float("inf")
-        return logits
-
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, SamplingParams(logits_processors=[pick_ith]))
-
-
 def test_allowed_token_ids(llm):
     """Check that we can use allowed_token_ids."""
 
