@@ -3179,6 +3179,7 @@ class GPUModelRunner(
         batch_descriptor: BatchDescriptor,
         dp_sync_handle: DPSyncHandle | None,
         num_tokens: int,
+        force_eager: bool = False,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -3193,6 +3194,7 @@ class GPUModelRunner(
             batch_descriptor: From _determine_batch_execution_and_padding_start()
             dp_sync_handle: From _determine_batch_execution_and_padding_start()
             num_tokens: Number of tokens (for cudagraph stats)
+            force_eager: If True, force eager execution (no cudagraph dispatch)
 
         Returns:
             Same as _determine_batch_execution_and_padding()
@@ -3215,13 +3217,18 @@ class GPUModelRunner(
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
                 # Note: We need to reconstruct dispatch_cudagraph here
                 uniform_decode = dp_sync_handle.should_attempt_ubatching or False
-                cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens_padded,
-                    has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-                    uniform_decode=uniform_decode,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
-                    num_active_loras=len(self.input_batch.lora_id_to_lora_request),
-                )
+                if force_eager:
+                    # When force_eager is True, skip cudagraph dispatch
+                    cudagraph_mode = CUDAGraphMode.NONE
+                    batch_descriptor = BatchDescriptor(num_tokens_padded)
+                else:
+                    cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+                        num_tokens=num_tokens_padded,
+                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                        uniform_decode=uniform_decode,
+                        disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                        num_active_loras=len(self.input_batch.lora_id_to_lora_request),
+                    )
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
         cudagraph_stats = None
@@ -3289,6 +3296,7 @@ class GPUModelRunner(
             batch_descriptor=batch_descriptor,
             dp_sync_handle=dp_sync_handle,
             num_tokens=num_tokens,
+            force_eager=force_eager,
         )
 
     def _register_layerwise_nvtx_hooks(self) -> None:
