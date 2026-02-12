@@ -63,9 +63,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         compilation_config: dict,
         matches_check: list[str],
         use_deepgemm: bool = False,
+        use_aiter: bool = False,
         tp_size: int = 1,
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.

@@ -312,7 +312,9 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.debug(
+            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
+        )
 
     def uuid(self) -> str:
         fusion_patterns = [

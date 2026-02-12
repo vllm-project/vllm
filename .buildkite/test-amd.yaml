@@ -1707,10 +1707,9 @@ steps:
   commands:
     - rocm-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - "oh"
-    # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
-    # TODO: Qwen uses group quantization which the pattern matcher on ROCm is not supported yet.
-    # - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
+    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+    # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
+    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 # corresponds to .buildkite/test_areas/compile.yaml
 - label: Fusion E2E Config Sweep (MI325)

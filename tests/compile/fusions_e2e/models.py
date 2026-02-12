@@ -133,7 +133,7 @@ llama4_scout_fp8 = ModelFusionInfo(
             attn_quant_fusion=n_layers,
             ar_rms_fusion=0,
             sequence_parallel=n_layers * 2,
-            async_tp=0
+            async_tp=0,
         )
     ),
 )
@@ -200,8 +200,15 @@ qwen3_a3b_fp8 = ModelFusionInfo(
     # ROCm matches
     else (
         lambda n_layers: Matches(
-            rms_quant_fusion=n_layers,
-            norm_rope_fusion=n_layers,
+            aiter_rms_quant_fusion=n_layers,
+            rms_quant_fusion=0,
+            # TODO: Allow use to set back n_layers,
+            # On ROCm norm_rope_fusion is only supported without
+            # enabling AITER.
+            # when we are running the tests in
+            # tests/compile/fusions_e2e/test_tp1_quant.py
+            # we are enabling AITER, so no fusion happens.
+            norm_rope_fusion=0,
             ar_rms_fusion=0,
             sequence_parallel=n_layers * 2 + 1,
             async_tp=n_layers * 2,

@@ -32,11 +32,11 @@ from .models import (
     [
         (*llama3_8b_fp8, False),
         (*qwen3_a3b_fp8, False),
-        (*qwen3_a3b_fp8, True),
     ]
     + (
         [
             (*llama4_scout_fp8, False),
+            (*qwen3_a3b_fp8, True),  # only supported on CUDA
         ]
         if current_platform.is_cuda()
         else []
@@ -92,12 +92,17 @@ def test_tp1_fp8_fusions(
         ),
     )
 
+    use_aiter = current_platform.is_rocm() and ("qwen" in model_name.lower())
+
     matches_check = [
         "rms_quant_fusion",
         "act_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",
     ]
+
+    if use_aiter:
+        matches_check.append("aiter_rms_quant_fusion")
 
     run_e2e_fusion_test(
         model_name,
@@ -107,6 +112,7 @@ def test_tp1_fp8_fusions(
         compilation_config,
         matches_check,
         use_deepgemm=use_deepgemm,
+        use_aiter=use_aiter,
     )
 
 
