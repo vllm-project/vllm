@@ -793,7 +793,7 @@ class AsyncLLM(EngineClient):
 
         # Clear cache
         if clear_cache:
-            await self.reset_prefix_cache()
+            await self.reset_prefix_cache(reset_running_requests=True)
             await self.reset_mm_cache()
             await self.reset_encoder_cache()
 
