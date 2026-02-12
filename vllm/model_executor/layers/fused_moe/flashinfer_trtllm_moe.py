@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -50,9 +51,9 @@ def _supports_quant_scheme(
     return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-def _supports_activation(activation: str) -> bool:
+def _supports_activation(activation: MoEActivation) -> bool:
     """Supports silu activation only."""
-    return activation in ["silu"]
+    return activation == MoEActivation.SILU
 
 
 def _supports_routing_method(
