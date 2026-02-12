@@ -515,7 +515,7 @@ def test_check_stop_min_tokens():
         max_tokens=20,
         min_tokens=5,
     )
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1, 2],
@@ -551,7 +551,7 @@ def test_check_stop_min_tokens():
         max_tokens=20,
         min_tokens=0,
     )
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request_no_min = Request(
         request_id="1",
         prompt_token_ids=[0, 1, 2],
@@ -571,7 +571,7 @@ def test_check_stop_min_tokens():
         min_tokens=5,
         stop_token_ids=[42],
     )
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request_stop = Request(
         request_id="2",
         prompt_token_ids=[0, 1, 2],
@@ -1874,9 +1874,10 @@ def create_requests_with_priority(
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
-        stop_token_ids=(stop_token_ids or []) + [EOS_TOKEN_ID],
+        stop_token_ids=stop_token_ids,
         prompt_logprobs=prompt_logprobs,
     )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
     if mm_hashes_list is not None:
@@ -2428,7 +2429,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         max_tokens=16,
         structured_outputs=structured_outputs_params,
     )
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],

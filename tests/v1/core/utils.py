@@ -190,9 +190,10 @@ def create_requests(
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
-        stop_token_ids=(stop_token_ids or []) + [EOS_TOKEN_ID],
+        stop_token_ids=stop_token_ids,
         prompt_logprobs=prompt_logprobs,
     )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
     if mm_hashes_list is not None:

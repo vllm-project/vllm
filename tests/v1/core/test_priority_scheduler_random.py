@@ -49,7 +49,7 @@ def _create_random_request(
     request_id = uuid.uuid4().hex
 
     sampling_params = SamplingParams(ignore_eos=False, max_tokens=max_tokens)
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     mm_features = []
     for j, position in enumerate(mm_positions):

@@ -212,7 +212,7 @@ def create_request(
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
-    sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
     suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]

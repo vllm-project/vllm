@@ -227,7 +227,7 @@ class RequestRunner:
         self.req_id += 1
 
         sampling_params = SamplingParams(max_tokens=1000)
-        sampling_params.update_from_generation_config({}, eos_token_id=EOS_TOKEN_ID)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
         req = Request(
             request_id=str(self.req_id),
