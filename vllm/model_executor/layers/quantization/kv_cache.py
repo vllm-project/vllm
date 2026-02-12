@@ -66,7 +66,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
                 # Only apply FNUZ scaling for FP8, not INT8
-                if current_platform.is_fp8_fnuz() and layer.kv_cache_dtype.startswith("fp8"):
+                if current_platform.is_fp8_fnuz() and layer.kv_cache_dtype.startswith(
+                    "fp8"
+                ):
                     k_scale *= 2
                     v_scale *= 2
             elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
@@ -76,11 +78,12 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     # INT8 KV cache is very sensitive to scale values
                     logger.warning_once(
                         "INT8 KV cache requires calibrated scaling factors. "
-                        "Using default scale=1.0 will likely cause severe accuracy loss. "
+                        "Using default scale=1.0 will likely cause severe accuracy "
+                        "loss. "
                         "Please either: "
-                        "(1) Use a checkpoint with calibrated k/v_scale, or "
-                        "(2) Set calculate_kv_scales=True for on-the-fly calibration, or "
-                        "(3) Use FP8 KV cache instead (recommended if hardware supports it). "
+                        "(1) Use a checkpoint with calibrated k/v_scale."
+                        "(2) Set calculate_kv_scales=True for on-the-fly calibration."
+                        "(3) Use FP8 KV cache instead."
                         "Expected: scale = absmax(tensor) / 127 for INT8."
                     )
                 k_scale = 1.0
@@ -94,7 +97,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
                 # Only apply FNUZ scaling for FP8, not INT8
-                if current_platform.is_fp8_fnuz() and layer.kv_cache_dtype.startswith("fp8"):
+                if current_platform.is_fp8_fnuz() and layer.kv_cache_dtype.startswith(
+                    "fp8"
+                ):
                     k_scale *= 2
                     v_scale *= 2
 
@@ -117,18 +122,26 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._v_scale.copy_(v_scale)
             layer._k_scale_float = k_scale
             layer._v_scale_float = v_scale
-            
+
             # Warn about INT8 with scale=1.0 (critical issue)
-            if layer.kv_cache_dtype.startswith("int8") and (k_scale == 1.0 or v_scale == 1.0):
+            if layer.kv_cache_dtype.startswith("int8") and (
+                k_scale == 1.0 or v_scale == 1.0
+            ):
                 logger.warning_once(
                     f"INT8 KV cache using scale k={k_scale:.6f}, v={v_scale:.6f}. "
-                    "Scale=1.0 is likely incorrect for INT8 and will cause accuracy issues. "
+                    "Scale=1.0 is likely incorrect for INT8 and "
+                    "will cause accuracy issues. "
                     "Expected: scale = absmax(tensor) / 127 for INT8. "
                     "This will result in value overflow and severe precision loss."
                 )
-            
+
             # Warn about FP8 with scale=1.0 (less critical, informational)
-            if k_scale == 1.0 and v_scale == 1.0 and layer.kv_cache_dtype.startswith("fp8") and "e5m2" not in layer.kv_cache_dtype:
+            if (
+                k_scale == 1.0
+                and v_scale == 1.0
+                and layer.kv_cache_dtype.startswith("fp8")
+                and "e5m2" not in layer.kv_cache_dtype
+            ):
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
                     "If this is unintended, verify that k/v_scale "
@@ -149,8 +162,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         else:
             prob_scale = 1.0
 
-        is_singleton_float = (
-            lambda x: isinstance(x, float)
+        is_singleton_float = lambda x: (
+            isinstance(x, float)
             or isinstance(x, torch.Tensor)
             and x.numel() == 1
             and x.is_floating_point()

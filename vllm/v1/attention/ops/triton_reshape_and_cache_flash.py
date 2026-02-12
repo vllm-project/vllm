@@ -78,7 +78,7 @@ def reshape_and_cache_kernel_flash(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
     if QUANTIZED_KV_CACHE:
-        # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
+        # tl.store will do the correct implicit cast to quantized format (fp8/int8),
         # based on the key_cache_ptr.dtype.element_ty
         if key_load.dtype.is_fp8():
             key_tile = key_load
@@ -99,7 +99,7 @@ def reshape_and_cache_kernel_flash(
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
-            # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
+            # tl.store will do the correct implicit cast to quantized format (fp8/int8),
             #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
             # INT8 requires explicit clamping to [-128, 127]
@@ -156,10 +156,10 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(("fp8", "int8", "int4")), (
-        f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
-    )
-    
+    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(
+        ("fp8", "int8", "int4")
+    ), f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
+
     # Determine the target dtype based on cache type
     if kv_cache_dtype.startswith("fp8"):
         kv_cache_torch_dtype = current_platform.fp8_dtype()
@@ -171,12 +171,14 @@ def triton_reshape_and_cache_flash(
         kv_cache_torch_dtype = key_cache.dtype
 
     # View the cache tensor as the target quantized dtype if needed
-    if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(("fp8", "int8", "int4")):
+    if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(
+        ("fp8", "int8", "int4")
+    ):
         # to avoid erroneous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
-    
+
     assert kv_cache_dtype != torch.uint8, (
         "explicit cast and store to "
         "uint8 is not supported by triton reshape_and_cache_flash"
@@ -290,7 +292,7 @@ def reshape_and_cache_kernel_flash_diffkv(
     # [TILE_SIZE]
     key_load = tl.load(key_ptr + src_key_idx + tile_offs, mask=tile_offs < head_size_k)
     if QUANTIZED_KV_CACHE:
-        # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
+        # tl.store will do the correct implicit cast to quantized format (fp8/int8),
         # based on the key_cache_ptr.dtype.element_ty
         key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
     else:
@@ -304,7 +306,7 @@ def reshape_and_cache_kernel_flash_diffkv(
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
-            # tl.store will do the correct implicit cast to quantized format (fp8/int8/int4),
+            # tl.store will do the correct implicit cast to quantized format (fp8/int8),
             #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
     else:
@@ -343,10 +345,10 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(("fp8", "int8", "int4")), (
-        f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
-    )
-    
+    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith(
+        ("fp8", "int8", "int4")
+    ), f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
+
     # Determine the target dtype based on cache type
     if kv_cache_dtype.startswith("fp8"):
         kv_cache_torch_dtype = current_platform.fp8_dtype()
@@ -358,11 +360,13 @@ def triton_reshape_and_cache_flash_diffkv(
         kv_cache_torch_dtype = kv_cache.dtype
 
     # View the cache tensor as the target quantized dtype if needed
-    if kv_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(("fp8", "int8", "int4")):
+    if kv_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(
+        ("fp8", "int8", "int4")
+    ):
         # to avoid erroneous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         kv_cache = kv_cache.view(kv_cache_torch_dtype)
-    
+
     assert kv_cache_dtype != torch.uint8, (
         "explicit cast and store to "
         "uint8 is not supported by triton reshape_and_cache_flash_diffkv"
