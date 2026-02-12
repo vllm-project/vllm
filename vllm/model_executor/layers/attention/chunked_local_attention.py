@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import functools
 from dataclasses import replace
 
 import numpy as np
 import torch
+from pydantic.fields import FieldInfo
 
 from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
@@ -190,6 +192,17 @@ def _compute_virtual_batches_attn_metadata_kernel(
             tl.store(block_indices_ptr + flat_idx, block_idx, mask=valid)
 
 
+def _pydantic_dataclass_replace(obj, **changes):
+    """Like dataclasses.replace() but handles pydantic Field(init=False)."""
+    init_fields = {
+        f.name: getattr(obj, f.name)
+        for f in dataclasses.fields(obj)
+        if not (isinstance(f.default, FieldInfo) and f.default.init is False)
+    }
+    init_fields.update(changes)
+    return type(obj)(**init_fields)
+
+
 @functools.lru_cache
 def create_chunked_local_attention_backend(
     underlying_attn_backend: AttentionBackend,
@@ -231,8 +244,9 @@ def create_chunked_local_attention_backend(
             # Also bump max_num_batched_tokens if needed to satisfy the
             # max_num_batched_tokens >= max_num_seqs validation
             modified_max_batched = max(max_num_batched_tokens, num_vb_ub)
-            modified_scheduler_config = replace(
-                vllm_config.scheduler_config,
+
+            modified_scheduler_config = _pydantic_dataclass_replace(
+                sched,
                 max_model_len=vllm_config.model_config.max_model_len,
                 is_encoder_decoder=vllm_config.model_config.is_encoder_decoder,
                 max_num_seqs=num_vb_ub,
