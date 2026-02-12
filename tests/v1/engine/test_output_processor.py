@@ -695,7 +695,6 @@ def test_stop_token(
         prompt_logprobs_raw=None,
         eos_token_id=sampling_params.eos_token_id,
         stop_token_ids=sampling_params.stop_token_ids,
-        ignore_eos=ignore_eos,
         request_ids=[request.request_id],
     )
 
