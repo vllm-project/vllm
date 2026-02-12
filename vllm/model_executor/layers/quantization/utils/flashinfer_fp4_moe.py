@@ -164,26 +164,26 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
     """Prepare quantized weights for kernel (done offline with weights)."""
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-    actual_intermediate_size = 2 * intermediate_size
+    gemm1_intermediate_size = (
+        2 * intermediate_size if is_gated_activation else intermediate_size
+    )
 
     # Convert quantized weights to proper formats
     gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, actual_intermediate_size, hidden_size // 2
+        num_experts, gemm1_intermediate_size, hidden_size // 2
     )  # packed fp4
     gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
     ).reshape(
-        num_experts, actual_intermediate_size, hidden_size // 16
+        num_experts, gemm1_intermediate_size, hidden_size // 16
     )  # fp8 scaling factors
 
     gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, hidden_size, actual_intermediate_size // 2
+        num_experts, hidden_size, intermediate_size // 2
     )  # packed fp4
     gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
-    ).reshape(
-        num_experts, hidden_size, actual_intermediate_size // 16
-    )  # fp8 scaling factors
+    ).reshape(num_experts, hidden_size, intermediate_size // 16)  # fp8 scaling factors
 
     gemm1_weights_fp4_shuffled = []
     gemm1_scales_fp4_shuffled = []
@@ -255,14 +255,14 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_scales_fp4_shuffled = (
         torch.stack(gemm1_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, actual_intermediate_size, hidden_size // 16)
+        .reshape(num_experts, gemm1_intermediate_size, hidden_size // 16)
     )
 
     gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
     gemm2_scales_fp4_shuffled = (
         torch.stack(gemm2_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, hidden_size, actual_intermediate_size // 16)
+        .reshape(num_experts, hidden_size, intermediate_size // 16)
     )
     return (
         gemm1_weights_fp4_shuffled,
@@ -528,10 +528,10 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             w2,
             w13_scale,
             w2_scale,
-            w2.size(-2),  # hidden_size
-            w13.size(-2) // 2,  # intermediate_size
-            w13.size(0),  # num_experts
-            is_gated,  # is_gated_activation
+            hidden_size=w2.size(-2),
+            intermediate_size=w13.size(-2) // 2 if is_gated else w13.size(-2),
+            num_experts=w13.size(0),
+            is_gated_activation=is_gated,
         )
 
         # We do not need to make this a parameter, because
