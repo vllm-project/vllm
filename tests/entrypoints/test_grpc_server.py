@@ -9,11 +9,17 @@ import socket
 import subprocess
 import sys
 import time
+from unittest.mock import MagicMock, PropertyMock
 
 import grpc
 import pytest
 import pytest_asyncio
+from grpc_health.v1 import health_pb2, health_pb2_grpc
+from grpc_reflection.v1alpha.proto_reflection_descriptor_database import (
+    ProtoReflectionDescriptorDatabase,
+)
 
+from vllm.entrypoints.grpc_server import _health_monitor
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 
 # Use a small model for fast testing
@@ -109,6 +115,17 @@ async def grpc_client(grpc_server):
     """Fixture providing a gRPC client connected to the server."""
     channel = grpc.aio.insecure_channel(f"localhost:{grpc_server.port}")
     stub = vllm_engine_pb2_grpc.VllmEngineStub(channel)
+
+    yield stub
+
+    await channel.close()
+
+
+@pytest_asyncio.fixture
+async def health_stub(grpc_server):
+    """Fixture providing a standard gRPC health check client."""
+    channel = grpc.aio.insecure_channel(f"localhost:{grpc_server.port}")
+    stub = health_pb2_grpc.HealthStub(channel)
 
     yield stub
 
@@ -426,3 +443,168 @@ async def test_abort_request(grpc_client):
     assert was_aborted and received_chunks < 500, (
         "Request should have been aborted before generating all 500 tokens"
     )
+
+
+# ---- Standard gRPC Health Service (grpc.health.v1) E2E Tests ----
+
+
+@pytest.mark.asyncio
+async def test_grpc_health_service_overall(health_stub):
+    """Test standard gRPC health check for overall server health."""
+    request = health_pb2.HealthCheckRequest(service="")
+    response = await health_stub.Check(request)
+
+    assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+
+@pytest.mark.asyncio
+async def test_grpc_health_service_vllm_engine(health_stub):
+    """Test standard gRPC health check for the VllmEngine service."""
+    request = health_pb2.HealthCheckRequest(
+        service="vllm.grpc.engine.VllmEngine"
+    )
+    response = await health_stub.Check(request)
+
+    assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+
+@pytest.mark.asyncio
+async def test_grpc_health_service_unknown_service(health_stub):
+    """Test standard gRPC health check for an unregistered service returns NOT_FOUND."""
+    request = health_pb2.HealthCheckRequest(service="nonexistent.Service")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        await health_stub.Check(request)
+
+    assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_grpc_health_service_reflection(grpc_server):
+    """Test that grpc.health.v1.Health appears in the reflection service list."""
+    channel = grpc.aio.insecure_channel(f"localhost:{grpc_server.port}")
+    try:
+        reflection_db = ProtoReflectionDescriptorDatabase(channel)
+        services = reflection_db.get_services()
+
+        assert "grpc.health.v1.Health" in services
+    finally:
+        await channel.close()
+
+
+# ---- _health_monitor Unit Tests ----
+
+
+@pytest.mark.asyncio
+async def test_health_monitor_sets_serving_when_healthy():
+    """Test that _health_monitor sets SERVING when engine is healthy."""
+    mock_health_servicer = MagicMock()
+    mock_async_llm = MagicMock()
+    type(mock_async_llm).errored = PropertyMock(return_value=False)
+
+    stop_event = asyncio.Event()
+
+    async def stop_after_one_cycle():
+        await asyncio.sleep(0.05)
+        stop_event.set()
+
+    await asyncio.gather(
+        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
+                        interval=0.01),
+        stop_after_one_cycle(),
+    )
+
+    # Verify set() was called with SERVING for both service names
+    calls = mock_health_servicer.set.call_args_list
+    service_status_pairs = [(c[0][0], c[0][1]) for c in calls]
+
+    assert ("", health_pb2.HealthCheckResponse.SERVING) in service_status_pairs
+    assert (
+        "vllm.grpc.engine.VllmEngine",
+        health_pb2.HealthCheckResponse.SERVING,
+    ) in service_status_pairs
+
+
+@pytest.mark.asyncio
+async def test_health_monitor_sets_not_serving_when_errored():
+    """Test that _health_monitor sets NOT_SERVING when engine is errored."""
+    mock_health_servicer = MagicMock()
+    mock_async_llm = MagicMock()
+    type(mock_async_llm).errored = PropertyMock(return_value=True)
+
+    stop_event = asyncio.Event()
+
+    async def stop_after_one_cycle():
+        await asyncio.sleep(0.05)
+        stop_event.set()
+
+    await asyncio.gather(
+        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
+                        interval=0.01),
+        stop_after_one_cycle(),
+    )
+
+    # Verify set() was called with NOT_SERVING for both service names
+    calls = mock_health_servicer.set.call_args_list
+    service_status_pairs = [(c[0][0], c[0][1]) for c in calls]
+
+    assert (
+        "",
+        health_pb2.HealthCheckResponse.NOT_SERVING,
+    ) in service_status_pairs
+    assert (
+        "vllm.grpc.engine.VllmEngine",
+        health_pb2.HealthCheckResponse.NOT_SERVING,
+    ) in service_status_pairs
+
+
+@pytest.mark.asyncio
+async def test_health_monitor_stops_on_event():
+    """Test that _health_monitor exits when stop_event is set."""
+    mock_health_servicer = MagicMock()
+    mock_async_llm = MagicMock()
+    type(mock_async_llm).errored = PropertyMock(return_value=False)
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    # Should return promptly since stop_event is already set
+    await asyncio.wait_for(
+        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
+                        interval=0.01),
+        timeout=2.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_monitor_handles_exception():
+    """Test that _health_monitor continues running when set() raises."""
+    mock_health_servicer = MagicMock()
+    call_count = 0
+
+    def side_effect_set(name, status):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise RuntimeError("simulated error")
+
+    mock_health_servicer.set.side_effect = side_effect_set
+
+    mock_async_llm = MagicMock()
+    type(mock_async_llm).errored = PropertyMock(return_value=False)
+
+    stop_event = asyncio.Event()
+
+    async def stop_after_recovery():
+        # Wait long enough for at least 2 cycles (error cycle + recovery cycle)
+        await asyncio.sleep(0.1)
+        stop_event.set()
+
+    await asyncio.gather(
+        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
+                        interval=0.01),
+        stop_after_recovery(),
+    )
+
+    # Should have been called more than twice, proving it survived the error
+    assert mock_health_servicer.set.call_count > 2
