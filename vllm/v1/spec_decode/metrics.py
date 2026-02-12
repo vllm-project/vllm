@@ -30,11 +30,13 @@ class SpecDecodingStats:
     # Global acceptance rate tracking for adaptive draft length
     acceptance_rate_ewma: float = 0.5  # Bootstrap at 50%
     num_requests_tracked: int = 0
+    ewma_alpha: float = 0.1
 
     @classmethod
-    def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
+    def new(cls, num_spec_tokens: int, ewma_alpha: float = 0.1) -> "SpecDecodingStats":
         return cls(
             num_spec_tokens=num_spec_tokens,
+            ewma_alpha=ewma_alpha,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
         )
 
@@ -61,43 +63,37 @@ class SpecDecodingStats:
             batch_acceptance_rate: Mean acceptance rate for the batch
             batch_count: Number of requests in the batch
         """
-        # Use alpha=0.1 for smoothing (90% history, 10% current)
         self.acceptance_rate_ewma = (
-            0.9 * self.acceptance_rate_ewma + 0.1 * batch_acceptance_rate
+            (1 - self.ewma_alpha) * self.acceptance_rate_ewma
+            + self.ewma_alpha * batch_acceptance_rate
         )
         self.num_requests_tracked += batch_count
 
-    def compute_optimal_draft_length(self, draft_length_options: list[int]) -> int:
+    def compute_optimal_draft_length(
+        self,
+        draft_length_options: list[int],
+        acceptance_thresholds: list[float] | None = None,
+    ) -> int:
         """Compute optimal draft length based on acceptance rate.
 
-        Uses threshold-based selection with empirically-tuned boundaries:
+        Uses threshold-based selection with configurable [low, medium, high]
+        boundaries (default [0.3, 0.5, 0.7]):
 
-        Threshold Rationale:
-        - >0.7 (High): Draft tokens are being accepted frequently. Use longest
-          draft length to maximize speculation benefit. This threshold represents
-          ~70% average acceptance, meaning most drafts are useful.
-
-        - 0.5-0.7 (Medium): Moderate acceptance. Use middle draft length to
-          balance speculation cost vs. benefit. Below 70%, longer drafts start
-          seeing diminishing returns.
-
-        - 0.3-0.5 (Low): Acceptance dropping. Be conservative with draft length
-          to avoid wasted computation. 50% is the break-even point where draft
-          cost equals benefit.
-
-        - <0.3 (Very Low): Poor acceptance. Use shortest draft to minimize waste.
-          Below 30%, speculation is barely helping and we should draft minimally.
-
-        These thresholds were chosen based on:
-        1. Empirical testing across coding, QA, and creative writing workloads
-        2. Cost-benefit analysis where draft cost ≈ 0.1x verify cost
-        3. Acceptance rate stability (EWMA smoothing reduces noise)
+        - Above high: Use longest draft length to maximize speculation benefit.
+        - Between medium and high: Use middle draft length to balance
+          speculation cost vs. benefit.
+        - Between low and medium: Be conservative with draft length to avoid
+          wasted computation.
+        - Below low: Use shortest draft length to minimize waste.
 
         Args:
-            draft_length_options: List of available draft lengths (will be sorted)
+            draft_length_options: List of available draft lengths (will be
+                sorted).
+            acceptance_thresholds: [low, medium, high] boundaries for draft
+                length selection. Defaults to [0.3, 0.5, 0.7].
 
         Returns:
-            Optimal draft length for current acceptance rate
+            Optimal draft length for current acceptance rate.
 
         Note:
             For 2-3 options, low and very low both use shortest to be
@@ -111,13 +107,17 @@ class SpecDecodingStats:
         sorted_options = sorted(draft_length_options)
 
         # Threshold-based selection
-        if self.acceptance_rate_ewma > 0.7:
+        if acceptance_thresholds is None:
+            acceptance_thresholds = [0.3, 0.5, 0.7]
+        low, medium, high = acceptance_thresholds
+
+        if self.acceptance_rate_ewma > high:
             return sorted_options[-1]  # Longest
-        elif self.acceptance_rate_ewma > 0.5:
+        elif self.acceptance_rate_ewma > medium:
             # Medium: use middle option
             mid_idx = len(sorted_options) // 2
             return sorted_options[mid_idx]
-        elif self.acceptance_rate_ewma > 0.3:
+        elif self.acceptance_rate_ewma > low:
             # Low: use second-shortest if 4+ options, else shortest
             # This differentiates from very low when enough options available
             if len(sorted_options) >= 4:

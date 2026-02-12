@@ -118,6 +118,16 @@ class SpeculativeConfig:
     When enabled and draft_length_options is None, draft_length_options will be
     auto-computed. The system will then dynamically select the optimal draft
     length at runtime based on recent acceptance rates."""
+    adaptive_ewma_alpha: float = Field(default=0.1, gt=0.0, le=1.0)
+    """Smoothing factor for the acceptance rate EWMA used in adaptive draft
+    length selection. Higher values weight recent observations more heavily,
+    lower values produce smoother estimates."""
+    adaptive_acceptance_thresholds: list[float] = Field(
+        default=[0.3, 0.5, 0.7])
+    """Acceptance rate thresholds [low, medium, high] for adaptive draft length
+    selection. When the EWMA acceptance rate exceeds the high threshold, the
+    longest draft length is used; between medium and high, the middle length;
+    between low and medium, a short length; below low, the shortest."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)

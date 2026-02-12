@@ -390,7 +390,8 @@ class GPUModelRunner(
             from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
             self.spec_decoding_stats = SpecDecodingStats.new(
-                self.speculative_config.num_speculative_tokens
+                self.speculative_config.num_speculative_tokens,
+                ewma_alpha=self.speculative_config.adaptive_ewma_alpha,
             )
 
         self.num_spec_tokens = 0
@@ -3258,7 +3259,8 @@ class GPUModelRunner(
                 and self.speculative_config.draft_length_options
             ):
                 draft_length = self.spec_decoding_stats.compute_optimal_draft_length(
-                    self.speculative_config.draft_length_options
+                    self.speculative_config.draft_length_options,
+                    self.speculative_config.adaptive_acceptance_thresholds,
                 )
 
             draft_token_ids = self.drafter.propose(
