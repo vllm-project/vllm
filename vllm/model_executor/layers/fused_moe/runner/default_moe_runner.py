@@ -755,7 +755,11 @@ class DefaultMoERunner(MoERunner):
                     chunk_end,
                 )
 
-                shared_input_chunk = shared_input[chunk_start:chunk_end, :] if shared_input is not None else None
+                shared_input_chunk = (
+                    shared_input[chunk_start:chunk_end, :]
+                    if shared_input is not None
+                    else None
+                )
 
                 shared_output_chunk, hidden_states_chunk = self._apply_quant_method(
                     layer=layer,
