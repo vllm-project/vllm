@@ -291,8 +291,8 @@ def fi_trtllm_fp8_per_tensor_moe(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
-    activation_type: int = 3,  # Swiglu
 ) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
@@ -352,8 +352,8 @@ def fi_trtllm_fp8_per_tensor_moe_fake(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
-    activation_type: int = 3,  # Swiglu
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
