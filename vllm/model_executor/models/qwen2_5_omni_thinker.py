@@ -375,8 +375,10 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
             * feature_extractor.sampling_rate
         )
 
+        image_processor = self.info.get_image_processor(**mm_processor_kwargs)
+        image_max_pixels = image_processor.size["longest_edge"]
         target_width, target_height = self.info.get_image_size_with_most_features(
-            max_pixels=mm_processor_kwargs.get("max_pixels", None),
+            max_pixels=image_max_pixels,
         )
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
