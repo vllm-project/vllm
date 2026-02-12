@@ -239,8 +239,7 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.tokenizer
+            tokenizer = self.renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -375,6 +374,7 @@ class OpenAIServingChat(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
@@ -387,7 +387,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 max_tokens = get_max_tokens(
-                    self.max_model_len,
+                    max_model_len,
                     request.max_completion_tokens
                     if request.max_completion_tokens is not None
                     else request.max_tokens,
