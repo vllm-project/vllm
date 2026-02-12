@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
 )
@@ -282,6 +283,15 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(audio_arrays=MultiModalFieldConfig.batched("audio"))
+
+    def _validate_mm_placeholders(
+        self,
+        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        # mistral_common's tokenizer's does not follow HF's placeholder norms
+        # skip validation here
+        ...
 
     def _get_prompt_updates(
         self,
