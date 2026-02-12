@@ -269,6 +269,8 @@ class KimiAudioASRMultiModalProcessor(
 ):
     """Minimal processor for Kimi-Audio ASR.
 
+    PLACEHOLDER_TOKEN_ID = 151666
+
     Key point: Kimi-Audio does not ship a HuggingFace `ProcessorMixin`.
     Its tokenizer is a custom TikTokenTokenizer, so we must bypass
     vLLM's default HF-processor path.
@@ -307,7 +309,7 @@ class KimiAudioASRMultiModalProcessor(
         # `_get_prompt_updates` will expand it to the correct sequence length.
         #
         # This also makes dummy/profiling paths deterministic.
-        prompt_ids = [151666]
+        prompt_ids = [self.PLACEHOLDER_TOKEN_ID]
 
         # Pass-through multimodal dict tensors. The keys here are expected to be
         # a flattened dict produced by BaseMultiModalProcessor.
@@ -323,7 +325,7 @@ class KimiAudioASRMultiModalProcessor(
         # For dummy/profiling paths vLLM may pass a string prompt.
         # We want a single placeholder token id so our PromptReplacement
         # can reliably match and expand it.
-        return [151666]
+        return [self.PLACEHOLDER_TOKEN_ID]
 
     def _get_mm_fields_config(
         self,
@@ -364,7 +366,7 @@ class KimiAudioASRMultiModalProcessor(
         # length, so that vLLM's placeholder-range bookkeeping matches the
         # shapes of our tensors (audio_input_ids / masks / features).
 
-        placeholder_id = 151666
+        placeholder_id = self.PLACEHOLDER_TOKEN_ID
 
         seq = _placeholder_seq(0)
 
