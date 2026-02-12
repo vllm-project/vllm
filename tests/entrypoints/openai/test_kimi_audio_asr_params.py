@@ -2,66 +2,64 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import builtins
+import io
 
 import numpy as np
 import pytest
+from fastapi import UploadFile
 
 from vllm.config import SpeechToTextConfig
-from vllm.entrypoints.openai.chat_completion.serving import (
-    _maybe_add_kimi_stop_tokens as _chat_add_kimi_stop_tokens,
-)
-from vllm.entrypoints.openai.completion.serving import (
-    _maybe_add_kimi_stop_tokens as _completion_add_kimi_stop_tokens,
-)
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import OpenAISpeechToText
+from vllm.entrypoints.openai.speech_to_text.protocol import TranscriptionRequest
 from vllm.model_executor.models.kimi_audio_asr import KimiAudioForConditionalGeneration
-from vllm.sampling_params import SamplingParams
 
 
-class _DummyTokens:
-    def __init__(self):
-        self.kimia_text_eos = 151667
-        self.msg_end = 151645
-        self.media_end = 151663
+def test_kimi_audio_stt_config_defaults() -> None:
+    stt_config = KimiAudioForConditionalGeneration.get_speech_to_text_config(
+        model_config=object(),
+        task_type="transcribe",
+    )
+
+    assert stt_config.sample_rate == 16_000
+    assert stt_config.max_audio_clip_s == 30
+    assert stt_config.skip_reading_prefix_cache is True
+    assert stt_config.default_sampling_params == {
+        "temperature": 0.0,
+        "top_k": 5,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
 
 
-class _DummyTokenizer:
-    def get_stop_token_ids(self):
-        return [151645, 151667]
+def test_transcription_request_uses_stt_defaults() -> None:
+    stt_config = KimiAudioForConditionalGeneration.get_speech_to_text_config(
+        model_config=object(),
+        task_type="transcribe",
+    )
+    dummy_file = UploadFile(filename="dummy.wav", file=io.BytesIO(b""))
+    request = TranscriptionRequest(file=dummy_file)
+
+    sampling_params = request.to_sampling_params(
+        default_max_tokens=16,
+        default_sampling_params=stt_config.default_sampling_params,
+    )
+    if stt_config.skip_reading_prefix_cache:
+        sampling_params.skip_reading_prefix_cache = True
+
+    assert sampling_params.temperature == 0.0
+    assert sampling_params.top_k == 5
+    assert sampling_params.top_p == 1.0
+    assert sampling_params.min_p == 0.0
+    assert sampling_params.repetition_penalty == 1.0
+    assert sampling_params.skip_reading_prefix_cache is True
 
 
-class _DummyHFConfig:
-    kimia_token_offset = 1
+def test_entrypoints_no_kimi_stop_token_helpers() -> None:
+    import vllm.entrypoints.openai.chat_completion.serving as chat_serving
+    import vllm.entrypoints.openai.completion.serving as completion_serving
 
-
-class _DummyModelConfig:
-    hf_config = _DummyHFConfig()
-
-
-def test_kimia_sampling_params_skips_prefix_cache() -> None:
-    sampler = SamplingParams(max_tokens=1, temperature=0.0)
-    stt = OpenAISpeechToText.__new__(OpenAISpeechToText)
-    stt.__dict__["_kimia_extra_tokens"] = _DummyTokens()
-
-    OpenAISpeechToText._apply_kimia_sampling_params(stt, sampler)
-
-    assert sampler.skip_reading_prefix_cache is True
-    assert 151645 in sampler.stop_token_ids
-    assert 151667 in sampler.stop_token_ids
-    assert 151663 in sampler.stop_token_ids
-
-
-def test_kimi_stop_tokens_added_for_chat_and_completion() -> None:
-    tokenizer = _DummyTokenizer()
-    model_config = _DummyModelConfig()
-    default_sampling: dict[str, list[int]] = {}
-
-    _chat_add_kimi_stop_tokens(model_config, tokenizer, default_sampling)
-    assert set(default_sampling["stop_token_ids"]) == {151645, 151667}
-
-    default_sampling = {"stop_token_ids": [151645]}
-    _completion_add_kimi_stop_tokens(model_config, tokenizer, default_sampling)
-    assert set(default_sampling["stop_token_ids"]) == {151645, 151667}
+    assert not hasattr(chat_serving, "_maybe_add_kimi_stop_tokens")
+    assert not hasattr(completion_serving, "_maybe_add_kimi_stop_tokens")
 
 
 def test_kimi_audio_requires_kimia_infer(monkeypatch: pytest.MonkeyPatch) -> None:
