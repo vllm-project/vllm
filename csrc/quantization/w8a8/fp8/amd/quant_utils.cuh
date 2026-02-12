@@ -5,6 +5,8 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_bfloat16.h>
 
+#include <string>
+
 #include "../../../../attention/attention_dtypes.h"
 
 namespace vllm {
@@ -639,7 +641,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   // function with template<typename scalar_t, typename cache_t,
   // Fp8KVCacheDataType kv_dt>.
   #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                  \
-    if (KV_DTYPE == "auto") {                                                  \
+    if (std::string(KV_DTYPE) == "auto") {                                     \
       if (SRC_DTYPE == at::ScalarType::Float) {                                \
         FN(float, float, vllm::Fp8KVCacheDataType::kAuto);                     \
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
@@ -650,7 +652,8 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \
     } else {                                                                   \
-      if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                       \
+      if (std::string(KV_DTYPE) == "fp8" ||                                    \
+          std::string(KV_DTYPE) == "fp8_e4m3") {                               \
         if (SRC_DTYPE == at::ScalarType::Float) {                              \
           FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);              \
         } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
