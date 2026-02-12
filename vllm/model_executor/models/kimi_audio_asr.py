@@ -636,7 +636,18 @@ class KimiAudioForConditionalGeneration(
 
         # Long-audio chunking can be implemented later.
 
-        return SpeechToTextConfig(sample_rate=16_000, max_audio_clip_s=30)
+        return SpeechToTextConfig(
+            sample_rate=16_000,
+            max_audio_clip_s=30,
+            default_sampling_params={
+                "temperature": 0.0,
+                "top_k": 5,
+                "top_p": 1.0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+            },
+            skip_reading_prefix_cache=True,
+        )
 
     @classmethod
     def get_generation_prompt(
