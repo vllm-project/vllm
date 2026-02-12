@@ -4681,7 +4681,21 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        # For speculative decoding, the compile range is extended:
+        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
+        # - Parallel draft: + num_speculative_tokens * max_num_seqs
+        max_dummy_run_tokens = self.scheduler_config.max_num_batched_tokens
+        if self.speculative_config is not None and (
+            self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_eagle()
+        ):
+            multiplier = (
+                self.speculative_config.num_speculative_tokens
+                if self.speculative_config.parallel_drafting
+                else 1
+            )
+            max_dummy_run_tokens += multiplier * self.scheduler_config.max_num_seqs
+        assert num_tokens <= max_dummy_run_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
@@ -4810,8 +4824,9 @@ class GPUModelRunner(
             remove_lora,
             num_active_loras,
         ):
-            # Make sure padding doesn't exceed max_num_tokens
-            assert num_tokens_padded <= self.max_num_tokens
+            # Make sure padding doesn't exceed max_num_tokens (extended for
+            # parallel drafting warmup)
+            assert num_tokens_padded <= max_dummy_run_tokens
             model_kwargs = self._init_model_kwargs()
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
