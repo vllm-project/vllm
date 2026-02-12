@@ -337,6 +337,7 @@ class LLM:
             profiler_config=profiler_config_instance,
             attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
+            logits_processors=logits_processors,
             **kwargs,
         )
 
