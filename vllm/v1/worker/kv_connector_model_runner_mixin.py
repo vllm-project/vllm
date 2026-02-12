@@ -108,6 +108,9 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
+            # Collect auxiliary metadata (e.g., hidden states).
+            output.aux_meta = kv_connector.get_aux_meta()
+
             kv_connector.clear_connector_metadata()
 
     @staticmethod

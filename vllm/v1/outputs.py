@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -136,6 +136,9 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # Auxiliary metadata from worker-side put_aux(), keyed by request ID.
+    # Used by connectors that transfer non-KV tensors (e.g., hidden states).
+    aux_meta: dict[str, dict[str, Any]] | None = None
 
     def is_empty(self):
         return (

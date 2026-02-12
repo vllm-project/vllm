@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import os
 import threading
 import time
 from collections import defaultdict
@@ -4239,12 +4238,10 @@ class GPUModelRunner(
                 # if we have full-prefix hidden states from the
                 # prefill instance, expand inputs so EAGLE does a
                 # full "prefill" of its own KV cache.
-                # Set VLLM_DISABLE_EAGLE_HS_INJECT=1 to skip (for A/B testing).
                 if (
                     transferred_hs
                     and not self.use_aux_hidden_state_outputs
                     and isinstance(self.drafter, EagleProposer)
-                    and not os.environ.get("VLLM_DISABLE_EAGLE_HS_INJECT")
                 ):
                     (
                         target_token_ids,

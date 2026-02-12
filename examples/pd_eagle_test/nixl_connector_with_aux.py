@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from vllm.config import KVCacheConfig, VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
     from vllm.forward_context import ForwardContext
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 logger = logging.getLogger(__name__)
@@ -620,6 +621,8 @@ class NixlConnectorWithAux(NixlConnector):
 
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
         self.aux_enabled = str(extra.get("transfer_aux", "false")).lower() == "true"
+        # Pending aux metadata from put_aux, to be sent via KVConnectorOutput.
+        self._pending_aux_meta: dict[str, dict[str, Any]] = {}
 
     # ── Worker-side: put / get / free ─────────────────────────────────
 
@@ -631,18 +634,22 @@ class NixlConnectorWithAux(NixlConnector):
         assert isinstance(self.connector_worker, NixlConnectorWorkerWithAux)
         info = self.connector_worker.put_aux(name, req_id, tensor)
 
-        # Propagate aux metadata to the scheduler side.
-        # In the current architecture, the scheduler and worker run in
-        # separate processes and communicate via the executor. The
-        # simplest path: store the info and let the scheduler pick it up
-        # via the KVConnectorOutput or a side channel.
-        #
-        # For the prototype, we store it on the worker and the scheduler
-        # reads it from kv_transfer_params (which is set in
-        # request_finished). The worker metadata needs to reach the
-        # scheduler. We use a class-level dict keyed by engine_id.
+        # Store aux metadata on the instance. It will be collected by
+        # get_aux_meta() and sent to the scheduler via KVConnectorOutput.
         if info is not None:
-            _AUX_PUT_REGISTRY[req_id] = info
+            self._pending_aux_meta[req_id] = info
+
+    def get_aux_meta(self) -> dict[str, dict[str, Any]] | None:
+        """Return and clear pending aux metadata from put_aux calls.
+
+        Called by the model runner mixin after get_finished() to populate
+        KVConnectorOutput.aux_meta, which flows back to the scheduler.
+        """
+        if not self._pending_aux_meta:
+            return None
+        meta = dict(self._pending_aux_meta)
+        self._pending_aux_meta.clear()
+        return meta
 
     def get_aux(
         self,
@@ -675,6 +682,28 @@ class NixlConnectorWithAux(NixlConnector):
         assert isinstance(self.connector_worker, NixlConnectorWorkerWithAux)
         self.connector_worker.start_load_aux(self._connector_metadata)
 
+    # ── Override: update_connector_output (scheduler side) ──────────────
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Receive aux metadata from the worker via KVConnectorOutput.
+
+        This is called on the scheduler side after each step. The worker
+        populates connector_output.aux_meta in get_aux_meta(); we forward
+        it to the scheduler-side connector so request_finished() can
+        include it in kv_transfer_params.
+        """
+        if (
+            self.aux_enabled
+            and self.connector_scheduler is not None
+            and connector_output.aux_meta
+        ):
+            assert isinstance(
+                self.connector_scheduler,
+                NixlConnectorSchedulerWithAux,
+            )
+            for req_id, info in connector_output.aux_meta.items():
+                self.connector_scheduler.set_aux_info(req_id, info)
+
     # ── Override: request_finished (scheduler side) ────────────────────
 
     def request_finished(
@@ -682,24 +711,5 @@ class NixlConnectorWithAux(NixlConnector):
         request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        # Inject aux metadata from the worker's put_aux into the
-        # scheduler's state before calling super().
-        if self.aux_enabled and self.connector_scheduler is not None:
-            aux_info = _AUX_PUT_REGISTRY.pop(request.request_id, None)
-            if aux_info is not None:
-                assert isinstance(
-                    self.connector_scheduler,
-                    NixlConnectorSchedulerWithAux,
-                )
-                self.connector_scheduler.set_aux_info(request.request_id, aux_info)
-
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
-
-
-# Module-level registry for passing aux metadata from worker to
-# scheduler across process boundaries. In production this would use
-# the executor's IPC mechanism; for the prototype we use a global dict
-# (works because scheduler and worker share the same process in
-# single-node P/D with MpExecutor).
-_AUX_PUT_REGISTRY: dict[str, dict[str, Any]] = {}
