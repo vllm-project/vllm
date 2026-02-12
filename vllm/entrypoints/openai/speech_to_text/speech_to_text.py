@@ -460,8 +460,6 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
-            if self.asr_config.skip_reading_prefix_cache:
-                sampling_params.skip_reading_prefix_cache = True
             if request.response_format == "verbose_json":
                 sampling_params.logprobs = 1
 
