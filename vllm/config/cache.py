@@ -223,10 +223,12 @@ class CacheConfig:
                 str(cache_dtype),
             )
         elif cache_dtype.startswith("int8"):
-            int8_warn_info = "Int8 quantization is very sensitive to scale factor. "
-            "Make sure --calculate_kv_scales argument is set and "
-            "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set. "
-            "Normally 127 for INT8."
+            int8_warn_info = (
+                "int8 kv cache requires calibrated scaling factors. "
+                "Make sure --calculate_kv_scales argument is set and "
+                "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set. "
+                "Normally 127 for INT8."
+            )
             logger.info(
                 warn_info,
                 str(cache_dtype),
