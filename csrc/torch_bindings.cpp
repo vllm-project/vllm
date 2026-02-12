@@ -190,6 +190,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int numRows, int stride0, int stride1, int topK) -> ()");
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
+  ops.def(
+      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
+      "Tensor? "
+      "row_starts_opt) -> ()");
+  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -258,14 +264,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // See the following document for more info on custom types and ops that use
   // custom types:
   // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
-
-  // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
-  ops.def(
-      "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
-      "Tensor b_scales, Tensor workspace, "
-      "int b_q_type, "
-      "SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor");
-  //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
   ops.def(

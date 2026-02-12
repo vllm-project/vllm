@@ -54,26 +54,15 @@ class EagleSpeculator:
             device=device,
         )
         self.hidden_states = torch.zeros(
-            self.max_num_tokens,
-            self.hidden_size,
-            dtype=self.dtype,
-            device=device,
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
         self.idx_mapping = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device=device,
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
         self.temperature = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.float32,
-            device=device,
+            self.max_num_reqs, dtype=torch.float32, device=device
         )
-        self.seeds = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int64,
-            device=device,
-        )
+        self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps,
@@ -312,6 +301,7 @@ class EagleSpeculator:
             num_tokens=num_reqs,
             query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=1,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
             max_seq_len=self.max_model_len,
             block_tables=block_tables,

@@ -236,7 +236,7 @@ def create_requests(
                 # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",

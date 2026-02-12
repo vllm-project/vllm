@@ -382,7 +382,7 @@ def _patch_get_raw_stream_if_needed():
         if hasattr(torch._C, "_cuda_getCurrentRawStream"):
             from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
 
-            builtins.get_raw_stream = _get_raw_stream
+            builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
 
 
 _patch_get_raw_stream_if_needed()

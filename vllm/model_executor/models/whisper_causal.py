@@ -10,9 +10,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -172,6 +172,9 @@ def create_whisper_attention_backend_with_block_pooling(
             if (
                 not underlying_attn_backend.forward_includes_kv_cache_update
                 and attn_metadata is not None
+                and layer.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
             ):
                 self.do_kv_cache_update(
                     layer, key, value, kv_cache, attn_metadata.slot_mapping

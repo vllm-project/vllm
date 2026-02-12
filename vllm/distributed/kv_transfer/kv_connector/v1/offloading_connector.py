@@ -8,7 +8,6 @@ from typing import Any
 
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
@@ -17,8 +16,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -28,13 +34,77 @@ from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
+from vllm.v1.kv_offload.worker.worker import (
+    OffloadingWorker,
+    TransferSpec,
+    TransferType,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 ReqId = str
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class OffloadingOperationMetrics:
+    op_size: int
+    op_time: float
+
+
+@dataclass
+class OffloadingConnectorStats(KVConnectorStats):
+    def __post_init__(self):
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
+
+    def reset(self):
+        self.data: dict[str, list[OffloadingOperationMetrics]] = {}
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        if not other.is_empty():
+            for k, v in other.data.items():
+                if k not in self.data:
+                    self.data[k] = v
+                else:
+                    accumulator = self.data[k]
+                    assert isinstance(accumulator, list)
+                    accumulator.extend(v)
+        return self
+
+    def reduce(self) -> dict[str, int | float]:
+        """
+        Reduce the observations collected during a time interval to one or
+        more representative values (eg avg/median/sum of the series).
+        This is meant to be called by the logger to produce a summary of the
+        stats for the last time interval.
+        """
+        return_dict: dict[str, int | float] = {}
+        for transfer_type, ops_list in self.data.items():
+            assert isinstance(ops_list, list)
+            total_bytes = 0
+            total_time = 0
+            for op in ops_list:
+                assert isinstance(op, dict)
+                total_bytes += op["op_size"]
+                total_time += op["op_time"]
+            return_dict[f"{transfer_type}_total_bytes"] = total_bytes
+            return_dict[f"{transfer_type}_total_time"] = total_time
+        return return_dict
+
+    def is_empty(self) -> bool:
+        return not self.data
+
+    def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
+        src, dst = transfer_type
+        transfer_type_key = src + "_to_" + dst
+        op = OffloadingOperationMetrics(num_bytes, time)
+        if transfer_type_key in self.data:
+            self.data[transfer_type_key].append(op)
+        else:
+            self.data[transfer_type_key] = [op]
 
 
 @dataclass
@@ -142,6 +212,33 @@ class OffloadingConnector(KVConnectorBase_V1):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_worker is None:
+            return None  # We only emit stats from the worker-side
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            OffloadingConnectorStats(data=data)
+            if data is not None
+            else OffloadingConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return OffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
 
 class OffloadingConnectorScheduler:
@@ -467,7 +564,8 @@ class OffloadingConnectorWorker:
 
         self._job_counter = 0
 
-        # job_id -> (req_id, store)
+        self.kv_connector_stats = OffloadingConnectorStats()
+        # req_id -> (job_id, store)
         self._jobs: dict[int, tuple[ReqId, bool]] = {}
         # req_id -> active job IDs
         self._load_job: dict[ReqId, int] = {}
@@ -559,10 +657,21 @@ class OffloadingConnectorWorker:
         """
         finished_sending = set()
         finished_recving = set()
-        for job_id, success in self.worker.get_finished():
+        for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
-            assert success
+            job_id = transfer_result.job_id
+            assert transfer_result.success
             req_id, store = self._jobs.pop(job_id)
+            if (
+                transfer_result.transfer_time
+                and transfer_result.transfer_size is not None
+                and transfer_result.transfer_type is not None
+            ):
+                self.kv_connector_stats.record_transfer(
+                    num_bytes=transfer_result.transfer_size,
+                    time=transfer_result.transfer_time,
+                    transfer_type=transfer_result.transfer_type,
+                )
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
@@ -588,3 +697,104 @@ class OffloadingConnectorWorker:
                 del self._store_jobs[req_id]
 
         return finished_sending, finished_recving
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """
+        Get the KV transfer stats for the connector.
+        """
+
+        if self.kv_connector_stats.is_empty():
+            return None
+        # Clear stats for next iteration
+        kv_connector_stats = self.kv_connector_stats
+        self.kv_connector_stats = OffloadingConnectorStats()
+        return kv_connector_stats
+
+
+class OffloadPromMetrics(KVConnectorPromMetrics):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+        # (engine_idx, transfer_tupe) -> (metric with bounded labels)
+        self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
+        self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
+        self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        buckets = [  # In bytes
+            1e6,
+            5e6,
+            10e6,
+            20e6,
+            40e6,
+            60e6,
+            80e6,
+            100e6,
+            150e6,
+            200e6,
+        ]
+
+        self._counter_kv_bytes = self._counter_cls(
+            name="vllm:kv_offload_total_bytes",
+            documentation="Number of bytes offloaded by KV connector",
+            labelnames=labelnames + ["transfer_type"],
+        )
+
+        self._counter_kv_transfer_time = self._counter_cls(
+            name="vllm:kv_offload_total_time",
+            documentation="Total time measured by all KV offloading operations",
+            labelnames=labelnames + ["transfer_type"],
+        )
+
+        self._histogram_transfer_size = self._histogram_cls(
+            name="vllm:kv_offload_size",
+            documentation="Histogram of KV offload transfer size, in bytes.",
+            buckets=buckets[:],
+            labelnames=labelnames + ["transfer_type"],
+        )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        """
+        Observe transfer statistics from the new data structure.
+        transfer_stats_data is expected to be a dict where:
+        - keys are transfer type strings (e.g., "cpu_to_gpu", "gpu_to_cpu")
+        - values are lists of OffloadingOperationMetrics objects
+        """
+
+        for transfer_type, ops in transfer_stats_data.items():
+            # Cache:
+            if (engine_idx, transfer_type) not in self.histogram_transfer_size:
+                self.histogram_transfer_size[(engine_idx, transfer_type)] = (
+                    self._histogram_transfer_size.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+                self.counter_kv_bytes[(engine_idx, transfer_type)] = (
+                    self._counter_kv_bytes.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+                self.counter_kv_transfer_time[(engine_idx, transfer_type)] = (
+                    self._counter_kv_transfer_time.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+
+            # Process ops:
+            assert isinstance(ops, list)
+            for op in ops:  # ops is a list of serialized OffloadingOperationMetrics
+                assert isinstance(op, dict)
+                # Observe size histogram
+                self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
+                    op["op_size"]
+                )
+
+                # Increment byte and time counters
+                self.counter_kv_bytes[(engine_idx, transfer_type)].inc(op["op_size"])
+
+                self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(
+                    op["op_time"]
+                )

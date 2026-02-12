@@ -15,8 +15,9 @@ steps:
   timeout_in_minutes: 35
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT

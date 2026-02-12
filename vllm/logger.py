@@ -157,7 +157,7 @@ _METHODS_TO_PATCH = {
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, Any]()
+    logging_config = dict[str, dict[str, Any] | Any]()
 
     if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(

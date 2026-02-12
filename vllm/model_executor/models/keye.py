@@ -20,7 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -984,6 +984,11 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return KeyeMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(
         self,
     ) -> Mapping[str, int | None]:
@@ -1154,6 +1159,7 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1183,13 +1189,11 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         return mm_data
 
 
-class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]): ...
+class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
+    pass
 
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return KeyeMultiModalDataParser()
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

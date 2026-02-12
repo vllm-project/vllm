@@ -221,6 +221,7 @@ class Cohere2VisionDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -262,11 +263,8 @@ class Cohere2VisionMultiModalProcessor(
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
 
             num_patches = [
                 self.info.get_num_patches(
