@@ -132,8 +132,8 @@ class VoxtralRealtimeBuffer:
         self._config = config
 
         # TODO(Patrick) - move tokenizer config
-        _look_ahead_in_ms = 2.5
-        _look_back_in_ms = 52.5
+        _look_ahead_in_ms = self._config.streaming_look_ahead_ms
+        _look_back_in_ms = self._config.streaming_look_back_ms
         self._look_ahead_in_samples = self._ms_to_samples(_look_ahead_in_ms)
         self._look_back_in_samples = self._ms_to_samples(_look_back_in_ms)
 
