@@ -94,6 +94,27 @@ def _has_non_finite(tensor: torch.Tensor) -> bool:
     return bool(torch.isnan(tensor).any().item() or torch.isinf(tensor).any().item())
 
 
+def _is_torch_compiling() -> bool:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling):
+            try:
+                return bool(is_compiling())
+            except Exception:
+                pass
+
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling):
+            try:
+                return bool(is_compiling())
+            except Exception:
+                pass
+    return False
+
+
 def _tensor_summary(name: str, tensor: torch.Tensor) -> str:
     shape = tuple(tensor.shape)
     dtype = str(tensor.dtype).replace("torch.", "")
@@ -1562,7 +1583,7 @@ class RowParallelLinear(LinearBase):
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
-        if self.reduce_results and self.tp_size > 1:
+        if self.reduce_results and self.tp_size > 1 and not _is_torch_compiling():
             _log_tp_row_numeric_debug(
                 layer_prefix=self.prefix,
                 input_parallel=input_parallel,
