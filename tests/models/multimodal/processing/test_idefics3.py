@@ -13,6 +13,10 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) < Version("5.2.0"),
+    reason="See https://github.com/huggingface/transformers/pull/43948",
+)
 @pytest.mark.parametrize("model_id", ["HuggingFaceM4/Idefics3-8B-Llama3"])
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
@@ -68,11 +72,7 @@ def test_processor_override(
     hf_processed_inputs = hf_processor(
         text=prompt,
         images=mm_data["image"],
-        **(
-            {}
-            if Version(TRANSFORMERS_VERSION) < Version("5.0.0")
-            else hf_processor_mm_kwargs
-        ),
+        **processor.info.ctx.get_merged_kwargs(hf_processor_mm_kwargs),
     )
     assert processed_inputs["prompt_token_ids"] == hf_processed_inputs["input_ids"][0]
 
