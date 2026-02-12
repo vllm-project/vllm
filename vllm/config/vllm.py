@@ -1114,8 +1114,10 @@ class VllmConfig:
                 self.cache_config.block_size
                 <= self.scheduler_config.max_num_batched_tokens
             ), (
-                "block_size must be not larger than max_num_batched_tokens"
-                " in Mamba cache align mode."
+                "In Mamba cache align mode, block_size "
+                f"({self.cache_config.block_size}) must be <= "
+                "max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
             )
             if self.scheduler_config.long_prefill_token_threshold > 0:
                 assert (
