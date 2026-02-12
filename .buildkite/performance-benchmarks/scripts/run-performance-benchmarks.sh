@@ -262,7 +262,7 @@ merge_serving_tests_stream() {
   # Emit merged serving test objects, optionally filtered by MODEL_FILTER/DTYPE_FILTER in DRY_RUN mode.
   # This helper does NOT modify JSON; it only filters the stream in dry-run mode.
   local serving_test_file="$1"
-
+  # shellcheck disable=SC2016
   local merged='
     if type == "array" then
       # Plain format: test cases array
@@ -408,6 +408,9 @@ run_serving_tests() {
         echo ""
         echo "vLLM failed to start within the timeout period."
       fi
+    elif [[ "${DRY_RUN:-0}" == "1" ]]; then
+        # dry-run: don't start server
+        echo "Dry Run."
     else
       server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"
       if [[ ${REMOTE_PORT} ]]; then

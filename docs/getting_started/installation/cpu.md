@@ -212,13 +212,13 @@ ON_CPU=1 DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performanc
 By providing different JSON file, users can get runtime configurations for different models such as Embedded Models.
 
 ```bash
-ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 By providing MODEL_FILTER and DTYPE_FILTER, only commands for related model ID and Data Type will be generated.
 
 ```bash
-ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh --dry-run
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
