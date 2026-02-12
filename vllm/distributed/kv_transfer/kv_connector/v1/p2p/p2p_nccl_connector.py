@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import regex as re
 import torch
 
 from vllm.config import VllmConfig
@@ -19,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.network_utils import get_ip
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -39,16 +39,27 @@ class ReqMeta:
     block_ids: torch.Tensor
     # Request num tokens
     num_tokens: int
+    # Remote side's base KV address (no rank offset)
+    remote_kv_addr: str = ""
+    # Decode's own request_id, for ID translation in get_finished
+    local_request_id: str = ""
 
     @staticmethod
     def make_meta(
-        request_id: str, token_ids: list[int], block_ids: list[int], block_size: int
+        request_id: str,
+        token_ids: list[int],
+        block_ids: list[int],
+        block_size: int,
+        remote_kv_addr: str = "",
+        local_request_id: str = "",
     ) -> "ReqMeta":
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
             request_id=request_id,
             block_ids=block_ids_tensor,
             num_tokens=len(token_ids),
+            remote_kv_addr=remote_kv_addr,
+            local_request_id=local_request_id,
         )
 
 
@@ -65,9 +76,18 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
+        remote_kv_addr: str = "",
+        local_request_id: str = "",
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size)
+            ReqMeta.make_meta(
+                request_id,
+                token_ids,
+                block_ids,
+                block_size,
+                remote_kv_addr,
+                local_request_id,
+            )
         )
 
 
@@ -85,13 +105,20 @@ class P2pNcclConnector(KVConnectorBase_V1):
         )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
+        self._requests_need_save: dict[str, Any] = {}
         self.is_producer = self._kv_transfer_config.is_kv_producer
         self.chunked_prefill: dict[str, tuple[list[int], list[int] | None]] = {}
+
+        self._kv_addr = f"{get_ip()}:{self._kv_transfer_config.kv_port}"
 
         self._rank = get_world_group().rank if role == KVConnectorRole.WORKER else 0
         self._local_rank = (
             get_world_group().local_rank if role == KVConnectorRole.WORKER else 0
         )
+
+        # Needed so P2pNcclEngine can access the prefill request_id for
+        # cleanup in get_finished
+        self._local_to_remote_id: dict[str, str] = {}
 
         self.p2p_nccl_engine = (
             P2pNcclEngine(
@@ -107,6 +134,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def _resolve_remote_address(self, base_addr: str) -> str:
+        """Add rank offset to a base host:port address."""
+        ip, base_port_str = base_addr.rsplit(":", 1)
+        return f"{ip}:{int(base_port_str) + self._rank}"
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -201,9 +233,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, False)
-            remote_address = ip + ":" + str(port + self._rank)
+            remote_address = self._resolve_remote_address(request.remote_kv_addr)
+
+            if request.local_request_id:
+                self._local_to_remote_id[request.local_request_id] = request.request_id
+
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
 
@@ -297,13 +331,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, True)
-            remote_address = ip + ":" + str(port + self._rank)
+            remote_address = self._resolve_remote_address(request.remote_kv_addr)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
             self.p2p_nccl_engine.send_tensor(
-                request_id + "#" + layer_name, kv_cache, remote_address
+                request.request_id + "#" + layer_name,
+                kv_cache,
+                remote_address,
             )
 
     def wait_for_save(self):
@@ -326,6 +360,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         assert self.p2p_nccl_engine is not None
+
+        # Decode uses local req IDs but the engine keys on prefill's req IDs
+        if not self.is_producer:
+            translated_ids = set()
+            for req_id in finished_req_ids:
+                remote_id = self._local_to_remote_id.pop(req_id, None)
+                translated_ids.add(remote_id if remote_id is not None else req_id)
+            finished_req_ids = translated_ids
 
         no_compile_layers = self._vllm_config.compilation_config.static_forward_context
         return self.p2p_nccl_engine.get_finished(finished_req_ids, no_compile_layers)
@@ -369,11 +411,23 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
         """
-        if not self.is_producer and num_external_tokens > 0:
+        if self.is_producer:
+            if request.kv_transfer_params:
+                self._requests_need_save[request.request_id] = request
+        elif num_external_tokens > 0:
             self._requests_need_load[request.request_id] = (
                 request,
                 blocks.get_block_ids()[0],
             )
+
+    def _get_remote_kv_addr(self, req_id: str) -> str:
+        """Look up the remote KV address from stored request params."""
+        req = self._requests_need_save.get(req_id)
+        if not req or not req.kv_transfer_params:
+            return ""
+        addr = req.kv_transfer_params.get("remote_kv_addr", "")
+        assert addr, f"kv_transfer_params for {req_id} missing 'remote_kv_addr'"
+        return addr
 
     def build_connector_meta(
         self,
@@ -392,6 +446,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:
+                if new_req.req_id not in self._requests_need_save:
+                    continue
+                remote_kv_addr = self._get_remote_kv_addr(new_req.req_id)
                 num_scheduled_tokens = (scheduler_output.num_scheduled_tokens)[
                     new_req.req_id
                 ]
@@ -410,16 +467,26 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     token_ids=new_req.prompt_token_ids or [],
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
+                    remote_kv_addr=remote_kv_addr,
                 )
                 continue
+
             if new_req.req_id in self._requests_need_load:
+                request, _ = self._requests_need_load.pop(new_req.req_id)
+                assert request.kv_transfer_params is not None, (
+                    f"Consumer request {new_req.req_id} missing kv_transfer_params"
+                )
+                kv_params = request.kv_transfer_params
+                remote_request_id = kv_params["remote_request_id"]
+                remote_kv_addr = kv_params["remote_kv_addr"]
                 meta.add_request(
-                    request_id=new_req.req_id,
+                    request_id=remote_request_id,
                     token_ids=new_req.prompt_token_ids or [],
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
+                    remote_kv_addr=remote_kv_addr,
+                    local_request_id=new_req.req_id,
                 )
-                self._requests_need_load.pop(new_req.req_id)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
@@ -442,11 +509,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     self.chunked_prefill[req_id] = (block_ids, prompt_token_ids)
                     continue
                 # the request's prompt is all prefilled finally
+                remote_kv_addr = self._get_remote_kv_addr(req_id)
                 meta.add_request(
                     request_id=req_id,
                     token_ids=prompt_token_ids,
                     block_ids=block_ids,
                     block_size=self._block_size,
+                    remote_kv_addr=remote_kv_addr,
                 )
                 self.chunked_prefill.pop(req_id, None)
                 continue
@@ -465,11 +534,19 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 assert new_block_ids is not None
                 block_ids = new_block_ids[0]
 
+                assert request.kv_transfer_params is not None, (
+                    f"Consumer request {req_id} missing kv_transfer_params"
+                )
+                kv_params = request.kv_transfer_params
+                remote_request_id = kv_params["remote_request_id"]
+                remote_kv_addr = kv_params["remote_kv_addr"]
                 meta.add_request(
-                    request_id=req_id,
+                    request_id=remote_request_id,
                     token_ids=token_ids,
                     block_ids=block_ids,
                     block_size=self._block_size,
+                    remote_kv_addr=remote_kv_addr,
+                    local_request_id=req_id,
                 )
 
         self._requests_need_load.clear()
@@ -492,30 +569,19 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         self.chunked_prefill.pop(request.request_id, None)
+        self._requests_need_save.pop(request.request_id, None)
+
+        if self.is_producer:
+            return False, {
+                "remote_request_id": request.request_id,
+                "remote_kv_addr": self._kv_addr,
+            }
 
         return False, None
 
     # ==============================
     # Static methods
     # ==============================
-
-    @staticmethod
-    def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
-        # Regular expression to match the string hostname and integer port
-        if is_prefill:
-            pattern = r"___decode_addr_(.*):(\d+)"
-        else:
-            pattern = r"___prefill_addr_(.*):(\d+)___"
-
-        # Use re.search to find the pattern in the request_id
-        match = re.search(pattern, request_id)
-        if match:
-            # Extract the ranks
-            ip = match.group(1)
-            port = int(match.group(2))
-
-            return ip, port
-        raise ValueError(f"Request id {request_id} does not contain hostname and port")
 
     @staticmethod
     def check_tensors_except_dim(tensor1, tensor2, dim):
