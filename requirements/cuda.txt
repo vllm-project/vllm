@@ -12,5 +12,6 @@ torchvision==0.25.0 # Required for phi3v processor. See https://github.com/pytor
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.6.3
 
-# QuACK kernels for FlashAttention4 (cute-DSL implementation)
-quack-kernels==0.2.4
+# QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
+nvidia-cutlass-dsl>=4.4.0.dev1
+quack-kernels>=0.2.7
