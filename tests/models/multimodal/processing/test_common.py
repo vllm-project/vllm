@@ -184,22 +184,43 @@ def get_text_token_prompts(
     text_prompt: str | None
     token_prompt: list[int]
     if isinstance(tokenizer, MistralTokenizer):
-        images = parsed_data.get("image", [])
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=""),
-                        *(ImageChunk(image=image) for image in images),
-                    ]
-                ),
-            ]
-        )
-        res = tokenizer.mistral.encode_chat_completion(request)
+        # MistralTokenizer's encode_chat_completion only supports image
+        # chunks natively. For modalities it can't express as chunks
+        # (e.g. audio in Voxtral), fall back to the dummy-inputs path.
+        non_image_modalities = {
+            k for k, count in mm_counts.items() if k != "image" and count > 0
+        }
 
-        # Mistral does not support decode_tokens with skip_special_tokens=False
-        text_prompt = None
-        token_prompt = res.tokens
+        if non_image_modalities:
+            # Use the dummy inputs builder which knows the model's
+            # placeholder tokens for every supported modality.
+            inputs = dummy_inputs.get_dummy_processor_inputs(
+                model_config.max_model_len,
+                mm_counts,
+            )
+            text_prompt = None  # MistralTokenizer can't round-trip decode
+            if isinstance(inputs.prompt, str):
+                token_prompt = tokenizer.encode(inputs.prompt, add_special_tokens=False)
+            else:
+                # Some models (e.g. Voxtral) return token IDs directly
+                token_prompt = inputs.prompt
+        else:
+            images = parsed_data.get("image", [])
+            request = ChatCompletionRequest(
+                messages=[
+                    UserMessage(
+                        content=[
+                            TextChunk(text=""),
+                            *(ImageChunk(image=image) for image in images),
+                        ]
+                    ),
+                ]
+            )
+            res = tokenizer.mistral.encode_chat_completion(request)
+
+            # Mistral does not support deco~de_tokens with skip_special_tokens=False
+            text_prompt = None
+            token_prompt = res.tokens
     else:
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
