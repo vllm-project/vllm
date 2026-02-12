@@ -454,3 +454,45 @@ class TestVllmConfigureLogging:
 
             with pytest.raises(ValueError, match="invalid literal for int"):
                 _ = envs.VLLM_CONFIGURE_LOGGING
+
+
+def test_basic_access_types(monkeypatch: pytest.MonkeyPatch):
+    """Test default values and types for various environment variables."""
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
+
+    assert isinstance(envs.LOCAL_RANK, int)
+    assert envs.LOCAL_RANK == 0
+
+    assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
+    assert not envs.VLLM_USE_MODELSCOPE
+
+
+def test_env_var_parsing(monkeypatch: pytest.MonkeyPatch):
+    """Test that environment variables are parsed to the correct types."""
+    monkeypatch.setenv("LOCAL_RANK", "5")
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "1")
+
+    assert isinstance(envs.LOCAL_RANK, int)
+    assert envs.LOCAL_RANK == 5
+
+    assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
+    assert envs.VLLM_USE_MODELSCOPE
+
+
+def test_lazy_defaults(monkeypatch: pytest.MonkeyPatch):
+    """Test that lazy defaults are resolved correctly."""
+    monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+
+    cache_root = envs.VLLM_CACHE_ROOT
+    assert isinstance(cache_root, str)
+    assert "vllm" in cache_root
+
+
+def test_is_set(monkeypatch: pytest.MonkeyPatch):
+    """Test the is_set() function."""
+    monkeypatch.delenv("VLLM_TEST_VAR_123", raising=False)
+    assert not envs.is_set("VLLM_TEST_VAR_123")
+
+    monkeypatch.setenv("VLLM_TEST_VAR_123", "test")
+    assert envs.is_set("VLLM_TEST_VAR_123")
