@@ -1014,6 +1014,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
+            and not self.per_step_hooks
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1333,21 +1334,29 @@ class EngineCoreProc(EngineCore):
         if mode not in ("keep", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        if mode == "keep":
-            # TODO could integrate with forced-preemption here for cache reset case
-            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
-            return None
-
         future: Future[Any] = Future()
 
-        def _wait_for_running_to_finish() -> bool:
-            if not self.scheduler.has_requests():
+        def _output_queue_empty() -> bool:
+            if self.output_queue.empty():
                 if clear_cache:
-                    self.reset_prefix_cache()
+                    self.reset_prefix_cache(reset_running_requests=True)
                     self.reset_mm_cache()
                     self.reset_encoder_cache()
                 future.set_result(None)
                 return True
+            return False
+
+        if mode == "keep":
+            # TODO could integrate with forced-preemption here for cache reset case
+            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+            if not _output_queue_empty():
+                self.per_step_hooks.add(_output_queue_empty)
+            return future
+
+        def _wait_for_running_to_finish() -> bool:
+            # wait for scheduler finish, then wait for output queue to empty
+            if not self.scheduler.has_requests():
+                return _output_queue_empty()
             return False
 
         if mode == "abort":
@@ -1382,9 +1391,8 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
-        return False  # TODO
         """Return whether the scheduler is in any pause state."""
-        # return self._scheduler_pause_state != PauseState.UNPAUSED
+        return self.scheduler.pause_state != PauseState.UNPAUSED
 
 
 class DPEngineCoreProc(EngineCoreProc):
