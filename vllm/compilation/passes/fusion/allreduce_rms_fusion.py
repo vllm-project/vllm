@@ -101,6 +101,9 @@ if flashinfer_comm is not None:
     _AR_RMS_NUMERIC_DEBUG_MAX_LOGS = _parse_int_env(
         "VLLM_DEBUG_AR_RMS_NUMERICS_MAX_LOGS", 200
     )
+    _AR_RMS_NUMERIC_DEBUG_MAX_BAD_ROWS = _parse_int_env(
+        "VLLM_DEBUG_AR_RMS_NUMERICS_MAX_BAD_ROWS", 16
+    )
     _AR_RMS_NUMERIC_DEBUG_CALLS = 0
     _AR_RMS_NUMERIC_DEBUG_LOGS = 0
     _AR_RMS_NUMERIC_DEBUG_CAPTURE_SKIP_WARNED = False
@@ -170,6 +173,28 @@ if flashinfer_comm is not None:
             zero_count = int((tensor == 0).sum().item())
             summary += f" zero={zero_count}/{numel}"
         return summary
+
+    def _bad_row_indices(
+        tensor: torch.Tensor | None, max_rows: int = _AR_RMS_NUMERIC_DEBUG_MAX_BAD_ROWS
+    ) -> str:
+        if tensor is None:
+            return "None"
+        if not torch.is_floating_point(tensor):
+            return "non-floating"
+        if tensor.ndim < 2:
+            return f"ndim={tensor.ndim}(row-scan-skip)"
+
+        first_dim = tensor.shape[0]
+        row_view = tensor.reshape(first_dim, -1)
+        non_finite_rows = (~torch.isfinite(row_view)).any(dim=1)
+        bad_rows = torch.nonzero(non_finite_rows, as_tuple=False).flatten()
+        bad_count = int(bad_rows.numel())
+        if bad_count == 0:
+            return f"0/{first_dim} first=[]"
+
+        first_bad = bad_rows[:max_rows].tolist()
+        suffix = "" if bad_count <= max_rows else "..."
+        return f"{bad_count}/{first_dim} first={first_bad}{suffix}"
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -250,13 +275,18 @@ if flashinfer_comm is not None:
                 _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS
             ):
                 _AR_RMS_NUMERIC_DEBUG_LOGS += 1
+                bad_rows_pre = (
+                    f"bad_rows(allreduce_in_pre)={_bad_row_indices(allreduce_in)} "
+                    f"bad_rows(residual_pre)={_bad_row_indices(residual)}"
+                )
                 logger.warning(
                     "AR_RMS_NUMERIC_DEBUG before call=%d rank=%d pattern=%s "
-                    "use_oneshot=%s | %s",
+                    "use_oneshot=%s | %s | %s",
                     call_id,
                     get_tensor_model_parallel_rank(),
                     _pattern_name(pattern_code),
                     use_oneshot,
+                    bad_rows_pre,
                     " | ".join(_tensor_summary(n, t) for n, t in debug_inputs),
                 )
 
@@ -294,15 +324,22 @@ if flashinfer_comm is not None:
                 input_non_finite or output_non_finite
             ) and _AR_RMS_NUMERIC_DEBUG_LOGS < _AR_RMS_NUMERIC_DEBUG_MAX_LOGS:
                 _AR_RMS_NUMERIC_DEBUG_LOGS += 1
+                bad_rows_post = (
+                    f"bad_rows(allreduce_in_post)={_bad_row_indices(allreduce_in)} "
+                    f"bad_rows(residual_post)={_bad_row_indices(residual)} "
+                    f"bad_rows(norm_out_post)={_bad_row_indices(norm_out)}"
+                )
                 logger.warning(
                     "AR_RMS_NUMERIC_DEBUG after call=%d rank=%d pattern=%s "
-                    "use_oneshot=%s input_non_finite=%s output_non_finite=%s | %s",
+                    "use_oneshot=%s input_non_finite=%s output_non_finite=%s "
+                    "| %s | %s",
                     call_id,
                     get_tensor_model_parallel_rank(),
                     _pattern_name(pattern_code),
                     use_oneshot,
                     input_non_finite,
                     output_non_finite,
+                    bad_rows_post,
                     " | ".join(_tensor_summary(n, t) for n, t in debug_outputs),
                 )
 
