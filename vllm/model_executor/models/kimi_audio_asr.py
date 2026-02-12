@@ -521,18 +521,18 @@ class KimiAudioForConditionalGeneration(
         flat_audio_ids = _flatten_seq_inputs(audio_input_ids)
 
         true_input_ids = input_ids
-        if isinstance(flat_audio_ids, torch.Tensor) and (
-            not isinstance(input_ids, torch.Tensor)
-            or flat_audio_ids.shape[-1] == input_ids.shape[-1]
-        ):
-            # Kimi-Audio uses the audio token stream as the base input ids.
-            true_input_ids = flat_audio_ids
-        elif isinstance(flat_text_ids, torch.Tensor) and (
+        if isinstance(flat_text_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
             or flat_text_ids.shape[-1] == input_ids.shape[-1]
         ):
-            # Fallback to text token stream if audio ids are unavailable.
+            # Prefer the text token stream for ASR text generation.
             true_input_ids = flat_text_ids
+        elif isinstance(flat_audio_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or flat_audio_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            # Fallback to audio ids if text ids are unavailable.
+            true_input_ids = flat_audio_ids
 
         # Base token embeddings. vLLM uses flattened token tensors, so
         # embed_tokens returns [S, H] for [S] input ids.
@@ -886,16 +886,16 @@ class KimiAudioForConditionalGeneration(
             input_ids = args[0]
 
         true_input_ids = input_ids
-        if isinstance(audio_input_ids, torch.Tensor) and (
-            not isinstance(input_ids, torch.Tensor)
-            or audio_input_ids.shape[-1] == input_ids.shape[-1]
-        ):
-            true_input_ids = audio_input_ids
-        elif isinstance(text_input_ids, torch.Tensor) and (
+        if isinstance(text_input_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
             or text_input_ids.shape[-1] == input_ids.shape[-1]
         ):
             true_input_ids = text_input_ids
+        elif isinstance(audio_input_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or audio_input_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            true_input_ids = audio_input_ids
 
         if isinstance(true_input_ids, torch.Tensor) and true_input_ids.dim() == 3:
             true_input_ids = true_input_ids.squeeze(0)
