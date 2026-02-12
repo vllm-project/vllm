@@ -225,15 +225,19 @@ class PromptComponents(NamedTuple):
     embeds: "torch.Tensor | None" = None
 
 
-def extract_prompt_components(
-    model_config: "ModelConfig",
-    prompt: object,
-) -> PromptComponents:
-    target_prompt = (
+def extract_target_prompt(model_config: "ModelConfig", prompt: object):
+    return (
         parse_enc_dec_prompt(prompt)["encoder_prompt"]
         if model_config.is_encoder_decoder
         else parse_dec_only_prompt(prompt)
     )
+
+
+def extract_prompt_components(
+    model_config: "ModelConfig",
+    prompt: object,
+) -> PromptComponents:
+    target_prompt = extract_target_prompt(model_config, prompt)
 
     return PromptComponents(
         text=target_prompt.get("prompt"),
@@ -243,11 +247,7 @@ def extract_prompt_components(
 
 
 def extract_prompt_len(model_config: "ModelConfig", prompt: object):
-    target_prompt = (
-        parse_enc_dec_prompt(prompt)["encoder_prompt"]
-        if model_config.is_encoder_decoder
-        else parse_dec_only_prompt(prompt)
-    )
+    target_prompt = extract_target_prompt(model_config, prompt)
 
     return length_from_prompt_token_ids_or_embeds(
         target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
