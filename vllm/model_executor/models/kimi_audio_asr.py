@@ -226,53 +226,6 @@ def _shape_tuple(value: object) -> tuple[int, ...] | None:
     return None
 
 
-def _update_hash_with_array(hasher: hashlib._Hash, value: object) -> None:
-    if value is None:
-        return
-    if isinstance(value, torch.Tensor):
-        data = value.detach()
-        if data.device.type != "cpu":
-            data = data.to("cpu")
-        if not data.is_contiguous():
-            data = data.contiguous()
-        hasher.update(str(tuple(data.shape)).encode("utf-8"))
-        hasher.update(str(data.dtype).encode("utf-8"))
-        hasher.update(data.numpy().tobytes())
-        return
-    if isinstance(value, np.ndarray):
-        arr = value
-        if not arr.flags["C_CONTIGUOUS"]:
-            arr = np.ascontiguousarray(arr)
-        hasher.update(str(arr.shape).encode("utf-8"))
-        hasher.update(str(arr.dtype).encode("utf-8"))
-        hasher.update(arr.tobytes())
-
-
-def _build_cache_salt(
-    audio: np.ndarray,
-    audio_input_ids: object,
-    text_input_ids: object,
-    is_continuous_mask: object,
-    request_prompt: str,
-    language: str | None,
-    task_type: str,
-    to_language: str | None,
-) -> str:
-    hasher = hashlib.sha1()
-    _update_hash_with_array(hasher, audio)
-    _update_hash_with_array(hasher, audio_input_ids)
-    _update_hash_with_array(hasher, text_input_ids)
-    _update_hash_with_array(hasher, is_continuous_mask)
-    if request_prompt:
-        hasher.update(request_prompt.encode("utf-8"))
-    if language:
-        hasher.update(f"lang={language}".encode())
-    if to_language:
-        hasher.update(f"to={to_language}".encode())
-    hasher.update(f"task={task_type}".encode())
-    return hasher.hexdigest()
-
-
 class KimiAudioASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         # We only need HF config values (token ids) and let vLLM handle weights.
@@ -858,17 +811,6 @@ class KimiAudioForConditionalGeneration(
                 "audio_input_ids": audio_ids,
             }
 
-            cache_salt = _build_cache_salt(
-                audio=audio,
-                audio_input_ids=audio_ids,
-                text_input_ids=text_ids,
-                is_continuous_mask=is_continuous_mask,
-                request_prompt=request_prompt,
-                language=language,
-                task_type=task_type,
-                to_language=to_language,
-            )
-
             # IMPORTANT: vLLM's multimodal pipeline expects *placeholder
             # tokens* in the prompt to mark where multimodal items are
             # inserted. Kimi-Audio's true input_ids include non-text ids that
@@ -887,8 +829,6 @@ class KimiAudioForConditionalGeneration(
             prompt: PromptType = {
                 "prompt": "",
                 "multi_modal_data": {"audio": mm_audio},
-                "cache_salt": cache_salt,
-                "multi_modal_uuids": {"audio": [cache_salt]},
             }
 
             return prompt
