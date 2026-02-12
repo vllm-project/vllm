@@ -1074,13 +1074,14 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
-            # Lazily look up utility method so that failure will be handled/returned.
-            method = lambda: (m := getattr(self, method_name)) and m(
-                *self._convert_msgspec_args(m, args)
+            # Lazily look-up utility method so that failure will be handled/returned.
+            get_result = lambda: (method := getattr(self, method_name)) and method(
+                *self._convert_msgspec_args(method, args)
             )
-            EngineCoreProc._invoke_utility_method(
-                method_name, method, client_idx, self.output_queue, output
+            enqueue_output = lambda out: self.output_queue.put_nowait(
+                (client_idx, EngineCoreOutputs(utility_output=out))
             )
+            self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
@@ -1090,27 +1091,22 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def _invoke_utility_method(
-        method_name: str,
-        method: Callable,
-        client_idx: int,
-        output_queue: queue.Queue[tuple[int, EngineCoreOutputs] | bytes],
-        output: UtilityOutput,
+        name: str, get_result: Callable, output: UtilityOutput, enqueue_output: Callable
     ):
         try:
-            result = method()
+            result = get_result()
             if isinstance(result, Future):
                 # Defer utility output handling until future completion.
-                result.add_done_callback(
-                    lambda future: EngineCoreProc._invoke_utility_method(
-                        method_name, future.result, client_idx, output_queue, output
-                    )
+                callback = lambda future: EngineCoreProc._invoke_utility_method(
+                    name, future.result, output, enqueue_output
                 )
+                result.add_done_callback(callback)
                 return
             output.result = UtilityResult(result)
         except Exception as e:
-            logger.exception("Invocation of %s method failed", method_name)
-            output.failure_message = f"Call to {method_name} method failed: {str(e)}"
-        output_queue.put_nowait((client_idx, EngineCoreOutputs(utility_output=output)))
+            logger.exception("Invocation of %s method failed", name)
+            output.failure_message = f"Call to {name} method failed: {str(e)}"
+        enqueue_output(output)
 
     @staticmethod
     def _convert_msgspec_args(method, args):
