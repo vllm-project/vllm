@@ -225,7 +225,8 @@ def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     logging.disable(current_level)
 
 
-def current_formatter_type(lgr: Logger | None) -> Literal["color", "newline", None]:
+def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
+    lgr: Logger | None = logger
     while lgr is not None:
         if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
             formatter = lgr.handlers[0].formatter

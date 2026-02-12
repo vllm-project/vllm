@@ -70,8 +70,9 @@ class CudagraphDispatcher:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_size = self.compilation_config.max_cudagraph_capture_size
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        if capture_sizes is None:
-            capture_sizes = [max_size]
+        assert capture_sizes is not None, (
+            "Cudagraph capture sizes must be set when cudagraphs are enabled."
+        )
         self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
         for end, start in zip(
             capture_sizes + [max_size + 1],
