@@ -69,8 +69,27 @@ def calculate_ops_pct(
 def create_logits(
     batch_size: int, vocab_size: int, device: str = "cuda"
 ) -> torch.Tensor:
-    """Create random logits tensor."""
-    return torch.randn(batch_size, vocab_size, dtype=torch.float32, device=device)
+    """Create random logits mimicking a realistic LLM distribution.
+
+    Uses a Zipf-like probability distribution (rank^-1.1) converted to logits
+    via log, then randomly permuted per row. This produces a peaked distribution
+    where a small number of tokens capture most probability mass, similar to
+    real model outputs.
+    """
+    # Create Zipf-like probabilities: p(rank) ~ rank^(-alpha)
+    ranks = torch.arange(1, vocab_size + 1, dtype=torch.float32, device=device)
+    probs = ranks.pow(-1.1)
+    probs = probs / probs.sum()
+
+    # Convert to logits (log-probabilities, unnormalized is fine)
+    base_logits = probs.log()
+
+    # Broadcast to batch and randomly permute each row
+    logits = base_logits.unsqueeze(0).expand(batch_size, -1).clone()
+    for i in range(batch_size):
+        logits[i] = logits[i, torch.randperm(vocab_size, device=device)]
+
+    return logits
 
 
 def measure_memory() -> tuple[int, int]:
@@ -234,7 +253,7 @@ def create_benchmark_configs(
             third = batch_size // 3
             k_mixed[:third] = 50
             # Second third: p only
-            p_mixed[third : 2 * third] = 0.9
+            p_mixed[third : 2 * third] = 0.5
             # Last third: both k and p
             k_mixed[2 * third :] = 100
             p_mixed[2 * third :] = 0.9
@@ -384,7 +403,7 @@ def main():
         "--batch-sizes",
         type=int,
         nargs="+",
-        default=[1, 4, 16, 24, 32, 48, 56, 64, 96, 128, 192, 256, 512, 1024],
+        default=[1, 4, 16, 64, 128, 512, 1024, 2048],
         help="Batch sizes to test (default: 1 4 16 64)",
     )
     parser.add_argument(

@@ -248,15 +248,10 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    # Rough empirical heuristic
-    if HAS_TRITON:
-        batch_size, vocab_size = logits.shape
-        both_k_and_p = p is not None and k is not None
-        threshold = vocab_size // (1024 if both_k_and_p else 2048)
-        if batch_size >= threshold:
-            # Use pytorch sort implementation for smaller batch sizes.
-            return apply_top_k_top_p_triton(logits, k, p)
+    if HAS_TRITON and logits.shape[0] >= 8:
+        return apply_top_k_top_p_triton(logits, k, p)
 
+    # Use pytorch sort implementation for small batch sizes.
     return apply_top_k_top_p_pytorch(logits, k, p)
 
 
@@ -301,7 +296,7 @@ def apply_top_k_top_p_pytorch(
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
-    return logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
