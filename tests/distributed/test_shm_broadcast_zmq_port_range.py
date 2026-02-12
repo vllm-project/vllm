@@ -34,6 +34,7 @@ def _find_free_port_range(size: int = 20) -> tuple[int, int]:
         if all(_port_is_free(p) for p in range(start, end + 1)):
             return start, end
     pytest.skip("Could not find a free contiguous TCP port range on localhost.")
+    raise RuntimeError("unreachable")
 
 
 @pytest.mark.parametrize(
@@ -65,7 +66,9 @@ def test_parse_port_range_invalid(port_range: str) -> None:
         _parse_port_range(port_range)
 
 
-def test_message_queue_binds_within_zmq_port_range(monkeypatch: pytest.MonkeyPatch):
+def test_message_queue_binds_within_zmq_port_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     start_port, end_port = _find_free_port_range(size=30)
     monkeypatch.setenv("VLLM_ZMQ_PORT_RANGE", f"{start_port}-{end_port}")
     if hasattr(envs.__getattr__, "cache_clear"):
