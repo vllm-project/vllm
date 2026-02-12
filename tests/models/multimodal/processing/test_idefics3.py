@@ -72,7 +72,7 @@ def test_processor_override(
     hf_processed_inputs = hf_processor(
         text=prompt,
         images=mm_data["image"],
-        **processor.info.ctx.get_merged_kwargs(hf_processor_mm_kwargs),
+        **processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs),
     )
     assert processed_inputs["prompt_token_ids"] == hf_processed_inputs["input_ids"][0]
 

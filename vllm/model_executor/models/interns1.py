@@ -205,7 +205,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         num_image_patches = image_processor.get_number_of_image_patches(
             image_height,
             image_width,
-            self.ctx.get_merged_kwargs(mm_kwargs),
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
 
         return processor.image_seq_length * num_image_patches

@@ -98,7 +98,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         images_kwargs = processor._merge_kwargs(
             Gemma3ProcessorKwargs,
             tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-            **self.ctx.get_merged_kwargs(mm_kwargs),
+            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )["images_kwargs"]
 
         do_pan_and_scan = images_kwargs.get(
@@ -216,7 +216,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         images_kwargs = processor._merge_kwargs(
             Gemma3ProcessorKwargs,
             tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-            **self.ctx.get_merged_kwargs({}),
+            **self.ctx.get_merged_mm_kwargs({}),
         )["images_kwargs"]
 
         max_num_crops = images_kwargs.get(
