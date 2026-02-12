@@ -169,15 +169,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Idefics3Processor,
         mm_kwargs: Mapping[str, object],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         image_processor: Idefics3ImageProcessor = processor.image_processor
 
-        _, grid_h, grid_w = image_processor.get_number_of_image_patches(
+        return image_processor.get_number_of_image_patches(
             image_height,
             image_width,
             mm_kwargs,
         )
-        return grid_w, grid_h
 
     def get_num_patches(
         self,
@@ -187,14 +186,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         processor: Idefics3Processor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        grid_w, grid_h = self._get_image_feature_grid_size(
+        num_patches, _, _ = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
             mm_kwargs=mm_kwargs,
         )
 
-        return grid_w * grid_h + 1
+        return num_patches
 
     def _get_image_token(self, processor: Idefics3Processor) -> tuple[str, str, str]:
         image_token = processor.image_token
@@ -220,7 +219,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         global_img_placeholder = fake_image_token + global_img_token + p_img
         tile_img_placeholder = fake_image_token + grid_placeholder + p_img
 
-        grid_w, grid_h = self._get_image_feature_grid_size(
+        _, grid_h, grid_w = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,

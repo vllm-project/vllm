@@ -3,7 +3,9 @@
 """Tests for Idefics3's multimodal preprocessing kwargs."""
 
 import pytest
+from packaging.version import Version
 from transformers import Idefics3Config
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -64,7 +66,13 @@ def test_processor_override(
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
     hf_processed_inputs = hf_processor(
-        text=prompt, images=mm_data["image"], **hf_processor_mm_kwargs
+        text=prompt,
+        images=mm_data["image"],
+        **(
+            {}
+            if Version(TRANSFORMERS_VERSION) < Version("5.0.0")
+            else hf_processor_mm_kwargs
+        ),
     )
     assert processed_inputs["prompt_token_ids"] == hf_processed_inputs["input_ids"][0]
 
