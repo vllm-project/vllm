@@ -15,7 +15,6 @@ from pydantic.dataclasses import dataclass
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logits_process import LogitsProcessor
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
@@ -207,11 +206,6 @@ class SamplingParams(
     """Whether to skip special tokens in the output."""
     spaces_between_special_tokens: bool = True
     """Whether to add spaces between special tokens in the output."""
-    # `list[LogitsProcessor] | None` type. We use Any here because
-    # `list[LogitsProcessor] | None` type is not supported by msgspec.
-    logits_processors: Any | None = None
-    """Functions that modify logits based on previously generated tokens, and
-    optionally prompt tokens as a first argument."""
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
@@ -277,7 +271,6 @@ class SamplingParams(
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        logits_processors: list[LogitsProcessor] | None = None,
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
