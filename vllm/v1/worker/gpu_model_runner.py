@@ -5705,10 +5705,10 @@ class GPUModelRunner(
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
+            block_sizes.append(block_size)
             max_num_blocks_per_req = cdiv(
                 max_model_len, block_size * get_total_cp_world_size()
             )
-            block_sizes.append(block_size)
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 max_num_blocks_per_req = (
                     max_num_blocks_per_req
