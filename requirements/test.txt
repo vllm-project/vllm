@@ -189,8 +189,6 @@ docopt==0.6.2
     # via num2words
 docstring-parser==0.17.0
     # via jsonargparse
-efficientnet-pytorch==0.7.1
-    # via segmentation-models-pytorch
 einops==0.8.1
     # via
     #   -r requirements/test.in
@@ -500,8 +498,6 @@ multiprocess==0.70.16
     # via
     #   datasets
     #   evaluate
-munch==4.0.0
-    # via pretrainedmodels
 mypy-extensions==1.0.0
     # via black
 networkx==3.2.1
@@ -752,8 +748,6 @@ portalocker==2.10.1
     # via sacrebleu
 pqdm==0.2.0
     # via -r requirements/test.in
-pretrainedmodels==0.7.4
-    # via segmentation-models-pytorch
 prometheus-client==0.22.0
     # via
     #   opentelemetry-exporter-prometheus
@@ -1008,6 +1002,7 @@ safetensors==0.4.5
     #   diffusers
     #   open-clip-torch
     #   peft
+    #   segmentation-models-pytorch
     #   timm
     #   transformers
 schemathesis==3.39.15
@@ -1036,8 +1031,9 @@ scipy==1.13.1
     #   sentence-transformers
     #   statsmodels
     #   vocos
-segmentation-models-pytorch==0.4.0
+segmentation-models-pytorch==0.5.0
     # via
+    #   -r requirements/test.in
     #   terratorch
     #   torchgeo
 sentence-transformers==5.2.0
@@ -1069,7 +1065,6 @@ six==1.16.0
     #   python-dateutil
     #   rfc3339-validator
     #   rouge-score
-    #   segmentation-models-pytorch
 smart-open==7.1.0
     # via ray
 smmap==5.0.2
@@ -1171,7 +1166,6 @@ torch==2.10.0+cu129
     #   -r requirements/test.in
     #   accelerate
     #   bitsandbytes
-    #   efficientnet-pytorch
     #   encodec
     #   kornia
     #   lightly
@@ -1180,7 +1174,6 @@ torch==2.10.0+cu129
     #   mteb
     #   open-clip-torch
     #   peft
-    #   pretrainedmodels
     #   pytorch-lightning
     #   runai-model-streamer
     #   segmentation-models-pytorch
@@ -1212,7 +1205,6 @@ torchvision==0.25.0+cu129
     #   -r requirements/test.in
     #   lightly
     #   open-clip-torch
-    #   pretrainedmodels
     #   segmentation-models-pytorch
     #   terratorch
     #   timm
@@ -1231,7 +1223,6 @@ tqdm==4.67.3
     #   optuna
     #   peft
     #   pqdm
-    #   pretrainedmodels
     #   pytorch-lightning
     #   segmentation-models-pytorch
     #   sentence-transformers
