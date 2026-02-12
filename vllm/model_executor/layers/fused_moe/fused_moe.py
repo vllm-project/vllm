@@ -50,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
@@ -679,43 +680,47 @@ def invoke_fused_moe_wna16_triton_kernel(
         )
     )
 
-    fused_moe_kernel_gptq_awq[grid](
-        A,
-        B,
-        C,
-        B_scale,
-        B_zp,
-        topk_weights,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        B.size(1),
-        A.size(1),
-        EM,
-        num_tokens,
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(2),
-        B.stride(1),
-        C.stride(1),
-        C.stride(2),
-        B_scale.stride(0),
-        B_scale.stride(2),
-        B_scale.stride(1),
-        B_zp.stride(0) if B_zp is not None else 0,
-        B_zp.stride(2) if B_zp is not None else 0,
-        B_zp.stride(1) if B_zp is not None else 0,
-        block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
-        group_size=block_shape[1],
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
-        top_k=top_k,
-        compute_type=compute_type,
-        has_zp=B_zp is not None,
-        use_int4_w4a16=use_int4_w4a16,
-        use_int8_w8a16=use_int8_w8a16,
-        **config,
-    )
+    E, N, K = B.size(0), B.size(1), A.size(1)
+    with record_function_or_nullcontext(
+        f"fused_moe_gptq_awq {M}x{N}x{K} E={E} top_k={top_k}"
+    ):
+        fused_moe_kernel_gptq_awq[grid](
+            A,
+            B,
+            C,
+            B_scale,
+            B_zp,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            N,
+            K,
+            EM,
+            num_tokens,
+            A.stride(0),
+            A.stride(1),
+            B.stride(0),
+            B.stride(2),
+            B.stride(1),
+            C.stride(1),
+            C.stride(2),
+            B_scale.stride(0),
+            B_scale.stride(2),
+            B_scale.stride(1),
+            B_zp.stride(0) if B_zp is not None else 0,
+            B_zp.stride(2) if B_zp is not None else 0,
+            B_zp.stride(1) if B_zp is not None else 0,
+            block_k_diviable=K % config["BLOCK_SIZE_K"] == 0,
+            group_size=block_shape[1],
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            has_zp=B_zp is not None,
+            use_int4_w4a16=use_int4_w4a16,
+            use_int8_w8a16=use_int8_w8a16,
+            **config,
+        )
 
 
 def invoke_fused_moe_triton_kernel(
