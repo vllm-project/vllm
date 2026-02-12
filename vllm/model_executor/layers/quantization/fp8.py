@@ -49,6 +49,10 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.copy_numel_counter import (
+    CopyNumelCounter,
+    copy_missing_attrs,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
 )
@@ -72,10 +76,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
-    CopyNumelCounter,
     MoeOnlineQuantizer,
     MoeOnlineWeightLoader,
-    _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -534,7 +536,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
                     output_dim=0,
                     weight_loader=patched_weight_loader,
                 )
-                _copy_missing_attrs(layer.weight, weight)
+                copy_missing_attrs(layer.weight, weight)
                 layer.register_parameter("weight", weight)
                 del layer._load_device
 
@@ -594,7 +596,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
                 output_dim=0,
                 weight_loader=layer.weight.weight_loader,
             )
-            _copy_missing_attrs(layer.weight, weight)
+            copy_missing_attrs(layer.weight, weight)
             layer.register_parameter("weight", weight)
             initialize_single_dummy_weight(layer.weight)
 
