@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
 )
@@ -154,9 +155,7 @@ class VoxtralProcessorAdapter:
             assert audio.ndim == 1
 
             if not self._audio_processor.audio_config.is_streaming:
-                audio = self._audio_processor.pad(
-                    audio, self.sampling_rate, is_online_streaming=False
-                )
+                audio = self._audio_processor.pad(audio, self.sampling_rate)
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id
@@ -187,6 +186,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MultiModalDataParser(
             target_sr=self.get_hf_processor().sampling_rate,
+            target_channels=1,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
@@ -219,6 +219,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
@@ -237,6 +238,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -280,6 +282,15 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(audio_arrays=MultiModalFieldConfig.batched("audio"))
 
+    def _validate_mm_placeholders(
+        self,
+        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        # mistral_common's tokenizer's does not follow HF's placeholder norms
+        # skip validation here
+        ...
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -289,10 +300,24 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         audio_id = processor.audio_token_id
+        out_mm_data = out_mm_kwargs.require_data()
+        out_audio_items = out_mm_data.get("audio", [])
 
         def get_replacement(item_idx: int):
-            audios = mm_items.get_items("audio", AudioProcessorItems)
-            audio_len = audios.get_audio_length(item_idx)
+            if item_idx < len(out_audio_items):
+                out_audio_data = out_audio_items[item_idx].get_data()
+                audio_arr = out_audio_data["audio_arrays"]
+                if isinstance(audio_arr, (torch.Tensor, np.ndarray)):
+                    audio_len = len(audio_arr)
+                else:
+                    raise TypeError(
+                        "Unexpected type for audio_arrays in out_mm_kwargs: "
+                        f"{type(audio_arr)}"
+                    )
+            else:
+                # Fallback for unexpected processor outputs.
+                audios = mm_items.get_items("audio", AudioProcessorItems)
+                audio_len = audios.get_audio_length(item_idx)
 
             nb_audio_tokens = processor.get_num_audio_tokens(audio_len)
 
@@ -335,6 +360,9 @@ class VoxtralForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    # transformers' currently has limited support for MistralCommon backend
+    # and cached_get_processor. Let's skip until fixed
+    skip_warmup_audio_preprocessing = True
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -492,7 +520,10 @@ class VoxtralForConditionalGeneration(
         return TokensPrompt(
             prompt_token_ids=tokenized.tokens,
             multi_modal_data={
-                "audio": (tokenized.audios[0].audio_array, stt_config.sample_rate)
+                "audio": [
+                    (audio.audio_array, stt_config.sample_rate)
+                    for audio in tokenized.audios
+                ],
             },
         )
 
@@ -771,7 +802,9 @@ class VoxtralEncoderModel(nn.Module):
         audio_waveforms: torch.Tensor,
     ) -> torch.Tensor:
         input_dtype = audio_waveforms.dtype
-        window = torch.hann_window(self.config.window_size).to(audio_waveforms.device)
+        window = torch.hann_window(
+            self.config.window_size, device=audio_waveforms.device
+        )
         stft = torch.stft(
             audio_waveforms,
             self.config.window_size,
@@ -782,7 +815,19 @@ class VoxtralEncoderModel(nn.Module):
         magnitudes = stft[..., :-1].abs() ** 2
         mel_spec = self.mel_filters.T @ magnitudes
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+
+        if global_log_mel_max := self.config.global_log_mel_max:
+            if not isinstance(global_log_mel_max, float):
+                raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
+            log_spec_max = torch.tensor(
+                global_log_mel_max,
+                device=log_spec.device,
+                dtype=log_spec.dtype,
+            )
+        else:
+            log_spec_max = log_spec.max()
+
+        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

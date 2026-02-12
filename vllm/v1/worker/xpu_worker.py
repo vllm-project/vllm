@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 from typing import Any
 
 import torch
-import torch.distributed
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -85,16 +85,20 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
+        # Set random seed.
+        set_random_seed(self.model_config.seed)
+
+        # Now take memory snapshot after NCCL is initialized
+        gc.collect()
         torch.xpu.empty_cache()
+
+        # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
         self.requested_memory = request_memory(init_snapshot, self.cache_config)
         logger.debug("worker init memory snapshot: %r", self.init_snapshot)
         logger.debug(
             "worker requested memory: %sGiB", format_gib(self.requested_memory)
         )
-
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1

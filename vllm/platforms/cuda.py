@@ -45,17 +45,29 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability,
+    num_heads: int | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if use_mla:
         if device_capability.major == 10:
+            # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+            if num_heads is not None and num_heads <= 16:
+                sparse_backends = [
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                ]
+            else:
+                sparse_backends = [
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                ]
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
-                AttentionBackendEnum.FLASHMLA_SPARSE,
+                *sparse_backends,
             ]
         else:
             return [
@@ -102,6 +114,9 @@ class CudaPlatformBase(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+    ]
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -197,11 +212,13 @@ class CudaPlatformBase(Platform):
                 requested_backend = (
                     attention_config.backend if attention_config else None
                 )
+                num_heads = model_config.get_num_attention_heads(parallel_config)
                 chosen_backend = cls.select_attention_backend(
                     selected_backend=requested_backend,
                     attn_selector_config=attn_selector_config,
                     device_capability=device_capability,
                     raise_on_invalid=False,
+                    num_heads=num_heads,
                 )
 
                 if chosen_backend is not None:
@@ -247,6 +264,7 @@ class CudaPlatformBase(Platform):
         cls,
         device_capability: DeviceCapability,
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -255,7 +273,9 @@ class CudaPlatformBase(Platform):
         invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla, device_capability
+            attn_selector_config.use_mla,
+            device_capability,
+            num_heads,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -280,6 +300,7 @@ class CudaPlatformBase(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         device_capability: "DeviceCapability",
         raise_on_invalid: bool = True,
+        num_heads: int | None = None,
     ) -> "AttentionBackendEnum | None":
         """Select the best attention backend for the given configuration.
 
@@ -292,6 +313,8 @@ class CudaPlatformBase(Platform):
             attn_selector_config: Configuration for attention selection
             device_capability: Device capability info
             raise_on_invalid: If True, raise ValueError when no valid backend
+            num_heads: Number of attention heads per GPU, used for backend
+                priority ordering on Blackwell GPUs
 
         Returns:
             The selected backend enum, or None if no valid backend found
@@ -323,6 +346,7 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
         )
 
         if len(valid_backends_priorities) == 0:
@@ -351,6 +375,7 @@ class CudaPlatformBase(Platform):
         cls,
         selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -358,6 +383,7 @@ class CudaPlatformBase(Platform):
         chosen_backend = cls.select_attention_backend(
             selected_backend=selected_backend,
             attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
             device_capability=device_capability,
             raise_on_invalid=True,
         )
@@ -371,6 +397,7 @@ class CudaPlatformBase(Platform):
             valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
                 device_capability=device_capability,
                 attn_selector_config=attn_selector_config._replace(block_size=None),
+                num_heads=num_heads,
             )
             reasons_str = (
                 "{"

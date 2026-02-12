@@ -611,6 +611,7 @@ class ImagePoolingAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
             )
 
     def forward_sdpa(
@@ -627,18 +628,6 @@ class ImagePoolingAttention(nn.Module):
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
 
-        if self.num_heads != self.num_kv_heads:
-            key = torch.repeat_interleave(
-                key,
-                self.num_heads // self.num_kv_heads,
-                dim=2,
-            )
-            value = torch.repeat_interleave(
-                value,
-                self.num_heads // self.num_kv_heads,
-                dim=2,
-            )
-
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
 
         out = F.scaled_dot_product_attention(
@@ -647,6 +636,7 @@ class ImagePoolingAttention(nn.Module):
             value,
             attn_mask=attn_mask,
             is_causal=False,
+            enable_gqa=self.num_heads > self.num_kv_heads,
         ).transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
@@ -2089,6 +2079,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
