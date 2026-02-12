@@ -1138,6 +1138,7 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.llm.shutdown()
         del self.llm
         cleanup_dist_env_and_memory()
 

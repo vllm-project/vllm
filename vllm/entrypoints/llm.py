@@ -1988,3 +1988,6 @@ class LLM:
             else:
                 self._cached_repr = f"LLM(model={self.model_config.model!r})"
         return self._cached_repr
+
+    def shutdown(self):
+        self.llm_engine.shutdown()

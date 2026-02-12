@@ -420,3 +420,8 @@ class LLMEngine:
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
+        self.shutdown()
+
+    def shutdown(self):
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
