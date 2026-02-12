@@ -438,8 +438,9 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 state["in_end"] = True
                 state["end_count"] = 0
                 state["check_count_down"] = state["thinking_token_budget"]
-                state["force_index"] = (state["think_count"]+len(state["spec_token_ids"]))
-                - state["thinking_token_budget"]
+                overflow_position = (state["think_count"]+len(state["spec_token_ids"]))\
+                  - state["thinking_token_budget"]
+                state["force_index"] = len(state["spec_token_ids"]) - overflow_position
         else:
             # In end mode
             state["end_count"] += 1
