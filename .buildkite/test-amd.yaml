@@ -569,9 +569,12 @@ steps:
       --ignore=lora/test_gptoss_tp.py \
       --ignore=lora/test_qwen3moe_tp.py
   parallelism: 4
+
+##### .buildkite/test_areas/pytorch.yaml #####
+# corresponds to .buildkite/test_areas/pytorch.yaml
 - label: PyTorch Compilation Unit Tests # 15min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -585,6 +588,10 @@ steps:
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  # TODO: clean up this comment if not needed. It is used to 
+  # keep track of the tests changes during vLLM IR Ops refactoring.
+  # Use `find` to launch multiple instances of pytest.
+  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -1667,7 +1674,7 @@ steps:
 - label: Fusion and Compile Unit Tests (2xMI325 GPUs)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1 # changed to 1 GPU until the fusion all reduce is enabled then only revert back to 2 GPUs
   source_file_dependencies:
   - csrc/quantization/fp4/
@@ -1695,7 +1702,7 @@ steps:
 - label: Fusion E2E Quick (MI325)
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1
   num_devices: 1
   source_file_dependencies:
@@ -1715,7 +1722,7 @@ steps:
 - label: Fusion E2E Config Sweep (MI325)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1
   num_devices: 1
   source_file_dependencies:
@@ -1730,8 +1737,7 @@ steps:
   commands:
     - rocm-smi
     # Run just llama3 (fp8) for all config combinations
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'llama-3'"
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8' -k 'inductor_partition and not +rms_norm and +quant_fp8 and qwen3' -k 'llama-3'"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 ## There are no ops on ROCm for these tests.
 ## The test still passes but the logs are not useful.
