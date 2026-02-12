@@ -19,12 +19,21 @@ class FlashinferMoeBackend(Enum):
     CUTEDSL = "CUTEDSL"
 
 
+def is_gated_activation(activation: str) -> bool:
+    NON_GATED_ACTIVATION_NAMES = {"relu2_no_mul"}
+    return activation not in NON_GATED_ACTIVATION_NAMES
+
+
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
+    from vllm.utils.flashinfer import FlashinferActivationType
+
+    # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
-        MoEActivation.SILU: 2,  # FlashInfer ActivationType.SiLU
-        MoEActivation.RELU2_NO_MUL: 6,  # FlashInfer ActivationType.ReLU2NoMul
+        MoEActivation.SILU: FlashinferActivationType.Swiglu,
+        MoEActivation.GELU: FlashinferActivationType.Geglu,
+        MoEActivation.RELU2_NO_MUL: FlashinferActivationType.Relu2,
     }
-    return ACTIVATION_TO_FI_ACTIVATION[activation]
+    return ACTIVATION_TO_FI_ACTIVATION[activation].value
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
