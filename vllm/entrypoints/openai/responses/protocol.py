@@ -331,6 +331,11 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
+        extra_args: dict[str, Any] = {}
+        if self.reasoning is not None and self.reasoning.effort is not None:
+            extra_args.update(reasoning_effort=self.reasoning.effort)
+        if self.parallel_tool_calls is not None:
+            extra_args.update(parallel_tool_calls=self.parallel_tool_calls)
 
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
@@ -356,6 +361,7 @@ class ResponsesRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            extra_args=extra_args,
         )
 
     def is_include_output_logprobs(self) -> bool:
