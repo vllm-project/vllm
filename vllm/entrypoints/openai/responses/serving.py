@@ -296,10 +296,12 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_prompt)
-        if self.max_model_len <= prompt_len:
+        max_model_len = self.model_config.max_model_len
+
+        if prompt_len >= max_model_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
-                f"exceeds the max_model_len {self.max_model_len}. "
+                f"exceeds the max_model_len {max_model_len}. "
                 "Please reduce prompt."
             )
             return self.create_error_response(
@@ -414,6 +416,7 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
@@ -431,8 +434,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
+            tokenizer = self.renderer.get_tokenizer()
 
             for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
@@ -440,7 +442,7 @@ class OpenAIServingResponses(OpenAIServing):
                     return maybe_error
 
                 default_max_tokens = get_max_tokens(
-                    self.max_model_len,
+                    max_model_len,
                     request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,

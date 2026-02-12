@@ -507,7 +507,8 @@ def test_apc_single_prompt_block_align_alignment(
     vllm_runner_kwargs["enable_prefix_caching"] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         # Retrieve the default mamba state block size
-        mamba_block_size = vllm_model.llm.llm_engine.cache_config.mamba_block_size
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
 
     # In case the hybrid model does not have the
     # "mamba_block_size" assume a fixed constant
@@ -660,7 +661,8 @@ def test_apc_multiple_prompts_block_align_alignment(
     vllm_runner_kwargs["enable_prefix_caching"] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         # Retrieve the default mamba state block size
-        mamba_block_size = vllm_model.llm.llm_engine.cache_config.mamba_block_size
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
 
     # In case the hybrid model does not have the
     # "mamba_block_size" assume a fixed constant

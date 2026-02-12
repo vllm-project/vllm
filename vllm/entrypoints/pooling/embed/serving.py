@@ -69,16 +69,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
 
         pooler_config = self.model_config.pooler_config
-
-        # Avoid repeated attribute lookups
-        self.supports_chunked_processing = bool(
-            pooler_config and pooler_config.enable_chunked_processing
-        )
-        self.max_embed_len = (
-            pooler_config.max_embed_len
-            if pooler_config and pooler_config.max_embed_len
-            else None
-        )
+        assert pooler_config is not None
+        self.pooler_config = pooler_config
 
     async def _preprocess(
         self,
@@ -240,7 +232,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         """Check if chunked processing should be used for this request."""
         return (
             isinstance(request, (EmbeddingCompletionRequest, EmbeddingChatRequest))
-            and self.supports_chunked_processing
+            and self.pooler_config.enable_chunked_processing
         )
 
     async def _process_chunked_request(
@@ -310,14 +302,14 @@ class OpenAIServingEmbedding(OpenAIServing):
             max_pos_embeddings = self._get_max_position_embeddings()
 
             # Determine the effective max length for validation
-            if self.max_embed_len is not None:
+            if self.pooler_config.max_embed_len:
                 # Use max_embed_len for validation instead of max_model_len
                 length_type = "maximum embedding input length"
-                max_length_value = self.max_embed_len
+                max_length_value = self.pooler_config.max_embed_len
             else:
                 # Fall back to max_model_len validation (original behavior)
                 length_type = "maximum context length"
-                max_length_value = self.max_model_len
+                max_length_value = self.model_config.max_model_len
 
             validation_error_msg = (
                 "This model's {length_type} is {max_length_value} tokens. "
