@@ -356,8 +356,9 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.input_processor = self.llm_engine.input_processor
+        self.renderer = self.llm_engine.renderer
         self.io_processor = self.llm_engine.io_processor
+        self.input_processor = self.llm_engine.input_processor
 
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
@@ -816,7 +817,7 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        renderer = self.llm_engine.renderer
+        renderer = self.renderer
         model_config = self.model_config
 
         parsed_prompts = [
@@ -858,7 +859,7 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        renderer = self.llm_engine.renderer
+        renderer = self.renderer
 
         chat_params = ChatParams(
             chat_template=chat_template,
