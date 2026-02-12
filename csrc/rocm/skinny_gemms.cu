@@ -1568,8 +1568,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         {
   #endif
           unsigned int kOff = k + (thrd * A_CHUNK);
-          unsigned int kOffcp =
-              k_str + kOff;  // min__(K - A_CHUNK, k_str + kOff);
+          unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
             __builtin_amdgcn_global_load_lds(
                 (int*)(&A[min__(
