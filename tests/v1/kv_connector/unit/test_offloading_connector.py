@@ -356,7 +356,7 @@ class RequestRunner:
             self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
             if (
-                prev_token_id is EOS_TOKEN_ID
+                prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
                 and self.scheduler.requests
             ):
