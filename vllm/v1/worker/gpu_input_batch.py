@@ -767,7 +767,7 @@ class InputBatch:
         # Update sampling metadata if batch state is changed.
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         for logit_proc in self.logitsprocs.all:
-            logit_proc.update_state(batch_update)
+            logit_proc.update_state(batch_update, self.spec_token_ids)
         if batch_update:
             self.sampling_metadata = self._make_sampling_metadata()
 
