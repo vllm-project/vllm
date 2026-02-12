@@ -694,6 +694,11 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-prompt-embeds", **model_kwargs["enable_prompt_embeds"]
         )
+        # Special case: served_model_name needs append action to avoid
+        # nargs="+" greedily consuming the positional model_tag argument.
+        model_kwargs["served_model_name"]["action"] = "append"
+        if "nargs" in model_kwargs["served_model_name"]:
+            del model_kwargs["served_model_name"]["nargs"]
         model_group.add_argument(
             "--served-model-name", **model_kwargs["served_model_name"]
         )

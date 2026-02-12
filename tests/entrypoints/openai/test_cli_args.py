@@ -241,3 +241,37 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         serve_parser.parse_args(
             args=["--default-chat-template-kwargs", "not valid json"]
         )
+
+
+### Tests for --served-model-name parsing
+@pytest.mark.parametrize(
+    "cli_args, expected",
+    [
+        # Single name
+        (["--served-model-name", "ASR"], ["ASR"]),
+        # Multiple names via repeated flag
+        (
+            ["--served-model-name", "ASR", "--served-model-name", "ASR2"],
+            ["ASR", "ASR2"],
+        ),
+        # Not specified → None
+        ([], None),
+    ],
+)
+def test_served_model_name(serve_parser, cli_args, expected):
+    """Ensure --served-model-name uses append action and doesn't
+    greedily consume positional args.
+    See: https://github.com/vllm-project/vllm/issues/34326"""
+    args = serve_parser.parse_args(args=cli_args)
+    assert args.served_model_name == expected
+
+
+def test_served_model_name_does_not_consume_model_tag(serve_parser):
+    """Regression test: --served-model-name should not greedily consume
+    the positional model_tag argument.
+    See: https://github.com/vllm-project/vllm/issues/34326"""
+    args = serve_parser.parse_args(
+        ["--served-model-name", "ASR", "Qwen/Qwen3-ASR-1.7B"]
+    )
+    assert args.model_tag == "Qwen/Qwen3-ASR-1.7B"
+    assert args.served_model_name == ["ASR"]
