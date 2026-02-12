@@ -5,7 +5,6 @@ import queue
 import signal
 import threading
 import time
-import weakref
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -1004,7 +1003,7 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
-            # 3) Run per-step hooks.
+            # 3) Run any per-step hooks.
             self._process_per_step_hooks()
 
     def _process_input_queue(self):
@@ -1058,7 +1057,7 @@ class EngineCoreProc(EngineCore):
     def _process_per_step_hooks(self) -> None:
         if self.per_step_hooks:
             for hook in list(self.per_step_hooks):
-                finished = hook()
+                finished = hook(self)
                 if finished:
                     self.per_step_hooks.discard(hook)
 
@@ -1075,7 +1074,13 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
-            self._invoke_utility_method(method_name, None, client_idx, output, args)
+            # Lazily look up utility method so that failure will be handled/returned.
+            method = lambda: (m := getattr(self, method_name)) and m(
+                *self._convert_msgspec_args(m, args)
+            )
+            EngineCoreProc._invoke_utility_method(
+                method_name, method, client_idx, self.output_queue, output
+            )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
@@ -1083,45 +1088,29 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
+    @staticmethod
     def _invoke_utility_method(
-        self,
         method_name: str,
-        method: Callable | None,
+        method: Callable,
         client_idx: int,
+        output_queue: queue.Queue[tuple[int, EngineCoreOutputs] | bytes],
         output: UtilityOutput,
-        args=(),
     ):
         try:
-            if method is None:
-                method = getattr(self, method_name)
-            result = method(*self._convert_msgspec_args(method, args))
+            result = method()
             if isinstance(result, Future):
-                self_ref = weakref.ref(self)
-
-                def _on_future_done(f: Future[Any]) -> None:
-                    engine = self_ref()
-                    if engine is None:
-                        return
-                    try:
-                        output.result = UtilityResult(f.result())
-                    except Exception as e:
-                        logger.exception("Invocation of %s method failed", method_name)
-                        output.failure_message = (
-                            f"Call to {method_name} method failed: {str(e)}"
-                        )
-                    engine.output_queue.put_nowait(
-                        (client_idx, EngineCoreOutputs(utility_output=output))
+                # Defer utility output handling until future completion.
+                result.add_done_callback(
+                    lambda future: EngineCoreProc._invoke_utility_method(
+                        method_name, future.result, client_idx, output_queue, output
                     )
-
-                result.add_done_callback(_on_future_done)
+                )
                 return
             output.result = UtilityResult(result)
         except Exception as e:
             logger.exception("Invocation of %s method failed", method_name)
             output.failure_message = f"Call to {method_name} method failed: {str(e)}"
-        self.output_queue.put_nowait(
-            (client_idx, EngineCoreOutputs(utility_output=output))
-        )
+        output_queue.put_nowait((client_idx, EngineCoreOutputs(utility_output=output)))
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -1349,36 +1338,19 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         future: Future[Any] = Future()
-        self_ref = weakref.ref(self)
 
-        def _output_queue_empty() -> bool:
-            engine = self_ref()
-            if engine is None:
-                future.set_result(None)
-                return True
-            if engine.output_queue.empty():
+        def wait_until_idle(engine: "EngineCoreProc") -> bool:
+            if (
+                not engine.scheduler.has_requests()
+                and not engine.batch_queue
+                and engine.output_queue.empty()
+            ):
                 if clear_cache:
                     engine.reset_prefix_cache(reset_running_requests=True)
                     engine.reset_mm_cache()
                     engine.reset_encoder_cache()
                 future.set_result(None)
                 return True
-            return False
-
-        if mode == "keep":
-            # TODO could integrate with forced-preemption here for cache reset case
-            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
-            if not _output_queue_empty():
-                self.per_step_hooks.add(_output_queue_empty)
-            return future
-
-        def _wait_for_running_to_finish() -> bool:
-            engine = self_ref()
-            if engine is None:
-                future.set_result(None)
-                return True
-            if not engine.scheduler.has_requests():
-                return _output_queue_empty()
             return False
 
         if mode == "abort":
@@ -1402,9 +1374,10 @@ class EngineCoreProc(EngineCore):
                     eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
                     self.output_queue.put_nowait((client_index, eco))
 
-        self.scheduler.set_pause_state(PauseState.PAUSED_NEW)
-        if not _wait_for_running_to_finish():
-            self.per_step_hooks.add(_wait_for_running_to_finish)
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+        if not wait_until_idle(self):
+            self.per_step_hooks.add(wait_until_idle)
             return future
         return None
 
