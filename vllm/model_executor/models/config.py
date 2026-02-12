@@ -550,13 +550,14 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
         ar_rms_enabled = vllm_config.compilation_config.pass_config.fuse_allreduce_rms
         nvfp4 = vllm_config.model_config.is_nvfp4_quantized()
 
-        # Also handle None case
-        if ar_rms_enabled is not False and nvfp4:
+        # Disable by default, warn if manually enabled:
+        if ar_rms_enabled is None and nvfp4:
             vllm_config.compilation_config.pass_config.fuse_allreduce_rms = False
-            if ar_rms_enabled is True:
-                logger.warning(
-                    "Disabling allreduce-rms fusion for DeepSeekV3 with NVFP4 quant"
-                )
+        if ar_rms_enabled and nvfp4:
+            logger.warning(
+                "Allreduce-rms fusion broken for DeepSeekV3 with NVFP4 quant,"
+                "see https://github.com/vllm-project/vllm/issues/34395."
+            )
 
 
 class DeepseekV32ForCausalLM(DeepseekV3ForCausalLM):
