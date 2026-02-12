@@ -391,7 +391,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py",
+        default="ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         help="Path to a checkpoint file to load from.",
     )
     parser.add_argument(
