@@ -21,7 +21,6 @@ This is a native integration:
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 import tempfile
@@ -169,60 +168,6 @@ def _flatten_feature_inputs(value: object) -> torch.Tensor | None:
         if len(elems) == 1:
             return elems[0]
         return torch.cat(elems, dim=0)
-    return None
-
-
-def _summarize_tensor(value: object) -> tuple[int | None, str | None]:
-    if value is None:
-        return None, None
-    if isinstance(value, torch.Tensor):
-        flat = value.detach().reshape(-1)
-        length = int(flat.numel())
-        if length == 0:
-            return 0, "empty"
-        sample = flat[: min(64, length)]
-        if sample.device.type != "cpu":
-            sample = sample.to("cpu")
-        digest = hashlib.sha1(sample.numpy().tobytes()).hexdigest()[:8]
-        return length, digest
-    if isinstance(value, np.ndarray):
-        flat = value.reshape(-1)
-        length = int(flat.size)
-        if length == 0:
-            return 0, "empty"
-        sample = flat[: min(64, length)]
-        digest = hashlib.sha1(sample.tobytes()).hexdigest()[:8]
-        return length, digest
-    if isinstance(value, (list, tuple)):
-        length = len(value)
-        if length == 0:
-            return 0, "empty"
-        sample = value[: min(64, length)]
-        digest = hashlib.sha1(str(sample).encode("utf-8")).hexdigest()[:8]
-        return length, digest
-    return None, None
-
-
-def _mask_true_count(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        mask = value
-        if mask.dtype != torch.bool:
-            mask = mask != 0
-        return int(mask.sum().item())
-    if isinstance(value, np.ndarray):
-        return int(np.count_nonzero(value))
-    if isinstance(value, (list, tuple)):
-        return int(sum(1 for v in value if v))
-    return None
-
-
-def _shape_tuple(value: object) -> tuple[int, ...] | None:
-    if isinstance(value, torch.Tensor):
-        return tuple(int(x) for x in value.shape)
-    if isinstance(value, np.ndarray):
-        return tuple(int(x) for x in value.shape)
     return None
 
 
@@ -717,7 +662,13 @@ class KimiAudioForConditionalGeneration(
             # implementation (KimiAPromptManager). This ensures the returned
             # multimodal tensors (audio/text token streams + whisper features)
             # match training-time expectations.
-            import kimia_infer.api.prompt_manager  # noqa: F401
+            try:
+                import kimia_infer.api.prompt_manager  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Kimi-Audio ASR requires `kimia_infer` to be installed. "
+                    "Please install the dependency before serving this model."
+                ) from exc
 
             hf_cfg = model_config.hf_config
             kimia_token_offset = int(getattr(hf_cfg, "kimia_token_offset", 152064))
@@ -1016,9 +967,6 @@ class KimiAudioForConditionalGeneration(
             "model.audio_encoder.",
             "model.speech_encoder.",
         }
-
-        # Since we now create audio_tower in __init__, we allow its weights to be loaded
-        # from the checkpoint. Don't skip audio_tower weights anymore.
 
         # Also skip nested model prefixes if any.
 
