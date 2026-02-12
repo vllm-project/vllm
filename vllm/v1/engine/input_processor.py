@@ -5,6 +5,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.inputs.data import (
     ProcessorInputs,
@@ -300,7 +301,8 @@ class InputProcessor:
                 " passed to vLLM; use the request_id field."
             )
         request.external_req_id = request.request_id
-        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+        if not envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION:
+            request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,
