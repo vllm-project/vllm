@@ -20,7 +20,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
 )
 from vllm.logger import init_logger
 
-from .preprocess import ClassifyPreprocess
+from .preprocessor import ClassifyPreProcessor
 
 logger = init_logger(__name__)
 
@@ -48,7 +48,7 @@ class ServingClassification(PoolingServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
-        self.preprocess = ClassifyPreprocess(
+        self.preprocessor = ClassifyPreProcessor(
             models=models,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
@@ -59,7 +59,7 @@ class ServingClassification(PoolingServing):
         self,
         ctx: ServeContext,
     ) -> None:
-        ctx.engine_prompts = await self.preprocess(ctx.request)
+        ctx.engine_prompts = await self.preprocessor(ctx.request)
 
     async def _build_response(
         self,

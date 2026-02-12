@@ -23,7 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 
 
-class ClassifyPreprocess:
+class ClassifyPreProcessor:
     def __init__(
         self,
         models: OpenAIServingModels,
