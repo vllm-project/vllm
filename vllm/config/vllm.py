@@ -1110,6 +1110,13 @@ class VllmConfig:
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.cache_config.mamba_cache_mode == "align":
+            assert (
+                self.cache_config.block_size
+                <= self.scheduler_config.max_num_batched_tokens
+            ), (
+                "block_size must be not larger than max_num_batched_tokens"
+                " in Mamba cache align mode."
+            )
             if self.scheduler_config.long_prefill_token_threshold > 0:
                 assert (
                     self.scheduler_config.long_prefill_token_threshold
