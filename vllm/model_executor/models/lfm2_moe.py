@@ -52,6 +52,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -69,12 +70,12 @@ class Lfm2MoeMlp(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.w1 = MergedColumnParallelLinear(
+        self.w13 = MergedColumnParallelLinear(
             input_size=dim,
             output_sizes=[ff_dim] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.w1",
+            prefix=f"{prefix}.w13",
         )
         self.w2 = RowParallelLinear(
             input_size=ff_dim,
@@ -86,7 +87,7 @@ class Lfm2MoeMlp(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.w1(x)
+        gate_up, _ = self.w13(x)
         x = self.act_fn(gate_up)
         x, _ = self.w2(x)
         return x
@@ -501,8 +502,8 @@ class Lfm2MoeModel(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            (".w1", ".w1", 0),
-            (".w1", ".w3", 1),
+            (".w13", ".w1", 0),
+            (".w13", ".w3", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -596,12 +597,19 @@ class Lfm2MoeForCausalLM(
             "k_proj",
             "v_proj",
         ],
-        "w1": [
+        "w13": [
             "w1",
             "w3",
         ],
         "in_proj": ["in_proj"],
     }
+
+    # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
+    # with the inner .conv.conv child (ShortConv has a child self.conv, so
+    # naming the container .conv too makes _match_target_modules match both)
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".conv.": ".short_conv."},
+    )
 
     # LoRA specific attributes
     embedding_modules = {
