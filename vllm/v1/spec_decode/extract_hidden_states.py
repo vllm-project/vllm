@@ -130,11 +130,9 @@ class ExtractHiddenStatesProposer:
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
 
-        num_tokens_dp_padded, num_tokens_across_dp = (
-            self._pad_batch_across_dp(
-                num_tokens_unpadded=num_tokens,
-                num_tokens_padded=num_tokens,
-            )
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
         )
 
         cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
@@ -208,9 +206,7 @@ class ExtractHiddenStatesProposer:
 
         num_tokens_dp_padded = num_tokens_padded
         if num_toks_across_dp is not None:
-            num_tokens_dp_padded = int(
-                num_toks_across_dp[self.dp_rank].item()
-            )
+            num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
         return num_tokens_dp_padded, num_toks_across_dp
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -239,16 +235,14 @@ class ExtractHiddenStatesProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        num_tokens_dp_padded, num_tokens_across_dp = (
-            self._pad_batch_across_dp(
-                num_tokens_unpadded=num_tokens,
-                num_tokens_padded=num_tokens,
-            )
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
         )
 
         if use_cudagraphs:
-            cudagraph_runtime_mode, batch_desc = (
-                self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+            cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                num_tokens_dp_padded
             )
             num_input_tokens = batch_desc.num_tokens
         else:
@@ -332,7 +326,7 @@ class ExtractHiddenStatesProposer:
         is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
         valid_sampled_tokens_count = is_valid.to(torch.int32)
 
-        use_sampled = is_valid & ~discard_request_mask
+        use_sampled = is_valid & ~discard_request_mask[:num_reqs]
         next_token_ids = torch.where(
             use_sampled, sampled.to(torch.int32), backup_tokens_gpu
         )
@@ -381,9 +375,7 @@ class ExtractHiddenStatesProposer:
             draft_attn_layers
         )
 
-    def validate_same_kv_cache_group(
-        self, kv_cache_config: KVCacheConfig
-    ) -> None:
+    def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Validate all drafting layers belong to the same KV cache group.
 
         With exactly one attention layer (asserted in load_model), this is
