@@ -48,23 +48,6 @@ from vllm.v1.sample.logits_processor import validate_logits_processors_parameter
 logger = init_logger(__name__)
 
 
-def _maybe_add_kimi_stop_tokens(
-    model_config, tokenizer: TokenizerLike | None, default_sampling_params: dict
-) -> None:
-    if tokenizer is None:
-        return
-    if getattr(model_config.hf_config, "kimia_token_offset", None) is None:
-        return
-    get_stop_token_ids = getattr(tokenizer, "get_stop_token_ids", None)
-    if not callable(get_stop_token_ids):
-        return
-    stop_token_ids = default_sampling_params.setdefault("stop_token_ids", [])
-    for token_id in get_stop_token_ids():
-        token_id = int(token_id)
-        if token_id not in stop_token_ids:
-            stop_token_ids.append(token_id)
-
-
 class OpenAIServingCompletion(OpenAIServing):
     def __init__(
         self,
@@ -93,11 +76,6 @@ class OpenAIServingCompletion(OpenAIServing):
         self.debug_log_completion_token_ids = envs.VLLM_DEBUG_LOG_COMPLETION_TOKEN_IDS
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        _maybe_add_kimi_stop_tokens(
-            self.model_config,
-            self.input_processor.tokenizer,
-            self.default_sampling_params,
-        )
 
     async def render_completion_request(
         self,
