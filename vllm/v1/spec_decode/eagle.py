@@ -567,6 +567,8 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+            # Invalidate the CPU-side shadows to avoid H<>D sync.
+            common_attn_metadata._seq_lens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -609,6 +611,11 @@ class SpecDecodeBaseProposer:
             common_attn_metadata.max_seq_len = min(
                 common_attn_metadata.max_seq_len + 1, self.max_model_len
             )
+
+            # Also update the CPU-side shadow; NOTE: this is hacky and should be
+            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
+            if common_attn_metadata._seq_lens_cpu is not None:
+                common_attn_metadata._seq_lens_cpu += 1
 
             # Compute the slot mapping.
             block_size = attn_metadata_builder.kv_cache_spec.block_size
@@ -966,6 +973,7 @@ class SpecDecodeBaseProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
+            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
             query_start_loc_cpu=query_start_loc_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
@@ -1193,6 +1201,9 @@ class SpecDecodeBaseProposer:
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         new_seq_lens = common_attn_metadata.seq_lens - num_rejected_tokens.to(device)
+        new_seq_lens_cpu: torch.Tensor | None = None
+        if common_attn_metadata._seq_lens_cpu is not None:
+            new_seq_lens_cpu = common_attn_metadata._seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1243,6 +1254,7 @@ class SpecDecodeBaseProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             seq_lens=new_seq_lens,
+            _seq_lens_cpu=new_seq_lens_cpu,
             query_start_loc_cpu=new_query_start_loc_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
