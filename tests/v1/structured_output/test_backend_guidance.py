@@ -187,3 +187,41 @@ def test_grammar_init_async_and_sync(async_grammar):
 
     # Verify the grammar can accept valid tokens
     assert grammar.accept_tokens(request.request_id, prompt)
+
+
+def test_backend_guidance_lark_grammar():
+    structured_outputs_config = StructuredOutputsConfig(backend="guidance")
+    vllm_config = VllmConfig(structured_outputs_config=structured_outputs_config)
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=tokenizer,
+        vocab_size=50257,
+    )
+
+    lark_grammar = r"""start: expr
+expr: term (("+" | "-") term)*
+term: factor (("*" | "/") factor)*
+factor: /\d+"""
+
+    grammar = backend.compile_grammar(StructuredOutputOptions.LARK, lark_grammar)
+
+    assert grammar is not None
+    assert not grammar.is_terminated()
+
+    # Test valid arithmetic expression tokens
+    arithmetic_str = "3 + 4 * 2"
+    tokens = tokenizer.encode(arithmetic_str)
+    assert grammar.accept_tokens("", tokens)
+    assert not grammar.is_terminated()
+
+    # Test invalid tokens are rejected
+    invalid_tokens = tokenizer.encode("3 + 4 * 2 invalid")
+    accepted = grammar.validate_tokens(invalid_tokens)
+    assert len(accepted) <= len(tokens)
+    assert not grammar.is_terminated()
+
+    # Test EOS terminates
+    assert grammar.accept_tokens("", [tokenizer.eos_token_id])
+    assert grammar.is_terminated()

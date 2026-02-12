@@ -1245,47 +1245,13 @@ class OpenAIServing:
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
-        is_mistral_flow = tool_parser_cls == MistralToolParser and isinstance(
+        function_calls = list[FunctionCall]()
+
+        use_mistral_grammar = tool_parser_cls == MistralToolParser and isinstance(
             tokenizer, MistralTokenizer
         )
-        function_calls = list[FunctionCall]()
         if (
-            request.tool_choice
-            and isinstance(request.tool_choice, ToolChoiceFunction)
-            and not is_mistral_flow
-        ):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            request.tool_choice
-            and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-            and not is_mistral_flow
-        ):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required" and not is_mistral_flow:
-            assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                [
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                    for tool_call in tool_calls
-                ]
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            is_mistral_flow
+            use_mistral_grammar
             or tool_parser_cls
             and enable_auto_tools
             and (request.tool_choice == "auto" or request.tool_choice is None)
@@ -1322,6 +1288,37 @@ class OpenAIServing:
             else:
                 # No tool calls.
                 return None, content
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ToolChoiceFunction
+        ):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                [
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls
+                ]
+            )
+            content = None  # Clear content since tool is called.
 
         return function_calls, content
 

@@ -214,7 +214,7 @@ class MistralGrammarFactory:
 
     def __init__(self, tokenizer: MistralTokenizer) -> None:
         if not isinstance(tokenizer, MistralTokenizer):
-            raise ValueError("`MistralGrammarFactory` expectes a `MistralTokenizer`.")
+            raise ValueError("`MistralGrammarFactory` expects a `MistralTokenizer`.")
         self._tokenizer = tokenizer
         self._tokenizer_version = tokenizer.tokenizer._version
 
