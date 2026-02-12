@@ -741,13 +741,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        rounded_hidden_size, rounded_intermediate_size_per_partition = (
-            maybe_roundup_mxfp4_fused_moe_sizes(
-                hidden_size=hidden_size,
-                intermediate_size_per_partition=intermediate_size_per_partition,
-                mxfp4_backend=self.mxfp4_backend,
+        if self.mxfp4_backend is not None:
+            rounded_hidden_size, rounded_intermediate_size_per_partition = (
+                maybe_roundup_mxfp4_fused_moe_sizes(
+                    hidden_size=hidden_size,
+                    intermediate_size_per_partition=intermediate_size_per_partition,
+                    mxfp4_backend=self.mxfp4_backend,
+                )
             )
-        )
         return rounded_hidden_size, rounded_intermediate_size_per_partition
 
     def get_packed_dim(self, dim: int, quant_dtype: str):

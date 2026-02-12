@@ -116,6 +116,9 @@ def maybe_roundup_mxfp4_fused_moe_sizes(
 ) -> tuple[int, int]:
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Backend
 
+    if not isinstance(mxfp4_backend, Mxfp4Backend):
+        raise ValueError(f"Invalid mxfp4_backend: {mxfp4_backend}")
+
     rounded_hidden_size = hidden_size
     rounded_intermediate = intermediate_size_per_partition
 
