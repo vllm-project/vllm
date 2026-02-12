@@ -148,7 +148,6 @@ class VoxtralRealtimeBuffer:
 
     def _generate_frame_size_and_num_tokens(self) -> Iterator[tuple[int, int]]:
         streaming_step_size = self._ms_to_samples(1000 / self._config.frame_rate)
-        assert self._config.transcription_delay_ms is not None
         start = 0
         end = self._initial_end
         while True:
