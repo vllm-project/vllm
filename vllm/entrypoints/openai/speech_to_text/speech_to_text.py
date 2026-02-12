@@ -207,6 +207,7 @@ class OpenAISpeechToText(OpenAIServing):
         sampling_params.top_p = 1.0
         sampling_params.min_p = 0.0
         sampling_params.repetition_penalty = 1.0
+        sampling_params.skip_reading_prefix_cache = True
 
         extra_tokens = self._kimia_extra_tokens
         stop_ids = {
