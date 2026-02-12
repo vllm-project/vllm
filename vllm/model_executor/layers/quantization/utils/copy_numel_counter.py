@@ -1,6 +1,8 @@
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
+
 from vllm.model_executor.utils import set_weight_attrs
+
 
 class CopyNumelCounter(TorchDispatchMode):
     """

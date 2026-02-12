@@ -143,7 +143,7 @@ class MoeOnlineWeightQuantizer:
         1. JIT Materialization: On first call, materializes w13_weight and
            w2_weight from meta device to the target device, reducing peak
            memory during model loading.
-        2. Load Tracking: Tracks total elements loaded across all shards 
+        2. Load Tracking: Tracks total elements loaded across all shards
            to detect when loading is complete.
         3. Auto-Quantization: When all shards are loaded,
            automatically call process_weights_after_loading to quantize
