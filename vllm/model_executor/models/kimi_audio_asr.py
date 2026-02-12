@@ -888,6 +888,7 @@ class KimiAudioForConditionalGeneration(
                 "prompt": "",
                 "multi_modal_data": {"audio": mm_audio},
                 "cache_salt": cache_salt,
+                "multi_modal_uuids": {"audio": [cache_salt]},
             }
 
             return prompt
