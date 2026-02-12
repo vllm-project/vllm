@@ -301,7 +301,13 @@ class InputProcessor:
                 " passed to vLLM; use the request_id field."
             )
         request.external_req_id = request.request_id
-        if not envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION:
+        if envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION:
+            logger.warning_once(
+                "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION is set and will be "
+                "deprecated in a future release. Duplicate externally-provided "
+                "request IDs may cause failures and/or subtle correctness errors."
+            )
+        else:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
