@@ -516,7 +516,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([16, 16], device=self.device, dtype=self.dtype)
+        input = torch.empty([1, 16, 16], device=self.device, dtype=self.dtype)
         quant_result = torch.empty((16, 8), device=self.device, dtype=torch.uint8)
         input_global_scale = torch.empty(
             [1, 1], device=self.device, dtype=torch.float32
@@ -607,7 +607,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         input = torch.empty([16, 16], device=self.device, dtype=self.dtype)
 
         residual = torch.empty([16, 16], device=self.device, dtype=self.dtype)
-        weight = torch.empty([16], device=self.device, dtype=self.dtype)
+        weight = torch.empty([16, 16], device=self.device, dtype=self.dtype)
         quant_result = torch.empty((16, 8), device=self.device, dtype=torch.uint8)
         input_global_scale = torch.empty(
             [1, 1], device=self.device, dtype=torch.float32
