@@ -4088,16 +4088,18 @@ class GPUModelRunner(
             )
             if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
                 raise ValueError(
-                    "aux_hidden_states are rquired when using `extract_hidden_states`"
+                    "aux_hidden_states are required when using `extract_hidden_states`"
                 )
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
-                sampled_token_ids=sampled_token_ids,
-                target_hidden_states=target_hidden_states,
-                common_attn_metadata=common_attn_metadata,
-                scheduler_output=scheduler_output,
-                slot_mappings=slot_mappings,
+            draft_token_ids, drafter_kv_connector_output = (
+                self.drafter.propose(
+                    sampled_token_ids=sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                    scheduler_output=scheduler_output,
+                    slot_mappings=slot_mappings,
+                )
             )
 
             next_token_ids, valid_sampled_tokens_count = (
@@ -4113,7 +4115,7 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-            # todo(fynn) combine kv_connector_output with existing
+            # todo(fynn) combine drafter_kv_connector_output with existing
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
@@ -4992,8 +4994,14 @@ class GPUModelRunner(
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
             ):
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer
+                    | DraftModelProposer
+                    | ExtractHiddenStatesProposer,
+                )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
@@ -5702,9 +5710,14 @@ class GPUModelRunner(
             cudagraph_mode, self.uniform_decode_query_len
         )
 
-        # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
+        # Initialize drafter's cudagraph dispatcher if using spec decode.
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
+            assert isinstance(
+                self.drafter, EagleProposer | ExtractHiddenStatesProposer
+            )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6071,8 +6084,14 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(
+                self.drafter,
+                EagleProposer
+                | DraftModelProposer
+                | ExtractHiddenStatesProposer,
+            )
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)

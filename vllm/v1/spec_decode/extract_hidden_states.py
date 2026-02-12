@@ -1,21 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
+from __future__ import annotations
 
-import numpy as np
+from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 PADDING_SLOT_ID = -1
 
@@ -25,11 +33,15 @@ class ExtractHiddenStatesProposer:
         assert vllm_config.speculative_config is not None
 
         assert vllm_config.speculative_config.num_speculative_tokens == 1
+        if vllm_config.speculative_config.disable_padded_drafter_batch:
+            raise ValueError(
+                "disable_padded_drafter_batch is not supported with "
+                "extract_hidden_states method"
+            )
         self.vllm_config = vllm_config
         self.device = device
         self.dtype = vllm_config.model_config.dtype
-        # Maximum length of the model.
-        self.max_model_len = vllm_config.model_config.max_model_len
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
@@ -42,25 +54,22 @@ class ExtractHiddenStatesProposer:
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
         )
 
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.num_hidden_states = len(
-            getattr(
-                self.config, "eagle_aux_hidden_state_layer_ids", [0, 0, 0]
-            )  # fallback to 3
-        )
-
-        # Get hidden size from draft model config (will be available after load_model)
-        # For now, we'll set it based on target model and update in load_model if needed
+        self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        layer_ids = getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if not layer_ids:
+            raise ValueError(
+                "eagle_aux_hidden_state_layer_ids must be set in the draft "
+                "model config for extract_hidden_states method"
+            )
+        self.num_hidden_states = len(layer_ids)
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size * self.num_hidden_states),
+            (self.max_num_tokens, self.num_hidden_states, self.hidden_size),
             dtype=self.dtype,
             device=device,
         )
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
-        # Initialize buffers and attributes needed for slot mapping
-        self.indexer_layer_names: list[str] = []
         self._slot_mapping_buffer = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
@@ -70,11 +79,11 @@ class ExtractHiddenStatesProposer:
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, KVConnectorOutput | None]:
         """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
@@ -95,77 +104,77 @@ class ExtractHiddenStatesProposer:
                           interface compatibility)
 
         Returns:
-            Draft tokens that match the sampled tokens, shape [batch_size, 1]
+            Tuple of:
+              - Draft tokens matching sampled tokens, shape [batch_size, 1]
+              - KV connector output (if KV transfer is active), else None
         """
-        # Call the ExtractHiddenStatesModel model to cache hidden states
-        # This triggers the KV cache storage and KV connector API
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)
-        # Stack them to create the input for ExtractHiddenStatesModel
-        # Shape: [num_tokens, num_layers * hidden_size]
-        stacked_hidden_states = torch.cat(target_hidden_states, dim=-1)
+        # Each tensor has shape [num_tokens, hidden_size]
+        # Stack to shape: [num_tokens, num_hidden_states, hidden_size]
+        stacked_hidden_states = torch.stack(target_hidden_states, dim=1)
         num_tokens = stacked_hidden_states.shape[0]
 
         # Copy hidden states to buffer
         self.hidden_states[:num_tokens] = stacked_hidden_states
 
-        if self.attn_metadata_builder is None:
-            attn_metadata_builder = self._get_attention_metadata_builder()
-        else:
-            attn_metadata_builder = self.attn_metadata_builder
-
-        attn_metadata = attn_metadata_builder.build_for_drafting(
+        assert self.attn_metadata_builder is not None
+        attn_metadata = self.attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
 
-        # At this moment, we assume all eagle layers belong to the same KV
-        # cache group, thus using the same attention metadata.
+        # We assume all cache-only layers belong to the same KV cache group,
+        # thus using the same attention metadata.
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
 
+        num_tokens_dp_padded, num_tokens_across_dp = (
+            self._pad_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                num_tokens_padded=num_tokens,
+            )
+        )
+
         cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_tokens
+            num_tokens_dp_padded
         )
         num_input_tokens = batch_desc.num_tokens
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        # Call model with proper forward context
         with (
             set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
-                num_tokens_across_dp=None,  # todo(fynn): handle
+                num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=self._get_slot_mapping(
-                    num_tokens, common_attn_metadata.slot_mapping
+                    num_input_tokens, common_attn_metadata.slot_mapping
                 ),
             ),
             (
                 KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
                 if has_kv_transfer_group()
                 else nullcontext()
-            ) as kv_connecter_output,
+            ) as kv_connector_output,
         ):
-            # Forward pass: caches hidden states in KV cache
-            # Output is ignored - we only care about the KV cache side effects
             self.model(
-                hidden_states=self.hidden_states[:num_tokens],
+                hidden_states=self.hidden_states[:num_input_tokens],
             )
 
         # Return the sampled tokens as "draft" tokens
-        # This ensures they will always verify (match) since they're identical
-        # We're not actually doing speculation - just caching hidden states
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids.unsqueeze(-1)
+        return sampled_token_ids.unsqueeze(-1), kv_connector_output
 
     def _get_slot_mapping(
         self,
         num_tokens: int,
         slot_mapping: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Return slot_mapping dict for EAGLE layers.
+        """Return slot_mapping dict for cache-only attention layers.
 
         If slot_mapping is provided, copies it into the buffer first.
         """
@@ -176,28 +185,108 @@ class ExtractHiddenStatesProposer:
                 self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
 
         view = self._slot_mapping_buffer[:num_tokens]
-        return {name: view for name in self.attn_layer_names + self.indexer_layer_names}
+        return {name: view for name in self.attn_layer_names}
 
-    def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
-        """Get the attention metadata builder for the draft model."""
-        # Get the first attention layer to determine the backend
-        if not self.attn_layer_names:
+    def _pad_batch_across_dp(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+    ) -> tuple[int, torch.Tensor | None]:
+        should_ubatch, num_toks_across_dp, _ = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=False,
+            allow_dp_padding=self.cudagraph_dispatcher.cudagraph_mode
+            != CUDAGraphMode.NONE,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=None,
+            num_scheduled_tokens_per_request=None,
+        )
+        assert not should_ubatch, (
+            "DBO ubatching not implemented for extract_hidden_states"
+        )
+
+        num_tokens_dp_padded = num_tokens_padded
+        if num_toks_across_dp is not None:
+            num_tokens_dp_padded = int(
+                num_toks_across_dp[self.dp_rank].item()
+            )
+        return num_tokens_dp_padded, num_toks_across_dp
+
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Initialize cudagraph dispatcher keys.
+
+        Only supports PIECEWISE cudagraphs (via mixed_mode).
+        Should be called after adjust_cudagraph_sizes_for_spec_decode.
+        """
+        assert self.vllm_config.speculative_config is not None
+        if (
+            not self.vllm_config.speculative_config.enforce_eager
+            and cudagraph_mode.mixed_mode()
+            in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        ):
+            proposer_cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            proposer_cudagraph_mode = CUDAGraphMode.NONE
+
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(proposer_cudagraph_mode)
+
+    @torch.inference_mode()
+    def dummy_run(
+        self,
+        num_tokens: int,
+        use_cudagraphs: bool = True,
+        is_graph_capturing: bool = False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        num_tokens_dp_padded, num_tokens_across_dp = (
+            self._pad_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                num_tokens_padded=num_tokens,
+            )
+        )
+
+        if use_cudagraphs:
+            cudagraph_runtime_mode, batch_desc = (
+                self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+            )
+            num_input_tokens = batch_desc.num_tokens
+        else:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+            num_input_tokens = num_tokens_dp_padded
+
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
+        # Use our own slot mapping buffer during cudagraph capture.
+        if (
+            self.attn_layer_names
+            and slot_mappings is not None
+            and self.attn_layer_names[0] in slot_mappings
+        ):
+            slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
+        else:
+            slot_mapping_dict = slot_mappings or {}
+
+        with set_forward_context(
+            None,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=slot_mapping_dict,
+        ):
+            self.model(
+                hidden_states=self.hidden_states[:num_input_tokens],
+            )
+
+    def _build_attn_metadata_builder(
+        self, draft_attn_layers: dict[str, AttentionLayerBase]
+    ) -> AttentionMetadataBuilder:
+        """Build the attention metadata builder from draft attention layers."""
+        if not draft_attn_layers:
             raise ValueError("No attention layers found for ExtractHiddenStatesModel")
-
-        # Get the attention layer from the model
-        # Layer names include the prefix (e.g., "drafter.cache_only_layers.32")
-        # We need to skip the prefix part since self.model is already the drafter
-        layer_name = self.attn_layer_names[0]
-        parts = layer_name.split(".")
-        # Skip the first part if it's the prefix (e.g., "drafter")
-        if parts[0] == "drafter":
-            parts = parts[1:]
-
-        layer = self.model
-        for part in parts:
-            layer = getattr(layer, part)
-
-        # Get the attention backend and its metadata builder
+        layer = next(iter(draft_attn_layers.values()))
         attn_backend = layer.get_attn_backend()
         return attn_backend.get_builder_cls()(
             layer.get_kv_cache_spec(self.vllm_config),
@@ -215,54 +304,38 @@ class ExtractHiddenStatesProposer:
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids and the number of valid sampled tokens
-        for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead. This is denoted
-        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
+        Prepare next token IDs for speculative decoding.
+
+        Since num_speculative_tokens == 1, sampled_token_ids has shape
+        (batch_size, 1). For each request we either use the sampled token
+        (if valid and not discarded) or a backup token from the request state.
         """
-
-        batch_size, num_tokens = sampled_token_ids.shape
-        device = sampled_token_ids.device
         num_reqs = gpu_input_batch.num_reqs
+        device = sampled_token_ids.device
 
-        # 1. Compute backup tokens for discarded requests
-        backup_tokens = []
-        for i in range(num_reqs):
-            req_id = gpu_input_batch.req_ids[i]
-            seq_len = common_attn_metadata.seq_lens_cpu[i].item()
-            token_id = requests[req_id].get_token_id(seq_len)
-            backup_tokens.append(token_id)
-
+        # Compute backup tokens for discarded / invalid requests
         backup_tokens_gpu = torch.tensor(
-            backup_tokens, dtype=torch.int32, device=device
+            [
+                requests[gpu_input_batch.req_ids[i]].get_token_id(
+                    common_attn_metadata.seq_lens_cpu[i].item()
+                )
+                for i in range(num_reqs)
+            ],
+            dtype=torch.int32,
+            device=device,
         )
 
-        # 2. Extract next token IDs
-        # For valid requests: find the LAST VALID token (skipping rejected -1 tokens)
-        # For discarded requests: use backup tokens
+        assert discard_request_mask.dtype == torch.bool
 
-        # Create mask for valid tokens (>= 0 and < vocab_size)
-        vocab_size = gpu_input_batch.vocab_size
-        is_valid = (sampled_token_ids >= 0) & (sampled_token_ids < vocab_size)
+        # With num_speculative_tokens == 1, there is exactly one token
+        sampled = sampled_token_ids[:, 0]
+        is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
+        valid_sampled_tokens_count = is_valid.to(torch.int32)
 
-        # Count valid tokens per request
-        valid_sampled_tokens_count = is_valid.sum(dim=1).to(torch.int32)
-
-        # Find the last valid token for each request
-        next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
-        for i in range(batch_size):
-            if discard_request_mask[i]:
-                # Use backup token for discarded requests
-                next_token_ids[i] = backup_tokens_gpu[i]
-            elif valid_sampled_tokens_count[i] > 0:
-                # Find last valid token index
-                valid_indices = torch.where(is_valid[i])[0]
-                last_valid_idx = valid_indices[-1]
-                next_token_ids[i] = sampled_token_ids[i, last_valid_idx].to(torch.int32)
-            else:
-                # No valid tokens, use backup
-                next_token_ids[i] = backup_tokens_gpu[i]
+        use_sampled = is_valid & ~discard_request_mask
+        next_token_ids = torch.where(
+            use_sampled, sampled.to(torch.int32), backup_tokens_gpu
+        )
 
         return next_token_ids, valid_sampled_tokens_count
 
@@ -283,13 +356,37 @@ class ExtractHiddenStatesProposer:
         )
 
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
-        self.model = get_model(
-            vllm_config=self.vllm_config, model_config=draft_model_config
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("extract_hidden_states"):
+            self.model = get_model(
+                vllm_config=self.vllm_config, model_config=draft_model_config
+            )
 
         # Identify draft model's attention layers (difference from target)
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
-            - target_attn_layer_names
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase
         )
-        self.attn_layer_names = list(draft_attn_layer_names)
+        draft_attn_layers = {
+            name: layer
+            for name, layer in all_attn_layers.items()
+            if name not in target_attn_layer_names
+        }
+        self.attn_layer_names = list(draft_attn_layers.keys())
+        assert len(draft_attn_layers) == 1, (
+            "ExtractHiddenStatesModel should have exactly one "
+            f"attention layer, found {len(draft_attn_layers)}"
+        )
+        self.attn_metadata_builder = self._build_attn_metadata_builder(
+            draft_attn_layers
+        )
+
+    def validate_same_kv_cache_group(
+        self, kv_cache_config: KVCacheConfig
+    ) -> None:
+        """Validate all drafting layers belong to the same KV cache group.
+
+        With exactly one attention layer (asserted in load_model), this is
+        trivially satisfied.
+        """
+        assert len(self.attn_layer_names) == 1
