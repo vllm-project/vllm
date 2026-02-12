@@ -64,7 +64,6 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.processing.context import get_current_request_id
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -387,33 +386,6 @@ class KimiAudioASRMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _kimia_field_config(hf_inputs)
 
-    def _log_prompt_stats(
-        self,
-        audio_items: DictEmbeddingItems,
-        placeholder_len: int,
-    ) -> None:
-        request_id = get_current_request_id()
-        for item_idx in range(audio_items.get_count()):
-            data = audio_items.get(item_idx)
-            audio_len, audio_hash = _summarize_tensor(data.get("audio_input_ids"))
-            text_len, text_hash = _summarize_tensor(data.get("text_input_ids"))
-            mask_true = _mask_true_count(data.get("is_continuous_mask"))
-            whisper_shape = _shape_tuple(data.get("whisper_input_features"))
-            logger.info(
-                "[Kimi-Audio] prompt_stats request_id=%s item=%d "
-                "audio_len=%s audio_hash=%s text_len=%s text_hash=%s "
-                "mask_true=%s whisper_shape=%s placeholder_len=%s",
-                request_id,
-                item_idx,
-                audio_len,
-                audio_hash,
-                text_len,
-                text_hash,
-                mask_true,
-                whisper_shape,
-                placeholder_len,
-            )
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -449,7 +421,6 @@ class KimiAudioASRMultiModalProcessor(
         placeholder_id = 151666
 
         seq = _placeholder_seq(0)
-        self._log_prompt_stats(audio_items, len(seq))
 
         return [
             PromptReplacement(
