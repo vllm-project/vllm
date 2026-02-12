@@ -10,7 +10,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -27,15 +27,23 @@ logger = init_logger(__name__)
 
 
 class JinaVLScorer(nn.Module):
-    def __init__(self, model_config: "ModelConfig"):
+    def __init__(self, model_config: "ModelConfig", prefix: str = ""):
         super().__init__()
         config = model_config.hf_config.get_text_config()
         head_dtype = model_config.head_dtype
         self.dense = ColumnParallelLinear(
-            config.hidden_size, config.hidden_size, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.hidden_size,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.dense",
         )
         self.out_proj = RowParallelLinear(
-            config.hidden_size, config.num_labels, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.out_proj",
         )
 
     def forward(self, x, **kwargs):
@@ -94,20 +102,10 @@ class JinaVLForSequenceClassification(
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.score = JinaVLScorer(vllm_config.model_config)
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.score
-                ),
-                "classify": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="classify"
-                ),
-                "score": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="score"
-                ),
-            }
+        self.score = JinaVLScorer(
+            vllm_config.model_config, prefix=maybe_prefix(prefix, "score")
         )
+        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -127,7 +125,7 @@ class JinaVLForSequenceClassification(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

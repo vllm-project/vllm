@@ -1,22 +1,14 @@
 #pragma once
 
 #include <torch/all.h>
+#include <c10/util/Optional.h>
 
 #include <map>
 #include <vector>
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 int64_t block_size_in_bytes,
                  const torch::Tensor& block_mapping);
-
-// Note: the key_caches and value_caches vectors are constant but
-// not the Tensors they contain. The vectors need to be const refs
-// in order to satisfy pytorch's C++ operator registration code.
-void copy_blocks(std::vector<torch::Tensor> const& key_caches,
-                 std::vector<torch::Tensor> const& value_caches,
-                 const torch::Tensor& block_mapping);
-
-void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
-                     const torch::Tensor& block_mapping);
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
@@ -35,6 +27,13 @@ void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
                           torch::Tensor& kv_cache, torch::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
                           torch::Tensor& scale);
+
+// NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
+void concat_and_cache_mla_rope_fused(
+    torch::Tensor& positions, torch::Tensor& q_pe, torch::Tensor& k_pe,
+    torch::Tensor& kv_c, torch::Tensor& rope_cos_sin_cache, bool rope_is_neox,
+    torch::Tensor& kv_cache_slot_mapping, torch::Tensor& kv_cache,
+    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale);
 
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
@@ -57,6 +56,15 @@ void cp_gather_cache(
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+// Gather and upconvert FP8 KV cache to BF16 workspace
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& seq_lens,          // [BATCH]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(

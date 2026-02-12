@@ -23,9 +23,10 @@
   #define MARLIN_NAMESPACE_NAME marlin_moe_wna16
 #endif
 
-#include "quantization/gptq_marlin/marlin.cuh"
-#include "quantization/gptq_marlin/marlin_dtypes.cuh"
-#include "quantization/gptq_marlin/dequant.h"
+#include "quantization/marlin/marlin.cuh"
+#include "quantization/marlin/marlin_dtypes.cuh"
+#include "quantization/marlin/dequant.h"
+#include "quantization/marlin/marlin_mma.h"
 #include "core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
@@ -35,7 +36,7 @@
 
 namespace MARLIN_NAMESPACE_NAME {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId b_type_id,  // weight MarlinScalarType id
@@ -70,7 +71,6 @@ __global__ void Marlin(
     const float* __restrict__ topk_weights_ptr,              // moe top weights
     int top_k,              // num of experts per token
     bool mul_topk_weights,  // mul topk weights or not
-    bool is_ep,             // expert parallelism
     int num_groups,         // number of scale groups per output channel
     int prob_m,             // batch dimension m
     int prob_n,             // output dimension n
@@ -83,146 +83,6 @@ __global__ void Marlin(
 }  // namespace MARLIN_NAMESPACE_NAME
 
 #else
-
-// m16n8k16 tensor core mma instruction with fp16 inputs and fp32
-// output/accumulation.
-template <vllm::ScalarTypeId type_id, int k_size = 16>
-__device__ inline void mma(
-    const typename MarlinScalarType<type_id>::FragA& a_frag,
-    const typename MarlinScalarType<type_id>::FragB& frag_b,
-    typename MarlinScalarType<type_id>::FragC& frag_c, int idx = 0) {
-  const uint32_t* a = reinterpret_cast<const uint32_t*>(&a_frag);
-  const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
-  using scalar_t = typename MarlinScalarType<type_id>::scalar_t;
-  if constexpr (k_size == 16) {
-    if constexpr (std::is_same<scalar_t, half>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, __nv_fp8_e4m3>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.e4m3.e4m3.f32 "
-          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(a[idx * 2]), "r"(a[idx * 2 + 1]), "r"(b[idx]), "f"(c[0]),
-            "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, int8_t>::value) {
-      int32_t* c = reinterpret_cast<int32_t*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32.satfinite "
-          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
-          : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
-          : "r"(a[idx * 2]), "r"(a[idx * 2 + 1]), "r"(b[idx]), "r"(c[0]),
-            "r"(c[1]), "r"(c[2]), "r"(c[3]));
-    }
-  } else if (k_size == 32) {
-    if constexpr (std::is_same<scalar_t, __nv_fp8_e4m3>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, int8_t>::value) {
-      int32_t* c = reinterpret_cast<int32_t*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32.satfinite "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
-          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
-            "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
-    }
-  }
-}
-
-template <vllm::ScalarTypeId type_id, int k_size = 16>
-__device__ inline void mma_trans(
-    const typename MarlinScalarType<type_id>::FragA& a_frag,
-    const typename MarlinScalarType<type_id>::FragB& frag_b,
-    const typename MarlinScalarType<type_id>::FragB& frag_b2,
-    typename MarlinScalarType<type_id>::FragC& frag_c) {
-  const uint32_t* a = reinterpret_cast<const uint32_t*>(&a_frag);
-  const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
-  const uint32_t* b2 = reinterpret_cast<const uint32_t*>(&frag_b2);
-  float* c = reinterpret_cast<float*>(&frag_c);
-  using scalar_t = typename MarlinScalarType<type_id>::scalar_t;
-  if constexpr (k_size == 16) {
-    if constexpr (std::is_same<scalar_t, half>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, __nv_fp8_e4m3>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.e4m3.e4m3.f32 "
-          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(a[0]), "f"(c[0]), "f"(c[1]), "f"(c[2]),
-            "f"(c[3]));
-    } else if constexpr (std::is_same<scalar_t, int8_t>::value) {
-      int32_t* c = reinterpret_cast<int32_t*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32.satfinite "
-          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
-          : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(a[0]), "r"(c[0]), "r"(c[1]), "r"(c[2]),
-            "r"(c[3]));
-    }
-  } else {
-    if constexpr (std::is_same<scalar_t, __nv_fp8_e4m3>::value) {
-      float* c = reinterpret_cast<float*>(&frag_c);
-  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
-      asm volatile(
-          "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-  #else
-      asm volatile(
-          "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
-            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
-  #endif
-    } else if constexpr (std::is_same<scalar_t, int8_t>::value) {
-      int32_t* c = reinterpret_cast<int32_t*>(&frag_c);
-      asm volatile(
-          "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32.satfinite "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-          : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
-          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
-            "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
-    }
-  }
-}
 
 // Instruction for loading a full 16x16 matrix fragment of operand A from shared
 // memory, directly in tensor core layout.
@@ -412,7 +272,6 @@ __global__ void Marlin(
     const float* __restrict__ topk_weights_ptr,              // moe top weights
     int top_k,              // num of experts per token
     bool mul_topk_weights,  // mul topk weights or not
-    bool is_ep,             // expert parallelism
     int num_groups,         // number of scale groups per output channel
     int prob_m,             // batch dimension m
     int prob_n,             // output dimension n
@@ -439,9 +298,20 @@ __global__ void Marlin(
   if constexpr (a_type_id == vllm::kFE4M3fn.id()) return;
   #endif
 
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+  // Turing TensorCore only supports fp16 and int8
+  if constexpr (a_type_id != vllm::kFloat16.id() && a_type_id != vllm::kS8.id())
+    return;
+  #endif
+
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
   constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
 
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+  constexpr bool use_fp16_accum = a_type_id == vllm::kFloat16.id();
+  #else
+  constexpr bool use_fp16_accum = false;
+  #endif
   using Adtype = MarlinScalarType<a_type_id>;
   using Cdtype = MarlinScalarType<c_type_id>;
 
@@ -504,14 +374,6 @@ __global__ void Marlin(
 
   // parallel: num valid moe blocks
   int parallel = num_tokens_past_padded / moe_block_size;
-  int num_valid_blocks = parallel;
-  if (is_ep) {
-    for (int i = 0; i < parallel; i++) {
-      if (expert_ids_ptr[i] == -1) num_valid_blocks--;
-    }
-  }
-  int num_invalid_blocks = parallel - num_valid_blocks;
-  parallel = num_valid_blocks;
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
@@ -618,7 +480,22 @@ __global__ void Marlin(
         }
       }
 
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+
+      if constexpr (moe_block_size >= 16)
+        local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 16);
+      if constexpr (moe_block_size >= 8)
+        local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 8);
+      if constexpr (moe_block_size >= 4)
+        local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 4);
+      if constexpr (moe_block_size >= 2)
+        local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 2);
+
+      local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 1);
+      block_num_valid_tokens = local_count;
+  #else
       block_num_valid_tokens = __reduce_add_sync(0xffffffff, local_count);
+  #endif
 
       if (lane_id == 0)
         reinterpret_cast<int*>(sh_new)[0] = block_num_valid_tokens;
@@ -651,22 +528,8 @@ __global__ void Marlin(
     if (par_id >= parallel) return;
 
     old_expert_id = expert_id;
-    if (num_invalid_blocks > 0) {
-      int skip_count = par_id;
-      for (int i = 0; i < num_tokens_past_padded / moe_block_size; i++) {
-        expert_id = expert_ids_ptr[i];
-        if (expert_id != -1) {
-          if (skip_count == 0) {
-            block_id = i;
-            break;
-          };
-          skip_count--;
-        };
-      }
-    } else {
-      block_id = par_id;
-      expert_id = expert_ids_ptr[block_id];
-    }
+    block_id = par_id;
+    expert_id = expert_ids_ptr[block_id];
 
     if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
       uint16_t val = global_scale_ptr[expert_id];
@@ -1018,10 +881,6 @@ __global__ void Marlin(
   constexpr int sh_s_size = has_act_order ? (act_s_max_num_groups * s_sh_stride)
                                           : (stages * s_sh_stage);
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
-  // shared memory reused by reduction should be smaller than
-  // shared memory used by weight.
-  static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
-                stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
 
   // Register storage for double buffer of shared memory reads.
@@ -1545,11 +1404,13 @@ __global__ void Marlin(
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
         if constexpr (m_block_size_8) {
-          mma_trans<a_type_id>(frag_a[k2][i], frag_b0, frag_b1,
-                               frag_c[i][j][0]);
+          mma_trans<a_type_id, use_fp16_accum>(frag_a[k2][i], frag_b0, frag_b1,
+                                               frag_c[i][j][0]);
         } else {
-          mma<a_type_id>(frag_a[k2][i], frag_b0, frag_c[i][j][0]);
-          mma<a_type_id>(frag_a[k2][i], frag_b1, frag_c[i][j][1]);
+          mma<a_type_id, use_fp16_accum>(frag_a[k2][i], frag_b0,
+                                         frag_c[i][j][0]);
+          mma<a_type_id, use_fp16_accum>(frag_a[k2][i], frag_b1,
+                                         frag_c[i][j][1]);
         }
       }
     }
@@ -1583,10 +1444,12 @@ __global__ void Marlin(
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        mma<a_type_id, 32>(frag_a[k2][i], frag_b[0],
-                           (group_blocks == -1 ? frag_c : frag_c_tmp)[i][j][0]);
-        mma<a_type_id, 32>(frag_a[k2][i], frag_b[1],
-                           (group_blocks == -1 ? frag_c : frag_c_tmp)[i][j][1]);
+        mma<a_type_id, false, 32>(
+            frag_a[k2][i], frag_b[0],
+            (group_blocks == -1 ? frag_c : frag_c_tmp)[i][j][0]);
+        mma<a_type_id, false, 32>(
+            frag_a[k2][i], frag_b[1],
+            (group_blocks == -1 ? frag_c : frag_c_tmp)[i][j][1]);
       }
 
       if constexpr (group_blocks != -1) {
@@ -2132,6 +1995,21 @@ __global__ void Marlin(
     // While this pattern may not be the most readable, other ways of writing
     // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
+      // convert fp16 accum to fp32 for reduction
+      if constexpr (use_fp16_accum) {
+  #pragma unroll
+        for (int i = 0; i < (thread_m_blocks * (is_a_8bit ? 2 : 4) * 2); i++) {
+          float* frag_c_part_float = reinterpret_cast<float*>(frag_c) + i * 4;
+          scalar_t* frag_c_part_half =
+              reinterpret_cast<scalar_t*>(frag_c_part_float);
+
+  #pragma unroll
+          for (int i = 3; i >= 0; i--) {
+            frag_c_part_float[i] = Cdtype::num2float(frag_c_part_half[i]);
+          }
+        }
+      }
+
       if constexpr (is_a_8bit) {
         float frag_a_s[2 * thread_m_blocks];
 

@@ -4,6 +4,7 @@ import os
 from collections.abc import Generator
 
 import gguf
+import regex as re
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -48,11 +49,6 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path = model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
-        # for raw HTTPS link
-        if model_name_or_path.startswith(
-            ("http://", "https://")
-        ) and model_name_or_path.endswith(".gguf"):
-            return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
@@ -70,7 +66,7 @@ class GGUFModelLoader(BaseModelLoader):
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
-            "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
+            "(expected local file, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
 
@@ -94,6 +90,7 @@ class GGUFModelLoader(BaseModelLoader):
             hasattr(config, "vision_config") and config.vision_config is not None
         )
         gguf_to_hf_name_map = {}
+        sideload_params: list[re.Pattern] = []
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
@@ -118,6 +115,12 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
         if model_type in ("qwen2_moe", "qwen3_moe"):
             model_type = model_type.replace("_", "")
             # GGUF layer map assumes that we will have a merged expert weights
@@ -131,6 +134,12 @@ class GGUFModelLoader(BaseModelLoader):
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
                 )
 
         arch = None
@@ -241,7 +250,15 @@ class GGUFModelLoader(BaseModelLoader):
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)
 
-        # All parameters must be mapped: both vision/projector and backbone
+        # All parameters (except those initialized by other means) must be mapped:
+        # both vision/projector and backbone
+        if unmapped_params:
+            unmapped_params = list(
+                filter(
+                    lambda x: not any(re.fullmatch(p, x) for p in sideload_params),
+                    unmapped_params,
+                )
+            )
         if unmapped_params:
             raise RuntimeError(
                 f"Failed to map GGUF parameters "
@@ -313,7 +330,7 @@ class GGUFModelLoader(BaseModelLoader):
         )
 
     def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         device_config = vllm_config.device_config
         local_model_path = self._prepare_weights(model_config)
@@ -342,7 +359,7 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
             self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)

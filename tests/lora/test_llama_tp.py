@@ -76,11 +76,18 @@ def do_sample(
             if lora_id
             else None,
         )
-    # Print the outputs.
+    lora_request = LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None
     generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        # The output should include  correct lora_request info
+        if lora_request is not None:
+            assert output.lora_request.lora_name == lora_request.lora_name
+            assert output.lora_request.lora_int_id == lora_request.lora_int_id
+            assert output.lora_request.lora_path == lora_request.lora_path
+        else:
+            assert output.lora_request is None
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts

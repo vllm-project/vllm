@@ -42,8 +42,11 @@ class ImageAsset:
         )
 
     @property
-    def pil_image(self, ext="jpg") -> Image.Image:
-        image_path = self.get_path(ext)
+    def pil_image(self) -> Image.Image:
+        return self.pil_image_ext(ext="jpg")
+
+    def pil_image_ext(self, ext: str) -> Image.Image:
+        image_path = self.get_path(ext=ext)
         return Image.open(image_path)
 
     @property

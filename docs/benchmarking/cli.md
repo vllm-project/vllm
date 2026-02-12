@@ -30,8 +30,10 @@ th {
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
 | HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
+| Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
 
 Legend:
 
@@ -84,7 +86,7 @@ Total input tokens:                      1369
 Total generated tokens:                  2212
 Request throughput (req/s):              1.73
 Output token throughput (tok/s):         382.89
-Total Token throughput (tok/s):          619.85
+Total token throughput (tok/s):          619.85
 ---------------Time to First Token----------------
 Mean TTFT (ms):                          71.54
 Median TTFT (ms):                        73.88
@@ -132,6 +134,33 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 ```
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
+
+#### Custom multimodal dataset
+
+If the multimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
+
+```json
+{"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
+{"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
+```
+
+```bash
+# need a model with vision capability here
+vllm serve Qwen/Qwen2-VL-7B-Instruct
+```
+
+```bash
+# run benchmarking script
+vllm bench serve--save-result --save-detailed \
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name custom_mm \
+  --dataset-path <path-to-your-mm-data-jsonl> \
+  --allowed-local-media-path /path/to/image/folder
+```
+
+Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.
 
 #### VisionArena Benchmark for Vision Language Models
 
@@ -269,6 +298,22 @@ vllm bench serve \
     --num-prompts 90 \
     --blazedit-min-distance 0.01 \
     --blazedit-max-distance 0.99
+```
+
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+
+```bash
+vllm bench serve \
+    --model openai/whisper-large-v3-turbo \
+    --backend openai-audio \
+    --dataset-name hf \
+    --dataset-path facebook/voxpopuli --hf-subset en --hf-split test --no-stream --trust-remote-code \
+    --num-prompts 99999999 \
+    --no-oversample \
+    --endpoint /v1/audio/transcriptions \
+    --ready-check-timeout-sec 600 \
+    --save-result \
+    --max-concurrency 512
 ```
 
 #### Running With Sampling Parameters

@@ -10,6 +10,11 @@ def is_quant_method_supported(quant_method: str) -> bool:
     if not (current_platform.is_cuda() or current_platform.is_rocm()):
         return False
 
+    try:
+        current_platform.verify_quantization(quant_method)
+    except ValueError:
+        return False
+
     capability = current_platform.get_device_capability()
     assert capability is not None
 

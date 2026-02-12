@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import re
-
 import prometheus_client
+import regex as re
 from fastapi import FastAPI, Response
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator

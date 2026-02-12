@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,8 +21,8 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import outlines_core as oc
+    import transformers.convert_slow_tokenizer as convert_slow_tokenizer
     import transformers.file_utils as file_utils
-    import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
     import xgrammar as xgr
 
     from vllm.tokenizers import TokenizerLike
@@ -30,15 +31,10 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
-    tokenization_gpt2 = LazyLoader(
-        "tokenization_gpt2",
-        globals(),
-        "transformers.models.gpt2.tokenization_gpt2",
+    convert_slow_tokenizer = LazyLoader(
+        "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
 
-    TokenizerLike = object
-    SchedulerOutput = object
-    InputBatch = object
 
 logger = init_logger(__name__)
 
@@ -74,13 +70,12 @@ def apply_grammar_bitmask(
     # request in the batch, as the logit indices are offset by this amount.
     struct_out_req_batch_indices: dict[str, int] = {}
     cumulative_offset = 0
-    seq = sorted(input_batch.req_id_to_index.items(), key=lambda x: x[1])
-    for req_id, batch_index in seq:
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    struct_out_req_ids = set(grammar_output.structured_output_request_ids)
+    for batch_index, req_id in enumerate(input_batch.req_ids):
         logit_index = batch_index + cumulative_offset
-        cumulative_offset += len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in grammar_output.structured_output_request_ids:
+        cumulative_offset += len(spec_tokens.get(req_id, ()))
+        if req_id in struct_out_req_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
     out_indices = []
@@ -93,14 +88,12 @@ def apply_grammar_bitmask(
     )
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
-        num_spec_tokens = len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in struct_out_req_batch_indices:
-            logit_index = struct_out_req_batch_indices[req_id]
+        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
             for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = grammar_bitmask[cumulative_index + i]
-                out_indices.append(logit_index + i)
+                bitmask_index = logit_idx + i
+                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
+                out_indices.append(bitmask_index)
         cumulative_index += 1 + num_spec_tokens
 
     # Copy async to device as tensor.
@@ -151,21 +144,19 @@ def get_outlines_cache_path() -> str:
     if outlines_cache_dir:
         # OUTLINES_CACHE_DIR takes precedence
         return outlines_cache_dir
-    elif xdg_cache_home:
+    if xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
     # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
     # not guarantee existence.
-    elif os.path.isdir(home_dir) and home_dir != "/":
+    if os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")
-    else:
-        import tempfile
 
-        # home_dir may be / inside a docker container without existing user
-        tempdir = tempfile.gettempdir()
-        return os.path.join(tempdir, ".cache", "outlines")
+    # home_dir may be / inside a docker container without existing user
+    tempdir = tempfile.gettempdir()
+    return os.path.join(tempdir, ".cache", "outlines")
 
 
 def get_outlines_cache():
@@ -186,8 +177,8 @@ def get_outlines_cache():
             cache.clear()
         cache.set("__version__", outlines_version)
         return cache
-    else:
-        return LRUCache(maxsize=128)
+
+    return LRUCache(maxsize=128)
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
@@ -195,8 +186,7 @@ re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
 def _reduced_vocabulary(
-    tokenizer: TokenizerLike,
-    eos_token_id: int,
+    tokenizer: TokenizerLike, eos_token_id: int
 ) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
@@ -204,7 +194,9 @@ def _reduced_vocabulary(
         A Dict of token string -> equivalent token ids
     """
 
-    unicode_to_bytes = {v: k for k, v in tokenization_gpt2.bytes_to_unicode().items()}
+    unicode_to_bytes = {
+        v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
+    }
 
     def convert_token_to_string(token: str) -> str:
         string = tokenizer.convert_tokens_to_string([token])
@@ -234,7 +226,9 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(token_str):
+            elif (token_str == "\ufffd" and token != "\ufffd") or (
+                "\ufffd" in token_str and not re_replacement_seq.match(token_str)
+            ):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -267,17 +261,13 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
         return tokenizer._outlines_vocabulary  # type: ignore
 
     try:
-        if (
-            hasattr(
-                tokenizer,
-                "eos_token_id",
-            )
-            and tokenizer.eos_token_id is not None
-        ):
+        if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
             eos_token_id = tokenizer.eos_token_id
         else:
             raise ValueError(
-                f"Error during structured outputs setup for outlines: Tokenizer ({type(tokenizer)}) has no `eos_token_id` property, but `eos_token_id` is required for structured outputs to work properly."  # noqa: E501
+                "Error during structured outputs setup for outlines: Tokenizer "
+                f"({type(tokenizer)}) has no `eos_token_id` property, but "
+                "`eos_token_id` is required for structured outputs to work properly."
             )
 
         reduced_vocab = _reduced_vocabulary(
@@ -290,7 +280,7 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
         return vocabulary
     except AttributeError as e:
         raise ValueError(
-            f"Cannot get the vocabulary of the tokenizer "
+            "Cannot get the vocabulary of the tokenizer "
             f"({type(tokenizer)}). The tokenizer should have a "
             "get_vocab method."
         ) from e

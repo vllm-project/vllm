@@ -4,7 +4,6 @@
 from typing import Any, Literal
 
 from pydantic import model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
@@ -16,7 +15,6 @@ StructuredOutputsBackend = Literal[
 
 
 @config
-@dataclass
 class StructuredOutputsConfig:
     """Dataclass which contains structured outputs config for the engine."""
 
@@ -65,22 +63,6 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
-        # Import here to avoid circular import
-        from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
-
-        if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
-            ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
-
-        valid_reasoning_parsers = ReasoningParserManager.list_registered()
-        if (
-            self.reasoning_parser != ""
-            and self.reasoning_parser not in valid_reasoning_parsers
-        ):
-            raise ValueError(
-                f"invalid reasoning parser: {self.reasoning_parser} "
-                f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
-            )
-
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "

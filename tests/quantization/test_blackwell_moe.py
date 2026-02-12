@@ -10,9 +10,9 @@ import pytest
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
-        "This test only runs on Blackwell GPUs (SM100).", allow_module_level=True
+        "This test only runs on Blackwell GPUs (SM10x).", allow_module_level=True
     )
 
 
@@ -178,3 +178,11 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--enforce-eager"],
     )
+
+
+## Qwen3 Next ##
+
+
+def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+    can_initialize("Qwen/Qwen3-Next-80B-A3B-Instruct", hf_overrides=HF_OVERRIDE_TEXT)

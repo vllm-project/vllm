@@ -10,7 +10,7 @@ All communications between nodes in a multi-node vLLM deployment are **insecure 
 
 ### Configuration Options for Inter-Node Communications
 
-The following options control inter-node communications in vLLM:
+The following options control internode communications in vLLM:
 
 #### 1. **Environment Variables:**
 
@@ -28,7 +28,7 @@ The following options control inter-node communications in vLLM:
 
 ### Notes on PyTorch Distributed
 
-vLLM uses PyTorch's distributed features for some inter-node communication. For
+vLLM uses PyTorch's distributed features for some internode communication. For
 detailed information about PyTorch Distributed security considerations, please
 refer to the [PyTorch Security
 Guide](https://github.com/pytorch/pytorch/security/policy#using-distributed-features).
@@ -172,12 +172,13 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/server_info` - Get detailed server configuration
 - `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
+- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
-**Profiler endpoints (only when `VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE` are set):**
+**Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
 
 These endpoints are only available when profiling is enabled and should only be used for local development:
 
@@ -206,7 +207,7 @@ An attacker who can reach the vLLM HTTP server can:
 - Cache manipulation that can disrupt service
 - Detailed server configuration disclosure
 
-Similarly, never enable profiler endpoints (`VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE`) in production.
+Similarly, never enable profiler endpoints in production.
 
 **Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
 

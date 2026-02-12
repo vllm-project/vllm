@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 try:
     from vllm.vllm_flash_attn import (
@@ -129,7 +130,7 @@ def test_varlen_with_paged_kv(
             "Flash attention with quantized inputs is only "
             "supported on version 3 with bfloat16 base type"
         )
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]

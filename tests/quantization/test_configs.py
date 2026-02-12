@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -23,20 +24,44 @@ MODEL_ARG_EXPTYPES = [
     # AUTOGPTQ
     # compat: autogptq <=0.7.1 is_marlin_format: bool
     # Model Serialized in Exllama Format.
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", None, "gptq_marlin"),
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", "marlin", "gptq_marlin"),
+    (
+        "TheBloke/Llama-2-7B-Chat-GPTQ",
+        None,
+        "gptq_marlin" if current_platform.is_cuda() else "gptq",
+    ),
+    (
+        "TheBloke/Llama-2-7B-Chat-GPTQ",
+        "marlin",
+        "gptq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "gptq", "gptq"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
     # compat: autogptq >=0.8.0 use checkpoint_format: str
     # Model Serialized in Exllama Format.
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", None, "gptq_marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "marlin", "gptq_marlin"),
+    (
+        "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+        None,
+        "gptq_marlin" if current_platform.is_cuda() else "gptq",
+    ),
+    (
+        "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+        "marlin",
+        "gptq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq", "gptq"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
     # AUTOAWQ
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq_marlin"),
+    (
+        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        None,
+        "awq_marlin" if current_platform.is_cuda() else "awq",
+    ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "awq_marlin"),
+    (
+        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        "marlin",
+        "awq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 

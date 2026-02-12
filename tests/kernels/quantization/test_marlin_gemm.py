@@ -10,15 +10,9 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
+from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL,
-    GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES,
-    GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES,
-)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
@@ -26,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
-    marlin_permute_scales,
     query_marlin_supported_quant_types,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -37,14 +30,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    MarlinWorkspace,
     awq_marlin_quantize,
     get_weight_perm,
     marlin_quantize,
     marlin_weights,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
-    marlin_24_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack,
@@ -56,6 +45,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "These tests require marlin, which is not supported on ROCm.",
+        allow_module_level=True,
+    )
+
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 USE_ATOMIC_ADD_OPTS = [False, True]
@@ -63,11 +58,6 @@ USE_FP32_REDUCE_OPTS = [True]
 
 MARLIN_K_CHUNKS = [128]
 MARLIN_N_CHUNKS = [64, 256]
-
-MARLIN_24_K_CHUNKS = [128]
-MARLIN_24_N_CHUNKS = [512]
-
-HQQ_SUPPORTED_GROUP_SIZES = [64]
 
 MARLIN_REPACK_NK_FACTORS = [
     (4, 8),
@@ -412,7 +402,7 @@ def marlin_generate_valid_test_cases():
     ),
     marlin_generate_valid_test_cases(),
 )
-def test_gptq_marlin_gemm(
+def test_marlin_gemm(
     a_type,
     b_type,
     c_type,
@@ -506,7 +496,7 @@ def test_gptq_marlin_gemm(
 
     output = torch.empty((size_m, size_n), dtype=dtype, device=a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         output,
         marlin_q_w,
@@ -533,180 +523,6 @@ def test_gptq_marlin_gemm(
     assert max_diff < 0.04
 
 
-# TODO: find better way to test this?
-@torch.compile(fullgraph=True)
-def marlin_24_gemm_tester(
-    a_input,
-    marlin_24_q_w_comp,
-    marlin_24_meta,
-    marlin_24_s,
-    scratch,
-    quant_type,
-    size_m,
-    size_n,
-    size_k,
-):
-    return ops.gptq_marlin_24_gemm(
-        a_input,
-        marlin_24_q_w_comp,
-        marlin_24_meta,
-        marlin_24_s,
-        scratch,
-        quant_type,
-        size_m,
-        size_n,
-        size_k,
-    )
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("gptq_marlin"),
-    reason="Marlin is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
-@pytest.mark.parametrize("n_chunk", MARLIN_24_N_CHUNKS)
-@pytest.mark.parametrize("quant_type", GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES)
-@pytest.mark.parametrize("group_size", GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
-@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size, mnk_factors):
-    m_factor, n_factor, k_factor = mnk_factors
-
-    size_m = m_factor
-    size_k = k_chunk * k_factor
-    size_n = n_chunk * n_factor
-
-    a_input = rand_data((size_m, size_k))
-    b_weight = rand_data((size_k, size_n))
-
-    (w_24_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = marlin_24_quantize(
-        b_weight, quant_type, group_size
-    )
-
-    workspace_24 = MarlinWorkspace(
-        size_n, GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL
-    )
-
-    output_ref = torch.matmul(a_input, w_24_ref)
-
-    opcheck(
-        torch.ops._C.gptq_marlin_24_gemm,
-        (
-            a_input,
-            marlin_24_q_w_comp,
-            marlin_24_meta,
-            marlin_24_s,
-            workspace_24.scratch,
-            quant_type.id,
-            a_input.shape[0],
-            b_weight.shape[1],
-            a_input.shape[1],
-        ),
-        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
-    )
-
-    output = marlin_24_gemm_tester(
-        a_input,
-        marlin_24_q_w_comp,
-        marlin_24_meta,
-        marlin_24_s,
-        workspace_24.scratch,
-        quant_type,
-        a_input.shape[0],
-        b_weight.shape[1],
-        a_input.shape[1],
-    )
-
-    torch.cuda.synchronize()
-
-    max_diff = compute_max_diff(output, output_ref)
-
-    assert max_diff < 0.04
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("gptq_marlin"),
-    reason="Marlin is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
-@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("group_size", HQQ_SUPPORTED_GROUP_SIZES)
-@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-@pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
-def test_hqq_marlin_gemm(
-    k_chunk,
-    n_chunk,
-    group_size,
-    mnk_factors,
-    use_fp32_reduce,
-):
-    m_factor, n_factor, k_factor = mnk_factors
-
-    size_m = m_factor
-    size_k = k_chunk * k_factor
-    size_n = n_chunk * n_factor
-
-    quant_type = scalar_types.uint4
-
-    a_input = rand_data((size_m, size_k))
-    dev = a_input.device
-
-    b_weight = torch.randint(0, 10, (size_n, size_k), dtype=torch.uint8, device=dev)
-    scale = rand_data((size_n, size_k // group_size))
-    zero = rand_data((size_n, size_k // group_size))
-
-    gptq_w_q = gptq_pack(b_weight.transpose(1, 0), 4, size_k, size_n)
-
-    sort_indices = torch.empty(0, dtype=torch.int, device=dev)
-    marlin_w_q = ops.gptq_marlin_repack(gptq_w_q, sort_indices, size_k, size_n, 4).to(
-        dev
-    )
-    marlin_s = marlin_permute_scales(
-        scale.transpose(1, 0), size_k, size_n, group_size
-    ).to(dev)
-    marlin_zp = marlin_permute_scales(
-        zero.transpose(1, 0), size_k, size_n, group_size
-    ).to(dev)
-
-    g_idx = marlin_make_empty_g_idx(dev)
-    g_idx_sort_indices = marlin_make_empty_g_idx(dev)
-
-    workspace = marlin_make_workspace_new(b_weight.device)
-
-    output = ops.gptq_marlin_gemm(
-        a_input,
-        None,
-        marlin_w_q,
-        None,
-        marlin_s,
-        None,
-        None,
-        marlin_zp,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        quant_type,
-        a_input.shape[0],
-        b_weight.shape[0],
-        a_input.shape[1],
-        is_k_full=True,
-        use_fp32_reduce=use_fp32_reduce,
-        is_zp_float=True,
-    )
-
-    b_flat = b_weight.reshape(-1, group_size)
-    zp_flat = zero.reshape(-1, 1)
-    s_flat = scale.reshape(-1, 1)
-    dequant = (b_flat - zp_flat) * s_flat
-
-    output_ref = torch.matmul(a_input, dequant.reshape(b_weight.shape).transpose(1, 0))
-
-    torch.cuda.synchronize()
-
-    max_diff = compute_max_diff(output, output_ref)
-
-    assert max_diff < 0.04
-
-
 def test_marlin_gemm_subset_input():
     quant_type = scalar_types.uint4b8
     group_size = 128
@@ -725,7 +541,7 @@ def test_marlin_gemm_subset_input():
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         None,
         marlin_q_w,
@@ -774,7 +590,7 @@ def test_marlin_gemm_with_bias(size_m):
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         None,
         marlin_q_w,

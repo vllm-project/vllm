@@ -3,22 +3,18 @@
 import contextlib
 import copy
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TypeAlias
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
 
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
-def get_cached_tokenizer(
-    tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast",
-) -> TokenizerLike:
+def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -32,6 +28,8 @@ def get_cached_tokenizer(
     tokenizer_len = len(tokenizer)
 
     max_token_id = max(tokenizer_vocab.values())
+    max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
+
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
@@ -53,6 +51,10 @@ def get_cached_tokenizer(
         def max_token_id(self) -> int:
             return max_token_id
 
+        @property
+        def max_chars_per_token(self) -> int:
+            return max_chars_per_token
+
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab
 
@@ -65,11 +67,10 @@ def get_cached_tokenizer(
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
     cached_tokenizer.__class__ = CachedTokenizer
-    return cached_tokenizer  # type: ignore
+    return cached_tokenizer
 
 
-@TokenizerRegistry.register("hf")
-class HfTokenizer(TokenizerLike):
+class CachedHfTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
         cls,
@@ -79,7 +80,7 @@ class HfTokenizer(TokenizerLike):
         revision: str | None = None,
         download_dir: str | None = None,
         **kwargs,
-    ) -> "TokenizerLike":
+    ) -> HfTokenizer:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
