@@ -129,7 +129,6 @@ class TestData:
 
         # Scale to fp8
         _, a1_scale = input_to_float8(hidden_states)
-        a1_scale = a1_scale.max()
         a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(dtype=torch.float32)
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
         w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
