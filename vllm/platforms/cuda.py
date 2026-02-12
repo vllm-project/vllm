@@ -170,6 +170,9 @@ class CudaPlatformBase(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
+        user_specified_block_size = (
+            cache_config is not None and cache_config.block_size is not None
+        )
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
@@ -187,6 +190,7 @@ class CudaPlatformBase(Platform):
             and model_config.use_mla
             and cache_config.block_size is not None
         ):
+            from vllm.config.vllm import set_current_vllm_config
             from vllm.v1.attention.selector import AttentionSelectorConfig
 
             use_sparse = hasattr(model_config.hf_config, "index_topk")
@@ -213,13 +217,14 @@ class CudaPlatformBase(Platform):
                     attention_config.backend if attention_config else None
                 )
                 num_heads = model_config.get_num_attention_heads(parallel_config)
-                chosen_backend = cls.select_attention_backend(
-                    selected_backend=requested_backend,
-                    attn_selector_config=attn_selector_config,
-                    device_capability=device_capability,
-                    raise_on_invalid=False,
-                    num_heads=num_heads,
-                )
+                with set_current_vllm_config(vllm_config):
+                    chosen_backend = cls.select_attention_backend(
+                        selected_backend=requested_backend,
+                        attn_selector_config=attn_selector_config,
+                        device_capability=device_capability,
+                        raise_on_invalid=False,
+                        num_heads=num_heads,
+                    )
 
                 if chosen_backend is not None:
                     try:
@@ -228,6 +233,18 @@ class CudaPlatformBase(Platform):
                             cache_config.block_size
                         )
                         if cache_config.block_size != preferred_block_size:
+                            if user_specified_block_size:
+                                raise ValueError(
+                                    f"User-specified block_size="
+                                    f"{cache_config.block_size} is "
+                                    f"incompatible with "
+                                    f"{chosen_backend.name} backend "
+                                    f"(requires block_size="
+                                    f"{preferred_block_size}). "
+                                    f"Either remove --block-size to "
+                                    f"auto-select, or use --block-size "
+                                    f"{preferred_block_size}."
+                                )
                             logger.info(
                                 "Setting kv cache block size to %d for %s backend.",
                                 preferred_block_size,
