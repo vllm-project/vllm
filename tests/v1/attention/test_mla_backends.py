@@ -150,8 +150,7 @@ def create_and_prepopulate_kv_cache(
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Optional kv cache dtype string. For fp8 cache dtype,
-                        the cache is populated using the fp8 DeepSeek MLA
-                        layout via concat_and_cache_mla.
+                        the cache is populated via concat_and_cache_mla.
         scale: Scaling factor forwarded to concat_and_cache_mla when the
                fp8 cache layout is requested.
 
