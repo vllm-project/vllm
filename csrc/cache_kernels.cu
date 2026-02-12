@@ -1019,6 +1019,11 @@ static void gather_cache_token_major(
               "block_table must be int32");
   TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
               "cu_seq_lens must be int32");
+  TORCH_CHECK(
+      cu_seq_lens.numel() > 0 &&
+          cu_seq_lens.numel() == block_table.size(0) + 1,
+      "cu_seq_lens has wrong size. Expected ", block_table.size(0) + 1,
+      " but got ", cu_seq_lens.numel());
   TORCH_CHECK(token_to_seq.dtype() == torch::kInt32,
               "token_to_seq must be int32");
   if (seq_starts.has_value()) {
@@ -1167,6 +1172,11 @@ static void gather_cache_batch_major(
               "block_table must be int32");
   TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
               "cu_seq_lens must be int32");
+  TORCH_CHECK(
+      cu_seq_lens.numel() > 0 &&
+          cu_seq_lens.numel() == block_table.size(0) + 1,
+      "cu_seq_lens has wrong size. Expected ", block_table.size(0) + 1,
+      " but got ", cu_seq_lens.numel());
   if (seq_starts.has_value()) {
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
@@ -1242,6 +1252,8 @@ void gather_cache(
   if (has_batch_major_metadata) {
     TORCH_CHECK(!scale.has_value(),
                 "gather_cache batch-major mode expects scale to be None");
+    TORCH_CHECK(batch_size <= block_table.size(0),
+                "gather_cache expects batch_size <= block_table.size(0)");
     if (batch_size == 0) {
       return;
     }
