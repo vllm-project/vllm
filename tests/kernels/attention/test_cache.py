@@ -924,7 +924,9 @@ def test_gather_cache_batch_major_mode(
     _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
 
     seq_len_tensor = torch.randint(0, max_seq_len + 1, (batch_size,), device=device)
-    seq_starts = torch.randint(0, max_seq_len + 1, (batch_size,), dtype=torch.int32, device=device)
+    seq_starts = torch.randint(
+        0, max_seq_len + 1, (batch_size,), dtype=torch.int32, device=device
+    )
 
     total_tokens = seq_len_tensor.sum()
     cu_seq_lens = torch.empty((batch_size + 1), dtype=torch.int32, device=device)
@@ -934,14 +936,18 @@ def test_gather_cache_batch_major_mode(
     max_needed_blocks = int(
         ((seq_starts + seq_len_tensor + block_size - 1) // block_size).max().item()
     )
-    block_table = torch.empty((batch_size, num_blocks), dtype=torch.int32, device=device)
+    block_table = torch.empty(
+        (batch_size, num_blocks), dtype=torch.int32, device=device
+    )
 
     for b in range(batch_size):
         perm = torch.randperm(num_blocks, device=device)
         assert max_needed_blocks <= num_blocks
         block_table[b, :] = perm
 
-    dst = torch.zeros((total_tokens, entry_size), dtype=src_cache.dtype, device=device)
+    dst = torch.zeros(
+        (total_tokens, entry_size), dtype=src_cache.dtype, device=device
+    )
 
     expected_batches = []
     for b in range(batch_size):

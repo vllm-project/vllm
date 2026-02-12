@@ -21,7 +21,6 @@ def test_gather_cache_oob():
     seq_starts causes the block_table offset to read out of bounds.
     """
 
-    batch_size = 1
     block_size = 64
     entry_size = 128
 
@@ -69,7 +68,9 @@ def test_gather_cache_oob():
 def test_gather_cache_token_major_zero_tokens_noop():
     block_size = 16
     entry_size = 576
-    src_cache = torch.randn((4, block_size, entry_size), dtype=torch.float16, device="cuda")
+    src_cache = torch.randn(
+        (4, block_size, entry_size), dtype=torch.float16, device="cuda"
+    )
     dst = torch.empty((0, entry_size), dtype=torch.float16, device="cuda")
     block_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
     cu_seq_lens = torch.zeros((2,), dtype=torch.int32, device="cuda")
@@ -95,12 +96,16 @@ def test_gather_cache_token_major_zero_tokens_noop():
 def test_gather_cache_requires_mode_metadata():
     block_size = 16
     entry_size = 576
-    src_cache = torch.randn((4, block_size, entry_size), dtype=torch.float16, device="cuda")
+    src_cache = torch.randn(
+        (4, block_size, entry_size), dtype=torch.float16, device="cuda"
+    )
     dst = torch.empty((1, entry_size), dtype=torch.float16, device="cuda")
     block_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
     cu_seq_lens = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
 
-    with pytest.raises(RuntimeError, match="requires either token-major metadata"):
+    with pytest.raises(
+        RuntimeError, match="requires either token-major metadata"
+    ):
         ops.gather_cache(
             src_cache,
             dst,
