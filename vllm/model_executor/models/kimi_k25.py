@@ -362,6 +362,7 @@ class KimiK25ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "vision_chunk"):
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
+                quant_config = quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.vision_tower = self.vision_tower.to(
