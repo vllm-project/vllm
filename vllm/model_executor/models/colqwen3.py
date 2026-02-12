@@ -142,8 +142,12 @@ class ColQwen3Model(
     supports_late_interaction: ClassVar[Literal[True]] = True
 
     # Override hf_to_vllm_mapper to handle ColQwen3 weight naming.
+    # NOTE: WeightsMapper applies ALL matching prefix rules sequentially
+    # (no early exit), so more-specific prefixes must come first.
     #   TomoroAI:    "vlm.model.visual.", "vlm.model.language_model."
-    #   OpenSearch:  "visual.", "language_model." (no outer prefix)
+    #   ColPali:     "model.visual.", "model.language_model."
+    #   OpenSearch:  "visual.", "language_model." (no outer prefix,
+    #                re-prefixed to "model.*" in load_weights)
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # TomoroAI naming convention (most specific first)
@@ -153,6 +157,10 @@ class ColQwen3Model(
             # ColPali / nvidia naming convention
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",
+            # OpenSearch-AI: after re-prefix, "language_model.model.*"
+            # becomes "model.language_model.model.*" — handle this before
+            # the shorter "model.language_model." rule to avoid double map
+            "model.language_model.model.": "language_model.model.",
             "model.language_model.": "language_model.model.",
         }
     )
@@ -245,14 +253,20 @@ class ColQwen3Model(
         proj_weights: list[tuple[str, torch.Tensor]] = []
         model_weights: list[tuple[str, torch.Tensor]] = []
 
-        needs_reprefix = False
-        for name, _ in weights_list:
-            if name.startswith("language_model.") or name.startswith("visual."):
-                needs_reprefix = True
-                break
-            if name.startswith("vlm.") or name.startswith("model."):
-                needs_reprefix = False
-                break
+        # Scan all weight names to determine if re-prefixing is needed.
+        # OpenSearch-AI models have unprefixed weights ("language_model.*",
+        # "visual.*") that need "model." added so hf_to_vllm_mapper can
+        # process them. Only re-prefix if ALL backbone weights are
+        # unprefixed (no "vlm." or "model." prefix found).
+        has_unprefixed = any(
+            name.startswith("language_model.") or name.startswith("visual.")
+            for name, _ in weights_list
+        )
+        has_prefixed = any(
+            name.startswith("vlm.") or name.startswith("model.")
+            for name, _ in weights_list
+        )
+        needs_reprefix = has_unprefixed and not has_prefixed
 
         for name, weight in weights_list:
             if self._is_proj_weight(name):
