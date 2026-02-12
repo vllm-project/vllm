@@ -5,6 +5,7 @@ import queue
 import signal
 import threading
 import time
+import weakref
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -1095,11 +1096,24 @@ class EngineCoreProc(EngineCore):
                 method = getattr(self, method_name)
             result = method(*self._convert_msgspec_args(method, args))
             if isinstance(result, Future):
-                result.add_done_callback(
-                    lambda f: self._invoke_utility_method(
-                        method_name, f.result, client_idx, output
+                self_ref = weakref.ref(self)
+
+                def _on_future_done(f: Future[Any]) -> None:
+                    engine = self_ref()
+                    if engine is None:
+                        return
+                    try:
+                        output.result = UtilityResult(f.result())
+                    except Exception as e:
+                        logger.exception("Invocation of %s method failed", method_name)
+                        output.failure_message = (
+                            f"Call to {method_name} method failed: {str(e)}"
+                        )
+                    engine.output_queue.put_nowait(
+                        (client_idx, EngineCoreOutputs(utility_output=output))
                     )
-                )
+
+                result.add_done_callback(_on_future_done)
                 return
             output.result = UtilityResult(result)
         except Exception as e:
@@ -1335,13 +1349,18 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         future: Future[Any] = Future()
+        self_ref = weakref.ref(self)
 
         def _output_queue_empty() -> bool:
-            if self.output_queue.empty():
+            engine = self_ref()
+            if engine is None:
+                future.set_result(None)
+                return True
+            if engine.output_queue.empty():
                 if clear_cache:
-                    self.reset_prefix_cache(reset_running_requests=True)
-                    self.reset_mm_cache()
-                    self.reset_encoder_cache()
+                    engine.reset_prefix_cache(reset_running_requests=True)
+                    engine.reset_mm_cache()
+                    engine.reset_encoder_cache()
                 future.set_result(None)
                 return True
             return False
@@ -1354,8 +1373,11 @@ class EngineCoreProc(EngineCore):
             return future
 
         def _wait_for_running_to_finish() -> bool:
-            # wait for scheduler finish, then wait for output queue to empty
-            if not self.scheduler.has_requests():
+            engine = self_ref()
+            if engine is None:
+                future.set_result(None)
+                return True
+            if not engine.scheduler.has_requests():
                 return _output_queue_empty()
             return False
 
