@@ -973,14 +973,14 @@ class TestToolsLarkConverter:
                 7,
                 "auto",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',  # noqa: E501
             ),
             (
                 [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
                 7,
                 "auto",
                 False,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n',  # noqa: E501
             ),
             # Single strict tool
             (
@@ -988,14 +988,14 @@ class TestToolsLarkConverter:
                 7,
                 "auto",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}}\n',  # noqa: E501
             ),
             (
                 [_create_tool("strict_func", {"param": "value"}, strict=True)],
                 7,
                 "auto",
                 False,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}, "maxItems": 1}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}, "maxItems": 1}\n',  # noqa: E501
             ),
             # Single strict tool with empty parameters
             (
@@ -1003,7 +1003,7 @@ class TestToolsLarkConverter:
                 7,
                 "auto",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "empty_strict_func"}, "arguments": {"type": "object", "properties": {}, "additionalProperties": false}}}]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "empty_strict_func"}, "arguments": {"type": "object", "properties": {}, "additionalProperties": false}}}]}}\n',  # noqa: E501
             ),
             # Multiple non-strict tools
             (
@@ -1014,7 +1014,7 @@ class TestToolsLarkConverter:
                 7,
                 "auto",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',  # noqa: E501
             ),
             # Multiple mixed tools (some strict, some not)
             (
@@ -1025,7 +1025,7 @@ class TestToolsLarkConverter:
                 7,
                 "auto",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "non_strict_func"}, "arguments": {"type": "object"}}}]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "non_strict_func"}, "arguments": {"type": "object"}}}]}}\n',  # noqa: E501
             ),
             # Test cases for mode="auto" with tokenizer version 11 (post-v11)
             # Single non-strict tool
@@ -1034,14 +1034,14 @@ class TestToolsLarkConverter:
                 11,
                 "auto",
                 True,
-                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',
+                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',  # noqa: E501
             ),
             (
                 [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
                 11,
                 "auto",
                 False,
-                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',
+                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',  # noqa: E501
             ),
             # Single strict tool
             (
@@ -1049,14 +1049,14 @@ class TestToolsLarkConverter:
                 11,
                 "auto",
                 True,
-                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?))+',
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?))+',  # noqa: E501
             ),
             (
                 [_create_tool("strict_func", {"param": "value"}, strict=True)],
                 11,
                 "auto",
                 False,
-                '(<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?)',
+                '(<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?)',  # noqa: E501
             ),
             # Single strict tool with empty parameters
             (
@@ -1064,7 +1064,7 @@ class TestToolsLarkConverter:
                 11,
                 "auto",
                 True,
-                '((<TOOL_CALLS> SAFE_WS? "empty_strict_func" <ARGS> SAFE_WS? %json {"type": "object", "properties": {}, "additionalProperties": false} SAFE_WS?))+',
+                '((<TOOL_CALLS> SAFE_WS? "empty_strict_func" <ARGS> SAFE_WS? %json {"type": "object", "properties": {}, "additionalProperties": false} SAFE_WS?))+',  # noqa: E501
             ),
             # Multiple non-strict tools
             (
@@ -1075,7 +1075,7 @@ class TestToolsLarkConverter:
                 11,
                 "auto",
                 True,
-                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',
+                '(<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)+',  # noqa: E501
             ),
             # Multiple mixed tools (some strict, some not)
             (
@@ -1086,23 +1086,22 @@ class TestToolsLarkConverter:
                 11,
                 "auto",
                 True,
-                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+',
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+',  # noqa: E501
             ),
-            # Test cases for mode="required" - should be same as "auto" for grammar generation
-            # Just test a few representative cases to ensure mode is handled correctly
+            # Test cases for mode="required" - should be same as "auto" for grammar
             (
                 [_create_tool("test_func", {"param": "value"}, strict=True)],
                 7,
                 "required",
                 True,
-                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "test_func"}, "arguments": {"param": "value"}}}]}}\n',
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "test_func"}, "arguments": {"param": "value"}}}]}}\n',  # noqa: E501
             ),
             (
                 [_create_tool("test_func", {"param": "value"}, strict=False)],
                 11,
                 "required",
                 False,
-                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',
+                '<TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?',  # noqa: E501
             ),
         ],
         ids=[
@@ -1189,7 +1188,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1202,7 +1201,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1217,7 +1216,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1230,7 +1229,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: think? (content | fcalls)\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: think? (content | fcalls)\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1245,7 +1244,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1258,7 +1257,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1273,7 +1272,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1286,7 +1285,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1301,7 +1300,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1314,7 +1313,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1322,7 +1321,7 @@ class TestMistralGrammarFactory:
                 False,
                 7,
                 [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1337,7 +1336,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1349,7 +1348,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1364,7 +1363,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1377,7 +1376,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1385,7 +1384,7 @@ class TestMistralGrammarFactory:
                 False,
                 11,
                 [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1400,7 +1399,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1412,7 +1411,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1427,7 +1426,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1440,7 +1439,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1448,7 +1447,7 @@ class TestMistralGrammarFactory:
                 False,
                 13,
                 [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1463,7 +1462,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1475,7 +1474,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "auto",
@@ -1490,7 +1489,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1503,7 +1502,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content | (content? fcalls)\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1518,7 +1517,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1531,7 +1530,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1546,7 +1545,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1559,7 +1558,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: think? fcalls\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: think? fcalls\nfcalls: content? ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\nthink: <THINK> content </THINK>\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1574,7 +1573,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1587,7 +1586,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1602,7 +1601,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1615,7 +1614,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1630,7 +1629,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1643,7 +1642,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: ((<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1651,34 +1650,7 @@ class TestMistralGrammarFactory:
                 False,
                 7,
                 [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
-            ),
-            (
-                "required",
-                False,
-                False,
-                7,
-                [
-                    _create_tool(
-                        "tool1",
-                        {
-                            "type": "object",
-                            "properties": {
-                                "location": {
-                                    "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
-                                },
-                                "unit": {
-                                    "type": "string",
-                                    "enum": ["celsius", "fahrenheit"],
-                                },
-                            },
-                            "required": ["location", "unit"],
-                        },
-                        strict=True,
-                    )
-                ],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1693,43 +1665,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
-                                },
-                                "unit": {
-                                    "type": "string",
-                                    "enum": ["celsius", "fahrenheit"],
-                                },
-                            },
-                            "required": ["location", "unit"],
-                        },
-                        strict=True,
-                    ),
-                    _create_tool("tool2", {}, strict=False),
-                ],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
-            ),
-            (
-                "required",
-                False,
-                False,
-                11,
-                [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
-            ),
-            (
-                "required",
-                False,
-                False,
-                11,
-                [
-                    _create_tool(
-                        "tool1",
-                        {
-                            "type": "object",
-                            "properties": {
-                                "location": {
-                                    "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1741,7 +1677,43 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
+            ),
+            (
+                "required",
+                False,
+                False,
+                7,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool1"}, "arguments": {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "tool2"}, "arguments": {"type": "object"}}}]}, "maxItems": 1}\n\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
+            ),
+            (
+                "required",
+                False,
+                False,
+                11,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1756,43 +1728,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
-                                },
-                                "unit": {
-                                    "type": "string",
-                                    "enum": ["celsius", "fahrenheit"],
-                                },
-                            },
-                            "required": ["location", "unit"],
-                        },
-                        strict=True,
-                    ),
-                    _create_tool("tool2", {}, strict=False),
-                ],
-                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
-            ),
-            (
-                "required",
-                False,
-                False,
-                13,
-                [_create_tool("tool1", {}, strict=False)],
-                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
-            ),
-            (
-                "required",
-                False,
-                False,
-                13,
-                [
-                    _create_tool(
-                        "tool1",
-                        {
-                            "type": "object",
-                            "properties": {
-                                "location": {
-                                    "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1804,7 +1740,43 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
+            ),
+            (
+                "required",
+                False,
+                False,
+                11,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    ),
+                    _create_tool("tool2", {}, strict=False),
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
+            ),
+            (
+                "required",
+                False,
+                False,
+                13,
+                [_create_tool("tool1", {}, strict=False)],
+                'start: body\nbody: content? fcalls\nfcalls: <TOOL_CALLS> SAFE_WS? /.+/ <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "required",
@@ -1819,7 +1791,34 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location", "unit"],
+                        },
+                        strict=True,
+                    )
+                ],
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
+            ),
+            (
+                "required",
+                False,
+                False,
+                13,
+                [
+                    _create_tool(
+                        "tool1",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1832,7 +1831,7 @@ class TestMistralGrammarFactory:
                     ),
                     _create_tool("tool2", {}, strict=False),
                 ],
-                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',
+                'start: body\nbody: content? fcalls\nfcalls: (<TOOL_CALLS> SAFE_WS? "tool1" <ARGS> SAFE_WS? %json {"type": "object", "properties": {"location": {"type": "string", "description": "City and state, e.g., \'San Francisco, CA\'"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location", "unit"]} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "tool2" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/',  # noqa: E501
             ),
             (
                 "none",
@@ -1840,7 +1839,7 @@ class TestMistralGrammarFactory:
                 False,
                 7,
                 [_create_tool("tool1", {}, strict=False)],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
             (
                 "none",
@@ -1855,7 +1854,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1867,7 +1866,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
             (
                 "none",
@@ -1875,7 +1874,7 @@ class TestMistralGrammarFactory:
                 False,
                 11,
                 [_create_tool("tool1", {}, strict=False)],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
             (
                 "none",
@@ -1890,7 +1889,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1902,7 +1901,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
             (
                 "none",
@@ -1910,7 +1909,7 @@ class TestMistralGrammarFactory:
                 False,
                 13,
                 [_create_tool("tool1", {}, strict=False)],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
             (
                 "none",
@@ -1925,7 +1924,7 @@ class TestMistralGrammarFactory:
                             "properties": {
                                 "location": {
                                     "type": "string",
-                                    "description": "City and state, e.g., 'San Francisco, CA'",
+                                    "description": "City and state, e.g., 'San Francisco, CA'",  # noqa: E501
                                 },
                                 "unit": {
                                     "type": "string",
@@ -1937,7 +1936,7 @@ class TestMistralGrammarFactory:
                         strict=True,
                     )
                 ],
-                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",
+                "start: body\nbody: content\ncontent: (/(.|\\n)+/)+\nSAFE_WS: /[ \\t\\r\\n]+/",  # noqa: E501
             ),
         ],
     )

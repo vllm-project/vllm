@@ -140,7 +140,10 @@ class OpenAIServingChat(OpenAIServing):
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
         )
-        if self.tool_parser == MistralToolParser and self.reasoning_parser is not None:
+        if (
+            self.tool_parser == MistralToolParser
+            and self.reasoning_parser_cls is not None
+        ):
             self.tool_parser.reasoning = True
 
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
