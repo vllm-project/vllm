@@ -298,6 +298,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
@@ -547,20 +548,20 @@ class InternS1ForConditionalGeneration(
         )
         self.downsample_ratio = config.downsample_ratio
 
-        self.llm_arch_name = config.text_config.architectures[0]
-        self.vision_tower = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_tower = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = self._init_mlp1(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.multi_modal_projector = self._init_mlp1(config)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
         self.video_context_token_id = None
@@ -699,8 +700,6 @@ class InternS1ForConditionalGeneration(
         ):
             return image_input["data"]
 
-        assert self.vision_tower is not None
-
         image_embeds = self.extract_feature(image_input["pixel_values"])
 
         num_patches = image_input["num_patches"]
@@ -736,9 +735,6 @@ class InternS1ForConditionalGeneration(
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         self.visual_token_mask = None
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -787,14 +783,13 @@ class InternS1ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {

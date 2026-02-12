@@ -19,13 +19,14 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& azp,
                       const std::optional<torch::Tensor>& azp_adj,
                       const std::optional<torch::Tensor>& bias,
-                      int64_t handler);
+                      const torch::Tensor& handler_tensor);
 
 int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  int64_t primitive_cache_size);
 
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
-               const std::optional<torch::Tensor>& bias, int64_t handler);
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor);
 
 bool is_onednn_acl_supported();
 
@@ -34,7 +35,7 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank);
+                         const int64_t rank, const int64_t thread_num);
 
 std::string join_shm_manager(int64_t handle, const std::string& name);
 
@@ -118,8 +119,8 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const std::optional<torch::Tensor>& w13_bias,
                    const std::optional<torch::Tensor>& w2_bias,
                    const torch::Tensor& topk_weights,
-                   const torch::Tensor& topk_id, const std::string& act,
-                   const std::string& isa);
+                   const torch::Tensor& topk_id, const bool skip_weighted,
+                   const std::string& act, const std::string& isa);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -196,7 +197,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN GEMM
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-      "int handler) -> ()");
+      "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
   // Check if oneDNN was built with ACL backend
@@ -212,7 +213,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-      "Tensor? azp_adj, Tensor? bias, int handler) -> ()");
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
   // Compute int8 quantized tensor for given scaling factor.
@@ -230,9 +231,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
 // SHM CCL
-#ifdef __AVX512F__
-  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
-          &init_shm_manager);
+#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
+  ops.def(
+      "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
+      "int",
+      &init_shm_manager);
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
@@ -250,7 +253,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
-#endif
+#endif  // #if defined(__AVX512F__) || defined(__aarch64__)
 
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
@@ -291,7 +294,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
 
   // placeholders
@@ -317,6 +320,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 #endif

@@ -7,8 +7,12 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -90,9 +94,14 @@ class TestData:
 
     @staticmethod
     def make_moe_tensors_8bit(
-        m: int, k: int, n: int, e: int, is_trtllm: bool, activation: str = "silu"
+        m: int,
+        k: int,
+        n: int,
+        e: int,
+        is_trtllm: bool,
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> "TestData":
-        is_gated = activation != "relu2_no_mul"
+        is_gated = activation.is_gated
 
         hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
         w13 = torch.randn(
@@ -116,18 +125,7 @@ class TestData:
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
         # Setup dummy config.
-        layer.moe_parallel_config = mk.FusedMoEParallelConfig(
-            tp_size=1,
-            pcp_size=1,
-            dp_size=1,
-            ep_size=1,
-            tp_rank=0,
-            pcp_rank=0,
-            dp_rank=0,
-            ep_rank=0,
-            use_ep=False,
-            all2all_backend="naive",
-        )
+        layer.moe_parallel_config = mk.FusedMoEParallelConfig.make_no_parallel()
 
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
@@ -143,6 +141,8 @@ class TestData:
                 layer.w2_input_scale,
             )
         layer.custom_routing_function = Llama4MoE.custom_routing_function
+        layer.routing_method_type = RoutingMethodType.Llama4
+        layer.renormalize = False
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
@@ -200,7 +200,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=False,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
@@ -225,14 +225,14 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("activation", ["silu", "relu2_no_mul"])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 def test_flashinfer_cutlass_moe_fp8_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
-    activation: str,
+    activation: MoEActivation,
     monkeypatch,
     workspace_init,
 ):
@@ -285,20 +285,28 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         td.layer.get_fused_moe_quant_config = get_fused_moe_quant_config
         td.layer.quant_method = td.layer
 
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            is_act_and_mul=activation.is_gated,
+            routing_method=RoutingMethodType.TopK,
+        )
+
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=quant_config.is_block_quantized
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
-                out_dtype=td.layer.orig_dtype,
+                moe_config=moe_config,
                 quant_config=quant_config,
-                ep_rank=td.layer.moe_parallel_config.ep_rank,
-                ep_size=td.layer.moe_parallel_config.ep_size,
-                tp_rank=td.layer.moe_parallel_config.tp_rank,
-                tp_size=td.layer.moe_parallel_config.tp_size,
-                use_dp=False,
-                use_deepseek_fp8_block_scale=False,
             ),
+            inplace=False,
         )
 
         flashinfer_cutlass_output = kernel(
@@ -307,7 +315,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             td.layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
@@ -316,3 +323,44 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         torch.testing.assert_close(
             output, flashinfer_cutlass_output, atol=5.5e-2, rtol=1e-2
         )
+
+
+@pytest.mark.parametrize(
+    "num_experts,intermediate,hidden",
+    [
+        (8, 2048, 1536),
+        (64, 4096, 4096),
+    ],
+)
+def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
+    num_experts, intermediate, hidden
+):
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    w13 = torch.randn(
+        (num_experts, 2 * intermediate, hidden), dtype=torch.bfloat16, device="cuda"
+    )
+    w2 = torch.randn(
+        (num_experts, hidden, intermediate), dtype=torch.bfloat16, device="cuda"
+    )
+
+    cache: dict[torch.Size, torch.Tensor] = {}
+    w13_converted, w2_converted = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        cache, w13, w2
+    )
+
+    assert w13_converted.ndim == 4, (
+        f"Expected 4D tensor, got shape {w13_converted.shape}"
+    )
+    assert w2_converted.ndim == 4, f"Expected 4D tensor, got shape {w2_converted.shape}"
+
+    assert w13_converted.numel() == w13.numel(), "W13 element count should be preserved"
+    assert w2_converted.numel() == w2.numel(), "W2 element count should be preserved"
+
+    assert w13_converted.dtype == torch.bfloat16
+    assert w2_converted.dtype == torch.bfloat16
+
+    assert w13_converted.shape[0] == num_experts
+    assert w2_converted.shape[0] == num_experts

@@ -335,6 +335,7 @@ def _validate_logprobs(
                 ref_prompt_logprob_toks,
                 ref_prompt_logprob_vals,
                 ref_prompt_token_ranks,
+                _,
             ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                 zip(prompt_token_ids[1:], prompt_logprobs[1:])

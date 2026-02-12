@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -12,11 +13,7 @@ MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
 
         # Allowed token IDs.
@@ -49,12 +46,15 @@ class LogitBiasState:
             device=device,
         )
 
+        # Using any of the above.
+        self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
+
     def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
+        # Using any logit bias.
+        use_logit_bias = False
+
         # Allowed token IDs.
         allowed_token_ids = sampling_params.allowed_token_ids
         if allowed_token_ids:
@@ -66,6 +66,7 @@ class LogitBiasState:
                 )
             self.num_allowed_token_ids.np[req_idx] = num_allowed_token_ids
             self.allowed_token_ids.stage_write(req_idx, 0, allowed_token_ids)
+            use_logit_bias = True
         else:
             self.num_allowed_token_ids.np[req_idx] = 0
 
@@ -81,6 +82,7 @@ class LogitBiasState:
             self.num_logit_bias.np[req_idx] = num_logit_bias
             self.logit_bias_token_ids.stage_write(req_idx, 0, logit_bias.keys())
             self.logit_bias.stage_write(req_idx, 0, logit_bias.values())
+            use_logit_bias = True
         else:
             self.num_logit_bias.np[req_idx] = 0
 
@@ -89,7 +91,7 @@ class LogitBiasState:
         min_len = prompt_len + min_tokens
         self.min_lens.np[req_idx] = min_len
         stop_token_ids = sampling_params.all_stop_token_ids
-        if stop_token_ids:
+        if min_tokens > 0 and stop_token_ids:
             num_stop_token_ids = len(stop_token_ids)
             if num_stop_token_ids > MAX_NUM_STOP_TOKEN_IDS:
                 raise ValueError(
@@ -98,8 +100,11 @@ class LogitBiasState:
                 )
             self.num_stop_token_ids.np[req_idx] = num_stop_token_ids
             self.stop_token_ids.stage_write(req_idx, 0, stop_token_ids)
+            use_logit_bias = True
         else:
             self.num_stop_token_ids.np[req_idx] = 0
+
+        self.use_logit_bias[req_idx] = use_logit_bias
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
@@ -117,8 +122,13 @@ class LogitBiasState:
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> None:
+        if not np.any(self.use_logit_bias[idx_mapping_np]):
+            # No request uses logit bias. Skip the kernel launch.
+            return
+
         apply_logit_bias(
             logits,
             idx_mapping,

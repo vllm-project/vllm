@@ -192,6 +192,7 @@ class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -227,11 +228,8 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
@@ -343,21 +341,23 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
-        self.vocab_size = config.text_config.vocab_size
-        self.multi_modal_projector = AyaVisionMultiModalProjector(config)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "model"),
-            # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
-            architectures=["Cohere2ForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                num_hidden_layers_override=num_hidden_layers,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.multi_modal_projector = AyaVisionMultiModalProjector(config)
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "model"),
+                # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
+                architectures=["Cohere2ForCausalLM"],
+            )
 
     @property
     def dtype(self):
@@ -380,7 +380,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def _process_image_input(
         self, image_input: AyaVisionImagePixelInputs, **kwargs
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
         image_features = self._image_pixels_to_features(
@@ -410,9 +409,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             },
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -422,7 +418,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

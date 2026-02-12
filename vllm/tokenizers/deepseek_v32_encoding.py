@@ -45,7 +45,7 @@ dsml_token: str = "｜DSML｜"
 system_msg_template: str = "{content}"
 user_msg_template: str = "<｜User｜>{content}<｜Assistant｜>"
 assistant_msg_template: str = "{reasoning}{content}{tool_calls}<｜end▁of▁sentence｜>"
-thinking_template = "{reasoning_content}"
+thinking_template = "{reasoning}"
 
 response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"
 tool_call_template: str = (
@@ -154,10 +154,12 @@ def find_last_user_index(messages: list[dict[str, Any]]) -> int:
 def render_message(
     index: int, messages: list[dict[str, Any]], thinking_mode: str
 ) -> str:
-    assert 0 <= index < len(messages)
-    assert thinking_mode in ["chat", "thinking"], (
-        f"Invalid thinking_mode `{thinking_mode}`"
-    )
+    if not (0 <= index < len(messages)):
+        raise ValueError(
+            f"Index {index} out of range for messages list of length {len(messages)}"
+        )
+    if thinking_mode not in ["chat", "thinking"]:
+        raise ValueError(f"Invalid thinking_mode `{thinking_mode}`")
 
     prompt = ""
     msg = messages[index]
@@ -168,7 +170,7 @@ def render_message(
     tools = msg.get("tools")
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
-    reasoning_content = msg.get("reasoning") or msg.get("reasoning_content")
+    reasoning = msg.get("reasoning")
     is_prefix = msg.get("prefix", False)
 
     if tools:
@@ -187,7 +189,8 @@ def render_message(
             )
 
     elif role == "developer":
-        assert content, f"Invalid message for role `{role}`: {msg}"
+        if not content:
+            raise ValueError(f"Invalid message for role `{role}`: {msg}")
         content_developer = ""
         if tools:
             content_developer += "\n\n" + render_tools(tools)
@@ -220,17 +223,17 @@ def render_message(
             prev_assistant_idx -= 1
             assistant_msg = messages[prev_assistant_idx]
 
-        assert (
+        if not (
             index == 0
             or prev_assistant_idx >= 0
             and assistant_msg.get("role") == "assistant"
-        ), f"Invalid messages at {index}:\n{assistant_msg}"
+        ):
+            raise ValueError(f"Invalid messages at {index}:\n{assistant_msg}")
 
         tool_call_order = index - prev_assistant_idx
         assistant_tool_calls = assistant_msg.get("tool_calls")
-        assert assistant_tool_calls and len(assistant_tool_calls) >= tool_call_order, (
-            "No tool calls but found tool output"
-        )
+        if not (assistant_tool_calls and len(assistant_tool_calls) >= tool_call_order):
+            raise ValueError("No tool calls but found tool output")
 
         if tool_call_order == 1:
             prompt += "\n\n<function_results>"
@@ -266,12 +269,12 @@ def render_message(
         summary_content = content or ""
 
         if thinking_mode == "thinking" and index > last_user_idx:
-            assert reasoning_content or tool_calls, (
-                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"
-            )
+            if not (reasoning or tool_calls):
+                raise ValueError(
+                    f"ThinkingMode: {thinking_mode}, invalid message without reasoning/tool_calls `{msg}` after last user message"
+                )
             thinking_part = (
-                thinking_template.format(reasoning_content=reasoning_content or "")
-                + thinking_end_token
+                thinking_template.format(reasoning=reasoning or "") + thinking_end_token
             )
 
         if not tool_calls and is_prefix:
@@ -303,7 +306,6 @@ def drop_thinking_messages(
 
         elif role == "assistant":
             msg_wo_thinking = copy.copy(msg)
-            msg_wo_thinking.pop("reasoning_content", None)
             msg_wo_thinking.pop("reasoning", None)
             messages_wo_thinking.append(msg_wo_thinking)
 
@@ -362,12 +364,14 @@ def parse_tool_calls(index: int, text: str):
         index, _, stop_token = _read_until_stop(
             index, text, [f"<{dsml_token}invoke", tool_calls_end_token]
         )
-        assert _ == ">\n", "Tool call format error"
+        if _ != ">\n":
+            raise RuntimeError("Tool call format error")
 
         if stop_token == tool_calls_end_token:
             break
 
-        assert stop_token is not None, "Missing special token"
+        if stop_token is None:
+            raise RuntimeError("Missing special token")
 
         index, tool_name_content, stop_token = _read_until_stop(
             index, text, [f"<{dsml_token}parameter", f"</{dsml_token}invoke"]
@@ -376,7 +380,8 @@ def parse_tool_calls(index: int, text: str):
         p_tool_name = re.findall(
             r'^\s*name="(.*?)">\n$', tool_name_content, flags=re.DOTALL
         )
-        assert len(p_tool_name) == 1, "Tool name format error"
+        if len(p_tool_name) != 1:
+            raise RuntimeError("Tool name format error")
         tool_name = p_tool_name[0]
 
         tool_args: dict[str, tuple[str, str]] = {}
@@ -390,16 +395,19 @@ def parse_tool_calls(index: int, text: str):
                 param_content,
                 flags=re.DOTALL,
             )
-            assert len(param_kv) == 1, "Parameter format error"
+            if len(param_kv) != 1:
+                raise RuntimeError("Parameter format error")
             param_name, string, param_value = param_kv[0]
 
-            assert param_name not in tool_args, "Duplicate parameter name"
+            if param_name in tool_args:
+                raise RuntimeError("Duplicate parameter name")
             tool_args[param_name] = (param_value, string)
 
             index, content, stop_token = _read_until_stop(
                 index, text, [f"<{dsml_token}parameter", f"</{dsml_token}invoke"]
             )
-            assert content == ">\n", "Parameter format error"
+            if content != ">\n":
+                raise RuntimeError("Parameter format error")
 
         tool_call = decode_dsml_to_arguments(tool_name=tool_name, tool_args=tool_args)
         tool_calls.append(tool_call)
@@ -411,7 +419,7 @@ def parse_tool_calls(index: int, text: str):
 # formatted string and will not attempt to correct malformed output
 # that may be generated by the model.
 def parse_message_from_completion_text(text: str, thinking_mode: str):
-    summary_content, reasoning_content, tool_calls = "", "", []
+    summary_content, reasoning, tool_calls = "", "", []
     index, stop_token = 0, None
     tool_calls_start_token = f"\n\n<{dsml_token}function_calls"
 
@@ -421,8 +429,9 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
         index, content_delta, stop_token = _read_until_stop(
             index, text, [thinking_end_token, tool_calls_start_token]
         )
-        reasoning_content = content_delta
-        assert stop_token == thinking_end_token, "Invalid thinking format"
+        reasoning = content_delta
+        if stop_token != thinking_end_token:
+            raise RuntimeError("Invalid thinking format")
 
     index, content_delta, stop_token = _read_until_stop(
         index, text, [eos_token, tool_calls_start_token]
@@ -431,17 +440,18 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
     if stop_token == tool_calls_start_token:
         is_tool_calling = True
     else:
-        assert stop_token == eos_token, "Invalid summary format"
+        if stop_token != eos_token:
+            raise RuntimeError("Invalid summary format")
 
     if is_tool_calling:
         index, stop_token, tool_calls = parse_tool_calls(index, text)
 
         index, tool_ends_text, stop_token = _read_until_stop(index, text, [eos_token])
-        assert not tool_ends_text, "Unexpected content after tool calls"
+        if tool_ends_text:
+            raise RuntimeError("Unexpected content after tool calls")
 
-    assert len(text) == index and stop_token in [eos_token, None], (
-        "Unexpected content at end"
-    )
+    if not (len(text) == index and stop_token in [eos_token, None]):
+        raise RuntimeError("Unexpected content at end")
 
     for sp_token in [
         bos_token,
@@ -450,14 +460,12 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
         thinking_end_token,
         dsml_token,
     ]:
-        assert sp_token not in summary_content and sp_token not in reasoning_content, (
-            "Unexpected special token in content"
-        )
+        if sp_token in summary_content or sp_token in reasoning:
+            raise RuntimeError("Unexpected special token in content")
 
     return {
         "role": "assistant",
         "content": summary_content,
-        "reasoning_content": reasoning_content,
-        "reasoning": reasoning_content,
+        "reasoning": reasoning,
         "tool_calls": tool_calls_to_openai_format(tool_calls),
     }

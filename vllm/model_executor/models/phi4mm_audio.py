@@ -33,8 +33,6 @@ from vllm.model_executor.models.phi4mm_utils import (
     unfold_tensor,
 )
 
-_AUDIO_PLACEHOLDER_TOKEN_ID = 200011  # <|endoftext11|>
-
 
 class ConformerEncoderLayer(nn.Module):
     """ConformerEncoder Layer module.

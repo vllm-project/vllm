@@ -13,6 +13,13 @@
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 
+// TODO(rasmith): The kernels in this file are susceptible to integer overflow
+// issues, do not take strides, and are unable to handle PyTorch tensors that
+// return is_contiguous() as False (the tensors may actually be contiguous
+// in memory).
+//
+// However, it may be possible to fix these kernels to handle both issues.
+
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
@@ -1358,13 +1365,12 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-#if defined(__gfx950__)  // TODO: Add NAVI support
-  // This version targets big A[] cases, where it is much larger than LDS
-  // capacity
+// This version targets cases skinny where CUs are not filled
+// Wave-SplitK is used with reduction done via atomics.
+#if defined(__gfx950__)
   #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB>
-
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     __attribute__((amdgpu_waves_per_eu(1, 1)))
     wvSplitKrc_(const int actlN, const int K, const int M, const int Bx,
@@ -1376,12 +1382,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   int* cntr = (int*)(&glbl[M * N]);
 
   constexpr int NTILE = 16;
-  constexpr int WVLDS_ = (NTILE * THRDS * A_CHUNK);
   constexpr int APAD = 1;
   constexpr int ASTRD = 64;
   constexpr int BPAD = 1;
-  constexpr int BSTRD = 64;
-  constexpr int WVLDS = ((WVLDS_ + (WVLDS_ / BSTRD) * 4 * BPAD));
+  constexpr int WVLDS_ = THRDS * A_CHUNK / CHUNKK;
+  constexpr int WVLDS = ((WVLDS_ + A_CHUNK * BPAD)) * YTILE;
 
   constexpr int max_lds_len = LDS_SIZE / 2;
 
@@ -1435,17 +1440,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         break;
     }
   #else
-  int constexpr kFit = 512;
+  int constexpr kFit = 512 / CHUNKK;
   int constexpr kfitsPerRdc = 1;
   #endif
 
-  bool doRdc = (kfitsPerRdc * kFit < K);
+  bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
   uint32_t numCuWithFullK =
       ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
   uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
 
   // given above k-split, find this wave's position
-  uint32_t kFitPdd = kFit + (kFit / ASTRD) * APAD;
+  uint32_t kFitPdd = kFit * CHUNKK + ((kFit * CHUNKK) / ASTRD) * APAD;
   uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
   uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
   uint32_t m = (m0 + m1) % Mmod;
@@ -1453,8 +1458,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
   const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
 
-  scalar8 sum4[N / NTILE / GrpsShrB][1];
-  bigType bigB_[YTILE / GrpsShrB][UNRL];
+  scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
+  bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
   const uint32_t bLoader = (threadIdx.y % GrpsShrB);
   uint32_t kBase = 0;
   if (k_str >= K) return;
@@ -1491,12 +1496,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     #pragma unroll
   for (uint32_t k2 = 0; k2 < UNRL; k2++) {
     uint32_t k = k_str + k2 * THRDS * A_CHUNK;
-    uint32_t k_ = k + threadIdx.x * A_CHUNK;
+    uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
     const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-    for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
-      bigB_[y][k2].h8 = (loadnt(
-          (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+      bigB_[y / CHUNKK][k2].h8 = (loadnt(
+          (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
+                                   bLoader + m,
+                               M - 1) *
+                         K])));
   }
   {
   #else
@@ -1549,48 +1557,51 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (reloada) {
   #endif
         constexpr int sprdN = 4;
-        const uint32_t thrd = ((threadIdx.y / sprdN) * THRDS + threadIdx.x);
+        const uint32_t thrd = threadIdx.x % (THRDS / CHUNKK);
 
   #ifndef WVSPLITKRC_1KPASS
     #pragma unroll
-        for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
+        for (int k = 0; k < kFit;
+             k += (THRDS * (WvPrGrp / sprdN) * A_CHUNK) / CHUNKK) {
   #else
         const unsigned int k = 0;
         {
   #endif
           unsigned int kOff = k + (thrd * A_CHUNK);
-          unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
-          const unsigned int k_in = kOffcp + ((threadIdx.y % sprdN)) * K;
-          const unsigned int k_ot = kOff + ((threadIdx.y % sprdN)) * kFitPdd;
-          for (unsigned int n = 0; n < N / 2; n += sprdN) {
-            __builtin_amdgcn_global_load_lds((int*)(&A[k_in + n * K]),
-                                             (int*)(&s[(k_ot + n * kFitPdd)]),
-                                             16, 0, 0);
-            if (((threadIdx.y % sprdN)) + n + N / 2 >= actlN) continue;
+          unsigned int kOffcp =
+              k_str + kOff;  // min__(K - A_CHUNK, k_str + kOff);
+          for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
             __builtin_amdgcn_global_load_lds(
-                (int*)(&A[k_in + (n + N / 2) * K]),
-                (int*)(&s[(k_ot + (n + N / 2) * kFitPdd)]), 16, 0, 0);
+                (int*)(&A[min__(
+                    K * actlN - A_CHUNK,
+                    kOffcp + K * (n / CHUNKK +
+                                  (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                                  (threadIdx.y % sprdN)))]),
+                (int*)(&s[(k +
+                           kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
+                16, 0, 0);
           }
 
           // Stage loaded B[] to LDS for MFMA swizzling...
           for (uint32_t k2 = 0; k2 < UNRL; k2++) {
             uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-            uint32_t k_ = k + threadIdx.x * A_CHUNK;
+            uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
             const bool oob_k = (k_ >= K);
-            for (uint32_t y = 0; y < YTILE / GrpsShrB; y++) {
-              uint32_t idx = threadIdx.x * 4 +
-                             (y * GrpsShrB + bLoader) * ((THRDS + BPAD) * 4);
+            for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
+              uint32_t idx =
+                  (threadIdx.x % (THRDS / CHUNKK)) * 4 +
+                  ((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB + bLoader) *
+                      ((THRDS / CHUNKK + BPAD) * 4);
               // zero out if oob
               *((scalar8*)&myStg[idx]) =
-                  (oob_k || (y * GrpsShrB + bLoader + m >= M))
+                  (oob_k)  // TODO: ever necessary (y*GrpsShrB+bLoader+m>=M) ?
                       ? 0
-                      : bigB_[y][k2].h8;
+                      : bigB_[y / CHUNKK][k2].h8;
             }
           }
         }
       }
     }
-
   #ifndef WVSPLITKRC_1KPASS
     // Fire load of next B[] chunk...
     if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
@@ -1601,40 +1612,50 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-        for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
-          bigB_[y][k2].h8 = (loadnt(
-              (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+          bigB_[y / CHUNKK][k2].h8 = (loadnt(
+              (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
+                                           GrpsShrB +
+                                       bLoader + m,
+                                   M - 1) *
+                             K])));
       }
   #endif
 
     // B[] staging is cooperative across GrpsShrB, so sync here before reading
-    // back
+    // back. This wait is currently inserted by compiler, but not gauranteed.
+    asm volatile("s_waitcnt 0");
     __syncthreads();
 
     // read back B[] swizzled for MFMA...
-    bigType bigB[YTILE][UNRL];
+    bigType bigB[YTILE / CHUNKK][UNRL];
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-      for (uint32_t y = 0; y < YTILE; y++) {
-        unsigned int idx = (threadIdx.x % YTILE) * ((THRDS + BPAD) * 4) +
-                           (threadIdx.x / YTILE) * 4 + y * 16;
+      for (uint32_t y = 0; y < YTILE / CHUNKK; y++) {
+        unsigned int idx =
+            (threadIdx.x % YTILE) * ((THRDS / CHUNKK + BPAD) * 4) +
+            (threadIdx.x / YTILE) * 4 + y * 16;
         bigB[y][k2].h8 = *((scalar8*)&myStg[idx]);
       }
     }
 
     // rReadback A[] swizzled for MFMA...
-    bigType bigA[N / GrpsShrB][UNRL];
+    bigType bigA[N / GrpsShrB / CHUNKK][UNRL];
   #pragma unroll
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
       uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
   #pragma unroll
       for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
   #pragma unroll
-        for (uint32_t n = 0; n < NTILE; n++) {
-          uint32_t idxa = (nt + (threadIdx.x % NTILE) +
-                           (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) *
-                              kFitPdd +
-                          A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
-          bigA[nt + n][k2] = *((const bigType*)(&(s[idxa])));
+        for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
+          uint32_t idxa =
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) % (N / CHUNKK) +
+               (threadIdx.x % NTILE)) *
+                  kFitPdd +
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) /
+               (N / CHUNKK)) *
+                  A_CHUNK * (64 / CHUNKK) +
+              A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
+          bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
         }
     }
 
@@ -1643,152 +1664,75 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
   #pragma unroll
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-        if constexpr (std::is_same_v<scalar_t, half>) {
-          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-              bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
-              (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
-          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-              bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0,
-              0, 0);
-        } else {  // bf16
-          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-              bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
-              (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
-          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-              bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0,
-              0, 0);
-        }
   #pragma unroll
-        for (uint32_t j = 1; j < YTILE; j++) {
+        for (uint32_t j = 0; j < YTILE / CHUNKK; j++) {
           if constexpr (std::is_same_v<scalar_t, half>) {
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0],
-                0, 0, 0);
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0],
-                0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_f16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
           } else {  // bf16
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0],
-                0, 0, 0);
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0],
-                0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_bf16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
           }
         }
       }
     }
   }
 
-  if (!doRdc) {
-    if (m + (threadIdx.x % 16) < M) {
-      scalar_t biases[N / NTILE / GrpsShrB][4] = {0};
+  if (m + (threadIdx.x % 16) < M) {
+    int my_cntr;
+    int mindx = m + (threadIdx.x % 16);
+    int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
+    scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+    // Atomic add the output, read biases
+    for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
+      for (uint32_t j = 0; j < 4; j++) {
+        // int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+        //             (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+        // int adr = mindx + M * nindx;
+        int g_nindx =
+            j + (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+        int g_adr = g_mindx + M * g_nindx * 4;
+        atomicAdd(&glbl[g_adr], sum4[nt][0][j]);
+      }
+    int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                 (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+    int adr_ = mindx + M * nindx_ / 4;
+    // Update the complete counter
+    my_cntr = atomicAdd(&cntr[adr_], 1);
+    float vals[N / NTILE / GrpsShrB][4] = {};
+    // If we're the last k-shard, read back the value and convert...
+    if (my_cntr + 1 == k_rnd) {
       if (BIAS)
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           for (uint32_t j = 0; j < 4; j++) {
-            int mindx = m + (threadIdx.x % 16);
             int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
           }
         }
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
         for (uint32_t j = 0; j < 4; j++) {
-          int mindx = m + (threadIdx.x % 16);
-          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-          int adr = mindx + M * nindx;
-          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
-            C[adr] = __float2bfloat16(sum4[nt][0][j]);
-          } else {
-            if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
-            C[adr] = __float2half(sum4[nt][0][j]);
-          }
+          int g_nindx =
+              j + (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          int g_adr = g_mindx + M * g_nindx * 4;
+          vals[nt][j] = glbl[g_adr];
         }
       }
-    }
-  } else {
-    if (m + (threadIdx.x % 16) < M) {
-      int my_cntr;
-      if (!BIAS) {
-        int mindx = m + (threadIdx.x % 16);
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
-          for (uint32_t j = 0; j < 4; j++) {
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+      __builtin_amdgcn_sched_barrier(0);
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          if (nindx < actlN) {
             int adr = mindx + M * nindx;
-            atomicAdd(&glbl[adr], sum4[nt][0][j]);
-          }
-        int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                     (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_ / 4;
-        my_cntr = atomicAdd(&cntr[adr_], 1);
-        float vals[N / NTILE / GrpsShrB][4] = {};
-        if (my_cntr + 1 == k_rnd) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              int adr = mindx + M * nindx;
-              vals[nt][j] = glbl[adr];
-            }
-          }
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              if (nindx >= actlN) break;
-              int adr = mindx + M * nindx;
-              if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                C[adr] = __float2bfloat16(vals[nt][j]);
-              } else {
-                C[adr] = __float2half(vals[nt][j]);
-              }
-            }
-          }
-        }
-      } else {
-        int mindx = m + (threadIdx.x % 16);
-        scalar_t biases[N / NTILE / GrpsShrB][4] = {};
-        // Atomic add the output, read biases
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++)
-          for (uint32_t j = 0; j < 4; j++) {
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            int adr = mindx + M * nindx;
-            atomicAdd(&glbl[adr], sum4[nt][0][j]);
-            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-          }
-        int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                     (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_ / 4;
-        // Update the complete counter
-        my_cntr = atomicAdd(&cntr[adr_], 1);
-        float vals[N / NTILE / GrpsShrB][4] = {};
-        // If we're the last k-shard, read back the value and convert...
-        if (my_cntr + 1 == k_rnd) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              int adr = mindx + M * nindx;
-              vals[nt][j] = glbl[adr];
-            }
-          }
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              if (nindx >= actlN) break;
-              int adr = mindx + M * nindx;
-              if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                vals[nt][j] += __bfloat162float(biases[nt][j]);
-                C[adr] = __float2bfloat16(vals[nt][j]);
-              } else {
-                vals[nt][j] += __half2float(biases[nt][j]);
-                C[adr] = __float2half(vals[nt][j]);
-              }
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              vals[nt][j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(vals[nt][j]);
+            } else {
+              vals[nt][j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(vals[nt][j]);
             }
           }
         }
@@ -1807,7 +1751,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB>
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
 __global__ void wvSplitKrc_(const int actlN, const int K, const int M,
                             const int Bx, const int By, const scalar_t* B,
                             const scalar_t* __restrict__ A,
@@ -1852,10 +1796,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N, _GrpsShrB)                     \
+#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
   {                                                                            \
-    dim3 block(64, _WvPrGrp);                                                  \
-    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N, _GrpsShrB>         \
+    dim3 block(64, 4);                                                         \
+    wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK>               \
         <<<grid, block, 0, stream>>>(N_in, K_in, M_in, Bx_in, By_in, af4, bf4, \
                                      biasf4, glbl, c, CuCount);                \
   }
@@ -1870,15 +1814,37 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     auto glbl = axl_glbl.data_ptr<float>();
+
+    // With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
+    // and each working on a 512-shard of K, how many CUs would we need?
+    int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
+
+    // How many of 4 waves in a group can work on same 16 Ms at same time? First
+    // try to maximize this. This reduces the Ms each group works on, i.e.
+    // increasing the number of CUs needed.
+    int GrpsShrB = min(N_p2 / 16, 4);
+
+    // Given the above, how many CUs would we need?
+    int CuNeeded = rndup_cus * GrpsShrB;
+
+    if (CuNeeded > CuCount) std::runtime_error("Invalid wvSplitKrc size");
+
+    // Can we increase SplitK by shrinking the K-shared to 256?
+    int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+
     switch (N_p2) {
       case 16:
-        WVSPLITKrc(4, 16, 1, 16, 1) break;
+        WVSPLITKrc(16, 1, 1) break;
       case 32:
-        WVSPLITKrc(4, 16, 1, 32, 2) break;
+        if (chunkk == 2)
+          WVSPLITKrc(32, 2, 2) else if (chunkk == 1) WVSPLITKrc(32, 2, 1) break;
       case 64:
-        WVSPLITKrc(4, 16, 1, 64, 2) break;
+        if (chunkk == 2)
+          WVSPLITKrc(64, 4, 2) else if (chunkk == 1) WVSPLITKrc(64, 4, 1) break;
       case 128:
-        WVSPLITKrc(4, 16, 1, 128, 4) break;
+        if (chunkk == 2)
+          WVSPLITKrc(128, 4, 2) else if (chunkk == 1)
+              WVSPLITKrc(128, 4, 1) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
@@ -1892,8 +1858,9 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitKQ_hf_sml_(const int K, const int Kp, const int M, const int Bx,
-                      const int By, const fp8_t* B, const fp8_t* __restrict__ A,
+    wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp, const int M,
+                      const int Bx, const int By, const fp8_t* B,
+                      const fp8_t* __restrict__ A,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const float* __restrict__ s_A,
                       const float* __restrict__ s_B, const int _WvPrGrp,
@@ -1917,9 +1884,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
     *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
   }
+  asm volatile("s_waitcnt vmcnt(0)");
   __syncthreads();
 
   if (threadIdx.y >= _WvPrGrp) return;
@@ -1927,37 +1899,24 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
   using floatx16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
-  floatx16 sum[N][YTILE];
   float sA = *s_A;
   float sB = *s_B;
 
   while (m < M) {
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++) sum[n][i] = {0.f};
-
-    bigType bigA[N][UNRL];
-    bigType bigB[YTILE][UNRL];
-
+    floatx16 sum[N][YTILE] = {};
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
-  #pragma unroll
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-  #pragma unroll
-        for (uint32_t n = 0; n < N; ++n) bigA[n][k2].h8 = {0.f};
-  #pragma unroll
-        for (uint32_t y = 0; y < YTILE; ++y) bigB[y][k2].h8 = {0.f};
-      }
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
 
       // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
-
-        const fp8_t* B_ = &B[(m + 0) * Kp + k_];
+        const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
   #pragma unroll
         for (uint32_t y = 0; y < YTILE; ++y) {
-          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[y * Kp])));
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
         }
       }
 
@@ -1968,16 +1927,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
         for (int n = 0; n < N; n++) {
-          bigA[n][k2] = *((const bigType*)(&(s[k_ + K * n])));
+          bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
         }
       }
 
   // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-        if (k >= K) break;
-
         for (uint32_t n = 0; n < N; n++) {
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
@@ -1995,48 +1951,27 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
         float accm16 = sum[n][y][8];
-        asm("v_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][1]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][9]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][2]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][10]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:3 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][3]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:3 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][11]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][4]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][12]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:9 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][5]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:9 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][13]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:10 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][6]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:10 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][14]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:11 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][7]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:11 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][15]), "v"(accm16));
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
+                                          1);  // row_shl1
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][9], 0x101, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
+                                          1);  // row_shl2
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][10], 0x102, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
+                                          1);  // row_shl3
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][11], 0x103, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][4], 0x108, 0xf, 0xf,
+                                          1);  // row_shl8
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][12], 0x108, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][5], 0x109, 0xf, 0xf,
+                                          1);  // row_shl9
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][13], 0x109, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][6], 0x10a, 0xf, 0xf,
+                                          1);  // row_shl10
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][14], 0x10a, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][7], 0x10b, 0xf, 0xf,
+                                          1);  // row_shl11
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][15], 0x10b, 0xf, 0xf, 1);
         accm0 += __shfl(accm0, 36);
         accm16 += __shfl(accm16, 52);
         sum[n][y][0] = accm0 + __shfl(accm16, 16);
@@ -2044,19 +1979,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     if (threadIdx.x == 0) {
+      scalar_t biases[N][YTILE] = {};
+      if (BIAS)
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+          }
+        }
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
           sum[n][y][0] *= sA * sB;
           if constexpr (std::is_same_v<scalar_t, half>) {
-            if (BIAS)
-              sum[n][y][0] += __half2float(BIAS[(m + y) % Bx + (n % By) * M]);
+            sum[n][y][0] += __half2float(biases[n][y]);
           } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            if (BIAS)
-              sum[n][y][0] +=
-                  __bfloat162float(BIAS[(m + y) % Bx + (n % By) * M]);
+            sum[n][y][0] += __bfloat162float(biases[n][y]);
           }
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);  // * sA * sB);
+          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);
         }
       }
     }
@@ -2067,9 +2006,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__MI3XX__) TODO: Add NAVI support
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
-__global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
-                                  const int Bx, const int By, const fp8_t* B,
-                                  const fp8_t* __restrict__ A,
+__global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
+                                  const int M, const int Bx, const int By,
+                                  const fp8_t* B, const fp8_t* __restrict__ A,
                                   const scalar_t* __restrict__ BIAS,
                                   scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
@@ -2082,8 +2021,9 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitKQ_hf_(const int K, const int Kp, const int M, const int Bx,
-                  const int By, const fp8_t* B, const fp8_t* __restrict__ A,
+    wvSplitKQ_hf_(const int K, const int Kap, const int Kbp, const int M,
+                  const int Bx, const int By, const fp8_t* B,
+                  const fp8_t* __restrict__ A,
                   const scalar_t* __restrict__ BIAS, scalar_t* C,
                   const float* __restrict__ s_A, const float* __restrict__ s_B,
                   const int _WvPrGrp, const int CuCount) {
@@ -2106,9 +2046,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
     *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
   }
+  asm volatile("s_waitcnt vmcnt(0)");
   __syncthreads();
 
   if (threadIdx.y >= _WvPrGrp) return;
@@ -2116,29 +2061,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
   using floatx16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
-  floatx16 sum[N][YTILE];
   float sA = *s_A;
   float sB = *s_B;
 
   while (m < M) {
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++) sum[n][i] = {0};
-
-    bigType bigA[N][UNRL];
-    bigType bigB[YTILE][UNRL];
-
+    floatx16 sum[N][YTILE] = {};
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+
       // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
-
-        const fp8_t* B_ = &B[(m + 0) * Kp + k_];
+        const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
         for (int y = 0; y < YTILE; ++y) {
-          if (y + m >= M) break;  // To avoid mem access fault.
-          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[y * Kp])));
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
         }
       }
 
@@ -2149,20 +2088,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
         for (int n = 0; n < N; n++) {
-          if (k_ + K * n < max_lds_len)
-            bigA[n][k2] = *((const bigType*)(&(s[k_ + K * n])));
+          if (k_ + Kap * n < max_lds_len)
+            bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
           else
-            bigA[n][k2] = *((const bigType*)(&(A[k_ + K * n])));
+            bigA[n][k2] = *((const bigType*)(&(A[k_ + Kap * n])));
         }
       }
 
   // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-        uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
-
         for (uint32_t n = 0; n < N; n++) {
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
@@ -2180,48 +2115,27 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
         float accm16 = sum[n][y][8];
-        asm("v_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][1]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][9]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][2]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][10]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:3 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][3]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:3 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][11]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][4]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][12]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:9 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][5]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:9 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][13]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:10 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][6]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:10 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][14]), "v"(accm16));
-        asm("v_add_f32 %0, %2, %3 row_shl:11 bound_ctrl:0 "
-            : "=v"(accm0)
-            : "0"(accm0), "v"(sum[n][y][7]), "v"(accm0));
-        asm("v_add_f32 %0, %2, %3 row_shl:11 bound_ctrl:0 "
-            : "=v"(accm16)
-            : "0"(accm16), "v"(sum[n][y][15]), "v"(accm16));
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
+                                          1);  // row_shl1
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][9], 0x101, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
+                                          1);  // row_shl2
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][10], 0x102, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
+                                          1);  // row_shl3
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][11], 0x103, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][4], 0x108, 0xf, 0xf,
+                                          1);  // row_shl8
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][12], 0x108, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][5], 0x109, 0xf, 0xf,
+                                          1);  // row_shl9
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][13], 0x109, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][6], 0x10a, 0xf, 0xf,
+                                          1);  // row_shl10
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][14], 0x10a, 0xf, 0xf, 1);
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][7], 0x10b, 0xf, 0xf,
+                                          1);  // row_shl11
+        accm16 += __builtin_amdgcn_mov_dpp(sum[n][y][15], 0x10b, 0xf, 0xf, 1);
         accm0 += __shfl(accm0, 36);
         accm16 += __shfl(accm16, 52);
         sum[n][y][0] = accm0 + __shfl(accm16, 16);
@@ -2229,17 +2143,21 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     if (threadIdx.x == 0) {
+      scalar_t biases[N][YTILE] = {};
+      if (BIAS)
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+          }
+        }
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
           sum[n][y][0] *= sA * sB;
           if constexpr (std::is_same_v<scalar_t, half>) {
-            if (BIAS)
-              sum[n][y][0] += __half2float(BIAS[(m + y) % Bx + (n % By) * M]);
+            sum[n][y][0] += __half2float(biases[n][y]);
           } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            if (BIAS)
-              sum[n][y][0] +=
-                  __bfloat162float(BIAS[(m + y) % Bx + (n % By) * M]);
+            sum[n][y][0] += __bfloat162float(biases[n][y]);
           }
           C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);
         }
@@ -2252,9 +2170,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__MI3XX__) TODO: Add NAVI support
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
-__global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
-                              const int Bx, const int By, const fp8_t* B,
-                              const fp8_t* __restrict__ A,
+__global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
+                              const int M, const int Bx, const int By,
+                              const fp8_t* B, const fp8_t* __restrict__ A,
                               const scalar_t* __restrict__ BIAS, scalar_t* C,
                               const float* __restrict__ s_A,
                               const float* __restrict__ s_B, const int _WvPrGrp,
@@ -2263,17 +2181,18 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
 }
 #endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
 
-void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
+void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
                const int64_t CuCount) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
-  auto M_in = in_a.size(0);
-  auto K_in = in_a.size(1);
-  auto N_in = in_b.size(0);
-  auto Kp_in = in_a.stride(0);
+  auto M_in = in_b.size(0);
+  auto K_in = in_b.size(1);
+  auto N_in = in_a.size(0);
+  auto Kap_in = in_a.stride(0);
+  auto Kbp_in = in_b.stride(0);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -2293,23 +2212,22 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size();
 
-#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _YTILEb, _UNRLs, _UNRLm, _UNRLb, \
-                  _N)                                                          \
-  {                                                                            \
-    dim3 block(64, _WvPrGrp);                                                  \
-    if ((K_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {               \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);               \
-      wvSplitKQ_hf_sml_<fptype, fp8_t, 64, _YTILEs, _WvPrGrp, 16, _UNRLs, _N>  \
-          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, Bx_in, By_in, a_ptr, \
-                                       b_ptr, bias_ptr, c_ptr, s_a, s_b,       \
-                                       __wvPrGrp, CuCount);                    \
-    } else {                                                                   \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);               \
-      wvSplitKQ_hf_<fptype, fp8_t, 64, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>      \
-          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, Bx_in, By_in, a_ptr, \
-                                       b_ptr, bias_ptr, c_ptr, s_a, s_b,       \
-                                       __wvPrGrp, CuCount);                    \
-    }                                                                          \
+#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)             \
+  {                                                                           \
+    dim3 block(64, _WvPrGrp);                                                 \
+    if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {            \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));     \
+      wvSplitKQ_hf_sml_<fptype, fp8_t, 64, _YTILEs, _WvPrGrp, 16, _UNRLs, _N> \
+          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
+                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
+                                       s_a, s_b, __wvPrGrp, CuCount);         \
+    } else {                                                                  \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));     \
+      wvSplitKQ_hf_<fptype, fp8_t, 64, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>     \
+          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
+                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
+                                       s_a, s_b, __wvPrGrp, CuCount);         \
+    }                                                                         \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(out_c.scalar_type(), "wvSplitKQ", [&] {
@@ -2325,16 +2243,16 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
                           : nullptr;
       switch (N_in) {
         case 1:
-          WVSPLITKQ(16, 2, 2, 2, 2, 2, 2, 1)
+          WVSPLITKQ(12, 2, 2, 2, 2, 1)
           break;
         case 2:
-          WVSPLITKQ(16, 2, 2, 2, 2, 2, 2, 2)
+          WVSPLITKQ(12, 2, 2, 2, 2, 2)
           break;
         case 3:
-          WVSPLITKQ(16, 4, 7, 7, 1, 1, 1, 3)
+          WVSPLITKQ(8, 2, 2, 1, 1, 3)
           break;
         case 4:
-          WVSPLITKQ(16, 4, 7, 7, 1, 1, 1, 4)
+          WVSPLITKQ(4, 2, 2, 1, 1, 4)
           break;
         default:
           throw std::runtime_error(

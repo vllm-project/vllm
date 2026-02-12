@@ -221,6 +221,7 @@ class Cohere2VisionDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -262,11 +263,8 @@ class Cohere2VisionMultiModalProcessor(
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
 
             num_patches = [
                 self.info.get_num_patches(
@@ -353,21 +351,23 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self.multimodal_config = multimodal_config
         self._patch_quant_config(config, quant_config)
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.vocab_size = config.text_config.vocab_size
-        self.multi_modal_projector = Cohere2VisionMultiModalProjector(
-            config, prefix=maybe_prefix(prefix, "multi_modal_projector")
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=config.text_config.architectures,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = Cohere2VisionMultiModalProjector(
+                config, prefix=maybe_prefix(prefix, "multi_modal_projector")
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=config.text_config.architectures,
+            )
 
     @property
     def dtype(self):
@@ -389,8 +389,6 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         Returns:
             List of flattened image embeddings, one per image
         """
-        assert self.vision_tower is not None, "Vision tower is required"
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -437,9 +435,6 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
             ):
                 quant_config.modules_to_not_convert.append("vision_tower")
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -449,7 +444,7 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

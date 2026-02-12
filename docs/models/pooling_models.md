@@ -273,7 +273,7 @@ outputs = llm.embed(
 print(outputs[0].outputs)
 ```
 
-A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy.py](../../examples/pooling/embed/embed_matryoshka_fy.py)
+A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy_offline.py](../../examples/pooling/embed/embed_matryoshka_fy_offline.py)
 
 ### Online Inference
 
@@ -303,7 +303,101 @@ Expected output:
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}
 ```
 
-An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy.py)
+An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
+
+## Specific models
+
+### ColBERT Late Interaction Models
+
+[ColBERT](https://arxiv.org/abs/2004.12832) (Contextualized Late Interaction over BERT) is a retrieval model that uses per-token embeddings and MaxSim scoring for document ranking. Unlike single-vector embedding models, ColBERT retains token-level representations and computes relevance scores through late interaction, providing better accuracy while being more efficient than cross-encoders.
+
+vLLM supports ColBERT models for reranking tasks, automatically applying MaxSim scoring for query-document relevance:
+
+```shell
+vllm serve answerdotai/answerai-colbert-small-v1
+```
+
+Currently supports ColBERT models with standard BERT encoders (e.g., `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0`).
+
+ColBERT models with modified encoder architectures are not yet supported, including BERT variants with rotary embeddings (e.g., `jinaai/jina-colbert-v2`) or other custom encoders (e.g., `LiquidAI/LFM2-ColBERT-350M`).
+
+If your standard BERT ColBERT model's config doesn't specify the architecture as `HF_ColBERT`, override it with:
+
+```shell
+vllm serve your-colbert-model --hf-overrides '{"architectures": ["HF_ColBERT"]}'
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "text_1": "What is machine learning?",
+    "text_2": ["Machine learning is a subset of AI.", "The weather is sunny."]
+}'
+```
+
+You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "input": "What is machine learning?",
+    "task": "token_embed"
+}'
+```
+
+An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../examples/pooling/score/colbert_rerank_online.py)
+
+### BAAI/bge-m3
+
+The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
+the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
+extra weights. To load the full model weights, override its architecture like this:
+
+```shell
+vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
+```
+
+Then you obtain the sparse embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_classify",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
+
+Due to limitations in the output schema, the output consists of a list of
+token scores for each token for each input. This means that you'll have to call
+`/tokenize` as well to be able to pair tokens with scores.
+Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
+to do that.
+
+You can obtain the colbert embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_embed",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
 
 ## Deprecated Features
 
@@ -313,15 +407,6 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 
 - `token_embed` is the same as `embed`, using normalization as the activation.
 - `token_classify` is the same as `classify`, by default using softmax as the activation.
-
-### Remove softmax from PoolingParams
-
-We are going to remove `softmax` and `activation` from `PoolingParams` in v0.15. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
-
-### as_reward_model
-
-!!! warning
-    We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
 
 Pooling models now default support all pooling, you can use it without any settings.
 

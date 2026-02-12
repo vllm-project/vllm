@@ -3,9 +3,10 @@
 
 import enum
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
-from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -27,6 +28,33 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
+@dataclass
+class StreamingUpdate:
+    """Lightweight data for streaming session continuation.
+
+    Contains only the fields needed to update an existing streaming session
+    with new input data.
+    """
+
+    mm_features: list[MultiModalFeatureSpec] | None
+    prompt_token_ids: list[int] | None
+    max_tokens: int
+    arrival_time: float
+    sampling_params: SamplingParams | None
+
+    @classmethod
+    def from_request(cls, request: "Request") -> "StreamingUpdate | None":
+        if not request.resumable:
+            return None
+        return cls(
+            mm_features=request.mm_features,
+            prompt_token_ids=request.prompt_token_ids,
+            max_tokens=request.max_tokens,
+            arrival_time=request.arrival_time,
+            sampling_params=request.sampling_params,
+        )
+
+
 class Request:
     def __init__(
         self,
@@ -39,11 +67,13 @@ class Request:
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        lora_request: Optional["LoRARequest"] = None,
+        lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        resumable: bool = False,
+        reasoning_ended: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -56,6 +86,8 @@ class Request:
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
         )
+        if self.structured_output_request is not None:
+            self.structured_output_request.reasoning_ended = reasoning_ended
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -105,8 +137,6 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
-        self.num_encoder_inputs = len(self.mm_features)
-        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -119,6 +149,9 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # True if this request is scheduled as a non-final prefill chunk.
+        self.is_prefill_chunk = False
+
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
@@ -130,12 +163,18 @@ class Request:
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
-        if block_hasher is not None:
-            self.get_hash_new_full_blocks = partial(block_hasher, self)
-            self.block_hashes = self.get_hash_new_full_blocks()
+        # Store the block hasher without binding self to avoid creating a
+        # reference cycle (Request -> partial -> Request) that prevents
+        # immediate garbage collection via reference counting.
+        self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
+        self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+
+        # Used for streaming
+        self.resumable = resumable
+        # None entry in the queue means finished.
+        self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
     @classmethod
     def from_engine_core_request(
@@ -158,6 +197,8 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            resumable=request.resumable,
+            reasoning_ended=request.reasoning_ended,
         )
 
     def append_output_token_ids(
@@ -171,8 +212,12 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
-        if self.get_hash_new_full_blocks is not None:
-            self.block_hashes.extend(self.get_hash_new_full_blocks())
+        self.update_block_hashes()
+
+    def update_block_hashes(self) -> None:
+        """Compute block hashes for any new full blocks and append them."""
+        if self._block_hasher is not None:
+            self.block_hashes.extend(self._block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
@@ -189,6 +234,14 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
+
+    @property
+    def num_encoder_inputs(self) -> int:
+        return len(self.mm_features)
+
+    @property
+    def has_encoder_inputs(self) -> bool:
+        return self.num_encoder_inputs > 0
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
@@ -211,7 +264,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        return self.mm_features[input_id].mm_position.get_num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
         self,
@@ -246,6 +299,7 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -256,7 +310,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @staticmethod
@@ -278,4 +332,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
 }
