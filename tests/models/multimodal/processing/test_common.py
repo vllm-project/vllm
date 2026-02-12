@@ -218,7 +218,7 @@ def get_text_token_prompts(
             )
             res = tokenizer.mistral.encode_chat_completion(request)
 
-            # Mistral does not support deco~de_tokens with skip_special_tokens=False
+            # Mistral does not support decode_tokens with skip_special_tokens=False
             text_prompt = None
             token_prompt = res.tokens
     else:
@@ -461,6 +461,13 @@ def test_processing_correctness(
         pytest.skip(
             "Qwen-VL tokenizer requires downloading a font file from "
             "servers that often refuse connections in CI"
+        )
+    if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
+        pytest.skip(
+            "Voxtral Realtime doesn't make use of any place-holder"
+            "tokens and hence cannot pass the processing "
+            "correctness test as is. Let's revisit adapting this "
+            "test once more realtime models exist."
         )
     if model_id == "internlm/Intern-S1-Pro":
         # FIXME(Isotr0py): Fix later.
