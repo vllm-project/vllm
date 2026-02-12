@@ -544,6 +544,7 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Disable AR-RMS-Quant fusion for DeepSeekV3 in NVFP4"""
+        # TODO: https://github.com/vllm-project/vllm/issues/34395
 
         # disable AR-rms-fp4 fusion for DSv3+
         ar_rms_enabled = vllm_config.compilation_config.pass_config.fuse_allreduce_rms
