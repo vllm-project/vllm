@@ -67,12 +67,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
+from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -85,7 +86,6 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
-from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -128,9 +128,6 @@ class OpenAIServingChat(OpenAIServing):
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
-
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
 
         # set up reasoning parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
@@ -218,10 +215,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> (
-        tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]
-        | ErrorResponse
-    ):
+    ) -> tuple[list[ConversationMessage], list[TokPrompt]] | ErrorResponse:
         """
         render chat request by validating and preprocessing inputs.
 
@@ -241,8 +235,7 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.tokenizer
+            tokenizer = self.renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -377,10 +370,11 @@ class OpenAIServingChat(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text = engine_prompt.get("prompt")
+                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -389,10 +383,12 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    prompt=engine_prompt,
-                    default_sampling_params=self.default_sampling_params,
+                    max_model_len,
+                    request.max_completion_tokens
+                    if request.max_completion_tokens is not None
+                    else request.max_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -403,12 +399,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                    )
-                    validate_logits_processors_parameters(
-                        self.logits_processors,
-                        sampling_params,
                     )
 
                 self._log_inputs(
