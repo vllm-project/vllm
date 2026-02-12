@@ -124,6 +124,7 @@ class TestData:
         layer.w2_input_scale = a2_scale
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
+        layer.activation = activation
         # Setup dummy config.
         layer.moe_parallel_config = mk.FusedMoEParallelConfig.make_no_parallel()
 
@@ -131,7 +132,7 @@ class TestData:
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
         if is_trtllm:
             rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
-                layer.w13_weight, layer.w2_weight
+                layer.w13_weight, layer.w2_weight, is_gated
             )
             register_scales_for_trtllm_fp8_per_tensor_moe(
                 layer,
@@ -146,7 +147,6 @@ class TestData:
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
-        layer.activation = activation
 
         return TestData(
             hidden_states=hidden_states,
