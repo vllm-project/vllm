@@ -130,6 +130,7 @@ class SiluAndMul(CustomOp):
     def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            # Use functional variant (allocates output internally)
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -141,11 +142,8 @@ class SiluAndMul(CustomOp):
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
-        return out
+        # Functional variant: op allocates and returns output
+        return self.op(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)

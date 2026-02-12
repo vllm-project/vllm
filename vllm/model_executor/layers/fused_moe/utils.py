@@ -376,7 +376,7 @@ def apply_moe_activation(
 
     # Activations with gated multiplication (gate × activation(up))
     if activation == "silu":
-        torch.ops._C.silu_and_mul(output, input)
+        torch.ops._C.silu_and_mul.out(input, out=output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(output, input)
     elif activation == "swigluoai":

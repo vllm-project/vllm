@@ -29,6 +29,24 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
+# silu_and_mul functional and out variant (PyTorch standard convention)
+# Enables torch.compile decompose_functional_to_out pass
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "silu_and_mul"):
+
+    @register_fake("_C::silu_and_mul")
+    def _silu_and_mul_fake(input: torch.Tensor) -> torch.Tensor:
+        # input: [..., 2*d], output: [..., d]
+        sizes = list(input.shape)
+        sizes[-1] //= 2
+        return torch.empty(sizes, dtype=input.dtype, device=input.device)
+
+    @register_fake("_C::silu_and_mul.out")
+    def _silu_and_mul_out_fake(
+        input: torch.Tensor, *, out: torch.Tensor
+    ) -> torch.Tensor:
+        return out
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,

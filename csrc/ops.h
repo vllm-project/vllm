@@ -147,7 +147,13 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
-void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+void silu_and_mul(torch::Tensor& out, const torch::Tensor& input);
+
+// Functional variant of silu_and_mul (allocates output)
+torch::Tensor silu_and_mul_func(const torch::Tensor& input);
+
+// Out variant with PyTorch standard signature: (input, *, out) -> Tensor
+torch::Tensor silu_and_mul_out(const torch::Tensor& input, torch::Tensor& out);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);

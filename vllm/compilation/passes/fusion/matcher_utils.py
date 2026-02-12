@@ -446,11 +446,8 @@ class MatcherSiluAndMul(MatcherCustomOp):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        result = auto_functionalized(SILU_MUL_OP, result=out, input=x)
-        return result[1]
+        # Use functional variant directly (returns result)
+        return SILU_MUL_OP(x)
 
     def forward_native(
         self,
