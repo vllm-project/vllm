@@ -624,23 +624,24 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: HunYuanVLProcessor | None,
+        image_processor: HunYuanVLProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         spatial_merge_size = vision_config.spatial_merge_size
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = mm_kwargs.get("size", image_processor.size)
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_merge_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                min_pixels=size["min_pixels"],
+                max_pixels=size["max_pixels"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -662,29 +663,37 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: HunYuanVLProcessor | None,
+        image_processor: HunYuanVLProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_image_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.get_image_processor()
+
         max_image_size, _ = self._get_vision_info(
             image_width=512,
             image_height=8192,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return max_image_size
 
     def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
+
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 
