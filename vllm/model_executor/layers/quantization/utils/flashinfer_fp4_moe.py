@@ -303,12 +303,13 @@ def flashinfer_trtllm_fp4_moe(
         Output tensor from the MoE layer
     """
     import flashinfer
+    from flashinfer.fused_moe.core import ActivationType
 
     from vllm.model_executor.models.llama4 import Llama4MoE
-    from vllm.utils.flashinfer import FlashinferActivationType
 
-    assert activation == MoEActivation.SILU, (
-        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
+    SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+    assert activation in SUPPORTED_ACTIVATIONS, (
+        "Only SiLU and ReLU2_NO_MUL activations are supported for FlashInfer TRTLLM FP4 MoE. "
         f"{activation} found instead."
     )
 
@@ -367,7 +368,7 @@ def flashinfer_trtllm_fp4_moe(
         routed_scaling_factor=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
-        activation_type=activation_type,
+        activation_type=ActivationType(activation_type),
     )[0]
 
     return out

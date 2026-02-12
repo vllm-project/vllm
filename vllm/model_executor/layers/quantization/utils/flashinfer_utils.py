@@ -20,15 +20,15 @@ class FlashinferMoeBackend(Enum):
 
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
-    from vllm.utils.flashinfer import FlashinferActivationType
+    from flashinfer.fused_moe.core import ActivationType
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
-        MoEActivation.SILU_NO_MUL: FlashinferActivationType.Silu,
-        MoEActivation.GELU_NO_MUL: FlashinferActivationType.Gelu,
-        MoEActivation.SILU: FlashinferActivationType.Swiglu,
-        MoEActivation.GELU: FlashinferActivationType.Geglu,
-        MoEActivation.RELU2_NO_MUL: FlashinferActivationType.Relu2,
+        MoEActivation.SILU_NO_MUL: ActivationType.Silu,
+        MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
+        MoEActivation.SILU: ActivationType.Swiglu,
+        MoEActivation.GELU: ActivationType.Geglu,
+        MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation].value
 

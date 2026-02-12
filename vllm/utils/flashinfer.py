@@ -82,23 +82,21 @@ def _get_submodule(module_name: str) -> Any | None:
         return None
 
 
-@functools.cache
-def _lazy_import_attr(module_name: str, attr_name: str):
-    """Create a lazy import wrapper for a specific attribute."""
-    if not has_flashinfer():
-        return None
-    mod = _get_submodule(module_name)
-    return getattr(mod, attr_name, None) if mod else None
-
-
 # General lazy import wrapper
 def _lazy_import_wrapper(
     module_name: str, attr_name: str, fallback_fn: Callable[..., Any] = _missing
 ):
     """Create a lazy import wrapper for a specific function."""
 
+    @functools.cache
+    def _get_impl():
+        if not has_flashinfer():
+            return None
+        mod = _get_submodule(module_name)
+        return getattr(mod, attr_name, None) if mod else None
+
     def wrapper(*args, **kwargs):
-        impl = _lazy_import_attr(module_name, attr_name)
+        impl = _get_impl()
         if impl is None:
             return fallback_fn(*args, **kwargs)
         return impl(*args, **kwargs)
@@ -136,8 +134,6 @@ nvfp4_block_scale_interleave = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-FlashinferActivationType = _lazy_import_attr("flashinfer", "ActivationType")
-
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
