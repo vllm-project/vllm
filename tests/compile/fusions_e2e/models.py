@@ -49,9 +49,9 @@ llama3_8b = ModelFusionInfo(
     # ROCm matches
     else (
         lambda n_layers: Matches(
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2 + 1,
-            async_tp=n_layers * 4,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -75,9 +75,9 @@ llama3_8b_fp8 = ModelFusionInfo(
             rms_quant_fusion=n_layers * 2,
             act_quant_fusion=n_layers,
             attn_quant_fusion=n_layers,
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2 + 1,
-            async_tp=n_layers * 4,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -101,9 +101,9 @@ llama3_8b_fp4 = ModelFusionInfo(
             rms_quant_fusion=0,
             act_quant_fusion=n_layers,
             attn_quant_fusion=n_layers,
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2 + 1,
-            async_tp=n_layers * 4,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -131,9 +131,9 @@ llama4_scout_fp8 = ModelFusionInfo(
         lambda n_layers: Matches(
             rms_quant_fusion=n_layers,
             attn_quant_fusion=n_layers,
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2,
-            async_tp=0,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -156,8 +156,8 @@ llama4_scout_fp4 = ModelFusionInfo(
         lambda n_layers: Matches(
             rms_quant_fusion=0,
             attn_quant_fusion=n_layers,
-            sequence_parallel=n_layers * 2,
-            async_tp=n_layers * 2 - 1,
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -177,9 +177,9 @@ qwen3_a3b = ModelFusionInfo(
     else (
         lambda n_layers: Matches(
             norm_rope_fusion=n_layers,
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2 + 1,
-            async_tp=n_layers * 2,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
@@ -209,9 +209,9 @@ qwen3_a3b_fp8 = ModelFusionInfo(
             # tests/compile/fusions_e2e/test_tp1_quant.py
             # we are enabling AITER, so no fusion happens.
             norm_rope_fusion=0,
-            ar_rms_fusion=0,
-            sequence_parallel=n_layers * 2 + 1,
-            async_tp=n_layers * 2,
+            ar_rms_fusion=0,  # Not supported
+            sequence_parallel=0,  # Not supported
+            async_tp=0,  # Not supported
         )
     ),
 )
