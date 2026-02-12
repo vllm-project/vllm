@@ -226,8 +226,8 @@ class CacheConfig:
             int8_warn_info = (
                 "int8 kv cache requires calibrated scaling factors. "
                 "Make sure --calculate_kv_scales argument is set and "
-                "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set. "
-                "Normally 127 for INT8."
+                "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set, "
+                "normally set to 127 for int8."
             )
             logger.info(
                 warn_info,
