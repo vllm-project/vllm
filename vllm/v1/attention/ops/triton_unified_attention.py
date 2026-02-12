@@ -105,7 +105,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8/int4 KV cache
+    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8 KV cache
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -451,7 +451,7 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8/int4 KV cache
+    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8 KV cache
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
@@ -933,7 +933,7 @@ def unified_attention(
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
-    # True when KV cache is quantized (fp8/int8/int4); kernel dequantizes with scale
+    # True when KV cache is quantized (fp8/int8); kernel dequantizes with scale
     use_quantized_kv = k_descale is not None
 
     block_size = v.shape[1]
