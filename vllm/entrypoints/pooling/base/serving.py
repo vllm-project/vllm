@@ -4,7 +4,6 @@ from collections.abc import AsyncGenerator, Mapping
 from http import HTTPStatus
 from typing import (
     ClassVar,
-    TypeAlias,
     assert_never,
 )
 from wsgiref.headers import Headers
@@ -32,7 +31,6 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.utils import create_error_response
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams
@@ -43,8 +41,6 @@ from vllm.tracing import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
-
-ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 
 
 class PoolingServing:
@@ -103,7 +99,7 @@ class PoolingServing:
 
             await self._check_model(request, raw_request)
 
-            ctx = ClassificationServeContext(
+            ctx = ServeContext(
                 request=request,
                 raw_request=raw_request,
                 model_name=model_name,
@@ -112,7 +108,7 @@ class PoolingServing:
 
             self._validate_request(ctx)
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
-            ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
+            await self._preprocess(ctx)
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
             generator = await self._build_response(ctx)
@@ -127,6 +123,12 @@ class PoolingServing:
             return JSONResponse(content=generator.model_dump())
 
         assert_never(generator)
+
+    async def _preprocess(
+        self,
+        ctx: ServeContext,
+    ):
+        ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
 
     async def _get_trace_headers(
         self,
@@ -196,7 +198,7 @@ class PoolingServing:
         if None in final_res_batch:
             raise ValueError("Failed to generate results for all prompts")
 
-        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
+        ctx.final_res_batch = final_res_batch
 
     async def _build_response(
         self,
