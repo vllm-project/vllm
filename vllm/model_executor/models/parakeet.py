@@ -5,6 +5,7 @@
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import ParakeetEncoder as HFParakeetEncoder
@@ -131,6 +132,8 @@ class ExtractorConfig:
     subsampling_factor: int
     subsampling_conv_kernel_size: int
     subsampling_conv_stride: int
+    clip_duration_s: int = 30
+    clip_min_duration_s: float = 0.1
 
     @staticmethod
     def from_hf_config(config: PretrainedConfig) -> "ExtractorConfig":
@@ -148,13 +151,40 @@ class ParakeetExtractor(ParakeetFeatureExtractor):
     def __init__(self, config: PretrainedConfig) -> None:
         self.config = ExtractorConfig.from_hf_config(config)
         super().__init__(**asdict(self.config))
+        self._clip_target_samples = int(
+            round(self.config.clip_duration_s * self.sampling_rate)
+        )
+        self._tail_min_samples = int(
+            round(self.config.clip_min_duration_s * self.sampling_rate)
+        )
+
+    def _normalize_audio_length(self, audio_len: int) -> int:
+        # Match mcore's compute_params() logic for clip/minduration handling.
+        target_len = max(audio_len, self._tail_min_samples)
+        tail_remainder = target_len % self._clip_target_samples
+        if 0 < tail_remainder < self._tail_min_samples:
+            padding = self._tail_min_samples - tail_remainder
+            target_len += padding
+        assert isinstance(target_len, int)
+        return target_len
 
     def audio_token_count(self, audio_len: int) -> int:
+        audio_len = self._normalize_audio_length(audio_len)
         num_frames = audio_len // self.hop_length
         n_tokens = HFParakeetEncoder._get_subsampling_output_length(
             self, torch.tensor([num_frames], dtype=torch.float)
         )
         return max(1, n_tokens.item())
+
+    def __call__(self, raw_speech: list[np.ndarray], *args, **kwargs):
+        padded = []
+        for p in raw_speech:
+            assert p.ndim == 1
+            audio_len = int(p.shape[0])
+            target_len = self._normalize_audio_length(audio_len)
+            p = np.pad(p, (0, target_len - audio_len))
+            padded.append(p)
+        return super().__call__(padded, *args, **kwargs)
 
     def audio_length(self, audio_tokens: int) -> int:
         return int(audio_tokens * self.config.subsampling_factor * self.hop_length)
