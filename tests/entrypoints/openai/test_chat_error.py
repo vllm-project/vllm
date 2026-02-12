@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.logger import _print_warning_once
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -234,6 +235,14 @@ async def test_chat_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.fixture(autouse=True)
+def _clear_warning_once_cache():
+    """Clear the warning_once lru_cache so each test gets a fresh state."""
+    _print_warning_once.cache_clear()
+    yield
+    _print_warning_once.cache_clear()
 
 
 @pytest.mark.parametrize(
