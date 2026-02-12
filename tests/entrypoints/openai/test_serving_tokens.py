@@ -133,17 +133,13 @@ async def test_generate_logprobs(client, logprobs_value):
     resp.raise_for_status()
     data = resp.json()
     choice = data["choices"][0]
-
-    if logprobs_value == 0:
-        assert choice["logprobs"] is None
-    else:
-        assert choice["logprobs"] is not None
-        logprobs_content = choice["logprobs"]["content"]
-        assert len(logprobs_content) == len(choice["token_ids"])
-        for entry in logprobs_content:
-            assert "logprob" in entry
-            assert len(entry["top_logprobs"]) >= 1
-            assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+    assert choice["logprobs"] is not None
+    logprobs_content = choice["logprobs"]["content"]
+    assert len(logprobs_content) == len(choice["token_ids"])
+    for entry in logprobs_content:
+        assert "logprob" in entry
+        assert len(entry["top_logprobs"]) >= 1
+        assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
 
 
 @pytest.mark.asyncio
