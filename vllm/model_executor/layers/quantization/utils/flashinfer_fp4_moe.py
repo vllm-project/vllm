@@ -308,8 +308,8 @@ def flashinfer_trtllm_fp4_moe(
 
     SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
     assert activation in SUPPORTED_ACTIVATIONS, (
-        "Only SiLU and ReLU2_NO_MUL activations are supported for FlashInfer TRTLLM FP4 MoE. "
-        f"{activation} found instead."
+        f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
+        f"TRTLLM FP4 MoE, {activation} found instead."
     )
 
     # Quantize input to FP4

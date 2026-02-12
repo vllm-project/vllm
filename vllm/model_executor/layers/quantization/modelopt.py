@@ -939,8 +939,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # time in the oracle rather than here.
         SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert layer.activation in SUPPORTED_ACTIVATIONS, (
-            f"Expected one of {SUPPORTED_ACTIVATIONS} activations but got "
-            + layer.activation
+            f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
+            f"TRTLLM FP4 MoE, {layer.activation} found instead."
         )
         return apply_fi_trtllm_fp8_per_tensor_moe(
             layer=layer,
