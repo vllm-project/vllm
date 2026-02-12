@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -64,7 +65,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
+    def _supports_activation(activation: MoEActivation) -> bool:
         raise NotImplementedError(
             "TrtLlmGenExperts is not yet used by an Oracle. "
             "This method should not be called."
@@ -92,7 +93,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
@@ -108,7 +109,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
