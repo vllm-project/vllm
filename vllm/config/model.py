@@ -1681,6 +1681,19 @@ class ModelConfig:
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
+    def is_nvfp4_quantized(self) -> bool:
+        # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
+        if self.quantization in ("modelopt_fp4",):
+            return True
+
+        # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
+        # in the quantization config
+        return (
+            self.quantization == "compressed-tensors"
+            and "nvfp4"
+            in self.model_arch_config.quantization_config.get("format", "").lower()
+        )
+
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
     """
