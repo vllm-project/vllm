@@ -454,8 +454,8 @@ def test_deepseek_flashinfer_topk(clean_logits: bool, top_k: int) -> None:
     else:
         offsets = torch.arange(next_n, device=logits_long.device, dtype=torch.int32)
         lengths = (seq_lens_long.unsqueeze(1) - next_n + 1 + offsets).flatten()
-    
-    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")        
+
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
     torch.ops._C.flashinfer_radix_topk(logits_long, lengths, indices, workspace, top_k)
 
     torch_indices_short = torch.empty(

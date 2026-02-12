@@ -18,14 +18,14 @@ struct vec_t {
   FLASHINFER_INLINE const T& operator[](size_t i) const { return data[i]; }
 
   FLASHINFER_INLINE void load(const T* ptr) {
-    #pragma unroll
+#pragma unroll
     for (size_t i = 0; i < N; ++i) {
       data[i] = ptr[i];
     }
   }
 
   FLASHINFER_INLINE void store(T* ptr) const {
-    #pragma unroll
+#pragma unroll
     for (size_t i = 0; i < N; ++i) {
       ptr[i] = data[i];
     }
@@ -33,7 +33,7 @@ struct vec_t {
 
   template <typename U>
   FLASHINFER_INLINE void cast_load(const U* ptr) {
-    #pragma unroll
+#pragma unroll
     for (size_t i = 0; i < N; ++i) {
       data[i] = static_cast<T>(ptr[i]);
     }

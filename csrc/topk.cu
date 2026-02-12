@@ -377,13 +377,9 @@ void large_context_topk(
               "large_context_topk kernel failed: ", cudaGetErrorString(result));
 }
 
-void flashinfer_radix_topk(
-  const torch::Tensor& logits,
-  const torch::Tensor& lengths,
-  torch::Tensor& output,
-  torch::Tensor& workspace,
-  int64_t k
-) {
+void flashinfer_radix_topk(const torch::Tensor& logits,
+                           const torch::Tensor& lengths, torch::Tensor& output,
+                           torch::Tensor& workspace, int64_t k) {
   TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
@@ -401,22 +397,21 @@ void flashinfer_radix_topk(
   const int64_t max_len = logits.size(1);
 
   TORCH_CHECK(lengths.size(0) == num_rows, "lengths size mismatch");
-  TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k, "output size mismatch");
+  TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k,
+              "output size mismatch");
   TORCH_CHECK(k > 0 && k <= max_len, "k out of range");
   TORCH_CHECK(workspace.size(0) >= 1024 * 1024,
               "workspace buffer too small, need at least 1MB (1048576 bytes)");
 
-  cudaError_t status = vllm::sampling::TopKRaggedTransformDispatch<float, int32_t>(
-      logits.data_ptr<float>(),
-      output.data_ptr<int32_t>(),
-      lengths.data_ptr<int32_t>(),
-      static_cast<uint32_t>(num_rows),
-      static_cast<uint32_t>(k),
-      static_cast<uint32_t>(max_len),
-      reinterpret_cast<vllm::sampling::RadixRowState*>(workspace.data_ptr()),
-      at::cuda::getCurrentCUDAStream()
-  );
+  cudaError_t status =
+      vllm::sampling::TopKRaggedTransformDispatch<float, int32_t>(
+          logits.data_ptr<float>(), output.data_ptr<int32_t>(),
+          lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
+          static_cast<uint32_t>(k), static_cast<uint32_t>(max_len),
+          reinterpret_cast<vllm::sampling::RadixRowState*>(
+              workspace.data_ptr()),
+          at::cuda::getCurrentCUDAStream());
 
-  TORCH_CHECK(status == cudaSuccess,
-              "TopKRaggedTransformDispatch failed: ", cudaGetErrorString(status));
+  TORCH_CHECK(status == cudaSuccess, "TopKRaggedTransformDispatch failed: ",
+              cudaGetErrorString(status));
 }
