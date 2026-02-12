@@ -154,9 +154,7 @@ class VoxtralProcessorAdapter:
             assert audio.ndim == 1
 
             if not self._audio_processor.audio_config.is_streaming:
-                audio = self._audio_processor.pad(
-                    audio, self.sampling_rate, is_online_streaming=False
-                )
+                audio = self._audio_processor.pad(audio, self.sampling_rate)
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id
