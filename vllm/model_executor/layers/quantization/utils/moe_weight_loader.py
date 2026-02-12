@@ -150,6 +150,29 @@ class MoeOnlineWeightLoader:
         weight_loader: Callable,
         extra_weight_attrs: dict,
     ) -> Callable:
+        """
+        Create a patched weight loader that handles JIT materialization and
+        triggers quantization when all weight shards are loaded.
+
+        This wrapper performs three key functions:
+        1. JIT Materialization: On first call, materializes w13_weight and
+           w2_weight from meta device to the target device, reducing peak
+           memory during model loading.
+        2. Load Tracking: Tracks total elements loaded across all shards 
+           to detect when loading is complete.
+        3. Auto-Quantization: When all shards are loaded,
+           automatically call process_weights_after_loading to quantize
+           weights and set up the kernel.
+
+        Args:
+            layer: The MoE layer module being loaded.
+            weight_loader: The original weight loader callable to wrap.
+            extra_weight_attrs: Additional attributes to set on weight tensors.
+
+        Returns:
+            A patched weight loader callable that wraps the original.
+        """
+
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
             # Add a counter to track how many elements we have updated
             if not hasattr(layer, "_loaded_numel"):
