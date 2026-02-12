@@ -19,16 +19,13 @@ class FlashinferMoeBackend(Enum):
     CUTEDSL = "CUTEDSL"
 
 
-def is_gated_activation(activation: str) -> bool:
-    NON_GATED_ACTIVATION_NAMES = {"relu2_no_mul"}
-    return activation not in NON_GATED_ACTIVATION_NAMES
-
-
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     from vllm.utils.flashinfer import FlashinferActivationType
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
+        MoEActivation.SILU_NO_MUL: FlashinferActivationType.Silu,
+        MoEActivation.GELU_NO_MUL: FlashinferActivationType.Gelu,
         MoEActivation.SILU: FlashinferActivationType.Swiglu,
         MoEActivation.GELU: FlashinferActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: FlashinferActivationType.Relu2,
