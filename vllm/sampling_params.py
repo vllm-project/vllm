@@ -318,7 +318,6 @@ class SamplingParams(
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
             structured_outputs=structured_outputs,
@@ -455,11 +454,6 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
-        if self.logits_processors:
-            # TODO: Remove `logits_processors` attribute
-            raise ValueError(
-                "vLLM V1 does not support per request user-provided logits processors."
-            )
         if self.truncate_prompt_tokens is not None and (
             self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
         ):
@@ -586,15 +580,7 @@ class SamplingParams(
         if self.skip_clone:
             return copy.copy(self)
 
-        logit_processor_refs = (
-            None
-            if self.logits_processors is None
-            else {
-                id(lp): lp.clone() if hasattr(lp, "clone") else lp
-                for lp in self.logits_processors
-            }
-        )
-        return copy.deepcopy(self, memo=logit_processor_refs)
+        return copy.deepcopy(self)
 
     def verify(
         self,

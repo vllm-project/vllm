@@ -403,7 +403,6 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
                     )
                     validate_logits_processors_parameters(
