@@ -44,7 +44,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "eagle_dynamic", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -117,6 +117,11 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # Dynamic proposal configuration
+    acceptance_rate_threshold: float = 0.4
+    """The acceptance rate threshold for dynamically adjusting the number of
+    speculative tokens."""
 
     # Alternative drafting strategies
     speculative_token_tree: str | None = None
@@ -405,7 +410,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -447,7 +452,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
@@ -457,9 +462,16 @@ class SpeculativeConfig:
                     ):
                         pass
                     else:
+                        eagle_method = self.method
+                        if eagle_method == "eagle_dynamic":
+                            if "eagle3" in self.draft_model_config.model.lower():
+                                eagle_method = "eagle3"
+                            else:
+                                eagle_method = "eagle"
+
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method,
+                            method=eagle_method,
                             model_type="eagle",
                         )
                         # EAGLEConfig primarily updates architectures, so update
@@ -744,7 +756,7 @@ class SpeculativeConfig:
                 )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "eagle_dynamic", "mtp")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

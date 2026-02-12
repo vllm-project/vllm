@@ -444,6 +444,9 @@ class GPUModelRunner(
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
+            print(
+                f"[GPUModelRunner] Spec Config Method: {self.speculative_config.method}"
+            )
             self.drafter: (
                 NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
@@ -463,6 +466,14 @@ class GPUModelRunner(
                 )
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "eagle_dynamic":
+                from vllm.v1.spec_decode.dynamic_proposer import DynamicProposer
+
+                self.drafter = DynamicProposer(self.vllm_config, self.device, self)
+                if self.drafter.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state
+                    )
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
@@ -3772,6 +3783,15 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
+            num_draft_tokens_per_seq = None
+            if self._draft_token_ids is not None:
+                if isinstance(self._draft_token_ids, list):
+                    num_draft_tokens_per_seq = [len(x) for x in self._draft_token_ids]
+                elif torch.is_tensor(self._draft_token_ids):
+                    num_spec = self._draft_token_ids.shape[1]
+                    num_reqs = self._draft_token_ids.shape[0]
+                    num_draft_tokens_per_seq = [num_spec] * num_reqs
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3784,6 +3804,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                num_draft_tokens_per_seq=num_draft_tokens_per_seq,
             )
 
         if not self.use_async_scheduling:
