@@ -945,9 +945,7 @@ def test_gather_cache_batch_major_mode(
         assert max_needed_blocks <= num_blocks
         block_table[b, :] = perm
 
-    dst = torch.zeros(
-        (total_tokens, entry_size), dtype=src_cache.dtype, device=device
-    )
+    dst = torch.zeros((total_tokens, entry_size), dtype=src_cache.dtype, device=device)
 
     expected_batches = []
     for b in range(batch_size):

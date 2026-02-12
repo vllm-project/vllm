@@ -103,9 +103,7 @@ def test_gather_cache_requires_mode_metadata():
     block_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
     cu_seq_lens = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
 
-    with pytest.raises(
-        RuntimeError, match="requires either token-major metadata"
-    ):
+    with pytest.raises(RuntimeError, match="requires either token-major metadata"):
         ops.gather_cache(
             src_cache,
             dst,

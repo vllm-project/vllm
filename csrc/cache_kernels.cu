@@ -869,8 +869,8 @@ __device__ __forceinline__ void copy_or_dequant_entry(
       if constexpr (!DO_DEQUANT) {
         dst_ptr[idx] = static_cast<scalar_t>(src_ptr[idx]);
       } else {
-        dst_ptr[idx] = fp8::scaled_convert<scalar_t, cache_t, kv_dt>(
-            src_ptr[idx], *scale);
+        dst_ptr[idx] =
+            fp8::scaled_convert<scalar_t, cache_t, kv_dt>(src_ptr[idx], *scale);
       }
     }
   } else {
@@ -878,8 +878,8 @@ __device__ __forceinline__ void copy_or_dequant_entry(
       if constexpr (!DO_DEQUANT) {
         dst_ptr[idx] = static_cast<scalar_t>(src_ptr[idx]);
       } else {
-        dst_ptr[idx] = fp8::scaled_convert<scalar_t, cache_t, kv_dt>(
-            src_ptr[idx], *scale);
+        dst_ptr[idx] =
+            fp8::scaled_convert<scalar_t, cache_t, kv_dt>(src_ptr[idx], *scale);
       }
     }
   }
@@ -888,20 +888,22 @@ __device__ __forceinline__ void copy_or_dequant_entry(
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           bool TOKEN_MAJOR, bool DO_DEQUANT, int ENTRY_SIZE, int CTA_SIZE>
 __global__ void gather_cache(
-    const cache_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ...]
-    scalar_t* __restrict__ dst,               // [TOT_TOKENS, ENTRY_SIZE]
-    const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
-    const int32_t* __restrict__ cu_seq_lens,  // [BATCH+1]
+    const cache_t* __restrict__ src_cache,     // [NUM_BLOCKS, BLOCK_SIZE, ...]
+    scalar_t* __restrict__ dst,                // [TOT_TOKENS, ENTRY_SIZE]
+    const int32_t* __restrict__ block_table,   // [BATCH, BLOCK_INDICES]
+    const int32_t* __restrict__ cu_seq_lens,   // [BATCH+1]
     const int32_t* __restrict__ token_to_seq,  // Optional for token-major
-    const int32_t num_tokens, const int32_t batch_size, const int32_t block_size,
-    const int32_t entry_size, const int64_t block_table_stride,
-    const int64_t cache_block_stride, const int64_t cache_entry_stride,
-    const int64_t dst_entry_stride, const float* __restrict__ scale,
+    const int32_t num_tokens, const int32_t batch_size,
+    const int32_t block_size, const int32_t entry_size,
+    const int64_t block_table_stride, const int64_t cache_block_stride,
+    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets
   assert(CTA_SIZE == blockDim.x);
 
   if constexpr (TOKEN_MAJOR) {
-    for (int token_id = blockIdx.x; token_id < num_tokens; token_id += gridDim.x) {
+    for (int token_id = blockIdx.x; token_id < num_tokens;
+         token_id += gridDim.x) {
       const int64_t batch_id = token_to_seq[token_id];
       const int64_t batch_start = cu_seq_lens[batch_id];
       const int64_t batch_end = cu_seq_lens[batch_id + 1];
@@ -913,7 +915,8 @@ __global__ void gather_cache(
       }
       const int32_t block_table_id = batch_offset / block_size;
       const int32_t slot_id = batch_offset % block_size;
-      const int64_t block_table_offset = batch_id * block_table_stride + block_table_id;
+      const int64_t block_table_offset =
+          batch_id * block_table_stride + block_table_id;
       const int32_t block_id = block_table[block_table_offset];
       const int64_t cache_offset =
           block_id * cache_block_stride + slot_id * cache_entry_stride;
@@ -975,12 +978,12 @@ void launch_token_major_gather_cache(
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
     const float* scale, const int32_t* seq_starts) {
   constexpr bool do_dequant = kv_dt != Fp8KVCacheDataType::kAuto;
-  gather_cache<scalar_t, cache_t, kv_dt, true, do_dequant, ENTRY_SIZE,
-               CTA_SIZE><<<grid, block, 0, stream>>>(
-      src_cache, dst, block_table, cu_seq_lens, token_to_seq, num_tokens,
-      /*batch_size=*/0, block_size, /*entry_size=*/ENTRY_SIZE,
-      block_table_stride, cache_block_stride, cache_entry_stride,
-      dst_entry_stride, scale, seq_starts);
+  gather_cache<scalar_t, cache_t, kv_dt, true, do_dequant, ENTRY_SIZE, CTA_SIZE>
+      <<<grid, block, 0, stream>>>(
+          src_cache, dst, block_table, cu_seq_lens, token_to_seq, num_tokens,
+          /*batch_size=*/0, block_size, /*entry_size=*/ENTRY_SIZE,
+          block_table_stride, cache_block_stride, cache_entry_stride,
+          dst_entry_stride, scale, seq_starts);
 }
 
 }  // namespace vllm
@@ -991,13 +994,14 @@ void launch_token_major_gather_cache(
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_TOKEN_MAJOR_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)            \
   vllm::launch_token_major_gather_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,     \
-                                        thread_block_size>(                    \
+                                        thread_block_size>(                   \
       grid, block, stream, reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),  \
-      reinterpret_cast<SCALAR_T*>(dst.data_ptr()), block_table.data_ptr<int32_t>(), \
-      cu_seq_lens.data_ptr<int32_t>(), token_to_seq.data_ptr<int32_t>(),      \
-      static_cast<int32_t>(num_tokens), block_size, block_table_stride,       \
-      cache_block_stride, cache_entry_stride, dst_entry_stride,               \
-      reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
+      reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                            \
+      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(),       \
+      token_to_seq.data_ptr<int32_t>(), static_cast<int32_t>(num_tokens),     \
+      block_size, block_table_stride, cache_block_stride, cache_entry_stride, \
+      dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()),     \
+      seq_starts_ptr);
 
 // Token-major gather path with optional FP8 dequantization.
 static void gather_cache_token_major(
@@ -1020,8 +1024,7 @@ static void gather_cache_token_major(
   TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
               "cu_seq_lens must be int32");
   TORCH_CHECK(
-      cu_seq_lens.numel() > 0 &&
-          cu_seq_lens.numel() == block_table.size(0) + 1,
+      cu_seq_lens.numel() > 0 && cu_seq_lens.numel() == block_table.size(0) + 1,
       "cu_seq_lens has wrong size. Expected ", block_table.size(0) + 1,
       " but got ", cu_seq_lens.numel());
   TORCH_CHECK(token_to_seq.dtype() == torch::kInt32,
@@ -1142,16 +1145,15 @@ __global__ void gather_and_dequant_cache_fp8_ds_mla(
 }  // namespace vllm
 
 // Macro to dispatch the kernel based on the data type.
-#define CALL_BATCH_MAJOR_GATHER_CACHE(CPY_DTYPE)                        \
-  vllm::gather_cache<CPY_DTYPE, CPY_DTYPE,                              \
-                     vllm::Fp8KVCacheDataType::kAuto, false,            \
-                     false, 0, 1024><<<grid, block, 0, stream>>>(       \
-      reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
-      reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
-      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-      /*token_to_seq=*/nullptr, /*num_tokens=*/0,                         \
-      static_cast<int32_t>(batch_size), block_size, entry_size,           \
-      block_table_stride, cache_block_stride, cache_entry_stride,         \
+#define CALL_BATCH_MAJOR_GATHER_CACHE(CPY_DTYPE)                            \
+  vllm::gather_cache<CPY_DTYPE, CPY_DTYPE, vllm::Fp8KVCacheDataType::kAuto, \
+                     false, false, 0, 1024><<<grid, block, 0, stream>>>(    \
+      reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),                   \
+      reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                         \
+      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(),     \
+      /*token_to_seq=*/nullptr, /*num_tokens=*/0,                           \
+      static_cast<int32_t>(batch_size), block_size, entry_size,             \
+      block_table_stride, cache_block_stride, cache_entry_stride,           \
       dst_entry_stride, /*scale=*/nullptr, seq_starts_ptr);
 
 // Batch-major gather path with copy-only semantics.
@@ -1173,8 +1175,7 @@ static void gather_cache_batch_major(
   TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
               "cu_seq_lens must be int32");
   TORCH_CHECK(
-      cu_seq_lens.numel() > 0 &&
-          cu_seq_lens.numel() == block_table.size(0) + 1,
+      cu_seq_lens.numel() > 0 && cu_seq_lens.numel() == block_table.size(0) + 1,
       "cu_seq_lens has wrong size. Expected ", block_table.size(0) + 1,
       " but got ", cu_seq_lens.numel());
   if (seq_starts.has_value()) {
