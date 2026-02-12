@@ -42,7 +42,6 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
-from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -66,9 +65,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             log_error_stack=log_error_stack,
         )
-
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -178,12 +174,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                    )
-                    validate_logits_processors_parameters(
-                        self.logits_processors,
-                        sampling_params,
                     )
 
                 request_id_item = f"{request_id}-{i}"
