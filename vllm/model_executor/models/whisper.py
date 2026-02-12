@@ -65,7 +65,6 @@ from vllm.v1.attention.backend import (
 
 from .interfaces import (
     MultiModalEmbeddings,
-    SupportsExplicitLanguageDetection,
     SupportsMultiModal,
     SupportsTranscription,
 )
@@ -782,7 +781,6 @@ class WhisperForConditionalGeneration(
     nn.Module,
     SupportsTranscription,
     SupportsMultiModal,
-    SupportsExplicitLanguageDetection,
 ):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
@@ -800,6 +798,7 @@ class WhisperForConditionalGeneration(
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
     supports_segment_timestamp = True
+    supports_explicit_language_detection = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod

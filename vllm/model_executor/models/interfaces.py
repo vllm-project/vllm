@@ -1107,6 +1107,15 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
+    supports_explicit_language_detection: ClassVar[bool] = False
+    """
+    Transcription models that require an explicit language detection step
+    (e.g. Whisper needs a separate forward pass to predict the language
+    token) should set this to ``True`` and implement
+    :meth:`get_language_detection_prompt` and
+    :meth:`parse_language_detection_output`.
+    """
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         # language codes in supported_languages
@@ -1202,26 +1211,31 @@ class SupportsTranscription(Protocol):
         """
         return text
 
-
-@runtime_checkable
-class SupportsExplicitLanguageDetection(Protocol):
-    """Optional capability for transcription models that require an explicit
-    language detection step (e.g. Whisper needs a separate forward pass to
-    predict the language token)."""
-
     @classmethod
     def get_language_detection_prompt(
         cls,
         audio: np.ndarray,
         stt_config: SpeechToTextConfig,
-    ) -> PromptType: ...
+    ) -> PromptType:
+        """Return a prompt that triggers language detection.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
 
     @classmethod
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
         tokenizer: object,
-    ) -> str | None: ...
+    ) -> str | None:
+        """Parse the detected language from model output token IDs.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
 
 
 @overload
