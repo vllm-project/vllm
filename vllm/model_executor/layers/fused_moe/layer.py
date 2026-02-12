@@ -658,7 +658,7 @@ class FusedMoE(CustomOp):
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
     # can safely swap out the quant_method. We should figure out a less
     # intrusive way to do this.
-    def _replace_quant_method(self, mk: FusedMoEModularMethod):
+    def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self.quant_method = mk
         # We need to force reconstruction of runner because we're swapping out
         # the quant_method with a FusedMoEModularMethod. This logic can go
