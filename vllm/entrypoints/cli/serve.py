@@ -270,7 +270,7 @@ def run_multi_api_server(args: argparse.Namespace):
             client_sentinel_cmd_addr=addresses.client_sentinel_cmd_addr,
             engine_core_sentinel_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
             engine_core_sentinel_identities=addresses.engine_core_sentinel_identities,
-            fault_pub_socket_addr=addresses.fault_pub_socket_addr,
+            fault_state_pub_socket_addr=addresses.fault_state_pub_socket_addr,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the

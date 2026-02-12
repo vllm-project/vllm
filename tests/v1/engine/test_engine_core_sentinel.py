@@ -1,22 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import queue
 import threading
 import time
+import uuid
 
 import pytest
 import zmq
+from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.engine import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.engine.core import (
     EngineCoreSentinel,
     EngineLoopPausedError,
 )
-from vllm.v1.serial_utils import serialize_method_call
 
+# todo: check if this file has been updated with the new changes
 CLIENT_CMD_ADDR = "tcp://127.0.0.1:8844"
 WORKER_CMD_ADDR = "tcp://127.0.0.1:8845"
 ENGINE_FAULT_SOCKET_ADDR = "tcp://127.0.0.1:8846"
@@ -85,21 +87,39 @@ def test_run_handle_instruction(instruction):
         time.sleep(0.1)
         if not cmd_socket.poll(timeout=2000):
             pytest.fail("Timeout waiting for command from sentinel")
-        identity, msg = cmd_socket.recv_multipart()
-        cmd_dict = json.loads(msg.decode("utf-8"))
-        assert cmd_dict["method"] == "pause" if instruction == "pause" else "retry"
-        response_dict = {"success": True, "method_uuid": cmd_dict["method_uuid"]}
-        cmd_socket.send_multipart([b"", json.dumps(response_dict).encode("utf-8")])
+        parts = cmd_socket.recv_multipart()
+        # DEALER receives messages in the form [empty_frame, msg_bytes]
+        empty_frame = None
+        msg_bytes = None
+        if len(parts) == 2:
+            empty_frame, msg_bytes = parts
+        elif len(parts) == 3:
+            # tolerate an extra identity frame if present
+            _, empty_frame, msg_bytes = parts
+        else:
+            pytest.fail(f"Unexpected multipart length: {len(parts)}")
+
+        assert empty_frame == b""
+        ft_req = msgpack.decode(msg_bytes, type=FaultToleranceRequest)
+        assert ft_req.instruction == instruction
+
+        # Reply with a msgpack-encoded FaultToleranceResult
+        ft_res = FaultToleranceResult(request_id=ft_req.request_id, success=True)
+        cmd_socket.send_multipart([b"", msgpack.encode(ft_res)])
 
     param = {"timeout": 3}
     if instruction == "pause":
         param["soft_pause"] = True
     elif instruction == "retry":
         param["new_stateless_dp_group_port"] = 23456
-    serial_instruction = serialize_method_call(instruction, **param)
-    client_socket.send_multipart(
-        [SENTINEL_IDENTITY, b"", serial_instruction.encode("utf-8")]
+
+    # Build a FaultToleranceRequest and send as msgpack
+    req_id = str(uuid.uuid4())
+    ft_request = FaultToleranceRequest(
+        request_id=req_id, instruction=instruction, params=param
     )
+    client_socket.send_multipart([SENTINEL_IDENTITY, b"", msgpack.encode(ft_request)])
+
     fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
     if instruction == "retry":
         busy_loop_active.set()
@@ -111,10 +131,13 @@ def test_run_handle_instruction(instruction):
     time.sleep(0.1)
     if not client_socket.poll(timeout=2000):
         pytest.fail("Timeout waiting for response from sentinel")
-    identity, _, msg = client_socket.recv_multipart()
-    result_dict = json.loads(msg.decode("utf-8"))
-    assert result_dict["sentinel_tag"] == "DP_0"
-    assert result_dict["success"]
+    identity, _, msg_bytes = client_socket.recv_multipart()
+
+    # The ROUTER identity frame indicates who replied
+    assert identity == SENTINEL_IDENTITY
+    ft_res = msgpack.decode(msg_bytes, type=FaultToleranceResult)
+    assert ft_res.request_id == req_id
+    assert ft_res.success
 
     time.sleep(0.1)
 

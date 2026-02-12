@@ -29,7 +29,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
-from vllm.v1.serial_utils import serialize_method_call
+from vllm.v1.engine import FaultToleranceRequest
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -76,11 +76,14 @@ async def process_fault_tolerance_instruction(request: Request) -> Response:
     kwargs = request_dict.get("fault_tolerance_params", {})
     assert engine is not None
     kwargs["timeout"] = fault_tolerance_timeout
-    serialized_instruction = serialize_method_call(
-        fault_tolerance_instruction, **kwargs
+    ft_request = FaultToleranceRequest(
+        request_id=random_uuid(),
+        instruction=fault_tolerance_instruction,
+        params=kwargs,
     )
-    success = await engine.handle_fault(serialized_instruction)
-    if success == "True":
+    ft_result = await engine.handle_fault(ft_request)
+    success, reason = ft_result.success, ft_result.reason
+    if success:
         return JSONResponse(
             status_code=200,
             content={"message": "Instruction executed successfully."},
@@ -90,7 +93,7 @@ async def process_fault_tolerance_instruction(request: Request) -> Response:
     engine.shutdown()
     raise HTTPException(
         status_code=400,
-        detail="Instruction execution failed.",
+        detail=f"Instruction execution failed. Reason: {reason}",
     )
 
 

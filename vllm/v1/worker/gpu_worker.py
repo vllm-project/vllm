@@ -146,11 +146,7 @@ class WorkerSentinel(BaseSentinel):
     def run(self):
         # Wait for fault tolerance instructions from EngineCoreSentinel
         while not self.sentinel_dead:
-            has_msg, cmd_str = self.receive_upstream_cmd()
-            if has_msg:
-                assert cmd_str is not None
-                success, method_uuid, reason = self._execute_cmd(cmd_str)
-                self._send_execution_result(success, method_uuid, reason)
+            self.receive_and_execute_upstream_cmd()
 
     def pause(self, timeout: int = 1, **kwargs) -> bool:
         soft_pause = kwargs.get("soft_pause", False)

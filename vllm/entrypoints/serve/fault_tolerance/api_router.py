@@ -3,6 +3,7 @@
 
 
 import json
+import uuid
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -12,7 +13,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.logger import init_logger
-from vllm.v1.serial_utils import serialize_method_call
+from vllm.v1.engine import FaultToleranceRequest
 
 logger = init_logger(__name__)
 
@@ -71,11 +72,13 @@ async def process_fault_tolerance_instruction(raw_request: Request):
         )
     try:
         fault_tolerance_params["timeout"] = fault_tolerance_timeout
-        serialized_instruction = serialize_method_call(
-            fault_tolerance_instruction, **fault_tolerance_params
+        ft_request = FaultToleranceRequest(
+            str(uuid.uuid4()), fault_tolerance_instruction, fault_tolerance_params
         )
-        success = await client.handle_fault(serialized_instruction)
-        if success == "True":
+
+        ft_result = await client.handle_fault(ft_request)
+        success, reason = ft_result.success, ft_result.reason
+        if success:
             return JSONResponse(
                 {
                     "message": "Instruction executed successfully.",
@@ -84,7 +87,7 @@ async def process_fault_tolerance_instruction(raw_request: Request):
         else:
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                detail="Instruction execution failed.",
+                detail=f"Instruction execution failed. Reason: {reason}",
             )
 
     except Exception as e:

@@ -178,7 +178,7 @@ class APIServerProcessManager:
         client_sentinel_cmd_addr: str | None = None,
         engine_core_sentinel_cmd_addr: str | None = None,
         engine_core_sentinel_identities: dict[int, bytes] | None = None,
-        fault_pub_socket_addr: str | None = None,
+        fault_state_pub_socket_addr: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -223,7 +223,9 @@ class APIServerProcessManager:
                         for k, v in engine_core_sentinel_identities.items()
                     }
                 )
-                client_config["fault_pub_socket_addr"] = fault_pub_socket_addr
+                client_config["fault_state_pub_socket_addr"] = (
+                    fault_state_pub_socket_addr
+                )
 
             proc = spawn_context.Process(
                 target=target_server_fn,
