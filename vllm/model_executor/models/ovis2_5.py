@@ -327,9 +327,9 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_config = self.info.get_hf_config()
         vte_vocab_size = hf_config.visual_vocab_size
         return [
-            vte_vocab_size - len(INDICATOR_IDS) + abs(x - 151671) - 1
+            vte_vocab_size - len(INDICATOR_IDS) + (x - INDICATOR_IDS[0])
             for x in visual_indicators
-            if x > 151671
+            if x >= INDICATOR_IDS[0]
         ]
 
     def _call_hf_processor(
