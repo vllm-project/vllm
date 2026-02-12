@@ -1341,17 +1341,17 @@ class EngineCoreProc(EngineCore):
 
         def wait_until_idle(engine: "EngineCoreProc") -> bool:
             if (
-                not engine.scheduler.has_requests()
-                and not engine.batch_queue
-                and engine.output_queue.empty()
+                engine.scheduler.has_requests()
+                or engine.batch_queue
+                or not engine.output_queue.empty()
             ):
-                if clear_cache:
-                    engine.reset_prefix_cache(reset_running_requests=True)
-                    engine.reset_mm_cache()
-                    engine.reset_encoder_cache()
-                future.set_result(None)
-                return True
-            return False
+                return False
+            if clear_cache:
+                engine.reset_prefix_cache(reset_running_requests=True)
+                engine.reset_mm_cache()
+                engine.reset_encoder_cache()
+            future.set_result(None)
+            return True
 
         if mode == "abort":
             aborted = self.scheduler.finish_requests(
