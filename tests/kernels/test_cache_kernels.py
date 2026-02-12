@@ -16,7 +16,7 @@ except ImportError:
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_oob():
     """
-    Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
+    Tests for OOB read in gather_cache token-major mode (Issue #27909).
     This test constructs a boundary case identified in the issue where
     seq_starts causes the block_table offset to read out of bounds.
     """
@@ -45,13 +45,17 @@ def test_gather_cache_oob():
 
     scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
 
-    # Calling the C++ function gather_and_maybe_dequant_cache
-    ops.gather_and_maybe_dequant_cache(
+    token_to_seq = torch.zeros((seq_len,), dtype=torch.int32, device="cuda")
+
+    # Calling the C++ unified gather_cache function in token-major mode.
+    ops.gather_cache(
         src_cache,
         dst,
         block_table,
         cu_seq_lens,
-        batch_size,
+        token_to_seq,
+        seq_len,
+        -1,
         "auto",  # kv_cache_dtype
         scale,
         seq_starts,
@@ -59,6 +63,56 @@ def test_gather_cache_oob():
 
     torch.cuda.synchronize()
     assert True
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
+def test_gather_cache_token_major_zero_tokens_noop():
+    block_size = 16
+    entry_size = 576
+    src_cache = torch.randn((4, block_size, entry_size), dtype=torch.float16, device="cuda")
+    dst = torch.empty((0, entry_size), dtype=torch.float16, device="cuda")
+    block_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
+    cu_seq_lens = torch.zeros((2,), dtype=torch.int32, device="cuda")
+    token_to_seq = torch.empty((0,), dtype=torch.int32, device="cuda")
+    scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+
+    ops.gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        token_to_seq,
+        0,
+        -1,
+        "auto",
+        scale,
+        None,
+    )
+    torch.cuda.synchronize()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
+def test_gather_cache_requires_mode_metadata():
+    block_size = 16
+    entry_size = 576
+    src_cache = torch.randn((4, block_size, entry_size), dtype=torch.float16, device="cuda")
+    dst = torch.empty((1, entry_size), dtype=torch.float16, device="cuda")
+    block_table = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
+    cu_seq_lens = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="requires either token-major metadata"):
+        ops.gather_cache(
+            src_cache,
+            dst,
+            block_table,
+            cu_seq_lens,
+            None,
+            -1,
+            -1,
+            "auto",
+            None,
+            None,
+        )
 
 
 if __name__ == "__main__":

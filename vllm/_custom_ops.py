@@ -2489,44 +2489,33 @@ def convert_fp8(
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
-def gather_and_maybe_dequant_cache(
+def gather_cache(
     src_cache: torch.Tensor,
     dst: torch.Tensor,
     block_table: torch.Tensor,
     cu_seq_lens: torch.Tensor,
-    token_to_seq: torch.Tensor,
+    token_to_seq: torch.Tensor | None,
     num_tokens: int,
+    batch_size: int,
     kv_cache_dtype: str,
-    scale: torch.Tensor,
+    scale: torch.Tensor | None,
     seq_starts: torch.Tensor | None = None,
 ) -> None:
-    torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
+    torch.ops._C_cache_ops.gather_cache(
         src_cache,
         dst,
         block_table,
         cu_seq_lens,
         token_to_seq,
         num_tokens,
+        batch_size,
         kv_cache_dtype,
         scale,
         seq_starts,
     )
 
 
-def cp_gather_cache(
-    src_cache: torch.Tensor,
-    dst: torch.Tensor,
-    block_table: torch.Tensor,
-    cu_seq_lens: torch.Tensor,
-    batch_size: int,
-    seq_starts: torch.Tensor | None = None,
-) -> None:
-    torch.ops._C_cache_ops.cp_gather_cache(
-        src_cache, dst, block_table, cu_seq_lens, batch_size, seq_starts
-    )
-
-
-def cp_gather_and_upconvert_fp8_kv_cache(
+def gather_and_dequant_cache_fp8_ds_mla(
     src_cache: torch.Tensor,
     dst: torch.Tensor,
     block_table: torch.Tensor,
@@ -2544,7 +2533,7 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
     """
-    torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
+    torch.ops._C_cache_ops.gather_and_dequant_cache_fp8_ds_mla(
         src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
     )
 

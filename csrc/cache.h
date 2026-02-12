@@ -39,26 +39,21 @@ void concat_and_cache_mla_rope_fused(
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);
 
-void gather_and_maybe_dequant_cache(
-    torch::Tensor const& src_cache,     // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
-    torch::Tensor const& dst,           // [TOT_TOKENS, ENTRIES...]
-    torch::Tensor const& block_table,   // [BATCH, BLOCK_INDICES]
-    torch::Tensor const& cu_seq_lens,   // [BATCH+1]
-    torch::Tensor const& token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNKS]
-    int64_t num_tokens, const std::string& kv_cache_dtype,
-    torch::Tensor const& scale,
-    std::optional<torch::Tensor> seq_starts = std::nullopt);
-
-// TODO(hc): cp_gather_cache need support scaled kvcahe in the future.
-void cp_gather_cache(
+// Unified gather op for MLA cache:
+//  - token-major mode with optional FP8 dequant when token_to_seq is provided.
+//  - batch-major copy-only mode when token_to_seq is None.
+void gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
-    int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
+    std::optional<torch::Tensor> token_to_seq, int64_t num_tokens,
+    int64_t batch_size, const std::string& kv_cache_dtype,
+    std::optional<torch::Tensor> scale,
+    std::optional<torch::Tensor> seq_starts = std::nullopt);
 
-// Gather and upconvert FP8 KV cache to BF16 workspace
-void cp_gather_and_upconvert_fp8_kv_cache(
+// Gather and dequant FP8 KV cache to BF16 workspace for DeepSeek MLA.
+void gather_and_dequant_cache_fp8_ds_mla(
     torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
     torch::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
