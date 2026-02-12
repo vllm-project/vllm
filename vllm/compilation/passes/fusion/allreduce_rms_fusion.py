@@ -241,14 +241,12 @@ if flashinfer_comm is not None:
         if _AR_RMS_NUMERIC_DEBUG and not skip_debug_during_capture:
             _AR_RMS_NUMERIC_DEBUG_CALLS += 1
             call_id = _AR_RMS_NUMERIC_DEBUG_CALLS
+            # Before kernel launch, only inspect true inputs.
             debug_inputs = (
                 ("allreduce_in_pre", allreduce_in),
                 ("residual_pre", residual),
                 ("rms_gamma", rms_gamma),
                 ("scale_factor", scale_factor),
-                ("norm_out_pre", norm_out),
-                ("quant_out_pre", quant_out),
-                ("scale_out_pre", scale_out),
             )
             input_non_finite = any(_has_non_finite(t) for _, t in debug_inputs)
             if (
