@@ -276,30 +276,27 @@ async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
 
 
 @pytest.mark.asyncio
-async def test_language_auto_detect_english(whisper_client, mary_had_lamb):
-    """Auto-detect language as English when no language param is provided."""
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_lang", "expected_text"),
+    [
+        ("mary_had_lamb", "en", ["Mary had a little lamb"]),
+        ("foscolo", "it", ["zacinto", "sacre"]),
+    ],
+    ids=["english", "italian"],
+)
+async def test_language_auto_detect(
+    whisper_client, fixture_name, expected_lang, expected_text, request
+):
+    """Auto-detect language when no language param is provided."""
+    audio_file = request.getfixturevalue(fixture_name)
     transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
-        file=mary_had_lamb,
+        file=audio_file,
         response_format="verbose_json",
         temperature=0.0,
     )
-    assert transcription.language == "en"
-    assert "Mary had a little lamb" in transcription.text
-
-
-@pytest.mark.asyncio
-async def test_language_auto_detect_italian(whisper_client, foscolo):
-    """Auto-detect language as Italian for the Foscolo poem audio."""
-    transcription = await whisper_client.audio.transcriptions.create(
-        model=MODEL_NAME,
-        file=foscolo,
-        response_format="verbose_json",
-        temperature=0.0,
-    )
-    assert transcription.language == "it"
-    # Verify the text is actually Italian (from "A Zacinto" by Foscolo)
+    assert transcription.language == expected_lang
     text_lower = transcription.text.lower()
-    assert any(word in text_lower for word in ["zacinto", "sacre"]), (
-        f"Expected Italian text but got: {transcription.text}"
+    assert any(word in text_lower for word in expected_text), (
+        f"Expected {expected_lang} text but got: {transcription.text}"
     )
