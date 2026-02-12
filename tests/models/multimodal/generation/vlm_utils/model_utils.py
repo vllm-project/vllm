@@ -1289,10 +1289,16 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
             input_ids = args[0]
         prompt_len = input_ids.shape[1] if input_ids is not None else 0
 
-        output_ids = _orig_generate(*args, **kwargs)
+        output = _orig_generate(*args, **kwargs)
         if prompt_len:
-            output_ids = output_ids[:, prompt_len:]
-        return output_ids
+            if isinstance(output, torch.Tensor):
+                output = output[:, prompt_len:]
+            else:
+                # GenerateDecoderOnlyOutput - trim sequences but preserve
+                # scores/logits so generate_greedy_logprobs_limit can
+                # extract per-token logprobs.
+                output.sequences = output.sequences[:, prompt_len:]
+        return output
 
     hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
     hf_model.model.generate = patched_generate  # type: ignore[method-assign]

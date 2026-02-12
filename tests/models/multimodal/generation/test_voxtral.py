@@ -13,6 +13,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....conftest import AudioTestAssets
 from ....utils import RemoteOpenAIServer
+from ...utils import check_logprobs_close
 from .test_ultravox import MULTI_AUDIO_PROMPT, run_multi_audio_test
 from .vlm_utils import model_utils
 
@@ -148,21 +149,20 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="HF reference check - may diverge due to attention backend "
-    "or weight updates between Mistral and HF format.",
-)
 def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
     """Compare vLLM Mistral-format output against HF Transformers reference.
 
-    This is an independent ground-truth check using a completely separate
-    model loading path (AutoProcessor + VoxtralForConditionalGeneration).
-    Marked xfail(strict=False) so mismatches don't block CI.
-    """
+    Instead of requiring an exact text match (which is brittle across
+    attention backends), we compare per-token logprobs using the standard
+    check_logprobs_close helper: when tokens diverge at a position, each
+    runner's chosen token must appear in the other's top-k logprobs.
 
+    Marked xfail(strict=False) so remaining edge-case mismatches
+    don't block CI.
+    """
     question = f"What's happening in these {len(audio_assets)} audio clips?"
     max_tokens = 10
+    num_logprobs = 5
     audio_data = [asset.audio_and_sample_rate for asset in audio_assets]
 
     vllm_prompt = _get_prompt(audio_assets, question)
@@ -175,14 +175,13 @@ def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
         load_format="mistral",
         limit_mm_per_prompt={"audio": len(audio_assets)},
     ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             [vllm_prompt],
             max_tokens,
+            num_logprobs,
             audios=[audio_data],
         )
-
-    vllm_text = vllm_outputs[0][1]
-    assert vllm_text, "vLLM inference produced empty output"
+    assert vllm_outputs[0][1], "vLLM inference produced empty output"
 
     with hf_runner(
         MODEL_NAME,
@@ -190,16 +189,22 @@ def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
         auto_cls=VoxtralForConditionalGeneration,
     ) as hf_model:
         hf_model = model_utils.voxtral_patch_hf_runner(hf_model)
-        hf_outputs = hf_model.generate_greedy(
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
             [question],
             max_tokens,
+            num_logprobs,
             audios=[audio_data],
         )
+    assert hf_outputs[0][1], "HF Transformers produced empty output"
 
-    hf_text = hf_outputs[0][1]
-    assert hf_text, "HF Transformers produced empty output"
-    assert vllm_text == hf_text, (
-        f"vLLM offline output does not match HF Transformers.\n"
-        f"  vLLM: {vllm_text!r}\n"
-        f"  HF:   {hf_text!r}"
+    print(
+        f"HF Reference Comparison\n"
+        f"  vLLM: {vllm_outputs[0][1]!r}\n"
+        f"  HF:   {hf_outputs[0][1]!r}"
+    )
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs,
+        outputs_1_lst=hf_outputs,
+        name_0="vllm",
+        name_1="hf",
     )
