@@ -42,7 +42,6 @@ from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import (
-    SupportsExplicitLanguageDetection,
     SupportsTranscription,
     supports_transcription,
 )
@@ -261,8 +260,7 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             from vllm.sampling_params import SamplingParams
 
-            model_cls = cast(SupportsExplicitLanguageDetection, self.model_cls)
-            prompt = model_cls.get_language_detection_prompt(
+            prompt = self.model_cls.get_language_detection_prompt(
                 audio_chunk,
                 self.asr_config,
             )
@@ -292,7 +290,7 @@ class OpenAISpeechToText(OpenAIServing):
                 return "en"
 
             token_ids = list(final_output.outputs[0].token_ids)
-            lang = model_cls.parse_language_detection_output(
+            lang = self.model_cls.parse_language_detection_output(
                 token_ids,
                 self.tokenizer,
             )
@@ -342,8 +340,8 @@ class OpenAISpeechToText(OpenAIServing):
         )
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
 
-        if language is None and isinstance(
-            self.model_cls, SupportsExplicitLanguageDetection
+        if language is None and getattr(
+            self.model_cls, "supports_explicit_language_detection", False
         ):
             language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
