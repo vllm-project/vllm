@@ -579,21 +579,21 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
-    "musicflamingo": run_musicflamingo,
+    "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
-    "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
+    "kimi_audio_asr": run_kimi_audio_asr,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
+    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
-    "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "qwen2_audio": run_qwen2_audio,
     "qwen3_asr": run_qwen3_asr,
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
-    "kimi_audio_asr": run_kimi_audio_asr,
 }
 
 
