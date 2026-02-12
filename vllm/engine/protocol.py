@@ -31,12 +31,9 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    input_processor: InputProcessor
+    renderer: BaseRenderer
     io_processor: IOProcessor | None
-
-    @property
-    @abstractmethod
-    def renderer(self) -> BaseRenderer: ...
+    input_processor: InputProcessor
 
     @property
     @abstractmethod

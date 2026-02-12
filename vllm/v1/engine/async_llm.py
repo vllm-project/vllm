@@ -27,7 +27,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers import merge_kwargs, renderer_from_config
 from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -110,9 +110,10 @@ class AsyncLLM(EngineClient):
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
 
-        self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
+
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
             init_tracer("vllm.llm_engine", tracing_endpoint)
@@ -131,20 +132,22 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.input_processor = InputProcessor(self.vllm_config)
+        self.renderer = renderer = renderer_from_config(self.model_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
         )
 
-        # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
+        # Convert TokPrompt --> EngineCoreRequest.
+        self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+        # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
-            self.tokenizer,
+            renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
+            tracing_enabled=tracing_endpoint is not None,
         )
-        if tracing_endpoint is not None:
-            self.output_processor.tracing_enabled = True
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -891,17 +894,13 @@ class AsyncLLM(EngineClient):
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
-        return self.input_processor.tokenizer
+        return self.renderer.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        return self.input_processor.get_tokenizer()
-
-    @property
-    def renderer(self) -> BaseRenderer:
-        return self.input_processor.renderer
+        return self.renderer.get_tokenizer()
 
     async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None  # type: ignore
+        return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(self) -> None:
         if self.logger_manager:

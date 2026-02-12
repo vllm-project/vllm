@@ -157,13 +157,14 @@ class OpenAIServingCompletion(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 prompt_text = self._extract_prompt_text(engine_prompt)
 
                 max_tokens = get_max_tokens(
-                    self.max_model_len,
+                    max_model_len,
                     request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,

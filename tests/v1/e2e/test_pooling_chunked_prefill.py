@@ -161,7 +161,8 @@ def test_pooling_prefix_cache(vllm_runner, monkeypatch):
             assert chunks[0] <= prompt1_len
             assert chunks[0] < prompt2_len
 
-            cache_config = llm.get_llm().llm_engine.cache_config
+            vllm_config = llm.get_llm().llm_engine.vllm_config
+            cache_config = vllm_config.cache_config
             print(f"{cache_config=}")
             # Prefixes are cached in blocks
             assert (prompt2_len - chunks[0]) % cache_config.block_size == 0
