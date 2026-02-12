@@ -843,6 +843,10 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         is_q_proj = "wq" in modules or "q_proj" in modules
 
         if (is_weight or is_weight_scale) and (is_k_proj or is_q_proj):
+            original_ndim = loaded_weight.ndim
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.unsqueeze(-1)
+
             f_out, f_in = loaded_weight.shape
             n_heads = (
                 self.config.num_key_value_heads
@@ -854,5 +858,8 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                 .transpose(1, 2)
                 .reshape(f_out, f_in)
             )
+
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.squeeze(-1)
 
         return name, loaded_weight
