@@ -346,8 +346,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens, self.kv_cache_spec.block_size, self.num_sms
                 )
+            block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
+            # Padded CUDA graph requests have block_table entries of -1.
+            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
+            # This is safe because padded requests have seq_lens=0, so the
+            # kernel produces no meaningful output for those rows.
+            block_table.clamp_(min=0)
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
-                block_table=common_attn_metadata.block_table_tensor[:num_decodes, ...],
+                block_table=block_table,
                 seq_lens=common_attn_metadata.seq_lens[:num_decodes],
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
