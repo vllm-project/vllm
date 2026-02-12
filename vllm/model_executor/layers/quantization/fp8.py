@@ -77,7 +77,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     MoeOnlineQuantizer,
-    MoeOnlineWeightLoader,
+    MoeOnlineWeightQuantizer,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1021,7 +1021,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeOnlineQuantizer):
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
-        self.weight_loader = MoeOnlineWeightLoader(self)
+        self.weight_quantizer = MoeOnlineWeightQuantizer(self)
 
     def create_weights(
         self,
@@ -1032,7 +1032,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeOnlineQuantizer):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        self.weight_loader.create_weights(
+        self.weight_quantizer.create_weights(
             layer,
             num_experts,
             hidden_size,
@@ -1042,7 +1042,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeOnlineQuantizer):
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        self.weight_loader.process_weights_after_loading(layer)
+        self.weight_quantizer.process_weights_after_loading(layer)
         # stash the correct device for `patched_weight_loader`
         layer._load_device = torch.get_default_device()
 

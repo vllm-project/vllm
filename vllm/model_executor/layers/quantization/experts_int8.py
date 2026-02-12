@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     MoeOnlineQuantizer,
-    MoeOnlineWeightLoader,
+    MoeOnlineWeightQuantizer,
 )
 
 logger = init_logger(__name__)
@@ -80,7 +80,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
         super().__init__(moe)
         self.quant_config = quant_config
         self.kernel: mk.FusedMoEModularKernel | None = None
-        self.weight_loader = MoeOnlineWeightLoader(self)
+        self.weight_quantizer = MoeOnlineWeightQuantizer(self)
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
@@ -105,7 +105,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        self.weight_loader.create_weights(
+        self.weight_quantizer.create_weights(
             layer,
             num_experts,
             hidden_size,
@@ -115,7 +115,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        self.weight_loader.process_weights_after_loading(layer)
+        self.weight_quantizer.process_weights_after_loading(layer)
 
     def create_scale_tensors(
         self,

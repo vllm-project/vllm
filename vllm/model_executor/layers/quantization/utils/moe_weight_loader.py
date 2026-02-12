@@ -53,7 +53,7 @@ class MoeOnlineQuantizer(ABC):
         raise NotImplementedError
 
 
-class MoeOnlineWeightLoader:
+class MoeOnlineWeightQuantizer:
     """
     Handles weight loading and quantization for MoE layers.
     """
