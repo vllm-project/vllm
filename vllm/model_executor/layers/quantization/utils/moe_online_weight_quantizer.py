@@ -112,22 +112,7 @@ class MoeOnlineWeightQuantizer:
         # Stash device for JIT materialization
         layer._load_device = torch.get_default_device()
 
-        self._create_scale_parameters(
-            layer,
-            num_experts,
-            intermediate_size_per_partition,
-            hidden_size,
-            extra_weight_attrs,
-        )
-
-    def _create_scale_parameters(
-        self,
-        layer: Module,
-        num_experts: int,
-        intermediate_size_per_partition: int,
-        hidden_size: int,
-        extra_weight_attrs: dict,
-    ) -> None:
+        # Create scale parameters for quantization
         w13_weight_scale, w2_weight_scale = (
             self.moe_quant_callbacks.create_scale_tensors(
                 layer,
