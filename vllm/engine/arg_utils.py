@@ -1320,6 +1320,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
