@@ -857,7 +857,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
     # Free memory as soon as possible as failed assertions
     # will short circuit and not free up memory
     del llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     for index, output in enumerate(outputs):

@@ -1031,7 +1031,7 @@ def test_spec_decode_logprobs(
             for logprobs in output.logprobs:
                 ref_logprobs.extend(logprobs.values())
     del ref_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Run spec decode LLM.
@@ -1060,7 +1060,7 @@ def test_spec_decode_logprobs(
             for logprobs in output.logprobs:
                 spec_logprobs.extend(logprobs.values())
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Per-token logprobs are expected to be the same.

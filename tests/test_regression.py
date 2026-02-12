@@ -49,7 +49,7 @@ def test_gc():
     del llm
 
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     # The memory allocated for model and KV cache should be released.
     # The memory allocated for PyTorch and others should be less than 50MB.

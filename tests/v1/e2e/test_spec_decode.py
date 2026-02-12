@@ -151,7 +151,7 @@ def test_ngram_and_suffix_correctness(
     ref_llm = LLM(model=model_name, max_model_len=1024)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     spec_llm = LLM(
@@ -174,7 +174,7 @@ def test_ngram_and_suffix_correctness(
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches >= int(0.66 * len(ref_outputs))
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
 
@@ -233,7 +233,7 @@ def test_suffix_decoding_acceptance(
     assert last_accept_rate > 0.80
 
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
 
@@ -293,14 +293,14 @@ def test_speculators_model_integration(
     verifier_model = spec_llm.llm_engine.vllm_config.model_config.model
 
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Second run: Reference without speculative decoding
     ref_llm = LLM(model=verifier_model, max_model_len=1024)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Compare outputs
@@ -507,7 +507,7 @@ def test_eagle_correctness(
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
@@ -541,7 +541,7 @@ def test_eagle_correctness(
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(0.6 * len(ref_outputs))
         del spec_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -580,7 +580,7 @@ def test_mtp_correctness(
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
@@ -609,7 +609,7 @@ def test_mtp_correctness(
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(MTP_SIMILARITY_RATE * len(ref_outputs))
         del spec_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -801,7 +801,7 @@ def assert_draft_model_correctness(args: ArgsTest):
     acceptance_rate: float = compute_acceptance_rate(metrics)
     acceptance_len: float = compute_acceptance_len(metrics)
     del spec_llm  # CLEANUP
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     print(
