@@ -86,7 +86,8 @@ class SchedulerConfig:
     prefill tokens for one request, subsequent prefill requests in the same
     batch will be limited to the remaining budget. For example, if set to 2048,
     and a request with 2000 prefill tokens is scheduled first, the next prefill
-    request can only schedule up to 48 tokens. Set to 0 to disable this limit."""
+    request can only schedule up to 48 tokens. Set to 0 to disable this limit.
+    Currently not supported with priority scheduling."""
 
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
@@ -255,6 +256,10 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
+        if self.inter_prefill_budget > 0 and self.policy != "fcfs":
+            raise ValueError(
+                "Inter-prefill budget is only supported for FCFS scheduling."
+            )
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
