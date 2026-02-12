@@ -24,8 +24,6 @@ elif current_platform.is_xpu():
 
 logger = init_logger(__name__)
 
-import flashinfer
-
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -41,7 +39,7 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
-    offsets_buffer: torch.Tensor
+    topk_workspace: torch.Tensor,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -68,7 +66,7 @@ def sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
-            offsets_buffer,
+            topk_workspace,
         )
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
@@ -130,15 +128,6 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
-            # Compute lengths from row spans
-            # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
-            # torch.ops._C.large_context_topk(
-            #    logits,
-            #    topk_indices,
-            #    lengths,
-            #    chunk.cu_seqlen_ks,  # row_starts
-            # )
-
     if has_decode:
         decode_metadata = attn_metadata.decode
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
@@ -189,9 +178,10 @@ def sparse_attn_indexer(
                     + decode_metadata.offsets
                 ).flatten()
     
-            offsets = offsets_buffer[:num_rows]
-            result = flashinfer.top_k_ragged_transform(logits, offsets, lengths, topk_tokens)
-            topk_indices[:] = result
+            topk_workspace.zero_()
+            torch.ops._C.flashinfer_radix_topk(
+                logits, lengths, topk_indices, topk_workspace, topk_tokens
+            )
         else:
             torch.ops._C.top_k_per_row_decode(
                 logits,
@@ -232,7 +222,7 @@ def sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
-    offsets_buffer: torch.Tensor | None,
+    topk_workspace: torch.Tensor | None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -240,7 +230,7 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer", "topk_workspace"],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -278,13 +268,13 @@ class SparseAttnIndexer(CustomOp):
         self.head_dim = head_dim
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
-        self.topk_indices_buffer = topk_indices_buffer
-        # Pre-allocate offsets buffer for FlashInfer top-k (reused across calls)
-        self.register_buffer(
-            "_offsets_buffer",
-            torch.zeros(max_total_seq_len, dtype=torch.int32),
-            persistent=False
-        )
+        self.topk_indices_buffer = topk_indices_buffer        
+        self.topk_workspace = torch.zeros(
+            1024 * 1024,
+            dtype=torch.uint8,
+            device=topk_indices_buffer.device,
+        )        
+
 
     def forward_native(
         self,
@@ -324,7 +314,7 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            self._offsets_buffer,
+            self.topk_workspace,
         )
 
     def forward_hip(
@@ -335,8 +325,6 @@ class SparseAttnIndexer(CustomOp):
         weights: torch.Tensor,
     ):
         if rocm_aiter_ops.is_enabled():
-            # ROCm path doesn't use FlashInfer, but pass dummy offsets_buffer for API compatibility
-            offsets_buffer = self._get_offsets_buffer(hidden_states.device)
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 self.k_cache.prefix,
@@ -351,7 +339,6 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
-                self._offsets_buffer,
             )
         else:
             raise RuntimeError(
