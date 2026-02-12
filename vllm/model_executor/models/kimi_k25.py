@@ -11,7 +11,6 @@ This module defines:
 - KimiK25ForConditionalGeneration: Main model class
 """
 
-import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
