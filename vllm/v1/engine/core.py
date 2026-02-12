@@ -1336,11 +1336,9 @@ class EngineCoreProc(EngineCore):
         future: Future[Any] = Future()
 
         def wait_until_idle(engine: "EngineCoreProc") -> bool:
-            if (
-                engine.scheduler.has_requests()
-                or engine.batch_queue
-                or not engine.output_queue.empty()
-            ):
+            scheduler = engine.scheduler
+            out_queue = engine.output_queue
+            if scheduler.has_requests() or engine.batch_queue or not out_queue.empty():
                 return False
             if clear_cache:
                 engine.reset_prefix_cache(reset_running_requests=True)
@@ -1350,25 +1348,10 @@ class EngineCoreProc(EngineCore):
             return True
 
         if mode == "abort":
-            aborted = self.scheduler.finish_requests(
+            aborted_reqs = self.scheduler.finish_requests(
                 None, RequestStatus.FINISHED_ABORTED
             )
-            if aborted:
-                # Map client_index to list of request_ids that belong to that client.
-                by_client = defaultdict[int, set[str]](set)
-                for req_id, client_index in aborted:
-                    by_client[client_index].add(req_id)
-                for client_index, req_ids in by_client.items():
-                    outputs = [
-                        EngineCoreOutput(
-                            request_id=rid,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ABORT,
-                        )
-                        for rid in req_ids
-                    ]
-                    eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
-                    self.output_queue.put_nowait((client_index, eco))
+            self._send_abort_outputs(aborted_reqs)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
@@ -1376,6 +1359,20 @@ class EngineCoreProc(EngineCore):
             self.per_step_hooks.add(wait_until_idle)
             return future
         return None
+
+    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+        if aborted_reqs:
+            # Map client_index to list of request_ids that belong to that client.
+            by_client = defaultdict[int, set[str]](set)
+            for req_id, client_index in aborted_reqs:
+                by_client[client_index].add(req_id)
+            for client_index, req_ids in by_client.items():
+                outputs = [
+                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
+                    for req_id in req_ids
+                ]
+                eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+                self.output_queue.put_nowait((client_index, eco))
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
