@@ -45,7 +45,6 @@ class TransformersFusedMoE(FusedMoE):
     # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self._topk_ids: torch.Tensor = None
 
         def custom_routing_function(hidden_states, gating_output, topk, renormalize):
@@ -63,7 +62,8 @@ class TransformersFusedMoE(FusedMoE):
                 (topk_ids,) = dist_group.all_gatherv([topk_ids], 0, sizes)
             return topk_weights, topk_ids
 
-        self.custom_routing_function = custom_routing_function
+        kwargs["custom_routing_function"] = custom_routing_function
+        super().__init__(*args, **kwargs)
 
     def forward(
         self,
