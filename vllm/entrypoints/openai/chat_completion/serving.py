@@ -1235,8 +1235,11 @@ class OpenAIServingChat(OpenAIServing):
                         else:
                             index = 0
 
-                        if self._should_check_for_unstreamed_tool_arg_tokens(
-                            delta_message, output, tool_parser
+                        if (
+                            tool_parser
+                            and self._should_check_for_unstreamed_tool_arg_tokens(
+                                delta_message, output, tool_parser
+                            )
                         ):
                             latest_delta_len = 0
                             if (
