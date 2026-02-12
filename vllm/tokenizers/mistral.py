@@ -65,20 +65,16 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
         if message.get("role") == "assistant":
-            tool_calls_validator = message.get("tool_calls", None)
-            validated_tool_calls = []
-            iterating_tool_calls = tool_calls_validator is not None
-            while iterating_tool_calls:
+            if (tool_calls_validator := message.get("tool_calls", None)) is not None:
                 try:
-                    tool_call = next(tool_calls_validator)  # type: ignore
-                    validated_tool_calls.append(tool_call)
+                    validated_tool_calls = list(tool_calls_validator)
                 except ValidationError as e:
                     raise ValueError(
                         "Validating messages' `tool_calls` raised an error. "
                         "Please ensure `tool_calls` are iterable of tool calls."
                     ) from e
-                except StopIteration:
-                    iterating_tool_calls = False
+            else:
+                validated_tool_calls = []
 
             request.messages[i]["tool_calls"] = validated_tool_calls
 
