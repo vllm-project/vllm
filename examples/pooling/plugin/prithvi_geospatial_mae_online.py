@@ -15,8 +15,6 @@ import requests
 #   pip install terratorch>=v1.1
 # - start vllm in serving mode with the below args
 #   --model='ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11'
-#   --model-impl terratorch
-#   --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
 #   --io-processor-plugin terratorch_segmentation
 #   --enable-mm-embeds

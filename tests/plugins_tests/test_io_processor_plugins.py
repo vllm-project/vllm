@@ -48,7 +48,6 @@ def server(model_name, plugin):
         "--runner",
         "pooling",
         "--enforce-eager",
-        "--trust-remote-code",
         "--skip-tokenizer-init",
         # Limit the maximum number of parallel requests
         # to avoid the model going OOM in CI.
@@ -56,8 +55,6 @@ def server(model_name, plugin):
         "32",
         "--io-processor-plugin",
         plugin,
-        "--model-impl",
-        "terratorch",
         "--enable-mm-embeds",
     ]
 
@@ -135,12 +132,10 @@ def test_prithvi_mae_plugin_offline(
         runner="pooling",
         skip_tokenizer_init=True,
         enable_mm_embeds=True,
-        trust_remote_code=True,
         enforce_eager=True,
         # Limit the maximum number of parallel requests
         # to avoid the model going OOM in CI.
         max_num_seqs=32,
-        model_impl="terratorch",
         io_processor_plugin=plugin,
     ) as llm_runner:
         pooler_output = llm_runner.get_llm().encode(img_prompt, pooling_task="plugin")
