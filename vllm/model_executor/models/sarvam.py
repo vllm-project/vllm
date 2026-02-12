@@ -284,15 +284,15 @@ class SarvamMLAMoE(nn.Module):
 
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 2.5)
 
-        self.n_group = getattr(config, "n_group", self.num_experts // 8)
-        self.topk_group = getattr(config, "topk_group", 2)
+        self.n_group = getattr(config, "n_group", None)
+        self.topk_group = getattr(config, "topk_group", None)
         self.use_grouped_topk = self.n_group is not None and self.topk_group is not None
 
         self.norm_expert_prob = getattr(config, "norm_topk_prob", True)
 
-        router_dtype_cfg = getattr(config, "router_dtype", None)
+        router_dtype_cfg = getattr(config, "router_dtype", "fp32")
         if router_dtype_cfg is None:
             self.router_dtype = None
         elif router_dtype_cfg == "fp32":
@@ -318,7 +318,7 @@ class SarvamMLAMoE(nn.Module):
             self.gate.e_score_correction_bias = None
 
         self.score_function = getattr(config, "score_function", "sigmoid")
-        self.num_shared_experts = getattr(config, "num_shared_experts", 0)
+        self.num_shared_experts = getattr(config, "num_shared_experts", 1)
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -350,7 +350,7 @@ class SarvamMLAMoE(nn.Module):
             num_expert_group=self.n_group,
             topk_group=self.topk_group,
             use_grouped_topk=self.use_grouped_topk,
-            routed_scaling_factor=1.0,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def maybe_get_fused_moe(self) -> SharedFusedMoE:
@@ -401,11 +401,7 @@ class SarvamMLABlock(nn.Module):
         parallel_config = vllm_config.parallel_config
         layer_idx = int(prefix.split(".")[-1])
         hidden_size = config.hidden_size
-        dense_intermediate = getattr(
-            config,
-            "intermediate_size",
-            config.moe_intermediate_size * 2,
-        )
+        dense_intermediate = getattr(config, "intermediate_size", 16384)
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.self_attn = SarvamMLAAttention(
@@ -417,7 +413,7 @@ class SarvamMLABlock(nn.Module):
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         use_moe = hasattr(config, "num_experts") and config.num_experts is not None
-        first_k_dense = getattr(config, "first_k_dense_replace", 0)
+        first_k_dense = getattr(config, "first_k_dense_replace", 1)
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         if use_moe:
             is_moe_layer = layer_idx >= first_k_dense and (
@@ -648,7 +644,7 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
 
         self.num_logical_experts = example_moe.num_experts
         self.num_routed_experts = example_moe.num_experts  # routed pool size
-        self.num_shared_experts = getattr(example_moe.config, "num_shared_experts", 0)
+        self.num_shared_experts = getattr(example_moe.config, "num_shared_experts", 1)
 
         self.num_physical_experts = self.num_logical_experts
         self.num_local_physical_experts = self.num_logical_experts
@@ -729,7 +725,6 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
 
         self.expert_weights = []
         self.num_moe_layers = 0
-        self.num_expert_groups = getattr(config, "n_group", None)
 
         self.moe_layers = []
         self.moe_mlp_layers = []

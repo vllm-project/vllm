@@ -477,6 +477,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="4.56.3",
     ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "SarvamMoEForCausalLM": _HfExamplesInfo(
+        "sarvamai/sarvam2-30b-a3b",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
+    "SarvamMLAForCausalLM": _HfExamplesInfo(
+        "sarvamai/sarvam2-105b-a9b",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
