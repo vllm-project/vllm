@@ -564,9 +564,12 @@ class FusedMoE(CustomOp):
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
-        # Round up hidden size before creating moe_config.
-        # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size_padded, intermediate_size_per_partition_padded = (
+        # Round up hidden size and update moe_config.
+        self.hidden_size_original = hidden_size
+        self.intermediate_size_per_partition_original = (
+            self.intermediate_size_per_partition
+        )
+        self.hidden_size, self.intermediate_size_per_partition = (
             self.quant_method.maybe_roundup_sizes(
                 hidden_size,
                 self.intermediate_size_per_partition,
@@ -574,9 +577,13 @@ class FusedMoE(CustomOp):
                 self.moe_parallel_config,
             )
         )
-        moe_quant_params["hidden_size"] = hidden_size_padded
+        self.moe_config.hidden_dim = self.hidden_size
+        self.moe_config.intermediate_size_per_partition = (
+            self.intermediate_size_per_partition
+        )
+        moe_quant_params["hidden_size"] = self.hidden_size
         moe_quant_params["intermediate_size_per_partition"] = (
-            intermediate_size_per_partition_padded
+            self.intermediate_size_per_partition
         )
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
