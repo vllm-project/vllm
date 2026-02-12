@@ -560,16 +560,7 @@ class SamplingParams(
         return self._bad_words_token_ids
 
     def clone(self) -> "SamplingParams":
-        """Deep copy, but maybe not the LogitsProcessor objects.
-
-        LogitsProcessor objects may contain an arbitrary, nontrivial amount of
-        data that is expensive to copy. However, if not copied, the processor
-        needs to support parallel decoding for multiple sequences
-        See https://github.com/vllm-project/vllm/issues/3087
-
-        If skip_clone is True, uses shallow copy instead of deep copy.
-        """
-
+        """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
             return copy.copy(self)
 
