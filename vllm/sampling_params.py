@@ -481,11 +481,12 @@ class SamplingParams(
         eos_token_id: int | None = None,
     ) -> None:
         """Update if there are non-default values from generation_config"""
+        if not self.ignore_eos:
+            self._eos_token_id = eos_token_id
 
         if eos_token_id is not None:
             # Add the eos token id into the sampling_params to support
             # min_tokens processing.
-            self._eos_token_id = eos_token_id
             self._all_stop_token_ids.add(eos_token_id)
 
         # Update eos_token_id for generation
