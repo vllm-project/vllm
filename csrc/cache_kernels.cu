@@ -1231,10 +1231,17 @@ void gather_cache(
     int64_t batch_size, const std::string& kv_cache_dtype,
     std::optional<torch::Tensor> scale,
     std::optional<torch::Tensor> seq_starts = std::nullopt) {
+  // Mode dispatch: token_to_seq present → token-major,
+  //                batch_size >= 0      → batch-major (copy-only),
+  //                otherwise            → error.
+  // Callers must pass batch_size < 0 (e.g. -1) when using token-major mode.
   const bool has_token_major_metadata = token_to_seq.has_value();
   const bool has_batch_major_metadata = batch_size >= 0;
 
   if (has_token_major_metadata) {
+    TORCH_CHECK(batch_size <= 0,
+                "gather_cache: pass batch_size <= 0 when using token-major "
+                "mode (token_to_seq is provided)");
     TORCH_CHECK(num_tokens >= 0, "gather_cache expects num_tokens >= 0");
     TORCH_CHECK(scale.has_value(),
                 "gather_cache requires scale in token-major mode");
@@ -1251,8 +1258,13 @@ void gather_cache(
     return;
   }
   if (has_batch_major_metadata) {
+    TORCH_CHECK(!token_to_seq.has_value(),
+                "gather_cache: do not pass token_to_seq in batch-major mode");
     TORCH_CHECK(!scale.has_value(),
                 "gather_cache batch-major mode expects scale to be None");
+    TORCH_CHECK(kv_cache_dtype == "auto",
+                "gather_cache batch-major mode is copy-only; "
+                "pass kv_cache_dtype='auto'");
     TORCH_CHECK(batch_size <= block_table.size(0),
                 "gather_cache expects batch_size <= block_table.size(0)");
     if (batch_size == 0) {
@@ -1265,7 +1277,7 @@ void gather_cache(
   TORCH_CHECK(
       false,
       "gather_cache requires either token-major metadata "
-      "(token_to_seq + num_tokens) or batch-major metadata (batch_size)");
+      "(token_to_seq + num_tokens) or batch-major metadata (batch_size >= 0)");
 }
 
 void gather_and_dequant_cache_fp8_ds_mla(

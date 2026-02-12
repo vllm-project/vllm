@@ -2343,8 +2343,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     if use_fp8_prefill
                     else prefill_metadata.chunked_context.chunk_total_token[i]
                 ),
-                batch_size=attn_metadata.num_prefills,
-                kv_cache_dtype=self.kv_cache_dtype,
+                batch_size=(attn_metadata.num_prefills if use_fp8_prefill else -1),
+                kv_cache_dtype=("auto" if use_fp8_prefill else self.kv_cache_dtype),
                 scale=None if use_fp8_prefill else k_scale,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )

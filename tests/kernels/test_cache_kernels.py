@@ -118,5 +118,16 @@ def test_gather_cache_requires_mode_metadata():
         )
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
+def test_gather_cache_batch_major_zero_batches_noop():
+    src = torch.randn((4, 16, 576), dtype=torch.float16, device="cuda")
+    dst = torch.empty((0, 576), dtype=torch.float16, device="cuda")
+    bt = torch.zeros((0, 4), dtype=torch.int32, device="cuda")
+    cu = torch.zeros((1,), dtype=torch.int32, device="cuda")
+
+    ops.gather_cache(src, dst, bt, cu, None, 0, 0, "auto", None, None)
+    torch.cuda.synchronize()
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
