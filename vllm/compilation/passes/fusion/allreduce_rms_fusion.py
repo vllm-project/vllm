@@ -106,6 +106,7 @@ if flashinfer_comm is not None:
     )
     _AR_RMS_NUMERIC_DEBUG_CALLS = 0
     _AR_RMS_NUMERIC_DEBUG_LOGS = 0
+    _AR_RMS_NUMERIC_DEBUG_CAPTURE_SKIP_WARNED = False
 
     def _pattern_name(pattern_code: int) -> str:
         fi_comm = flashinfer_comm
@@ -128,6 +129,15 @@ if flashinfer_comm is not None:
         return bool(
             torch.isnan(tensor).any().item() or torch.isinf(tensor).any().item()
         )
+
+    def _is_cuda_graph_capturing(tensor: torch.Tensor | None) -> bool:
+        if tensor is None or not tensor.is_cuda:
+            return False
+        try:
+            return bool(torch.cuda.is_current_stream_capturing())
+        except RuntimeError:
+            # If CUDA context is not fully initialized, treat as not capturing.
+            return False
 
     def _tensor_summary(name: str, tensor: torch.Tensor | None) -> str:
         if tensor is None:
@@ -180,6 +190,7 @@ if flashinfer_comm is not None:
         scale_factor: torch.Tensor | None = None,
     ) -> None:
         global _AR_RMS_NUMERIC_DEBUG_CALLS, _AR_RMS_NUMERIC_DEBUG_LOGS
+        global _AR_RMS_NUMERIC_DEBUG_CAPTURE_SKIP_WARNED
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
@@ -216,7 +227,18 @@ if flashinfer_comm is not None:
 
         input_non_finite = False
         call_id = 0
-        if _AR_RMS_NUMERIC_DEBUG:
+        skip_debug_during_capture = _is_cuda_graph_capturing(allreduce_in)
+        if (
+            _AR_RMS_NUMERIC_DEBUG
+            and skip_debug_during_capture
+            and not _AR_RMS_NUMERIC_DEBUG_CAPTURE_SKIP_WARNED
+        ):
+            logger.warning(
+                "AR_RMS_NUMERIC_DEBUG is enabled, but checks are skipped during "
+                "CUDA graph capture to avoid stream-capture errors."
+            )
+            _AR_RMS_NUMERIC_DEBUG_CAPTURE_SKIP_WARNED = True
+        if _AR_RMS_NUMERIC_DEBUG and not skip_debug_during_capture:
             _AR_RMS_NUMERIC_DEBUG_CALLS += 1
             call_id = _AR_RMS_NUMERIC_DEBUG_CALLS
             debug_inputs = (
@@ -264,7 +286,7 @@ if flashinfer_comm is not None:
             scale_factor=scale_factor,
         )
 
-        if _AR_RMS_NUMERIC_DEBUG:
+        if _AR_RMS_NUMERIC_DEBUG and not skip_debug_during_capture:
             debug_outputs = (
                 ("allreduce_in_post", allreduce_in),
                 ("residual_post", residual),
