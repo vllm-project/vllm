@@ -2,6 +2,7 @@
 /build
 dist
 vllm/*.so
+.deps/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
