@@ -3,6 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
+import json
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -11,6 +12,7 @@ from typing import Annotated, Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -453,6 +455,11 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
+        if self.logits_processors:
+            # TODO: Remove `logits_processors` attribute
+            raise ValueError(
+                "vLLM V1 does not support per request user-provided logits processors."
+            )
         if self.truncate_prompt_tokens is not None and (
             self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
         ):
@@ -588,6 +595,237 @@ class SamplingParams(
             }
         )
         return copy.deepcopy(self, memo=logit_processor_refs)
+
+    def verify(
+        self,
+        model_config: ModelConfig,
+        speculative_config: SpeculativeConfig | None,
+        structured_outputs_config: StructuredOutputsConfig | None,
+        tokenizer: TokenizerLike | None,
+    ) -> None:
+        self._validate_logprobs(model_config)
+        self._validate_logit_bias(model_config)
+        self._validate_allowed_token_ids(tokenizer)
+        self._validate_spec_decode(speculative_config)
+        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+
+    def _validate_logprobs(self, model_config: ModelConfig) -> None:
+        max_logprobs = model_config.max_logprobs
+        if max_logprobs == -1:
+            max_logprobs = model_config.get_vocab_size()
+
+        # Validate sample logprobs.
+        if num_logprobs := self.logprobs:
+            if num_logprobs == -1:
+                num_logprobs = model_config.get_vocab_size()
+            if num_logprobs > max_logprobs:
+                raise VLLMValidationError(
+                    f"Requested sample logprobs of {num_logprobs}, "
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="logprobs",
+                    value=num_logprobs,
+                )
+
+        # Validate prompt logprobs.
+        if num_prompt_logprobs := self.prompt_logprobs:
+            if num_prompt_logprobs == -1:
+                num_prompt_logprobs = model_config.get_vocab_size()
+            if num_prompt_logprobs > max_logprobs:
+                raise VLLMValidationError(
+                    f"Requested prompt logprobs of {num_prompt_logprobs}, "
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="prompt_logprobs",
+                    value=num_prompt_logprobs,
+                )
+
+    def _validate_logit_bias(self, model_config: ModelConfig) -> None:
+        """Validate logit_bias token IDs are within vocabulary range."""
+        if not self.logit_bias:
+            return
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.logit_bias
+            if token_id < 0 or token_id >= vocab_size
+        ]
+
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in logit_bias contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="logit_bias",
+                value=invalid_token_ids,
+            )
+
+    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+        allowed_token_ids = self.allowed_token_ids
+        if allowed_token_ids is None:
+            return
+
+        if len(allowed_token_ids) == 0:
+            raise VLLMValidationError(
+                "allowed_token_ids is not None and empty!",
+                parameter="allowed_token_ids",
+                value=allowed_token_ids,
+            )
+
+        if tokenizer is not None:
+            vocab_size = len(tokenizer)
+            invalid_token_ids = [
+                token_id
+                for token_id in allowed_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    "allowed_token_ids contains out-of-vocab token id!",
+                    parameter="allowed_token_ids",
+                    value=invalid_token_ids,
+                )
+
+    def _validate_spec_decode(
+        self,
+        speculative_config: SpeculativeConfig | None,
+    ) -> None:
+        if speculative_config is None:
+            return
+
+        # Some sampling parameters are not yet compatible with spec decoding.
+        if self.min_tokens > 1 or self.min_p > _SAMPLING_EPS or self.logit_bias:
+            raise ValueError(
+                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "are not yet supported with speculative decoding."
+            )
+
+    def _validate_structured_outputs(
+        self,
+        structured_outputs_config: StructuredOutputsConfig | None,
+        tokenizer: TokenizerLike | None,
+    ) -> None:
+        if structured_outputs_config is None or self.structured_outputs is None:
+            return
+
+        if tokenizer is None:
+            raise ValueError(
+                "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
+            )
+
+        backend = structured_outputs_config.backend
+        if _backend := self.structured_outputs._backend:
+            # Request-level backend selection is not supported.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_backend_was_auto` field set in the params.
+            if backend != _backend and not (
+                backend == "auto" and self.structured_outputs._backend_was_auto
+            ):
+                raise ValueError(
+                    "Request-level structured output backend selection is not "
+                    f"supported. The request specified '{_backend}', but vLLM "
+                    f"was initialised with '{backend}'. This error can be "
+                    "resolved by removing '_backend' from the request."
+                )
+        else:
+            self.structured_outputs._backend = backend
+
+        # Request content validation
+        if (
+            isinstance(self.structured_outputs.choice, list)
+            and not self.structured_outputs.choice
+        ):
+            # It is invalid for choice to be an empty list
+            raise ValueError(
+                f"Choice '{self.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
+            )
+        # Reject empty string grammar early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.grammar, str)
+            and self.structured_outputs.grammar.strip() == ""
+        ):
+            raise ValueError("structured_outputs.grammar cannot be an empty string")
+
+        from vllm.tokenizers.mistral import MistralTokenizer
+        from vllm.v1.structured_output.backend_guidance import (
+            has_guidance_unsupported_json_features,
+            validate_guidance_grammar,
+        )
+        from vllm.v1.structured_output.backend_lm_format_enforcer import (
+            validate_structured_output_request_lm_format_enforcer,
+        )
+        from vllm.v1.structured_output.backend_outlines import (
+            validate_structured_output_request_outlines,
+        )
+        from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+        if backend.startswith("xgrammar"):
+            # xgrammar with no fallback
+            validate_xgrammar_grammar(self)
+        elif backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            if isinstance(tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "Mistral tokenizer is not supported for the 'guidance' "
+                    "structured output backend. Please use ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
+            validate_guidance_grammar(self, tokenizer=None)
+        elif backend == "outlines":
+            # outlines backend
+            validate_structured_output_request_outlines(self)
+        elif backend == "lm-format-enforcer":
+            # lm format enforcer backend
+            if isinstance(tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
+                    "structured output backend. Please use ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
+            validate_structured_output_request_lm_format_enforcer(self)
+        else:
+            # NOTE: backend must be "auto" here, because we have
+            # checked supported_backends above.
+            # In this mode, we set opinionated defaults based on what we think
+            # will satisfy the most use cases without having to worry about
+            # this setting. We include fallback behavior here, but not with any
+            # other setting where a specific backend was specified.
+            try:
+                validate_xgrammar_grammar(self)
+                self.structured_outputs._backend = "xgrammar"
+            except ValueError:
+                # The request either failed validation
+                # or includes some jsonschema feature(s) that
+                # are not supported in xgrammar.
+
+                # Check if schema has features unsupported by guidance
+                so_params = self.structured_outputs
+                skip_guidance = False
+                if so_params.json:
+                    if isinstance(so_params.json, str):
+                        schema = json.loads(so_params.json)
+                    else:
+                        schema = so_params.json
+                    skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                if isinstance(tokenizer, MistralTokenizer) or skip_guidance:
+                    # Fall back to outlines if the tokenizer is Mistral
+                    # or if schema contains features unsupported by guidance
+                    validate_structured_output_request_outlines(self)
+                    self.structured_outputs._backend = "outlines"
+                else:
+                    # Fall back to guidance by default.
+                    validate_guidance_grammar(self, tokenizer=None)
+                    self.structured_outputs._backend = "guidance"
+            # Remember that this backend was set automatically
+            self.structured_outputs._backend_was_auto = True
+
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        self.structured_outputs.__post_init__()
 
     def __repr__(self) -> str:
         return (
