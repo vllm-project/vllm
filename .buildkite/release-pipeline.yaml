@@ -248,8 +248,8 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-  - group: "Publish wheels"
-    key: "publish-wheels"
+  - group: "Publish release artifacts"
+    key: "publish-release-artifacts"
     steps:
       - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
         key: block-upload-release-wheels
@@ -265,6 +265,27 @@ steps:
           queue: small_cpu_queue_postmerge
         commands:
           - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
+      
+      - block: "Confirm update release images to DockerHub"
+        key: block-update-release-images-dockerhub
+        depends_on:
+          - input-release-version
+          - annotate-release-workflow
+      
+      - label: "Publish release images to DockerHub"
+        depends_on:
+          - block-update-release-images-dockerhub
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/push-release-images-dockerhub.sh"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
   # ROCm Release Pipeline (x86_64 only)
