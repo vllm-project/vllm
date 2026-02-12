@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -54,7 +55,7 @@ def make_dummy_moe_config(
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation="silu",
+        activation=MoEActivation.SILU,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
