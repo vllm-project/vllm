@@ -6,14 +6,13 @@ from typing import TypeAlias
 import numpy as np
 
 from vllm import ClassificationOutput
-from vllm.engine.protocol import EngineClient
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.openai.engine.serving import ServeContext
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
+from vllm.renderers import BaseRenderer
 
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
@@ -31,36 +30,22 @@ ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 class ServingClassification(PoolingServing):
     request_id_prefix = "classify"
 
-    def __init__(
+    def init_io_processor(
         self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
+        model_config: ModelConfig,
+        renderer: BaseRenderer,
         *,
-        request_logger: RequestLogger | None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         trust_request_chat_template: bool = False,
-        log_error_stack: bool = False,
-    ) -> None:
-        super().__init__(
-            engine_client=engine_client,
-            models=models,
-            request_logger=request_logger,
-            log_error_stack=log_error_stack,
-        )
-        self.io_processor = ClassifyIOProcessor(
-            model_config=models.model_config,
-            renderer=models.renderer,
+    ) -> ClassifyIOProcessor:
+        return ClassifyIOProcessor(
+            model_config=model_config,
+            renderer=renderer,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             trust_request_chat_template=trust_request_chat_template,
         )
-
-    async def _preprocess(
-        self,
-        ctx: ServeContext,
-    ) -> None:
-        ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
 
     async def _build_response(
         self,

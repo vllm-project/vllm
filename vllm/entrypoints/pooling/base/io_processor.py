@@ -79,6 +79,9 @@ class PoolingIOProcessor:
     async def post_process(self, *args, **kwargs):
         pass
 
+    def create_pooling_params(self, request):
+        return request.to_pooling_params()
+
     def _validate_input(
         self,
         request: object,

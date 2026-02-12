@@ -134,7 +134,7 @@ class ServingScores(OpenAIServing):
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        pooling_params = request.to_pooling_params("embed")
+        pooling_params = self.io_processor.create_pooling_params(request)
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -215,8 +215,7 @@ class ServingScores(OpenAIServing):
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        pooling_params = request.to_pooling_params("token_embed")
+        pooling_params = self.io_processor.create_pooling_params(request)
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -304,8 +303,7 @@ class ServingScores(OpenAIServing):
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        default_pooling_params = request.to_pooling_params("score")
+        default_pooling_params = self.io_processor.create_pooling_params(request)
 
         engine_prompts, request_prompts = await self.io_processor.pre_process(
             data_1=data_1,

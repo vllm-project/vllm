@@ -86,6 +86,9 @@ class CrossEncoderIOProcessor(PoolingIOProcessor):
     async def post_process(self, *args, **kwargs):
         pass
 
+    def create_pooling_params(self, request):
+        return request.to_pooling_params("score")
+
 
 class EmbeddingScoreIOProcessor(PoolingIOProcessor):
     async def pre_process(
@@ -128,6 +131,10 @@ class EmbeddingScoreIOProcessor(PoolingIOProcessor):
 
         return input_texts, engine_prompts
 
+    def create_pooling_params(self, request):
+        return request.to_pooling_params("embed")
+
 
 class LateInteractionIOProcessor(EmbeddingScoreIOProcessor):
-    pass
+    def create_pooling_params(self, request):
+        return request.to_pooling_params("token_embed")
