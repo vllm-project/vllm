@@ -377,6 +377,7 @@ class MoonViTEncoderLayer(nn.Module):
             total_num_heads=num_heads,
             total_num_kv_heads=num_heads,
             bias=attn_bias,
+            quant_config = quant_config,
             prefix=f"{prefix}.wqkv",
             disable_tp=self.use_data_parallel,
         )
@@ -384,6 +385,7 @@ class MoonViTEncoderLayer(nn.Module):
             hidden_dim,
             hidden_dim,
             bias=attn_bias,
+            quant_config = quant_config,
             prefix=f"{prefix}.wo",
             disable_tp=self.use_data_parallel,
         )
