@@ -413,6 +413,7 @@ class KimiAudioForConditionalGeneration(
     """Kimi-Audio model for conditional generation + transcription."""
 
     is_kimia_asr: ClassVar[bool] = True
+    skip_warmup_audio_preprocessing: ClassVar[bool] = True
 
     # vLLM V1: treat this as a "raw input only" multimodal model so that
     # multimodal kwargs (whisper_input_features / masks / ids) are forwarded
