@@ -1031,10 +1031,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
+        tokenizer_mode="mistral",
     ),
     "VoxtralRealtimeGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-4B-Realtime-2602",
         enforce_eager=True,
+        tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
