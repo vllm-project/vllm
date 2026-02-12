@@ -41,3 +41,20 @@ You can quantize your own huggingface model with torchao, e.g. [transformers](ht
     ```
 
 Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.
+
+## Online Quantization in vLLM
+
+To perform online quantization with TorchAO in vLLM, use `--quantization torchao`
+and pass the TorchAO config through `--hf-overrides`.
+
+You can inline the overrides as JSON:
+
+```bash
+vllm serve meta-llama/Meta-Llama-3-8B \
+  --quantization torchao \
+  --hf-overrides '{"quantization_config_file": "/path/to/torchao_config.json"}'
+```
+
+When you need to skip specific modules (for example, excluding
+`vocab_parallel_embedding`), configure that in the TorchAO config with
+`FqnToConfig` rather than changing vLLM model code.
