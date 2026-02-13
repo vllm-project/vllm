@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from:
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo3_5_hybrid/modeling_olmo3_5_hybrid.py
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo3_2_hybrid/modeling_olmo3_2_hybrid.py
 # Copyright 2024 The vLLM team.
 # Copyright 2026 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code combines OLMo2/OLMo3 attention with Gated DeltaNet linear attention
-# for the OLMo 3.5 Hybrid architecture.
+# for the OLMo 3.2 Hybrid architecture.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only OLMo 3.5 Hybrid model compatible with HuggingFace weights."""
+"""Inference-only OLMo 3.2 Hybrid model compatible with HuggingFace weights."""
 
 import contextlib
 from collections.abc import Iterable
@@ -134,9 +134,9 @@ def _make_conv1d_weight_loader(dim: int, tp_size: int, tp_rank: int):
     return weight_loader
 
 
-class Olmo3_5HybridGatedDeltaNet(nn.Module, MambaBase):
+class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
     """
-    Gated DeltaNet linear attention layer for OLMo 3.5 Hybrid.
+    Gated DeltaNet linear attention layer for OLMo 3.2 Hybrid.
 
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
@@ -405,7 +405,7 @@ class Olmo3_5HybridGatedDeltaNet(nn.Module, MambaBase):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.olmo3_5_hybrid_gdn_attention_core(
+        torch.ops.vllm.olmo3_2_hybrid_gdn_attention_core(
             mixed_qkv,
             b,
             a,
@@ -536,7 +536,7 @@ class Olmo3_5HybridGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
-        g, beta = fused_olmo3_5_hybrid_gdn_gating(
+        g, beta = fused_olmo3_2_hybrid_gdn_gating(
             self.A_log, a, b, self.dt_bias, self.allow_neg_eigval
         )
 
@@ -630,7 +630,7 @@ class Olmo3_5HybridGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
 
-class Olmo3_5HybridAttention(nn.Module):
+class Olmo3_2HybridAttention(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -741,7 +741,7 @@ class Olmo3_5HybridAttention(nn.Module):
         return output
 
 
-class Olmo3_5HybridMLP(nn.Module):
+class Olmo3_2HybridMLP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -773,7 +773,7 @@ class Olmo3_5HybridMLP(nn.Module):
         return x
 
 
-class Olmo3_5HybridDecoderLayer(nn.Module):
+class Olmo3_2HybridDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -787,7 +787,7 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         if self.layer_type == "linear_attention":
-            self.linear_attn = Olmo3_5HybridGatedDeltaNet(
+            self.linear_attn = Olmo3_2HybridGatedDeltaNet(
                 config,
                 model_config=model_config,
                 cache_config=cache_config,
@@ -805,7 +805,7 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
                 eps=config.rms_norm_eps,
             )
         else:
-            self.self_attn = Olmo3_5HybridAttention(
+            self.self_attn = Olmo3_2HybridAttention(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
@@ -819,7 +819,7 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
                 eps=config.rms_norm_eps,
             )
 
-        self.mlp = Olmo3_5HybridMLP(
+        self.mlp = Olmo3_2HybridMLP(
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
@@ -859,7 +859,7 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Olmo3_5HybridModel(nn.Module):
+class Olmo3_2HybridModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -872,7 +872,7 @@ class Olmo3_5HybridModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: Olmo3_5HybridDecoderLayer(
+            lambda prefix: Olmo3_2HybridDecoderLayer(
                 vllm_config=vllm_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
@@ -972,7 +972,7 @@ class Olmo3_5HybridModel(nn.Module):
         return loaded_params
 
 
-class Olmo3_5HybridForCausalLM(
+class Olmo3_2HybridForCausalLM(
     nn.Module, HasInnerState, SupportsPP, SupportsLoRA, IsHybrid
 ):
     packed_modules_mapping = {
@@ -994,7 +994,7 @@ class Olmo3_5HybridForCausalLM(
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
 
-        self.model = Olmo3_5HybridModel(
+        self.model = Olmo3_2HybridModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -1079,7 +1079,7 @@ class Olmo3_5HybridForCausalLM(
         return loader.load_weights(weights)
 
 
-def olmo3_5_hybrid_gdn_attention_core(
+def olmo3_2_hybrid_gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
@@ -1096,7 +1096,7 @@ def olmo3_5_hybrid_gdn_attention_core(
     )
 
 
-def olmo3_5_hybrid_gdn_attention_core_fake(
+def olmo3_2_hybrid_gdn_attention_core_fake(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
@@ -1108,15 +1108,15 @@ def olmo3_5_hybrid_gdn_attention_core_fake(
 
 
 direct_register_custom_op(
-    op_name="olmo3_5_hybrid_gdn_attention_core",
-    op_func=olmo3_5_hybrid_gdn_attention_core,
+    op_name="olmo3_2_hybrid_gdn_attention_core",
+    op_func=olmo3_2_hybrid_gdn_attention_core,
     mutates_args=["core_attn_out"],
-    fake_impl=olmo3_5_hybrid_gdn_attention_core_fake,
+    fake_impl=olmo3_2_hybrid_gdn_attention_core_fake,
 )
 
 
 @triton.jit
-def fused_olmo3_5_hybrid_gdn_gating_kernel(
+def fused_olmo3_2_hybrid_gdn_gating_kernel(
     g,
     beta_output,
     A_log,
@@ -1157,7 +1157,7 @@ def fused_olmo3_5_hybrid_gdn_gating_kernel(
     )
 
 
-def fused_olmo3_5_hybrid_gdn_gating(
+def fused_olmo3_2_hybrid_gdn_gating(
     A_log: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1171,7 +1171,7 @@ def fused_olmo3_5_hybrid_gdn_gating(
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
     beta_output = torch.empty(1, batch, num_heads, dtype=torch.float32, device=b.device)
-    fused_olmo3_5_hybrid_gdn_gating_kernel[grid](
+    fused_olmo3_2_hybrid_gdn_gating_kernel[grid](
         g,
         beta_output,
         A_log,
