@@ -17,7 +17,7 @@ class IntKernel(w8a8_cutlass_linear.IntKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "Requires ROCm."
+            return False, "requires ROCm."
 
         if compute_capability is not None and compute_capability < 90:
             return False, "requires compute capability 90 and above."
@@ -65,12 +65,12 @@ class IntKernel(w8a8_cutlass_linear.IntKernel):
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
         assert symmetric, (
-            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
+            f"{IntKernel.get_name()} only supports symmetric quantization."
         )
         x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
 
         assert x_zp is None, (
-            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
+            f"{IntKernel.get_name()} only supports symmetric quantization."
         )
         out_dtype = x.dtype
 

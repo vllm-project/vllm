@@ -83,7 +83,9 @@ class IntKernel(w8a8_cutlass_linear.IntKernel):
             x.contiguous(), i_s, i_zp, symmetric=True
         )
 
-        assert x_zp is None, "Triton kernel only supports symmetric quantization"
+        assert x_zp is None, (
+            f"{IntKernel.get_name()} kernel only supports symmetric quantization"
+        )
 
         return triton_scaled_mm(
             x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias

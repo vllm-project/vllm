@@ -14,13 +14,13 @@ class FpKernel(w8a8_linear.FpKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
-            return False, "XPUFP8ScaledMM only support on XPU"
+            return False, "requires XPU."
         return True, None
 
     @classmethod
     def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
-            return False, "XPUFP8ScaledMM only support FP8 weight dtype"
+            return False, "supports Fp8 weight dtype only."
         return True, None
 
     def apply_weights(
