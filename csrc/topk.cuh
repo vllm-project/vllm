@@ -148,6 +148,8 @@ struct vec_t {
   FLASHINFER_INLINE T* ptr() { return data; }
 };
 
+#undef FLASHINFER_INLINE
+
 namespace sampling {
 
 // ============================================================================
@@ -2479,7 +2481,5 @@ cudaError_t TopKRaggedTransformDispatch(DType* input, IdType* output_indices,
 }  // namespace sampling
 
 }  // namespace vllm
-
-#undef FLASHINFER_INLINE
 
 #endif  // FLASHINFER_TOPK_CUH_
