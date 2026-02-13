@@ -172,7 +172,9 @@ class StreamingXMLToolCallParser:
             return result_delta
         else:
             # No complete elements, check if there's unoutput text content
-            if self.text_content_buffer and self.tool_call_index == 0:
+            # Use .strip() to filter out whitespace-only content (e.g., "\n\n"
+            # between </think> and <tool_call>)
+            if self.text_content_buffer.strip() and self.tool_call_index == 0:
                 # Has text content but no tool_call yet, output text content
                 text_delta = DeltaMessage(content=self.text_content_buffer)
                 self._emit_delta(text_delta)
@@ -257,7 +259,7 @@ class StreamingXMLToolCallParser:
                         or preprocessed_element.strip().startswith("<function name=")
                     )
                     and self.tool_call_index == 0
-                ) and self.text_content_buffer:
+                ) and self.text_content_buffer.strip():
                     # First tool_call starts,
                     # output previously collected text content first
                     text_delta = DeltaMessage(content=self.text_content_buffer)
