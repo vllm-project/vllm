@@ -205,7 +205,7 @@ async def test_online_serving_v1_completions(
     print(f"Streaming completion passed")
 
     print(f"\n{'='*60}")
-    print("All /v1/completions endpoint assertions passed!")
+    print("✅ All /v1/completions endpoint assertions passed!")
     print(f"{'='*60}\n")
 
 
@@ -377,7 +377,7 @@ async def test_online_serving_v1_chat_completions(
     print(f"Streaming chat completion passed")
 
     print(f"\n{'='*60}")
-    print("All /v1/chat/completions endpoint assertions passed!")
+    print("✅ All /v1/chat/completions endpoint assertions passed!")
     print(f"{'='*60}\n")
 
 
