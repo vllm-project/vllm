@@ -322,12 +322,6 @@ class MultiConnector(KVConnectorBase_V1):
             return None
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
-    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
-    # method for the MultiConnector. It should be able to get events from
-    # multiple connectors, handling the case where only a subset of the
-    # requested connectors implements the 'get_kv_connector_kv_cache_events'
-    # WIP: https://github.com/vllm-project/vllm/pull/31811
-
     # ==============================
     # Scheduler-side methods
     # ==============================

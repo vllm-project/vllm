@@ -767,12 +767,9 @@ def test_multi_connector_overrides_all_base_methods():
     Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
     """
     # These are fine to inherit from KVConnectorBase_V1
-    # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
-    # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
     INHERITED_OK = {
         "role",
         "has_connector_metadata",
-        "get_kv_connector_kv_cache_events",
     }
 
     base_members = {
