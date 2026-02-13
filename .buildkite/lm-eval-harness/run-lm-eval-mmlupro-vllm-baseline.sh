@@ -27,6 +27,7 @@ while getopts "m:b:l:f:t:" OPT; do
         ;;
     b )
         BATCH_SIZE="$OPTARG"
+        export BATCH_SIZE
         ;;
     l )
         LIMIT="$OPTARG"
