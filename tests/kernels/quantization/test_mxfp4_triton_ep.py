@@ -141,7 +141,7 @@ class TestTritonMoeForwardExpertMap:
 
             if expert_map_present:
                 sparse_result = MagicMock()
-                sparse_result.indx = torch.tensor([[0, 2]])
+                sparse_result.indx = torch.tensor([[0, 2]], dtype=torch.int32)
                 sparse_result.vals = torch.tensor([[0.6, 0.4]])
                 mock_topk.return_value = sparse_result
                 mock_make_routing.return_value = (

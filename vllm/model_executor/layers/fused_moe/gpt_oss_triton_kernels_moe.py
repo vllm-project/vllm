@@ -192,7 +192,7 @@ def triton_kernel_moe_forward(
             logits = torch.softmax(logits, dim=-1)
         sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
         # sparse_logits.indx contains global expert IDs – remap to local.
-        topk_ids = expert_map[sparse_logits.indx]
+        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
         topk_weights = sparse_logits.vals
         local_num_experts = w1.size(0)
         routing_data, gather_idx, scatter_idx = make_routing_data(
