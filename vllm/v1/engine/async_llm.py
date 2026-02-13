@@ -19,8 +19,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.inputs import PromptType, StreamingInput
+from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -272,7 +272,7 @@ class AsyncLLM(EngineClient):
             engine_core.shutdown()
 
         if input_processor := getattr(self, "input_processor", None):
-            input_processor.close()
+            input_processor.shutdown()
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:

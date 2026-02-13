@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -262,6 +263,15 @@ class OvisProcessingInfo(BaseProcessingInfo):
             image_pad_token=self.get_image_pad_token(),
             image_segment_len=self.get_image_segment_len(),
             **kwargs,
+        )
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return (
+            super()
+            .get_default_tok_params()
+            .with_kwargs(
+                add_special_tokens=False,
+            )
         )
 
     def get_image_segment_len(self) -> int:
