@@ -533,25 +533,29 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
             {"role": "user", "message_type": "audio", "content": wav_path},
         ]
 
-        content = prompt_manager.get_prompt(messages, output_type="text")
-        (
-            audio_ids,
-            text_ids,
-            is_continuous_mask,
-            _audio_loss_mask,
-            _text_loss_mask,
-        ) = content.to_tensor()
+        # Build multimodal tensors without grad; vLLM may hash tensors.
+        import torch
 
-        whisper_feats = content.continuous_feature[0]
-        if whisper_feats.dim() == 2:
-            whisper_feats = whisper_feats.unsqueeze(0)
+        with torch.inference_mode():
+            content = prompt_manager.get_prompt(messages, output_type="text")
+            (
+                audio_ids,
+                text_ids,
+                is_continuous_mask,
+                _audio_loss_mask,
+                _text_loss_mask,
+            ) = content.to_tensor()
 
-        mm_audio = {
-            "whisper_input_features": whisper_feats.detach(),
-            "is_continuous_mask": is_continuous_mask,
-            "text_input_ids": text_ids,
-            "audio_input_ids": audio_ids,
-        }
+            whisper_feats = content.continuous_feature[0]
+            if whisper_feats.dim() == 2:
+                whisper_feats = whisper_feats.unsqueeze(0)
+
+            mm_audio = {
+                "whisper_input_features": whisper_feats,
+                "is_continuous_mask": is_continuous_mask,
+                "text_input_ids": text_ids,
+                "audio_input_ids": audio_ids,
+            }
     finally:
         import contextlib
 

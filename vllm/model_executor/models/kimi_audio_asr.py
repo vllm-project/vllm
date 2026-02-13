@@ -714,58 +714,59 @@ class KimiAudioForConditionalGeneration(
                 }
             )
 
-            content = prompt_manager.get_prompt(messages, output_type="text")
-            (
-                audio_ids,
-                text_ids,
-                is_continuous_mask,
-                _audio_loss_mask,
-                _text_loss_mask,
-            ) = content.to_tensor()
-
-            if not content.continuous_feature:
-                raise RuntimeError("No whisper features produced by prompt manager")
-
-            whisper_feats = content.continuous_feature[0]
-            if isinstance(whisper_feats, torch.Tensor) and whisper_feats.dim() == 2:
-                whisper_feats = whisper_feats.unsqueeze(0)
-
-            if (
-                isinstance(whisper_feats, torch.Tensor)
-                and isinstance(is_continuous_mask, torch.Tensor)
-                and whisper_feats.dim() == 3
-                and is_continuous_mask.dim() == 2
-                and whisper_feats.shape[0] == is_continuous_mask.shape[0]
-                and whisper_feats.shape[1] != is_continuous_mask.shape[1]
-            ):
-                # Some Kimi-Audio preprocessing paths return whisper features only
-                # for masked (continuous) positions. Expand to full token length so
-                # the model forward path can avoid data-dependent scattering.
-                if whisper_feats.shape[0] != 1:
-                    logger.warning(
-                        "[Kimi-Audio] Unexpected batch size for whisper features: %d",
-                        whisper_feats.shape[0],
-                    )
-                else:
-                    mask = is_continuous_mask[0].to(torch.bool)
-                    idx = mask.nonzero(as_tuple=False).squeeze(-1)
-                    if idx.numel() == whisper_feats.shape[1]:
-                        full = whisper_feats.new_zeros(
-                            (1, is_continuous_mask.shape[1], whisper_feats.shape[2])
-                        )
-                        full[0, idx] = whisper_feats[0]
-                        whisper_feats = full
-                    else:
-                        logger.warning(
-                            "[Kimi-Audio] Mask/feature length mismatch: "
-                            "mask_true=%d features=%d",
-                            idx.numel(),
-                            whisper_feats.shape[1],
-                        )
-
-            # Ensure returned tensors do not require grad; vLLM may hash tensors.
+            # Build multimodal tensors without grad; vLLM may hash tensors.
             with torch.inference_mode():
-                whisper_input_features = whisper_feats.detach()
+                content = prompt_manager.get_prompt(messages, output_type="text")
+                (
+                    audio_ids,
+                    text_ids,
+                    is_continuous_mask,
+                    _audio_loss_mask,
+                    _text_loss_mask,
+                ) = content.to_tensor()
+
+                if not content.continuous_feature:
+                    raise RuntimeError("No whisper features produced by prompt manager")
+
+                whisper_feats = content.continuous_feature[0]
+                if isinstance(whisper_feats, torch.Tensor) and whisper_feats.dim() == 2:
+                    whisper_feats = whisper_feats.unsqueeze(0)
+
+                if (
+                    isinstance(whisper_feats, torch.Tensor)
+                    and isinstance(is_continuous_mask, torch.Tensor)
+                    and whisper_feats.dim() == 3
+                    and is_continuous_mask.dim() == 2
+                    and whisper_feats.shape[0] == is_continuous_mask.shape[0]
+                    and whisper_feats.shape[1] != is_continuous_mask.shape[1]
+                ):
+                    # Some Kimi-Audio preprocessing paths return whisper features only
+                    # for masked (continuous) positions. Expand to full token length so
+                    # the model forward path can avoid data-dependent scattering.
+                    if whisper_feats.shape[0] != 1:
+                        logger.warning(
+                            "[Kimi-Audio] Unexpected batch size for "
+                            "whisper features: %d",
+                            whisper_feats.shape[0],
+                        )
+                    else:
+                        mask = is_continuous_mask[0].to(torch.bool)
+                        idx = mask.nonzero(as_tuple=False).squeeze(-1)
+                        if idx.numel() == whisper_feats.shape[1]:
+                            full = whisper_feats.new_zeros(
+                                (1, is_continuous_mask.shape[1], whisper_feats.shape[2])
+                            )
+                            full[0, idx] = whisper_feats[0]
+                            whisper_feats = full
+                        else:
+                            logger.warning(
+                                "[Kimi-Audio] Mask/feature length mismatch: "
+                                "mask_true=%d features=%d",
+                                idx.numel(),
+                                whisper_feats.shape[1],
+                            )
+
+                whisper_input_features = whisper_feats
 
             # IMPORTANT: Return a single placeholder token in the prompt.
             # The multimodal processor expands it to match multimodal length.
