@@ -162,8 +162,9 @@ dataproperty==1.0.1
     # via
     #   pytablewriter
     #   tabledata
-datasets==4.5.0
+datasets==4.0.0
     # via
+    #   -r requirements/test.in
     #   evaluate
     #   lm-eval
     #   mteb
@@ -235,7 +236,7 @@ frozenlist==1.5.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2025.10.0
+fsspec==2025.3.0
     # via
     #   datasets
     #   evaluate
@@ -316,7 +317,6 @@ httpcore==1.0.6
 httpx==0.27.2
     # via
     #   -r requirements/test.in
-    #   datasets
     #   diffusers
     #   perceptron
     #   schemathesis
@@ -1192,8 +1192,6 @@ torchaudio==2.10.0+cu129
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchcodec==0.10.0
-    # via -r requirements/test.in
 torchgeo==0.7.0
     # via terratorch
 torchmetrics==1.7.4
