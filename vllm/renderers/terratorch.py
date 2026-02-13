@@ -23,9 +23,9 @@ class TerratorchRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
-        config: VllmConfig,
+        config: VllmConfig,  # type: ignore[override]
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
+    ) -> "TerratorchRenderer":
         model_config = config.model_config
         if not model_config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")

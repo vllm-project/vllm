@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],

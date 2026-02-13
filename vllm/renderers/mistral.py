@@ -52,7 +52,7 @@ def safe_apply_chat_template(
 
 class MistralRenderer(BaseRenderer[MistralTokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],

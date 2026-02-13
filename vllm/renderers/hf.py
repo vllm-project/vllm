@@ -587,7 +587,7 @@ def replace_vision_chunk_video_placeholder(
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
