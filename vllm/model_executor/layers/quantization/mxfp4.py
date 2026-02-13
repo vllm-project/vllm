@@ -977,71 +977,29 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
             or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
         )
-        from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
         # Backend-specific preparation
-        if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-                FlashInferExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
-            )
-
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                FlashInferExperts(
-                    moe_config=self.moe, quant_config=self.moe_quant_config
-                ),
-                shared_experts=None,
-            )
-            return self.kernel(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-            )
-        elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
-            assert x.dtype == torch.bfloat16
-
-            quant_scales = [
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-            ]
-
-            fi_input = x
-            extra_kwargs = dict(
-                use_w4_group_scaling=True,
-                fc1_expert_weights=layer.w13_weight,
-                fc2_expert_weights=layer.w2_weight,
-            )
-
-        output = torch.empty_like(x, dtype=torch.bfloat16)
-
-        flashinfer_cutlass_fused_moe(
-            input=fi_input,
-            token_selected_experts=topk_ids.to(torch.int).contiguous(),
-            token_final_scales=topk_weights,
-            output_dtype=torch.bfloat16,
-            output=output,
-            quant_scales=quant_scales,
-            fc1_expert_biases=layer.w13_bias,
-            fc2_expert_biases=layer.w2_bias,
-            swiglu_alpha=layer.gemm1_alpha,
-            swiglu_beta=layer.gemm1_beta,
-            swiglu_limit=layer.gemm1_clamp_limit,
-            tp_size=self.moe.tp_size,
-            tp_rank=self.moe.tp_rank,
-            ep_size=self.moe.ep_size,
-            ep_rank=self.moe.ep_rank,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
-            **extra_kwargs,
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+            FlashInferExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            MoEPrepareAndFinalizeNoEP,
         )
 
-        return output
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferExperts(moe_config=self.moe, quant_config=self.moe_quant_config),
+            shared_experts=None,
+        )
+        return self.kernel(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
 
     def apply_monolithic(
         self,
