@@ -105,8 +105,8 @@ class ExtractHiddenStatesProposer:
 
         Returns:
             Tuple of:
-              - Draft tokens matching sampled tokens, shape [batch_size, 1]
-              - KV connector output (if KV transfer is active), else None
+                - Draft tokens matching sampled tokens, shape [batch_size, 1]
+                - KV connector output (if KV transfer is active), else None
         """
         assert self.model is not None and isinstance(target_hidden_states, list)
 
