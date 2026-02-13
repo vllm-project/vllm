@@ -824,7 +824,11 @@ class VllmConfig:
                     )
 
                 if pass_config.sp_min_token_num is None:
-                    logger.debug("SP threshold is None, disabling enable_sp")
+                    logger.warning(
+                        "Model hidden_size too small for the SP "
+                        "threshold heuristic, disabling. To force SP, "
+                        "set pass_config.sp_min_token_num manually."
+                    )
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
