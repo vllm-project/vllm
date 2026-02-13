@@ -794,8 +794,8 @@ class SpeculativeConfig:
             )
         ):
             raise ValueError(
-                f"{self.method} is only supported for {aux_hidden_states_supported} models. "
-                f"Got {self.target_model_config.hf_text_config.model_type=}"
+                f"{self.method} is only supported for {aux_hidden_states_supported}"
+                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
         return self

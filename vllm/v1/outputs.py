@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, NamedTuple, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -174,7 +175,7 @@ class KVConnectorOutput:
             [output.kv_connector_stats for output in outputs],
         )
         kv_cache_events = _combine_non_none(
-            lambda x, y: x.add_events(y.get_all_events()),
+            lambda x, y: x.merge(y),
             [output.kv_cache_events for output in outputs],
         )
         invalid_block_ids = _combine_non_none(
