@@ -149,6 +149,50 @@ class KVCacheManager:
         """
         return self.block_pool.get_usage()
 
+    @property
+    def num_total_blocks(self) -> int:
+        """Get the total number of KV cache blocks available.
+
+        Returns:
+            The total number of KV cache blocks.
+        """
+        return self.block_pool.num_gpu_blocks
+
+    @property
+    def num_cached_blocks(self) -> int:
+        """Get the number of blocks currently in the prefix cache.
+
+        Returns:
+            The number of prefix cached blocks.
+        """
+        return self.block_pool.get_num_cached_blocks()
+
+    @property
+    def num_cached_tokens(self) -> int:
+        """Get the number of tokens currently in the prefix cache.
+
+        Calculates tokens per group using each group's block size, then
+        returns the maximum across groups. This provides the most accurate
+        token count when groups have different block sizes.
+
+        Returns:
+            The number of prefix cached tokens.
+        """
+        blocks_per_group = self.block_pool.get_num_cached_blocks_per_group()
+        if not blocks_per_group:
+            return 0
+
+        # Calculate tokens for each group and return the max.
+        # All groups cache the same token sequences, but may have different
+        # block sizes, so we use max to report the actual cached tokens.
+        max_tokens = 0
+        for group_id, num_blocks in blocks_per_group.items():
+            block_size = self.kv_cache_config.kv_cache_groups[
+                group_id
+            ].kv_cache_spec.block_size
+            max_tokens = max(max_tokens, num_blocks * block_size)
+        return max_tokens
+
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
 
