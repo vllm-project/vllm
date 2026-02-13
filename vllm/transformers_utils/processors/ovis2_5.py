@@ -94,7 +94,9 @@ class Ovis2_5Processor(ProcessorMixin):
         suggestion = (
             "please add '<image>', '<video>', '<ovis_visual_atom>', "
             "'<ovis_image_start>', '<ovis_image_end>', '<ovis_video_start>', "
-            "'<ovis_video_end>' in 'additional_special_tokens' of tokenizer_config.json"
+            "'<ovis_video_end>' in 'additional_special_tokens' of "
+            "tokenizer_config.json, You can refer to "
+            "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
         )
 
         for key, token_name in required_tokens.items():
