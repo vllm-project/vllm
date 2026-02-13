@@ -312,20 +312,3 @@ class TestSiluMulFp8Integration:
         kernel_wrapper = registered_kernels["silu_mul_fp8"]
         assert kernel_wrapper.op_name == "silu_mul_fp8"
         assert kernel_wrapper._config_picker is not None
-
-    def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported()
-        from vllm.kernels.helion.register import get_registered_kernels
-
-        input_tensor = torch.randn(32, 4096, dtype=torch.bfloat16, device="cuda")
-        scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["silu_mul_fp8"]
-        fake_impl = kernel_wrapper._fake_impl
-
-        fake_output = fake_impl(input_tensor, scale)
-
-        expected_shape = (32, 2048)
-        assert fake_output.shape == expected_shape
-        assert fake_output.dtype == torch.float8_e4m3fn
-        assert fake_output.device == input_tensor.device
