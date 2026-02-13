@@ -188,18 +188,6 @@ class FP8ScaledMMLinearKernel(
 class Int8ScaledMMLinearKernel(
     ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
 ):
-    @property
-    def is_static(self) -> bool:
-        return self.config.is_static_input_scheme
-
-    @property
-    def is_symmetric(self) -> bool:
-        return self.config.input_symmetric
-
-    @property
-    def is_channelwise(self) -> bool:
-        return self.config.is_channelwise
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
