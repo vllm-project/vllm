@@ -284,6 +284,18 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc2_expert_weights = w2.view(torch.long)
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
+            assert w1.is_contiguous() and w2.is_contiguous()
+            assert self.gemm1_alpha is not None
+            assert self.gemm1_beta is not None
+            assert self.gemm1_clamp_limit is not None
+
+            fc1_expert_biases = self.w1_bias
+            fc2_expert_biases = self.w2_bias
+            swiglu_alpha = self.gemm1_alpha
+            swiglu_beta = self.gemm1_beta
+            swiglu_limit = self.gemm1_clamp_limit
+            fc1_expert_weights = w1.view(torch.long)
+            fc2_expert_weights = w2.view(torch.long)
             if self.quant_dtype == "mxfp8":
                 fake_input_scale = torch.ones(
                     self.moe_config.num_experts, device=hidden_states.device
@@ -294,20 +306,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     self.w2_scale.view(torch.int32),
                     fake_input_scale,
                 ]
-
-                assert w1.is_contiguous() and w2.is_contiguous()
-                assert self.gemm1_alpha is not None
-                assert self.gemm1_beta is not None
-                assert self.gemm1_clamp_limit is not None
-
                 use_mxfp8_act_scaling = True
-                fc1_expert_biases = self.w1_bias
-                fc2_expert_biases = self.w2_bias
-                swiglu_alpha = self.gemm1_alpha
-                swiglu_beta = self.gemm1_beta
-                swiglu_limit = self.gemm1_clamp_limit
-                fc1_expert_weights = w1.view(torch.long)
-                fc2_expert_weights = w2.view(torch.long)
+            else:
+                assert hidden_states.dtype == torch.bfloat16
+                quant_scales = [
+                    self.w1_scale,
+                    self.w2_scale,
+                ]
+                a1q_scale = None
+                use_w4_group_scaling = True
+
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [
