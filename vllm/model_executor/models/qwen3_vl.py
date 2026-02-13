@@ -532,39 +532,57 @@ class Qwen3_VisionTransformer(nn.Module):
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
-        if isinstance(grid_thw, list):
-            grid_thw_list = grid_thw
-            grid_thw = np.array(grid_thw, dtype=np.int32)
+        if encoder_metadata is None:
+            if isinstance(grid_thw, list):
+                grid_thw_list = grid_thw
+                grid_thw = np.array(grid_thw, dtype=np.int32)
+            else:
+                grid_thw_list = grid_thw.tolist()
+                grid_thw = grid_thw.numpy()
+
+            pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+            rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(
+                grid_thw_list
+            )
+
+            cu_seqlens = np.repeat(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(axis=0, dtype=np.int32)
+            cu_seqlens = np.concatenate(
+                [np.zeros(1, dtype=np.int32), cu_seqlens]
+            )
+            sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+                self.attn_backend, cu_seqlens, self.device
+            )
+            max_seqlen = torch.tensor(
+                MMEncoderAttention.compute_max_seqlen(
+                    self.attn_backend, cu_seqlens
+                ),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens,
+                self.hidden_size,
+                self.tp_size,
+                self.device,
+            )
         else:
-            grid_thw_list = grid_thw.tolist()
-            grid_thw = grid_thw.numpy()
+            pos_embeds = encoder_metadata['pos_embeds']
+            rotary_pos_emb_cos = encoder_metadata['rotary_pos_emb_cos']
+            rotary_pos_emb_sin = encoder_metadata['rotary_pos_emb_sin']
+            cu_seqlens = encoder_metadata['cu_seqlens']
+            max_seqlen = encoder_metadata['max_seqlen']
+            sequence_lengths = encoder_metadata.get('sequence_lengths')
 
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
         hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
-
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
-        )
-        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            self.attn_backend, cu_seqlens, self.device
-        )
-        max_seqlen = torch.tensor(
-            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
-            dtype=torch.int32,
-        )
-        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens,
-            self.hidden_size,
-            self.tp_size,
-            self.device,
-        )
         hidden_states = hidden_states.unsqueeze(1)
 
         deepstack_feature_lists = []
