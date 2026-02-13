@@ -312,7 +312,7 @@ class OffloadingConnectorScheduler:
 
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
+            # Cannot load partial offloaded blocks; skip.
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
