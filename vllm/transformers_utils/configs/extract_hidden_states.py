@@ -18,15 +18,20 @@ class ExtractHiddenStatesConfig(PretrainedConfig):
         assert method == "extract_hidden_states"
 
         if isinstance(model, dict):
-            for k, v in model.items():
-                if k != "architectures":
-                    kwargs[k] = v
+            model_dict = model
         elif isinstance(model, PretrainedConfig):
-            kwargs.update(model.to_dict())
+            model_dict = model.to_dict()
+        else:
+            model_dict = {}
 
-        kwargs["architectures"] = ["ExtractHiddenStatesModel"]
+        # Combine: model_dict first, then kwargs override
+        combined = {**model_dict, **kwargs}
+        # Remove architectures from the base, we'll set it explicitly
+        combined = {k: v for k, v in combined.items() if k != "architectures"}
 
-        super().__init__(**kwargs)
+        combined["architectures"] = ["ExtractHiddenStatesModel"]
+
+        super().__init__(**combined)
 
     @classmethod
     def from_pretrained(
@@ -41,6 +46,6 @@ class ExtractHiddenStatesConfig(PretrainedConfig):
 
     def to_json_string(self, use_diff: bool = True) -> str:
         # we override use_diff to False as initializing
-        # EAGLEConfig with default arguments is not supported
+        # ExtractHiddenStatesConfig with default arguments is not supported
         del use_diff
         return super().to_json_string(use_diff=False)

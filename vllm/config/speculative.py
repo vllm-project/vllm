@@ -182,9 +182,22 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
+        # Eagle3 and extract_hidden_states affect the computation graph because
+        # they return intermediate hidden states in addition to the final hidden state.
+        uses_aux_hidden_states = self.method in ("eagle3", "extract_hidden_states")
+        factors.append(uses_aux_hidden_states)
+
+        # The specific layers used also affect the computation graph
+        if uses_aux_hidden_states and self.draft_model_config is not None:
+            layer_ids = getattr(
+                self.draft_model_config.hf_config,
+                "eagle_aux_hidden_state_layer_ids",
+                None,
+            )
+            if layer_ids is not None:
+                # Convert to tuple to make it hashable
+                factors.append(tuple(layer_ids))
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -417,12 +430,25 @@ class SpeculativeConfig:
                 hf_config = self.draft_model_config["hf_config"]
             else:
                 hf_config = {}
-            print("Calling ExtractHiddenStatesConfig.__init__", hf_config)
 
             self.draft_model_config = copy.copy(self.target_model_config)
             self.draft_model_config.hf_config = ExtractHiddenStatesConfig(
                 self.draft_model_config.hf_config, **hf_config
             )
+            # ExtractHiddenStatesConfig updates architectures, so update
+            # all architectures-related fields in draft_model_config
+            self.draft_model_config.hf_text_config = get_hf_text_config(
+                self.draft_model_config.hf_config
+            )
+            self.draft_model_config.model_arch_config = (
+                self.draft_model_config.get_model_arch_config()
+            )
+            model_info, arch = self.draft_model_config.registry.inspect_model_cls(
+                self.draft_model_config.architectures,
+                self.draft_model_config,
+            )
+            self.draft_model_config._model_info = model_info
+            self.draft_model_config._architecture = arch
             self.draft_parallel_config = self.target_parallel_config
 
         else:
@@ -749,7 +775,7 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        eagle3_target_supported = [
+        aux_hidden_states_supported = [
             "llama",
             "qwen",
             "minicpm",
@@ -760,15 +786,15 @@ class SpeculativeConfig:
             "nemotron_h",
         ]
         if (
-            self.method == "eagle3"
+            self.method in ("eagle3", "extract_hidden_states")
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in eagle3_target_supported
+                for supported_model in aux_hidden_states_supported
             )
         ):
             raise ValueError(
-                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
+                f"{self.method} is only supported for {aux_hidden_states_supported} models. "
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
