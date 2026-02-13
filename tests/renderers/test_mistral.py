@@ -36,6 +36,7 @@ class MockModelConfig:
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
 
 @dataclass
@@ -55,7 +56,7 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
     mock_model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template = mocked_apply_chat_template
-    mock_renderer = MistralRenderer(
+    mock_renderer = MistralRenderer.from_config(
         MockVllmConfig(mock_model_config),
         tokenizer_kwargs={},
     )

@@ -38,6 +38,7 @@ class MockModelConfig:
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
 
 @dataclass
@@ -76,7 +77,7 @@ def _build_renderer(
 ):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    renderer = HfRenderer(
+    renderer = HfRenderer.from_config(
         MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
