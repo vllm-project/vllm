@@ -225,7 +225,13 @@ class KimiAudioASRDummyInputsBuilder(
         s = 1
 
         config = self.info.get_hf_config()
-        whisper_feat_dim = int(getattr(config, "kimia_adaptor_input_dim", 5120))
+        whisper_feat_dim = int(
+            getattr(
+                config,
+                "kimia_adaptor_input_dim",
+                KimiAudioForConditionalGeneration.DEFAULT_KIMIA_ADAPTOR_INPUT_DIM,
+            )
+        )
 
         return {
             "audio": {
@@ -415,6 +421,12 @@ class KimiAudioForConditionalGeneration(
 ):
     """Kimi-Audio model for conditional generation + transcription."""
 
+    # Default config values (from HF generation_config.json)
+    DEFAULT_KIMIA_TOKEN_OFFSET: ClassVar[int] = 152064
+    DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS: ClassVar[int] = 0
+    DEFAULT_KIMIA_ADAPTOR_INPUT_DIM: ClassVar[int] = 5120
+    PLACEHOLDER_TOKEN_ID: ClassVar[int] = 151666
+
     skip_warmup_audio_preprocessing: ClassVar[bool] = True
 
     # vLLM V1: treat this as a "raw input only" multimodal model so that
@@ -441,7 +453,11 @@ class KimiAudioForConditionalGeneration(
             and not hasattr(self.model, "vq_adaptor")
         ):
             # Manually add vq_adaptor if not present (vLLM may not load it)
-            input_dim = getattr(config, "kimia_adaptor_input_dim", 5120)
+            input_dim = getattr(
+                config,
+                "kimia_adaptor_input_dim",
+                KimiAudioForConditionalGeneration.DEFAULT_KIMIA_ADAPTOR_INPUT_DIM,
+            )
             hidden_size = config.hidden_size
             rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
 
@@ -685,9 +701,19 @@ class KimiAudioForConditionalGeneration(
                 ) from exc
 
             hf_cfg = model_config.hf_config
-            kimia_token_offset = int(getattr(hf_cfg, "kimia_token_offset", 152064))
+            kimia_token_offset = int(
+                getattr(
+                    hf_cfg,
+                    "kimia_token_offset",
+                    KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TOKEN_OFFSET,
+                )
+            )
             kimia_text_audiodelaytokens = int(
-                getattr(hf_cfg, "kimia_text_audiodelaytokens", 0)
+                getattr(
+                    hf_cfg,
+                    "kimia_text_audiodelaytokens",
+                    KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS,
+                )
             )
 
             prompt_manager = _get_kimia_prompt_manager(

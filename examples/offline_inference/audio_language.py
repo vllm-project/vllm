@@ -493,6 +493,7 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     """
     # Lazy import Kimi-Audio utilities since they're only needed for this model
     from vllm.model_executor.models.kimi_audio_asr import (
+        KimiAudioForConditionalGeneration,
         _get_kimia_prompt_manager,
         _write_wav_tmp,
     )
@@ -518,8 +519,12 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
 
     try:
         # Match defaults used in the model code.
-        kimia_token_offset = 152064
-        kimia_text_audiodelaytokens = 0
+        kimia_token_offset = (
+            KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TOKEN_OFFSET
+        )
+        kimia_text_audiodelaytokens = (
+            KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS
+        )
 
         prompt_manager = _get_kimia_prompt_manager(
             model_path=str(model_path),
@@ -576,7 +581,7 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     # (Matches the placeholder id used in vllm.model_executor.models.kimi_audio_asr)
     return ModelRequestData(
         engine_args=engine_args,
-        prompt_token_ids=[151666],
+        prompt_token_ids=[KimiAudioForConditionalGeneration.PLACEHOLDER_TOKEN_ID],
         multi_modal_data={"audio": mm_audio},
     )
 
