@@ -456,7 +456,7 @@ steps:
       - "artifacts/rocm-base-wheels/*.whl"
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
 
   # ROCm Job 2: Build vLLM ROCm Wheel
   - label: ":python: Build vLLM ROCm Wheel - x86_64"
@@ -566,7 +566,7 @@ steps:
       - "artifacts/rocm-vllm-wheel/*.whl"
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
 
   # ROCm Job 3: Upload Wheels to S3
   - label: ":s3: Upload ROCm Wheels to S3"
@@ -613,7 +613,7 @@ steps:
         bash .buildkite/scripts/upload-rocm-wheels.sh
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
 
   # ROCm Job 4: Annotate ROCm Wheel Release
   - label: ":memo: Annotate ROCm wheel release"
@@ -628,7 +628,7 @@ steps:
     commands:
       - "bash .buildkite/scripts/annotate-rocm-release.sh"
     env:
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
 
   # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
   # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
@@ -645,7 +645,7 @@ steps:
     commands:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
       VARIANT: "rocm700"
 
   # ROCm Job 5: Build ROCm Release Docker Image
@@ -710,4 +710,4 @@ steps:
         echo "Pushed: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm"
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
