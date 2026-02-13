@@ -24,15 +24,39 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-    FlashInferMLASparseBackend,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseBackend,
-    triton_convert_req_index_to_global_index,
-)
+
+try:
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseBackend,
+        triton_convert_req_index_to_global_index,
+    )
+except (ImportError, ModuleNotFoundError):
+    FlashMLASparseBackend = None
+    triton_convert_req_index_to_global_index = None
+
+try:
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseBackend,
+    )
+except (ImportError, ModuleNotFoundError):
+    FlashInferMLASparseBackend = None
+
 from vllm.v1.attention.backends.utils import split_prefill_chunks
 from vllm.v1.attention.ops import flashmla
+
+_SPARSE_BACKENDS = []
+_SPARSE_BACKEND_IDS = []
+if FlashMLASparseBackend is not None:
+    _SPARSE_BACKENDS.append(FlashMLASparseBackend)
+    _SPARSE_BACKEND_IDS.append("FlashMLA")
+if FlashInferMLASparseBackend is not None:
+    _SPARSE_BACKENDS.append(FlashInferMLASparseBackend)
+    _SPARSE_BACKEND_IDS.append("FlashInfer")
+
+_requires_flashmla_sparse = pytest.mark.skipif(
+    triton_convert_req_index_to_global_index is None,
+    reason="FlashMLASparseBackend not available (missing dependencies)",
+)
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -160,8 +184,8 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseBackend],
-    ids=["FlashMLA", "FlashInfer"],
+    _SPARSE_BACKENDS,
+    ids=_SPARSE_BACKEND_IDS,
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
@@ -548,6 +572,7 @@ def _triton_convert_reference_impl(
     return result
 
 
+@_requires_flashmla_sparse
 @pytest.mark.parametrize("block_size", [16, 64, 128])
 @pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
 @pytest.mark.skipif(
@@ -604,6 +629,7 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
 
 
+@_requires_flashmla_sparse
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() < (9, 0),
@@ -688,6 +714,7 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
+@_requires_flashmla_sparse
 def test_triton_convert_returns_valid_counts():
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device("cuda")
