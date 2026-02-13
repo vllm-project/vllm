@@ -78,13 +78,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         # We also need to check for the <|end|> token to avoid false positives from
         # previous messages in multi-turn conversations.
-        eom_token_ids = self.model_tokenizer.encode("<|end|>")
-        if len(eom_token_ids) != 1:
-            raise ValueError(
-                "Expected '<|end|>' to be a single token, but got "
-                f"{len(eom_token_ids)} tokens: {eom_token_ids}"
-            )
-        self.eom_token_id = eom_token_ids[0]
+        self.eom_token_id = self.model_tokenizer.vocab["<|end|>"]
         self.reasoning_max_num_between_tokens = 20
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
