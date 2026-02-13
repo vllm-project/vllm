@@ -489,6 +489,22 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
+    # Vision encoder CUDA graph
+    cudagraph_mm_encoder: bool = False
+    """Enable CUDA graph capture for multimodal encoder (ViT) using budget-batch mode.
+    When enabled, captures full encoder forward as CUDA graph for each token budget level.
+    Requires encoder_cudagraph_token_budgets to be specified."""
+
+    encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for encoder CUDA graph capture.
+    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
+    into the smallest fitting budget and the corresponding CUDA graph is replayed.
+    Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_images_per_batch: int = 16
+    """Maximum number of images per batch for encoder CUDA graph capture.
+    Determines the fixed batch size used during graph capture."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -905,6 +921,18 @@ class CompilationConfig:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
+
+        # Validate encoder CUDA graph configuration
+        if self.cudagraph_mm_encoder:
+            if not self.encoder_cudagraph_token_budgets:
+                raise ValueError(
+                    "encoder_cudagraph_token_budgets must be specified when "
+                    "cudagraph_mm_encoder is enabled"
+                )
+            if self.encoder_cudagraph_max_images_per_batch <= 0:
+                raise ValueError(
+                    "encoder_cudagraph_max_images_per_batch must be positive"
+                )
 
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
