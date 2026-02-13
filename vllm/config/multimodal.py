@@ -219,7 +219,6 @@ class MultiModalConfig:
         the final hidden states.
         """
         factors: list[Any] = [
-            self.language_model_only,
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
             else None,
