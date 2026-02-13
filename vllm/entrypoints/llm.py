@@ -1685,8 +1685,15 @@ class LLM:
                 tokenization_kwargs=encode_kwargs,
             )
 
-    def start_profile(self) -> None:
-        self.llm_engine.start_profile()
+    def start_profile(self, profile_prefix: str | None = None) -> None:
+        """Start profiling with optional custom trace prefix.
+
+        Args:
+            profile_prefix: Optional prefix for the trace file names. If provided,
+                           trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
+                           If not provided, default naming will be used.
+        """
+        self.llm_engine.start_profile(profile_prefix)
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
