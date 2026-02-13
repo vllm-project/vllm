@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.multimodal.cache import BaseMultiModalProcessorCache
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -53,7 +54,7 @@ class BaseRenderer(ABC):
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self._mm_processor: BaseMultiModalProcessor | None = None
-        self._mm_processor_cache: BaseMultiModalProcessor | None = None
+        self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
