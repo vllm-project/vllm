@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
+    vit_flashinfer_wrapper,
     vit_torch_sdpa_wrapper,
 )
 
@@ -31,6 +32,7 @@ class MMEncoderAttention(CustomOp):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
+        workspace_buffer: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> None:
         """
         Args:
@@ -40,15 +42,16 @@ class MMEncoderAttention(CustomOp):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MultiHeadAttention
+            workspace_buffer: workspace buffer for FlashInfer CuDNN backend.
         """
         super().__init__()
 
         self.num_heads = num_heads
         self.head_size = head_size
-        self.scale = scale
+        self.scale = 1.0 / (head_size**0.5) if scale is None else scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.layer_name = prefix
-
+        self.workspace_buffer = workspace_buffer
         assert self.num_heads % self.num_kv_heads == 0, (
             f"num_heads ({self.num_heads}) is not "
             f"divisible by num_kv_heads ({self.num_kv_heads})"
@@ -165,6 +168,27 @@ class MMEncoderAttention(CustomOp):
             output = output.reshape(bsz, q_len, -1)
         return output
 
+    def _forward_flashinfer(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
+    ) -> torch.Tensor:
+        return vit_flashinfer_wrapper(
+            q=query,
+            k=key,
+            v=value,
+            scale=self.scale,
+            workspace_buffer=self.workspace_buffer,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
+
     def forward_native(
         self,
         query: torch.Tensor,
@@ -172,6 +196,8 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         return self._forward_sdpa(query, key, value, cu_seqlens)
 
@@ -182,9 +208,15 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         if self.is_flash_attn_backend:
             return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
+        elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            return self._forward_flashinfer(
+                query, key, value, cu_seqlens, max_seqlen, sequence_lengths
+            )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             return self._forward_sdpa(query, key, value, cu_seqlens)
         else:
@@ -200,6 +232,8 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         return self._forward_sdpa(query, key, value, cu_seqlens)
 
@@ -210,6 +244,8 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         assert self.is_flash_attn_backend, (
             "XPU only supports FLASH_ATTN for vision attention."
