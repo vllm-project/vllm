@@ -36,7 +36,6 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.metrics.stats import MultiModalCacheStats
 
 logger = init_logger(__name__)
 
@@ -569,12 +568,3 @@ class InputProcessor:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
         self._validate_model_input(decoder_inputs, prompt_type="decoder")
-
-    def stat_mm_cache(self) -> MultiModalCacheStats | None:
-        return self.renderer.stat_mm_cache()
-
-    def clear_mm_cache(self) -> None:
-        self.renderer.clear_mm_cache()
-
-    def shutdown(self) -> None:
-        self.renderer.shutdown()

@@ -384,7 +384,7 @@ class LLM:
         return parallel_config.world_size
 
     def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
