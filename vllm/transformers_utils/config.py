@@ -1068,9 +1068,11 @@ def try_get_dense_modules(
         if isinstance(modules, dict):
             modules = modules.get("modules", [])
 
-        dense_modules = [
-            m for m in modules if m.get("type") == "sentence_transformers.models.Dense"
-        ]
+        _DENSE_MODULE_TYPES = {
+            "sentence_transformers.models.Dense",
+            "pylate.models.Dense.Dense",
+        }
+        dense_modules = [m for m in modules if m.get("type") in _DENSE_MODULE_TYPES]
         if not dense_modules:
             return None
 

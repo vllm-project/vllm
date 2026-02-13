@@ -311,20 +311,31 @@ An OpenAI client example can be found here: [examples/pooling/embed/openai_embed
 
 [ColBERT](https://arxiv.org/abs/2004.12832) (Contextualized Late Interaction over BERT) is a retrieval model that uses per-token embeddings and MaxSim scoring for document ranking. Unlike single-vector embedding models, ColBERT retains token-level representations and computes relevance scores through late interaction, providing better accuracy while being more efficient than cross-encoders.
 
-vLLM supports ColBERT models for reranking tasks, automatically applying MaxSim scoring for query-document relevance:
+vLLM supports ColBERT models with multiple encoder backbones:
+
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `HF_ColBERT` | BERT | `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0` |
+| `ColBERTModernBertModel` | ModernBERT | `lightonai/GTE-ModernColBERT-v1` |
+| `ColBERTJinaRobertaModel` | Jina XLM-RoBERTa | `jinaai/jina-colbert-v2` |
+
+**BERT-based ColBERT** models work out of the box:
 
 ```shell
 vllm serve answerdotai/answerai-colbert-small-v1
 ```
 
-Currently supports ColBERT models with standard BERT encoders (e.g., `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0`).
-
-ColBERT models with modified encoder architectures are not yet supported, including BERT variants with rotary embeddings (e.g., `jinaai/jina-colbert-v2`) or other custom encoders (e.g., `LiquidAI/LFM2-ColBERT-350M`).
-
-If your standard BERT ColBERT model's config doesn't specify the architecture as `HF_ColBERT`, override it with:
+For **non-BERT backbones**, use `--hf-overrides` to set the correct architecture:
 
 ```shell
-vllm serve your-colbert-model --hf-overrides '{"architectures": ["HF_ColBERT"]}'
+# ModernBERT backbone
+vllm serve lightonai/GTE-ModernColBERT-v1 \
+    --hf-overrides '{"architectures": ["ColBERTModernBertModel"]}'
+
+# Jina XLM-RoBERTa backbone
+vllm serve jinaai/jina-colbert-v2 \
+    --hf-overrides '{"architectures": ["ColBERTJinaRobertaModel"]}' \
+    --trust-remote-code
 ```
 
 Then you can use the rerank endpoint:
