@@ -305,6 +305,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        workspace_buffer: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -346,6 +347,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
+            workspace_buffer=workspace_buffer,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
@@ -357,6 +359,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -398,6 +401,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         context_layer = einops.rearrange(
@@ -456,6 +460,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -463,6 +468,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -817,7 +823,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens = torch.cat(cu_seqlens)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
-
+        # sequence_lengths is only a placeholder for the now
+        # unsupported FlashInfer CuDNN backend, will need to
+        # revisit this computation when FlashInfer CuDNN backend is supported.
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        sequence_lengths = sequence_lengths.to(device=self.device, non_blocking=True)
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
         max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
@@ -858,6 +868,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
+                sequence_lengths=sequence_lengths,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block

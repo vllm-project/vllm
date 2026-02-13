@@ -51,7 +51,7 @@ from transformers.video_utils import VideoMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -138,6 +138,39 @@ logger = init_logger(__name__)
 # of the maximum size.
 DUMMY_VIDEO_NUM_FRAMES = 2048
 
+# Batch buckets for cuDNN graph caching.
+# Graphs use batch size and max sequence length as cache key.
+# This avoids creating a new graph for each unique set of
+# batch size and max sequence length at runtime.
+# From the cuDNN team's performance measurements, there
+# is no significant kernel performance difference between padding
+# to a smaller batch size/seq length and padding to larger
+# ones. The bucketing here is solely used to avoid memory
+# operation overhead, which won't be needed if we have CUDA
+# graph support in the future.
+# TODO: In cuDNN 9.19 and cudnn-frontend 1.18,
+# we will have the graph recompilation optimization
+# where real batch size and max sequence length can
+# be used and no graph recompilation will happen.
+# We will need to remove the padding. But this optimization
+# won't be compatible with CUDA graph.
+# TODO: When we have full CUDA graph support on
+# the mm encoder, we can remove these buckets
+# and only use a large enough padding size to
+# capture one large CUDA graph.
+FLASHINFER_BATCH_BUCKETS = [8, 16, 32, 64]
+FLASHINFER_MAX_SEQLEN_BUCKETS = [
+    1 * 1024,
+    2 * 1024,
+    4 * 1024,
+    8 * 1024,
+    16 * 1024,
+    32 * 1024,
+    64 * 1024,
+    128 * 1024,
+]
+FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
+
 
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -215,6 +248,7 @@ class Qwen3_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        workspace_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -227,6 +261,7 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            workspace_buffer=workspace_buffer,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -244,6 +279,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -251,6 +287,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -332,6 +369,13 @@ class Qwen3_VisionTransformer(nn.Module):
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
+
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
         self.out_hidden_size = vision_config.out_hidden_size * (
@@ -385,6 +429,16 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
+        workspace_buffer = (
+            None
+            if self.attn_backend != AttentionBackendEnum.FLASHINFER
+            else torch.zeros(
+                FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES,
+                dtype=torch.uint8,
+                device=self.device,
+            )
+        )
+
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -395,6 +449,7 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
+                    workspace_buffer=workspace_buffer,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
@@ -522,9 +577,75 @@ class Qwen3_VisionTransformer(nn.Module):
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
             AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.FLASHINFER,
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
+
+    def add_padding_to_fi_seqlens(
+        self, seq: np.ndarray, batch_size: int, padding_value: int
+    ) -> np.ndarray:
+        batch_size_padded = next(
+            (b for b in FLASHINFER_BATCH_BUCKETS if b >= batch_size),
+            # For large batches (> max bucket), round up to a multiple of
+            # the base bucket size to avoid negative pad length.
+            round_up(batch_size, FLASHINFER_BATCH_BUCKETS[0]),
+        )
+        if batch_size_padded == batch_size:
+            return seq
+        return np.concatenate(
+            [
+                seq,
+                np.full(
+                    (batch_size_padded - batch_size,), padding_value, dtype=seq.dtype
+                ),
+            ]
+        )
+
+    def compute_flashinfer_cu_seqlens(
+        self,
+        cu_seqlens: np.ndarray,
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+    ) -> np.ndarray:
+        batch_size = len(cu_seqlens) - 1
+
+        # Currently FI cudnn api needs to compute the batch_offsets_*
+        # by scaling from cu_seqlens
+        # TODO: remove this computation when FI cudnn api
+        # supports computing batch offsets from q, k, v tensor
+        scale = self.hidden_size // self.tp_size
+        cu_seqlens = cu_seqlens * scale
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            # batch_offsets_* = cu_seqlens * scale * 1 if q, k is contiguous
+            cu_seqlens_qk = cu_seqlens
+        else:
+            # batch_offsets_* = cu_seqlens * scale * 3
+            # if q, k is directly unbinded from qkv
+            cu_seqlens_qk = cu_seqlens * 3
+        cu_seqlens_v = cu_seqlens * 3
+        cu_seqlens_o = cu_seqlens
+
+        cu_seqlens_qk = self.add_padding_to_fi_seqlens(
+            cu_seqlens_qk, batch_size, cu_seqlens_qk[-1]
+        )
+        cu_seqlens_v = self.add_padding_to_fi_seqlens(
+            cu_seqlens_v, batch_size, cu_seqlens_v[-1]
+        )
+        cu_seqlens_o = self.add_padding_to_fi_seqlens(
+            cu_seqlens_o, batch_size, cu_seqlens_o[-1]
+        )
+        return np.concatenate([cu_seqlens_qk, cu_seqlens_v, cu_seqlens_o])
+
+    def bucket_flashinfer_max_seqlen(self, real_max_seqlen: int) -> int:
+        if real_max_seqlen <= 0:
+            return FLASHINFER_MAX_SEQLEN_BUCKETS[0]
+        return next(
+            (s for s in FLASHINFER_MAX_SEQLEN_BUCKETS if s >= real_max_seqlen),
+            # For large sequences (> max bucket), round up to a multiple of
+            # the largest bucket to avoid under-estimation.
+            round_up(real_max_seqlen, FLASHINFER_MAX_SEQLEN_BUCKETS[-1]),
+        )
 
     def forward(
         self,
@@ -549,10 +670,30 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        flashinfer_max_seqlen = 0
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            flashinfer_max_seqlen = self.bucket_flashinfer_max_seqlen(
+                int(sequence_lengths.max()) if sequence_lengths.size > 0 else 0
+            )
+            sequence_lengths = self.add_padding_to_fi_seqlens(
+                sequence_lengths, len(sequence_lengths), 0
+            )
+            cu_seqlens = self.compute_flashinfer_cu_seqlens(
+                cu_seqlens, rotary_pos_emb_cos, rotary_pos_emb_sin
+            )
         cu_seqlens = torch.from_numpy(cu_seqlens)
-
+        sequence_lengths = torch.from_numpy(sequence_lengths).to(
+            self.device, non_blocking=True
+        )
         hidden_states = hidden_states.unsqueeze(1)
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen = (
+            torch.tensor(flashinfer_max_seqlen, device=self.device)
+            # setting to 128k to avoid cudnn recompilation
+            # TODO: use the real max_seqlen once cudnn compilation is optimized
+            if self.attn_backend == AttentionBackendEnum.FLASHINFER
+            else self.compute_attn_mask_seqlen(cu_seqlens)
+        )
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
@@ -563,6 +704,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
