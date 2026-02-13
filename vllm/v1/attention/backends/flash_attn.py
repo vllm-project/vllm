@@ -677,12 +677,7 @@ class FlashAttentionImpl(AttentionImpl):
         if vllm_config.model_config.dtype != torch.bfloat16:
             return False
 
-        # FA3 cannot write FP8 output directly. FA3 requires:
-        # - BF16/FP16 input → BF16/FP16 output (same dtype)
-        # - FP8 input → BF16 output
-        # Therefore, fused FP8 output quantization is not supported for FA3
-        # when using FP8 KV cache.
-        return not self.kv_cache_dtype.startswith("fp8")
+        return False
 
     def forward(
         self,
