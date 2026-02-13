@@ -73,15 +73,15 @@ def unified_kv_cache_update(
 
 
 @maybe_transfer_kv_layer
-def dummy_attention(layer_name):
+def dummy_attention(layer_name, _placeholder):
     # Note: layer_name arg required by @maybe_transfer_kv_layer
-    pass
+    return _placeholder
 
 
 def basic_cache(
-    to_cache: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
+    to_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
+    kv_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
+    slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
     num_blocks, block_size, num_heads, head_size = kv_cache.shape
     token_kv_cache = kv_cache.view(num_blocks * block_size, num_heads, head_size)
@@ -224,7 +224,6 @@ class CacheOnlyAttentionImpl(AttentionImpl):
             f"KV cache must be {self.kv_cache_torch_dtype}, got {kv_cache.dtype}"
         )
 
-        # todo(fynn): Implement more performant op (maybe custom triton op?)
         basic_cache(to_cache, kv_cache, slot_mapping)
 
     def forward(self, *args, **kwargs):
@@ -314,12 +313,12 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # head_size to hidden_size for hidden states storage
         output = torch.empty(0, device=to_cache.device, dtype=to_cache.dtype)
 
-        # todo(fynn): determine if we need to use a custom op here
-        # or if direct call only is sufficient
-        _ = unified_kv_cache_update(to_cache, self.layer_name)
+        # Note: dummy_out is used to force torch.compile to preserve ordering between
+        # cache update and attention op (which triggers kv_connector transfer)
+        dummy_out = unified_kv_cache_update(to_cache, self.layer_name)
 
         # Triggers kv_connector transfer via decorator
-        dummy_attention(self.layer_name)
+        _ = dummy_attention(self.layer_name, dummy_out)
 
         return output
 
@@ -355,8 +354,6 @@ class ExtractHiddenStatesModel(nn.Module):
             getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
-        # todo(fynn): Set up a new cache config for the drafter
-        # independent of verifier's cache config
         cache_config = vllm_config.cache_config
 
         # Create a single cache-only attention layer
@@ -377,10 +374,7 @@ class ExtractHiddenStatesModel(nn.Module):
             }
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> None:
         """Process and cache hidden states.
 
         Args:
@@ -394,13 +388,6 @@ class ExtractHiddenStatesModel(nn.Module):
         # Call dummy attention layer to cache hidden states
         # Output is ignored - we only care about the KV cache side effects
         _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)
-
-        # Return dummy outputs (required by interface but not used)
-        # todo(fynn): Remove these
-        dummy_output = hidden_states.new_zeros(
-            (hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states)
-        )
-        return dummy_output, dummy_output
 
     def load_weights(self, weights):
         """No weights to load for this dummy model."""
