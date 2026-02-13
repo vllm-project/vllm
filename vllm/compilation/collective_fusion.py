@@ -109,11 +109,19 @@ class AllGatherGEMMPattern(BasePattern):
             return torch.ops.aten.mm.default(all_gather, weight)
 
         def replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            # return_A=False tells the op that the gathered tensor (ag_output)
+            # is not needed by any downstream consumer. This is always the case
+            # here since the pattern only captures mm(all_gather(x), weight)
+            # and discards ag_output. Setting return_A=False unlocks the
+            # multimem execution path in _should_use_multimem_all_gather_matmul,
+            # which uses NVLink multicast and is significantly faster for
+            # small M (up to ~8x for M<=2048 on H100).
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
                 x,
                 [weight],
                 gather_dim=0,
                 group_name=self.tp.device_group.group_name,
+                return_A=False,
             )
             return mm_outputs
 
