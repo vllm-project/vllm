@@ -3169,8 +3169,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3678,10 +3678,10 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        kv_connector_output = self.kv_connector_output
-        self.kv_connector_output = None
 
         if self.execute_model_state is None:
+            kv_connector_output = self.kv_connector_output
+            self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and get_pp_group().world_size > 1:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
@@ -3831,6 +3831,10 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+
+        # self.kv_connector_output may be modified during drafting
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
@@ -4070,15 +4074,22 @@ class GPUModelRunner(
                 )
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids, drafter_kv_connector_output = (
-                self.drafter.propose(
-                    sampled_token_ids=sampled_token_ids,
-                    target_hidden_states=target_hidden_states,
-                    common_attn_metadata=common_attn_metadata,
-                    scheduler_output=scheduler_output,
-                    slot_mappings=slot_mappings,
-                )
+            draft_token_ids, drafter_kv_connector_output = self.drafter.propose(
+                sampled_token_ids=sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+                scheduler_output=scheduler_output,
+                slot_mappings=slot_mappings,
             )
+            # Combine KVConnectorOutputs or select the non-empty one
+            if self.kv_connector_output and drafter_kv_connector_output:
+                self.kv_connector_output = KVConnectorOutput.merge(
+                    self.kv_connector_output, drafter_kv_connector_output
+                )
+            else:
+                self.kv_connector_output = (
+                    self.kv_connector_output or drafter_kv_connector_output
+                )
 
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
@@ -4996,9 +5007,7 @@ class GPUModelRunner(
             ):
                 assert isinstance(
                     self.drafter,
-                    EagleProposer
-                    | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -5712,9 +5721,7 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(
-                self.drafter, EagleProposer | ExtractHiddenStatesProposer
-            )
+            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6197,9 +6204,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer
-                | DraftModelProposer
-                | ExtractHiddenStatesProposer,
+                EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
             )
             # validate all draft model layers belong to the same kv cache
             # group
