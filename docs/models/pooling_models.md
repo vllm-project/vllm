@@ -389,12 +389,37 @@ Start the server:
 vllm serve TomoroAI/tomoro-colqwen3-embed-4b --max-model-len 4096
 ```
 
-You can get per-token multi-vector embeddings for **text queries** via the pooling endpoint:
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "text_1": "What is the capital of France?",
+    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
+}'
+```
+
+You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
     "model": "TomoroAI/tomoro-colqwen3-embed-4b",
-    "input": "What is machine learning?"
+    "input": "What is machine learning?",
+    "task": "token_embed"
 }'
 ```
 
@@ -411,30 +436,6 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
                 {"type": "text", "text": "Describe the image."}
             ]
         }
-    ]
-}'
-```
-
-Use the `/score` endpoint for text-only late interaction scoring:
-
-```shell
-curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
-    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
-    "text_1": "What is the capital of France?",
-    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
-}'
-```
-
-Or the `/rerank` endpoint for document reranking:
-
-```shell
-curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
-    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
-    "query": "What is machine learning?",
-    "documents": [
-        "Machine learning is a subset of artificial intelligence.",
-        "Python is a programming language.",
-        "Deep learning uses neural networks."
     ]
 }'
 ```
