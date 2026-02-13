@@ -204,7 +204,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                     )
             return processor_kwargs
     except Exception as exc:
-        logger.warning_once("Failed to collect processor kwargs: %s", exc)
+        logger.warning_once("Failed to collect processor kwargs", exc_info=True)
         return set()
 
 
