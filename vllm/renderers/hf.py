@@ -14,7 +14,7 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormat,
@@ -589,23 +589,24 @@ class HfRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
         self,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
         super().__init__(config)
 
+        model_config = self.model_config
         self.use_unified_vision_chunk = getattr(
-            config.hf_config, "use_unified_vision_chunk", False
+            model_config.hf_config, "use_unified_vision_chunk", False
         )
 
-        if config.skip_tokenizer_init:
+        if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = cast(
@@ -634,7 +635,7 @@ class HfRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -688,7 +689,7 @@ class HfRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
