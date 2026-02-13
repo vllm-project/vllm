@@ -5,6 +5,7 @@
 Please see the Installation Guides for environment specific instructions:
 
 - [Any Kubernetes Cluster](https://www.kubeai.org/installation/any/)
+- [AKS](https://www.kubeai.org/installation/aks/)
 - [EKS](https://www.kubeai.org/installation/eks/)
 - [GKE](https://www.kubeai.org/installation/gke/)
 
