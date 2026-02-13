@@ -22,11 +22,131 @@
 #include <cstdlib>
 #include <cuda/std/limits>
 #include <numeric>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
-#include "flashinfer_utils.cuh"
-#include "flashinfer_vec.cuh"
+#define FLASHINFER_ERROR(message) \
+  throw vllm::Error(__FUNCTION__, __FILE__, __LINE__, message)
+
+#define FLASHINFER_CUDA_CALL(func, ...) \
+  {                                     \
+    cudaError_t e = (func);             \
+    if (e != cudaSuccess) {             \
+      return e;                         \
+    }                                   \
+  }
+
+#define DISPATCH_ALIGNED_VEC_SIZE(aligned_vec_size, ALIGNED_VEC_SIZE, ...) \
+  switch (aligned_vec_size) {                                              \
+    case 16: {                                                             \
+      constexpr size_t ALIGNED_VEC_SIZE = 16;                              \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 8: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 8;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 4: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 4;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 2: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 2;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 1: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 1;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    default: {                                                             \
+      std::ostringstream err_msg;                                          \
+      err_msg << "Unsupported aligned_vec_size: " << aligned_vec_size;     \
+      FLASHINFER_ERROR(err_msg.str());                                     \
+    }                                                                      \
+  }
+
+#define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__
 
 namespace vllm {
+
+// Error class for exception handling
+class Error : public std::exception {
+ private:
+  std::string msg_;
+
+ public:
+  explicit Error(const std::string& func, const std::string& file, int lineno,
+                 const std::string& msg)
+      : msg_(func + " at " + file + ":" + std::to_string(lineno) + ": " + msg) {
+  }
+  const char* what() const noexcept override { return msg_.c_str(); }
+};
+
+namespace math {
+__forceinline__ __device__ float ptx_rcp(float x) {
+  float y;
+  asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+}  // namespace math
+
+template <typename T1, typename T2>
+__forceinline__ __device__ __host__ constexpr T1 ceil_div(const T1 x,
+                                                          const T2 y) noexcept {
+  return (x + y - 1) / y;
+}
+
+template <typename T1, typename T2>
+__forceinline__ __device__ __host__ constexpr T1 round_up(const T1 x,
+                                                          const T2 y) noexcept {
+  return ceil_div(x, y) * y;
+}
+
+template <typename T1, typename T2>
+__forceinline__ __device__ __host__ constexpr T1 round_down(
+    const T1 x, const T2 y) noexcept {
+  return (x / y) * y;
+}
+
+template <typename T, size_t N>
+struct vec_t {
+  T data[N];
+
+  FLASHINFER_INLINE T& operator[](size_t i) { return data[i]; }
+  FLASHINFER_INLINE const T& operator[](size_t i) const { return data[i]; }
+
+  FLASHINFER_INLINE void load(const T* ptr) {
+#pragma unroll
+    for (size_t i = 0; i < N; ++i) {
+      data[i] = ptr[i];
+    }
+  }
+
+  FLASHINFER_INLINE void store(T* ptr) const {
+#pragma unroll
+    for (size_t i = 0; i < N; ++i) {
+      ptr[i] = data[i];
+    }
+  }
+
+  template <typename U>
+  FLASHINFER_INLINE void cast_load(const U* ptr) {
+#pragma unroll
+    for (size_t i = 0; i < N; ++i) {
+      data[i] = static_cast<T>(ptr[i]);
+    }
+  }
+
+  FLASHINFER_INLINE T* ptr() { return data; }
+};
 
 namespace sampling {
 
@@ -2359,5 +2479,7 @@ cudaError_t TopKRaggedTransformDispatch(DType* input, IdType* output_indices,
 }  // namespace sampling
 
 }  // namespace vllm
+
+#undef FLASHINFER_INLINE
 
 #endif  // FLASHINFER_TOPK_CUH_
