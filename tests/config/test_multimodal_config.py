@@ -23,3 +23,11 @@ def test_mm_encoder_attn_backend_hash_updates():
         mm_encoder_attn_backend=AttentionBackendEnum.FLASH_ATTN
     ).compute_hash()
     assert base_hash != overridden_hash
+
+
+def test_language_model_only_does_not_affect_hash():
+    """language_model_only does not affect the ViT computation graph,
+    so it should not change the hash."""
+    base_hash = MultiModalConfig().compute_hash()
+    lm_only_hash = MultiModalConfig(language_model_only=True).compute_hash()
+    assert base_hash == lm_only_hash
