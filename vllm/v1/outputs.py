@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Callable, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -120,6 +120,20 @@ class SamplerOutput:
     logprobs_tensors: LogprobsTensors | None
 
 
+T = TypeVar("T")
+
+
+def _combine_non_none(f: Callable[[T, T], T], items: list[T | None]) -> T | None:
+    non_none = [item for item in items if item is not None]
+    if len(non_none) == 0:
+        return None
+
+    combined = non_none[0]
+    for item in non_none[1:]:
+        combined = f(combined, item)
+    return combined
+
+
 @dataclass
 class KVConnectorOutput:
     # [req_ids]
@@ -144,6 +158,43 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+        )
+
+    @classmethod
+    def merge(cls, *outputs: "KVConnectorOutput"):
+        assert len(outputs) > 0, "Cannot merge empty outputs"
+        finished_sending = _combine_non_none(
+            set.union, [output.finished_sending for output in outputs]
+        )
+        finished_recving = _combine_non_none(
+            set.union, [output.finished_recving for output in outputs]
+        )
+        kv_connector_stats = _combine_non_none(
+            lambda x, y: x.aggregate(y),
+            [output.kv_connector_stats for output in outputs],
+        )
+        kv_cache_events = _combine_non_none(
+            lambda x, y: x.add_events(y.get_all_events()),
+            [output.kv_cache_events for output in outputs],
+        )
+        invalid_block_ids = _combine_non_none(
+            set.union, [output.invalid_block_ids for output in outputs]
+        )
+        assert invalid_block_ids is not None
+
+        assert all(
+            output.expected_finished_count == outputs[0].expected_finished_count
+            for output in outputs
+        )
+        expected_finished_count = outputs[0].expected_finished_count
+
+        return cls(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+            kv_connector_stats=kv_connector_stats,
+            kv_cache_events=kv_cache_events,
+            invalid_block_ids=invalid_block_ids,
+            expected_finished_count=expected_finished_count,
         )
 
 
