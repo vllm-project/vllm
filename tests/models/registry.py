@@ -725,7 +725,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
-        trust_remote_code=True,
         min_transformers_version="5.0.0",
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
@@ -1032,13 +1031,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
-        # disable this temporarily until we support HF format
-        is_available_online=False,
+        tokenizer_mode="mistral",
     ),
     "VoxtralRealtimeGeneration": _HfExamplesInfo(
-        "<place-holder>",
-        # disable this temporarily until we support HF format
-        is_available_online=False,
+        "mistralai/Voxtral-Mini-4B-Realtime-2602",
+        enforce_eager=True,
+        tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
