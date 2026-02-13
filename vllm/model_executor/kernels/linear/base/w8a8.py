@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import Generic, TypeVar
 import torch
 from typing_extensions import Self
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -65,7 +65,7 @@ class Kernel(Generic[_ConfigT, _ParamsT], ABC):
         Try to select a compatible kernel variant.
         """
         kernel_name = cls.get_name()
-        if kernel_name in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
+        if kernel_name in envs.VLLM_DISABLED_KERNELS:
             return None, [f" {kernel_name} is disabled by environment variable"]
 
         is_supported, reason = cls.is_supported(compute_capability)
@@ -81,10 +81,10 @@ class Kernel(Generic[_ConfigT, _ParamsT], ABC):
     @classmethod
     def get_name(cls) -> str:
         """
-        Return the kernel name in format: provider.precision.ClassName
+        Return the kernel name in format: linear.provider.precision.ClassName
         """
         module_path = cls.__module__
-        prefix = "vllm.model_executor.kernels.linear"
+        prefix = "vllm.model_executor.kernels."
         if module_path.startswith(prefix):
             module_path = module_path[len(prefix) :]
         return f"{module_path}.{cls.__name__}"
