@@ -76,9 +76,7 @@ class TestMakeFxHop:
 
         with _helion_mock_context():
             wrapper = HelionKernelWrapper(
-                raw_kernel_func=raw_add_scale,
-                op_name="test_make_fx",
-                fake_impl=lambda *a, **kw: None,
+                raw_kernel_func=raw_add_scale, op_name="test_make_fx"
             )
             wrapper.register_config_picker(lambda args, keys: "default")
 
@@ -132,9 +130,7 @@ class TestMakeFxHop:
 
         with _helion_mock_context():
             wrapper = HelionKernelWrapper(
-                raw_kernel_func=raw_silu_mul,
-                op_name="test_pm_silu_mul",
-                fake_impl=lambda *a, **kw: None,
+                raw_kernel_func=raw_silu_mul, op_name="test_pm_silu_mul"
             )
             wrapper.register_config_picker(lambda args, keys: "default")
 

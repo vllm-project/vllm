@@ -386,14 +386,9 @@ class TestHelionKernelWrapper:
 
     def test_get_configured_op_validates_configs_available(self, sample_kernel):
         """Test get_configured_op validates configs are available."""
-
-        def fake_impl(*args, **kwargs):
-            return torch.zeros_like(args[0])
-
         wrapper = HelionKernelWrapper(
             raw_kernel_func=sample_kernel,
             op_name="test_kernel",
-            fake_impl=fake_impl,
         )
 
         def default_picker(args, config_keys):
@@ -423,14 +418,9 @@ class TestHelionKernelWrapper:
         self, sample_kernel, sample_configs
     ):
         """Test get_configured_op validates config picker."""
-
-        def fake_impl(*args, **kwargs):
-            return torch.zeros_like(args[0])
-
         wrapper = HelionKernelWrapper(
             raw_kernel_func=sample_kernel,
             op_name="test_kernel",
-            fake_impl=fake_impl,
         )
         # Don't set config picker - should raise assertion error
 
@@ -455,16 +445,12 @@ class TestHelionKernelWrapper:
     ):
         """Test get_configured_op returns cached ConfiguredHelionKernel."""
 
-        def fake_impl(*args, **kwargs):
-            return torch.zeros_like(args[0])
-
         def default_picker(args, config_keys):
             return "default"
 
         wrapper = HelionKernelWrapper(
             raw_kernel_func=sample_kernel,
             op_name="test_kernel",
-            fake_impl=fake_impl,
         )
         wrapper._config_picker = default_picker
 
@@ -522,7 +508,6 @@ class TestKernelRegistry:
         wrapper = HelionKernelWrapper(
             raw_kernel_func=Mock(),
             op_name="test_kernel",
-            fake_impl=Mock(),
         )
 
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
@@ -536,20 +521,6 @@ class TestKernelRegistry:
         """Test get_kernel_by_name returns None for missing kernel."""
         result = get_kernel_by_name("nonexistent")
         assert result is None
-
-    def test_register_kernel_auto_generates_fake_impl(self):
-        """Test register_kernel auto-generates fake_impl when not provided."""
-        with patch("vllm.kernels.helion.register.infer_fake_impl") as mock_infer:
-            mock_fake = Mock()
-            mock_infer.return_value = mock_fake
-
-            def original_kernel(x):
-                return x
-
-            wrapper = register_kernel(original_kernel)
-
-            mock_infer.assert_called_once_with(original_kernel, None)
-            assert wrapper._fake_impl is mock_fake
 
     def test_register_kernel_creates_wrapper(self):
         """Test register_kernel creates HelionKernelWrapper."""
@@ -596,9 +567,7 @@ class TestKernelRegistry:
 
     def test_register_kernel_supports_decorator_syntax(self):
         """Test register_kernel works with decorator arguments."""
-        mock_fake = Mock()
-
-        wrapper = register_kernel("custom_name", fake_impl=mock_fake)
+        wrapper = register_kernel("custom_name")
 
         def test_kernel(x):
             return x
@@ -606,7 +575,6 @@ class TestKernelRegistry:
         result = wrapper(test_kernel)
 
         assert result.op_name == "custom_name"
-        assert result._fake_impl is mock_fake
 
     def test_register_kernel_bare_decorator(self):
         """Test register_kernel works as bare decorator."""

@@ -245,15 +245,12 @@ class HelionKernelWrapper:
         self,
         raw_kernel_func: Callable,
         op_name: str,
-        fake_impl: Callable,
         helion_settings: "helion.Settings | None" = None,
     ):
-        # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
 
         self.raw_kernel_func = raw_kernel_func
         self.op_name = op_name
-        self._fake_impl = fake_impl
         self.helion_settings = helion_settings
         self._config_picker: (
             Callable[[tuple[Any, ...], list[str]], str | None] | None
@@ -413,38 +410,10 @@ def get_kernel_by_name(kernel_name: str) -> HelionKernelWrapper | None:
     return _REGISTERED_KERNELS.get(kernel_name)
 
 
-def infer_fake_impl(
-    kernel_func: Callable,
-    helion_settings: "helion.Settings | None" = None,
-) -> Callable:
-    def helion_fake_kernel(*args, **kwargs):
-        kernel_kwargs = {}
-        if helion_settings:
-            kernel_kwargs.update(helion_settings.to_dict())
-
-        temp_decorated_kernel = helion.kernel(**kernel_kwargs)(kernel_func)
-
-        # Bind with args to get config_spec, then get a valid default config
-        bound = temp_decorated_kernel.bind(args)
-        default_config = bound.config_spec.default_config()
-        compiled_runner = bound.compile_config(default_config)
-
-        return compiled_runner(*args, **kwargs, _launcher=lambda *a, **kw: None)
-
-    return helion_fake_kernel
-
-
-# Overloads are necessary for proper mypy type inference.
-# Without overloads, the union return type HelionKernelWrapper | Callable[...]
-# causes mypy to complain about missing attributes when tests do:
-#   wrapper = register_kernel(func)  # Should return HelionKernelWrapper
-#   wrapper._fake_impl  # mypy error: "Callable has no attribute _fake_impl"
-# The overloads tell mypy the exact return type based on the argument pattern.
 @overload
 def register_kernel(
     op_name_or_func: Callable,
     *,
-    fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
 ) -> HelionKernelWrapper: ...
 
@@ -453,7 +422,6 @@ def register_kernel(
 def register_kernel(
     op_name_or_func: str | None = None,
     *,
-    fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
 ) -> Callable[[Callable], HelionKernelWrapper]: ...
 
@@ -461,15 +429,9 @@ def register_kernel(
 def register_kernel(
     op_name_or_func: str | Callable | None = None,
     *,
-    fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
 ) -> HelionKernelWrapper | Callable[[Callable], HelionKernelWrapper]:
-    """
-    Decorator to register a Helion kernel function as a HelionKernelWrapper.
-
-    Wraps the raw kernel function in a HelionKernelWrapper and registers it
-    in the global kernel registry. Auto-generates fake_impl if not provided.
-    """
+    """Decorator to register a Helion kernel function as a HelionKernelWrapper."""
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
         op_name = op_name_or_func if isinstance(op_name_or_func, str) else None
@@ -481,18 +443,9 @@ def register_kernel(
                 f"Use a different op_name or check for duplicate registrations."
             )
 
-        final_fake_impl = fake_impl
-        if final_fake_impl is None:
-            final_fake_impl = infer_fake_impl(kernel_func, helion_settings)
-            logger.debug(
-                "Auto-generated fake_impl for Helion kernel '%s'",
-                kernel_func.__name__,
-            )
-
         kernel_wrapper = HelionKernelWrapper(
             raw_kernel_func=kernel_func,
             op_name=final_op_name,
-            fake_impl=final_fake_impl,
             helion_settings=helion_settings,
         )
 
