@@ -51,7 +51,9 @@ def is_nvfp4_supported():
 class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
-    def __init__(self, hidden_size: int, force_kernel: type[w8a8.FpKernel], **kwargs):
+    def __init__(
+        self, hidden_size: int, force_kernel: type[w8a8.FpKernel] | None, **kwargs
+    ):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
 
