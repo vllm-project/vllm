@@ -410,7 +410,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.in_proj_qkv = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[
-                sum(self.key_dim, self.key_dim, self.value_dim),
+                sum((self.key_dim, self.key_dim, self.value_dim)),
                 self.value_dim,
             ],
             bias=False,
