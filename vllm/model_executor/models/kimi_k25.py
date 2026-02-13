@@ -11,7 +11,6 @@ This module defines:
 - KimiK25ForConditionalGeneration: Main model class
 """
 
-import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
@@ -378,10 +377,6 @@ class KimiK25ForConditionalGeneration(
             )
 
         self.quant_config = quant_config
-        sub_vllm_config = copy.deepcopy(vllm_config)
-        sub_vllm_config.model_config.hf_config = (
-            sub_vllm_config.model_config.hf_config.text_config
-        )
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
