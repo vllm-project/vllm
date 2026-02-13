@@ -55,13 +55,18 @@ class EncoderCudaGraphManager:
         self.token_budgets = sorted(comp_config.encoder_cudagraph_token_budgets)
         self.max_batch_size = comp_config.encoder_cudagraph_max_images_per_batch
 
+        self.use_dp = (
+            vllm_config.multimodal_config.mm_encoder_tp_mode == "data"
+            and vllm_config.parallel_config.tensor_parallel_size > 1
+        )
+
         self.budget_graphs: dict[int, BudgetGraphMetadata] = {}
         self.graph_hits = 0
         self.graph_misses = 0
 
         logger.info(
             f"EncoderCudaGraphManager initialized with budgets={self.token_budgets}, "
-            f"max_batch_size={self.max_batch_size}"
+            f"max_batch_size={self.max_batch_size}, use_dp={self.use_dp}"
         )
 
     def capture(self):
@@ -241,25 +246,12 @@ class EncoderCudaGraphManager:
         self.graph_hits += 1
         return graph_meta.output_buffer
 
-    def execute(
+    def _execute_local(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
+        grid_thw_list: list[list[int]],
     ) -> list[torch.Tensor] | None:
-        """Execute encoder using CUDA graph.
-
-        Args:
-            pixel_values: Concatenated pixel values
-            grid_thw: Grid dimensions per image
-
-        Returns:
-            List of encoder outputs (one per image), or None if no matching budget.
-        """
-        if isinstance(grid_thw, torch.Tensor):
-            grid_thw_list = grid_thw.tolist()
-        else:
-            grid_thw_list = grid_thw
-
+        """Execute encoder on local inputs using CUDA graph."""
         spatial_merge_size = self.vision_model.spatial_merge_size
         total_tokens = sum(
             (t * (h // spatial_merge_size) * (w // spatial_merge_size))
@@ -308,6 +300,48 @@ class EncoderCudaGraphManager:
             start_idx += num_tokens
 
         return outputs
+
+    def execute(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
+    ) -> list[torch.Tensor] | None:
+        """Execute encoder using CUDA graph with optional DP.
+
+        Args:
+            pixel_values: Concatenated pixel values
+            grid_thw: Grid dimensions per image
+
+        Returns:
+            List of encoder outputs (one per image), or None if no matching budget.
+        """
+        if isinstance(grid_thw, torch.Tensor):
+            grid_thw_list = grid_thw.tolist()
+        else:
+            grid_thw_list = grid_thw
+
+        if self.use_dp:
+            from vllm.model_executor.models.vision import (
+                dp_shard_vision_inputs,
+                dp_gather_vision_outputs,
+            )
+
+            spatial_merge_size_squared = self.vision_model.spatial_merge_size ** 2
+            local_pixel_values, local_grid_thw_list, dp_meta = dp_shard_vision_inputs(
+                pixel_values, grid_thw_list, spatial_merge_size_squared
+            )
+
+            local_outputs = self._execute_local(local_pixel_values, local_grid_thw_list)
+            if local_outputs is None:
+                return None
+
+            hidden_size = self.vision_model.out_hidden_size
+            outputs = dp_gather_vision_outputs(
+                local_outputs, dp_meta, self.device, self.dtype, hidden_size
+            )
+            return list(outputs)
+        else:
+            return self._execute_local(pixel_values, grid_thw_list)
 
     def get_stats(self) -> dict[str, Any]:
         """Get CUDA graph statistics."""
