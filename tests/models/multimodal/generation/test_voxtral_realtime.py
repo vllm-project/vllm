@@ -14,7 +14,6 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
@@ -114,6 +113,9 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
 
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
+    # Lazy import to avoid CUDA-reinitialization error
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
