@@ -481,56 +481,34 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 # Kimi-Audio (ASR)
 def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
-    """Kimi-Audio ASR example.
+    """Kimi-Audio ASR example using kimia_infer for preprocessing."""
+    import contextlib
 
-    Note: Kimi-Audio uses a custom preprocessing stack (kimia_infer) to produce
-    the multimodal tensors (whisper features + token streams). For an offline
-    example we construct those tensors directly and pass them via
-    `multi_modal_data`.
+    import torch
 
-    This example is intended as a minimal smoke-test and only builds inputs for
-    a single audio clip.
-    """
-    # Lazy import Kimi-Audio utilities since they're only needed for this model
     from vllm.model_executor.models.kimi_audio_asr import (
         KimiAudioForConditionalGeneration,
         _get_kimia_prompt_manager,
         _write_wav_tmp,
     )
 
-    assert audio_count == 1, "Kimi-Audio ASR only supports a single audio input"
+    assert audio_count == 1, "Kimi-Audio ASR only supports single audio input"
 
-    # Lazy import kimia_infer since it's only needed for Kimi-Audio
     import kimia_infer.api.prompt_manager  # noqa: F401
 
-    # Use HuggingFace model path by default.
-    # For local testing, use: --model /data1/moonshotai/Kimi-Audio-7B-Instruct
     model_path = args.model or "moonshotai/Kimi-Audio-7B-Instruct"
 
-    # Build multimodal tensors using the reference Kimi prompt manager.
-    # (Same approach as vLLM's KimiAudioForConditionalGeneration.get_generation_prompt)
-
     audio, sr = audio_assets[0].audio_and_sample_rate
-    # Kimi expects 16kHz audio features.
     if sr != 16000:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-        sr = 16000
 
-    wav_path = _write_wav_tmp(audio, sr)
-
+    wav_path = _write_wav_tmp(audio, 16000)
     try:
-        # Match defaults used in the model code.
-        kimia_token_offset = (
-            KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TOKEN_OFFSET
-        )
-        kimia_text_audiodelaytokens = (
-            KimiAudioForConditionalGeneration.DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS
-        )
-
+        cls = KimiAudioForConditionalGeneration
         prompt_manager = _get_kimia_prompt_manager(
             model_path=str(model_path),
-            kimia_token_offset=kimia_token_offset,
-            kimia_text_audiodelaytokens=kimia_text_audiodelaytokens,
+            kimia_token_offset=cls.DEFAULT_KIMIA_TOKEN_OFFSET,
+            kimia_text_audiodelaytokens=cls.DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS,
         )
 
         instruction = question.strip() or "Please transcribe the following audio:"
@@ -539,32 +517,20 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
             {"role": "user", "message_type": "audio", "content": wav_path},
         ]
 
-        # Build multimodal tensors without grad; vLLM may hash tensors.
-        import torch
-
         with torch.inference_mode():
             content = prompt_manager.get_prompt(messages, output_type="text")
-            (
-                audio_ids,
-                text_ids,
-                is_continuous_mask,
-                _audio_loss_mask,
-                _text_loss_mask,
-            ) = content.to_tensor()
-
+            audio_ids, text_ids, is_continuous_mask, _, _ = content.to_tensor()
             whisper_feats = content.continuous_feature[0]
             if whisper_feats.dim() == 2:
                 whisper_feats = whisper_feats.unsqueeze(0)
 
-            mm_audio = {
-                "whisper_input_features": whisper_feats,
-                "is_continuous_mask": is_continuous_mask,
-                "text_input_ids": text_ids,
-                "audio_input_ids": audio_ids,
-            }
+        mm_audio = {
+            "whisper_input_features": whisper_feats,
+            "is_continuous_mask": is_continuous_mask,
+            "text_input_ids": text_ids,
+            "audio_input_ids": audio_ids,
+        }
     finally:
-        import contextlib
-
         with contextlib.suppress(OSError):
             os.unlink(wav_path)
 
@@ -578,8 +544,6 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
         enforce_eager=True,
     )
 
-    # Provide a single placeholder token id for multimodal replacement.
-    # (Matches the placeholder id used in vllm.model_executor.models.kimi_audio_asr)
     return ModelRequestData(
         engine_args=engine_args,
         prompt_token_ids=[KimiAudioForConditionalGeneration.PLACEHOLDER_TOKEN_ID],
