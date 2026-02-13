@@ -150,7 +150,8 @@ class BaseSentinel:
         )
         self.logger("Executing command: %s", ft_request, level="info")
         try:
-            success: bool = run_method(self, method, args=(), kwargs=method_params)
+            method_kwargs = method_params or {}
+            success: bool = run_method(self, method, args=(), kwargs=method_kwargs)
             self.logger("Command (%s) succeeded: %s", method, success, level="info")
             reason = None
         except Exception as e:
@@ -198,7 +199,7 @@ class BaseSentinel:
         target_downstream_sentinels: set[bytes],
         timeout: int = 5,
         **kwargs,
-    ):
+    ) -> tuple[bool, dict[bytes, FaultToleranceResult]]:
         """
         Broadcast a command to downstream sentinels and collect responses.
         """

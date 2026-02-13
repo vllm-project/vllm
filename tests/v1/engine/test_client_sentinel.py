@@ -43,7 +43,6 @@ def create_client_sentinel():
     parallel = ParallelConfig(
         data_parallel_size=2,
         data_parallel_size_local=2,
-        data_parallel_index=0,
         data_parallel_master_ip="127.0.0.1",
     )
     vconfig = VllmConfig(
@@ -203,7 +202,7 @@ def test_handle_fault_roundtrip(instruction):
     if instruction == "pause":
         params["soft_pause"] = True
     else:
-        params["new_stateless_dp_group_port"] = None
+        params["new_stateless_dp_group_port"] = 12568
 
     ft_req = FaultToleranceRequest(
         request_id=req_id, instruction=instruction, params=params

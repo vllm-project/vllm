@@ -6,6 +6,7 @@ import json
 import queue
 import sys
 import threading
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -40,6 +41,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineStatusType,
     FaultToleranceRequest,
     FaultToleranceResult,
     PauseMode,
@@ -447,13 +449,17 @@ class ClientSentinel(BaseSentinel):
         )
 
         self.is_faulted = threading.Event()
-        self.engine_status_dict = ThreadSafeDict()
+        self.engine_status_dict: ThreadSafeDict[int, dict[str, EngineStatusType]] = (
+            ThreadSafeDict()
+        )
         self.engine_status_dict.update(
             {
-                engine_index: {"status": "Healthy"}
+                engine_index: {"status": EngineStatusType.HEALTHY}
                 for engine_index in range(dp_rank, dp_rank + num_dp_managed)
             }.items()
         )
+        # todo: use identities as the key, indexes as the value as the index may
+        # change in dp scale down and up
         self.engine_core_sentinel_identities = engine_core_sentinel_identities
 
         threading.Thread(
@@ -481,7 +487,7 @@ class ClientSentinel(BaseSentinel):
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
         for engine_status in self.engine_status_dict.values():
-            if engine_status["status"] == "Dead":
+            if engine_status["status"] == EngineStatusType.DEAD:
                 self.logger(
                     "Engine core is dead; retry won't work.",
                     level="warning",
@@ -498,7 +504,7 @@ class ClientSentinel(BaseSentinel):
         )
 
         for engine_index, _ in self.engine_status_dict.items():
-            self.engine_status_dict[engine_index] = {"status": "Healthy"}
+            self.engine_status_dict[engine_index] = {"status": EngineStatusType.HEALTHY}
 
         if success:
             self.is_faulted.clear()
@@ -521,27 +527,42 @@ class ClientSentinel(BaseSentinel):
         alive_engines = {
             identity
             for index, identity in self.engine_core_sentinel_identities.items()
-            if self.engine_status_dict.get(index, {}).get("status") != "Dead"
+            if self.engine_status_dict[index]["status"] != EngineStatusType.DEAD
             and (exclude_engine_index is None or index not in exclude_engine_index)
         }
-        success, _ = self._broadcast_command_to_downstream(
+        success, responses = self._broadcast_command_to_downstream(
             "pause",
             alive_engines,
             timeout=timeout,
             soft_pause=soft_pause,
         )
+        for engine_identity, ft_result in responses.items():
+            if ft_result.success:
+                for i, identity in self.engine_core_sentinel_identities.items():
+                    if identity == engine_identity:
+                        engine_status = self.engine_status_dict[i]["status"]
+                        if engine_status == EngineStatusType.HEALTHY:
+                            self.engine_status_dict[i] = {
+                                "status": EngineStatusType.PAUSED
+                            }
         return success
 
     def _pub_engine_status(self):
         engine_status = self.engine_status_dict.to_dict()
-        self.fault_state_pub_socket.send(msgspec.msgpack.encode(engine_status))
+        self.fault_state_pub_socket.send_multipart(
+            (b"vllm_fault", msgspec.msgpack.encode(engine_status))
+        )
 
     def _alert_and_pause(self):
         """Receive fault info from engine and pause engines if first fault."""
         try:
             identity, _, message = self.fault_receiver_socket.recv_multipart()
             fault_info = FaultInfo.from_json(message.decode("utf-8"))
-            engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
+            engine_status = (
+                EngineStatusType.DEAD
+                if "dead" in fault_info.type
+                else EngineStatusType.UNHEALTHY
+            )
             self.engine_status_dict[int(fault_info.engine_id)] = {
                 "status": engine_status
             }
@@ -618,6 +639,7 @@ class ClientSentinel(BaseSentinel):
                 assert recv_res.request_id == ft_result.request_id
                 if identity is not None:
                     self.fault_tolerance_req_socket.send_multipart([identity, b"", msg])
+                self._pub_engine_status()
 
         self.fault_receiver_socket.close()
         self.fault_state_pub_socket.close()
@@ -1212,6 +1234,7 @@ class AsyncMPClient(MPClient):
             0
         ]
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.is_faulted = threading.Event()
             assert self.engine_fault_socket_addr is not None
             assert self.client_sentinel_cmd_addr is not None
             assert self.engine_core_sentinel_cmd_addr is not None
@@ -1228,10 +1251,12 @@ class AsyncMPClient(MPClient):
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.ft_request_lock = threading.Lock()
-            self.engine_status_dict = ThreadSafeDict()
+            self.engine_status_dict: ThreadSafeDict[
+                int, dict[str, EngineStatusType]
+            ] = ThreadSafeDict()
             self.engine_status_dict.update(
                 {
-                    engine_index: {"status": "Healthy"}
+                    engine_index: {"status": EngineStatusType.HEALTHY}
                     for engine_index in self.engine_ranks_managed
                 }.items()
             )
@@ -1517,13 +1542,42 @@ class AsyncMPClient(MPClient):
 
     def _engine_status_listener(self):
         while True:
-            engine_status_bytes = self.fault_state_sub_socket.recv()
-            status_dict = msgspec.msgpack.decode(engine_status_bytes)
+            # Expect multipart: [topic, payload].
+            frames = self.fault_state_sub_socket.recv_multipart()
+            payload = frames[-1]
+            status_dict = msgspec.msgpack.decode(payload)
             self.engine_status_dict.clear()
             self.engine_status_dict.update(status_dict.items())
+            healthy = True
+            for k, v in self.engine_status_dict.items():
+                if v.get("status") != EngineStatusType.HEALTHY:
+                    healthy = False
+                    self.is_faulted.set()
+                    break
+            if healthy:
+                self.is_faulted.clear()
 
     async def fault_reporter(self):
-        return self.engine_status_dict.to_dict()
+        # Convert internal enums to external human-readable strings when
+        # returning to callers.
+        raw = self.engine_status_dict.to_dict()
+
+        def _enum_to_str(s):
+            if s == EngineStatusType.HEALTHY:
+                return "Healthy"
+            if s == EngineStatusType.DEAD:
+                return "Dead"
+            if s == EngineStatusType.UNHEALTHY:
+                return "Unhealthy"
+            if s == EngineStatusType.PAUSED:
+                return "Paused"
+            return str(s)
+
+        result = {}
+        for k, v in raw.items():
+            status_val = v.get("status")
+            result[k] = {"status": _enum_to_str(status_val)}
+        return result
 
 
 class DPAsyncMPClient(AsyncMPClient):
