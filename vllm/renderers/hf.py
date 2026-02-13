@@ -585,13 +585,13 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(BaseRenderer):
+class HfRenderer(BaseRenderer[CachedHfTokenizer]):
     @classmethod
     def from_config(
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
+    ) -> "HfRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -599,13 +599,7 @@ class HfRenderer(BaseRenderer):
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__(config)
-
         model_config = self.model_config
-        self.use_unified_vision_chunk = getattr(
-            model_config.hf_config, "use_unified_vision_chunk", False
-        )
-
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
@@ -617,18 +611,11 @@ class HfRenderer(BaseRenderer):
                 ),
             )
 
-        self._tokenizer = tokenizer
+        super().__init__(config, tokenizer)
 
-    @property
-    def tokenizer(self) -> HfTokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> HfTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        self.use_unified_vision_chunk = getattr(
+            model_config.hf_config, "use_unified_vision_chunk", False
+        )
 
     def render_messages(
         self,

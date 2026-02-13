@@ -21,13 +21,13 @@ from .params import ChatParams
 logger = init_logger(__name__)
 
 
-class Grok2Renderer(BaseRenderer):
+class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
     @classmethod
     def from_config(
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
+    ) -> "Grok2Renderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -35,8 +35,6 @@ class Grok2Renderer(BaseRenderer):
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__(config)
-
         model_config = self.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
@@ -46,18 +44,7 @@ class Grok2Renderer(BaseRenderer):
                 **tokenizer_kwargs,
             )
 
-        self._tokenizer = tokenizer
-
-    @property
-    def tokenizer(self) -> Grok2Tokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> Grok2Tokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        super().__init__(config, tokenizer)
 
     def render_messages(
         self,

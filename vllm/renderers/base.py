@@ -4,7 +4,9 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Generic, overload
+
+from typing_extensions import TypeVar
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -34,7 +36,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class BaseRenderer(ABC):
+_T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
+class BaseRenderer(ABC, Generic[_T]):
     @classmethod
     @abstractmethod
     def from_config(
@@ -44,16 +49,18 @@ class BaseRenderer(ABC):
     ) -> "BaseRenderer":
         raise NotImplementedError
 
-    def __init__(self, config: "VllmConfig") -> None:
+    def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
         self.config = config
         self.model_config = config.model_config
 
+        self.tokenizer = tokenizer
+
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
-        self._mm_processor: BaseMultiModalProcessor | None = None
+        self.mm_processor: BaseMultiModalProcessor | None = None
         self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
@@ -71,12 +78,7 @@ class BaseRenderer(ABC):
                 MultiModalCacheStats() if mm_processor_cache else None
             )
 
-    @property
-    @abstractmethod
-    def tokenizer(self) -> TokenizerLike | None:
-        raise NotImplementedError
-
-    def get_tokenizer(self) -> TokenizerLike:
+    def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
         if tokenizer is None:
             raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
@@ -88,10 +90,6 @@ class BaseRenderer(ABC):
             self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
 
         return self._async_tokenizer
-
-    @property
-    def mm_processor(self) -> "BaseMultiModalProcessor | None":
-        return self._mm_processor
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self._mm_processor is None:
