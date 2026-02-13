@@ -846,13 +846,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                gemm1_alpha=layer.gemm1_alpha,
+                gemm1_beta=layer.gemm1_beta,
+                gemm1_clamp_limit=layer.gemm1_clamp_limit,
             )
-        elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+        elif self.mxfp4_backend in [
+            Mxfp4Backend.SM100_FI_MXFP4_BF16,
+            Mxfp4Backend.SM90_FI_MXFP4_BF16,
+        ]:
             return mxfp4_w4a16_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                gemm1_alpha=layer.gemm1_alpha,
+                gemm1_beta=layer.gemm1_beta,
+                gemm1_clamp_limit=layer.gemm1_clamp_limit,
             )
         else:
             w1_scale = layer.w13_weight_scale
@@ -972,24 +981,28 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # Backend-specific preparation
         if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
-            from flashinfer import mxfp8_quantize
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+                FlashInferExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
 
-            x_quant, x_scale = mxfp8_quantize(x, True, 32)
-
-            fake_input_scale = torch.ones(self.num_experts, device=x.device)
-            quant_scales = [
-                layer.w13_weight_scale.contiguous().view(torch.int32),
-                fake_input_scale,
-                layer.w2_weight_scale.contiguous().view(torch.int32),
-                fake_input_scale,
-            ]
-
-            fi_input = x_quant
-            extra_kwargs = dict(
-                use_mxfp8_act_scaling=True,
-                input_sf=x_scale,
-                fc1_expert_weights=layer.w13_weight.contiguous().view(torch.long),
-                fc2_expert_weights=layer.w2_weight.contiguous().view(torch.long),
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                FlashInferExperts(
+                    moe_config=self.moe, quant_config=self.moe_quant_config
+                ),
+                shared_experts=None,
+            )
+            return self.kernel(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
             )
         elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
             assert x.dtype == torch.bfloat16

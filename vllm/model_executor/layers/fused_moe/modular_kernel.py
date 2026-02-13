@@ -564,8 +564,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     #
 
     @property
-    def quant_dtype(self) -> torch.dtype | None:
+    def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.weight_quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
@@ -626,6 +630,18 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
+
+    @property
+    def gemm1_alpha(self) -> torch.Tensor | None:
+        return self.quant_config.gemm1_alpha
+
+    @property
+    def gemm1_beta(self) -> torch.Tensor | None:
+        return self.quant_config.gemm1_beta
+
+    @property
+    def gemm1_clamp_limit(self) -> torch.Tensor | None:
+        return self.quant_config.gemm1_clamp_limit
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
