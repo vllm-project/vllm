@@ -514,7 +514,7 @@ class MistralTokenizer(TokenizerLike):
             return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
         non_skip_special_tokens_ids = {
-            self.tokenizer.get_control_token(SpecialTokens.tool_calls),
+            self.tokenizer.get_special_token(SpecialTokens.tool_calls),
         }
         if isinstance(self.instruct, InstructTokenizerV13):
             if self.instruct.BEGIN_THINK:
