@@ -5,6 +5,7 @@ import contextlib
 import multiprocessing
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -262,6 +263,20 @@ class EngineCoreClient(ABC):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        raise NotImplementedError
+
+    async def call_utility_async(self, method: str, *args) -> Any:
+        raise NotImplementedError
+
+    async def drain_async(self, timeout: float) -> bool:
+        """Signal engine to drain and wait for completion.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            True if drain completed, False if timed out or failed.
+        """
         raise NotImplementedError
 
 
@@ -566,6 +581,28 @@ class MPClient(EngineCoreClient):
     def shutdown(self):
         # Terminate background resources.
         self._finalizer()
+
+    async def drain_async(self, timeout: float) -> bool:
+        """Signal engines to drain and wait for them to exit."""
+        engine_manager = self.resources.engine_manager
+        assert isinstance(engine_manager, CoreEngineProcManager), (
+            "Drain is only supported for local process-based engines"
+        )
+        logger.info(
+            "Sending DRAIN to %d engine(s) via shutdown pipe",
+            len(self.core_engines),
+        )
+        engine_manager.signal_drain()
+        start_time = time.monotonic()
+
+        while not self.resources.engine_dead:
+            if time.monotonic() - start_time >= timeout:
+                logger.warning("Drain: timed out, proceeding with shutdown")
+                return False
+            await asyncio.sleep(0.1)
+
+        logger.info("Drain: complete in %.1fs", time.monotonic() - start_time)
+        return True
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""

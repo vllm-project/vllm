@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -109,10 +110,14 @@ class CoreEngineProcManager:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
+        self.shutdown_writers: list[Connection] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+
+            shutdown_reader, shutdown_writer = context.Pipe(duplex=False)
+            self.shutdown_writers.append(shutdown_writer)
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
@@ -124,11 +129,14 @@ class CoreEngineProcManager:
                     | {
                         "dp_rank": global_index,
                         "local_dp_rank": local_index,
+                        "shutdown_pipe": shutdown_reader,
                     },
                 )
             )
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self._finalizer = weakref.finalize(
+            self, shutdown, self.processes, self.shutdown_writers
+        )
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
@@ -156,6 +164,15 @@ class CoreEngineProcManager:
     def close(self):
         """Shutdown all procs."""
         self._finalizer()
+
+    def signal_drain(self):
+        """Signal all engine cores to start draining."""
+        logger.debug("Sending DRAIN to %d engine(s)", len(self.shutdown_writers))
+        for i, w in enumerate(self.shutdown_writers):
+            try:
+                w.send("DRAIN")
+            except (BrokenPipeError, OSError) as e:
+                logger.warning("Failed to send DRAIN to engine %d: %s", i, e)
 
     def join_first(self):
         """Wait for any process to exit."""

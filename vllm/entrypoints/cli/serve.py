@@ -156,7 +156,8 @@ def run_headless(args: argparse.Namespace):
 
     shutdown_requested = False
 
-    # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    # FIXME: Create pipe, close writer here, pass reader to
+    # join_first() -> connection.wait()
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)

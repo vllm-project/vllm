@@ -11,6 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
+from multiprocessing.connection import Connection
 from typing import Any, TypeVar, cast
 
 import msgspec
@@ -711,6 +712,42 @@ class EngineCore:
         return req, request.current_wave
 
 
+class ShutdownPipeHandler:
+    """Handles shutdown coordination via pipe from parent process.
+
+    Relays DRAIN messages and detects parent death (pipe EOF).
+    """
+
+    def __init__(self, shutdown_pipe: Connection, input_queue: queue.Queue):
+        self._shutdown_pipe = shutdown_pipe
+        self._input_queue = input_queue
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def join(self, timeout: float | None = None):
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def _run(self):
+        try:
+            while True:
+                msg = self._shutdown_pipe.recv()
+                if msg == "DRAIN":
+                    logger.info("Received DRAIN from parent")
+                    self._input_queue.put_nowait((EngineCoreRequestType.DRAIN, None))
+                else:
+                    logger.warning("Unknown message from parent: %s", msg)
+        except EOFError:
+            # Fallback for unexpected parent death.
+            logger.info("Parent exited, shutting down EngineCore")
+            self._input_queue.put_nowait((EngineCoreRequestType.SHUTDOWN, None))
+        finally:
+            self._shutdown_pipe.close()
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -737,6 +774,7 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
+        self._drain_requested = False
 
         with self._perform_handshakes(
             handshake_address,
@@ -957,28 +995,40 @@ class EngineCoreProc(EngineCore):
         return init_message.addresses
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    def run_engine_core(
+        *args,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+        shutdown_pipe: Connection | None = None,
+        **kwargs,
+    ):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
         shutdown_requested = False
+        shutdown_handler: ShutdownPipeHandler | None = None
+        engine_core: EngineCoreProc | None = None
 
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
+        def signal_handler(*_):
+            nonlocal shutdown_requested, engine_core
             if not shutdown_requested:
                 shutdown_requested = True
-                raise SystemExit()
+                if engine_core is not None:
+                    engine_core.input_queue.put_nowait(
+                        (EngineCoreRequestType.SHUTDOWN, None)
+                    )
 
-        # Either SIGTERM or SIGINT will terminate the engine_core
+        # SIGTERM triggers immediate shutdown; SIGINT is handled by the
+        # parent process which coordinates graceful drain via shutdown pipe.
         signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-        engine_core: EngineCoreProc | None = None
+        if shutdown_pipe is not None:
+            # New process group so terminal Ctrl-C doesn't kill workers.
+            os.setpgrp()
+        else:
+            signal.signal(signal.SIGINT, signal_handler)
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1026,11 +1076,14 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
+            if shutdown_pipe:
+                shutdown_handler = ShutdownPipeHandler(
+                    shutdown_pipe, engine_core.input_queue
+                )
+                shutdown_handler.start()
+
             engine_core.run_busy_loop()
 
-        except SystemExit:
-            logger.debug("EngineCore exiting.")
-            raise
         except Exception as e:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
@@ -1039,6 +1092,8 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            if shutdown_handler is not None:
+                shutdown_handler.join(timeout=5.0)
             if engine_core is not None:
                 engine_core.shutdown()
 
@@ -1048,10 +1103,10 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            if not self._process_input_queue():
+                break
             # 2) Step the engine core and return the outputs.
             #    Skip if scheduling is paused (level 0 sleep)
             if not self._scheduler_paused:
@@ -1061,8 +1116,14 @@ class EngineCoreProc(EngineCore):
                 # by processing any utility requests that might resume scheduling
                 pass
 
-    def _process_input_queue(self):
-        """Exits when an engine step needs to be performed."""
+            # 3) Check if drain is complete.
+            if self._drain_requested and not self.scheduler.has_requests():
+                logger.info("Drain complete, exiting")
+                break
+
+    def _process_input_queue(self) -> bool:
+        """Exits when an engine step needs to be performed.
+        Returns False on SHUTDOWN request (e.g. parent died)."""
 
         waited = False
         while (
@@ -1070,6 +1131,7 @@ class EngineCoreProc(EngineCore):
             and (not self.scheduler.has_requests() or self._scheduler_paused)
             and not self.batch_queue
             and not self._scheduler_paused
+            and not self._drain_requested
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1078,16 +1140,22 @@ class EngineCoreProc(EngineCore):
                 if logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+            request_type, request = self.input_queue.get()
+            if request_type == EngineCoreRequestType.SHUTDOWN:
+                return False
+            self._handle_client_request(request_type, request)
 
         if waited:
             logger.debug("EngineCore loop active.")
 
         # Handle any more client requests.
         while not self.input_queue.empty():
-            req = self.input_queue.get_nowait()
-            self._handle_client_request(*req)
+            request_type, request = self.input_queue.get_nowait()
+            if request_type == EngineCoreRequestType.SHUTDOWN:
+                return False
+            self._handle_client_request(request_type, request)
+
+        return True
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -1136,6 +1204,9 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.DRAIN:
+            logger.info("Received DRAIN, draining requests...")
+            self._drain_requested = True
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
@@ -1230,6 +1301,14 @@ class EngineCoreProc(EngineCore):
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(copy=False)
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+
+                    # These are reserved for shutdown pipe only.
+                    assert request_type != EngineCoreRequestType.DRAIN, (
+                        "DRAIN should only be sent via shutdown pipe"
+                    )
+                    assert request_type != EngineCoreRequestType.SHUTDOWN, (
+                        "SHUTDOWN should only be sent via shutdown pipe"
+                    )
 
                     # Deserialize the request data.
                     request: Any
@@ -1445,10 +1524,10 @@ class DPEngineCoreProc(EngineCoreProc):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            if not self._process_input_queue():
+                break
 
             # Skip processing if scheduling is paused (level 0 sleep)
             if self._scheduler_paused:

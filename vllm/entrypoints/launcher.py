@@ -16,6 +16,8 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from vllm.entrypoints.openai.cli_args import FrontendArgs
+from vllm.entrypoints.serve.middleware import set_rejecting_requests
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
@@ -69,17 +71,24 @@ async def serve_http(
     if h11_max_header_count is None:
         h11_max_header_count = H11_MAX_HEADER_COUNT_DEFAULT
 
+    args = getattr(app.state, "args", None)
+    engine_client: EngineClient = app.state.engine_client
+    enable_drain = (
+        args is not None and getattr(args, "shutdown_mode", "immediate") == "drain"
+    )
+
     config = uvicorn.Config(app, **uvicorn_kwargs)
-    # Set header limits
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
+    if enable_drain:
+        config.install_signal_handlers = False
     config.load()
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    watchdog_task = loop.create_task(watchdog_loop(server, engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
     ssl_cert_refresher = (
@@ -93,6 +102,22 @@ async def serve_http(
         )
     )
 
+    async def perform_drain() -> None:
+        """Drain in-flight requests before shutdown."""
+        drain_timeout = getattr(
+            args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
+        )
+
+        inflight_count = engine_client.get_num_unfinished_requests()
+        logger.info(
+            "Drain: draining %d in-flight requests (timeout: %ds)",
+            inflight_count,
+            drain_timeout,
+        )
+
+        set_rejecting_requests(True)
+        await engine_client.drain(drain_timeout)
+
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
         server_task.cancel()
@@ -100,11 +125,38 @@ async def serve_http(
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
 
+    async def drain_then_shutdown() -> None:
+        """Drain in-flight requests then trigger shutdown."""
+        await perform_drain()
+        signal_handler()
+
+    shutting_down = False
+    drain_task: asyncio.Task | None = None
+
+    def on_signal() -> None:
+        """Signal callback that spawns the drain task."""
+        nonlocal shutting_down, drain_task
+        if shutting_down:
+            logger.warning("Received second signal, forcing immediate shutdown")
+            if drain_task is not None and not drain_task.done():
+                drain_task.cancel()
+            signal_handler()
+            return
+        shutting_down = True
+
+        if enable_drain:
+            logger.info(
+                "Drain initiated. Send SIGTERM again to force immediate shutdown."
+            )
+            drain_task = loop.create_task(drain_then_shutdown())
+        else:
+            signal_handler()
+
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    loop.add_signal_handler(signal.SIGINT, on_signal)
+    loop.add_signal_handler(signal.SIGTERM, on_signal)
 
     try:
         await server_task

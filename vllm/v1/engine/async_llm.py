@@ -811,6 +811,24 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
+    async def drain(self, timeout: float) -> bool:
+        """Drain in-flight requests before shutdown.
+
+        Signals the engine to stop accepting new requests and waits for
+        existing requests to complete.
+
+        Args:
+            timeout: Maximum time to wait for drain in seconds.
+
+        Returns:
+            True if drain completed successfully, False if timed out or failed.
+        """
+        return await self.engine_core.drain_async(timeout)
+
+    def get_num_unfinished_requests(self) -> int:
+        """Return the number of in-flight requests."""
+        return self.output_processor.get_num_unfinished_requests()
+
     async def encode(
         self,
         prompt: PromptType | DictPrompt | TokPrompt,
