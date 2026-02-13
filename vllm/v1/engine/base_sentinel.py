@@ -213,7 +213,7 @@ class BaseSentinel:
         ft_request = FaultToleranceRequest(
             request_id=request_id,
             instruction=method_name,
-            params=kwargs if kwargs else None,
+            params=kwargs,
         )
 
         # Broadcast the instruction

@@ -473,16 +473,18 @@ class ClientSentinel(BaseSentinel):
 
     def run(self) -> None:
         """Execute fault tolerance commands from the queue serially."""
-        while not self.sentinel_dead:
-            identity, ft_request = self.ft_request_queue.get()
-            ft_result = self._execute_cmd(ft_request)
-            self.ft_result_queue.put((identity, ft_result))
-            try:
-                self.inproc_res_send_socket.send(msgspec.msgpack.encode(ft_result))
-            except zmq.ZMQError as e:
-                # Socket is closed.
-                self.logger("zmq error happened: %s", e, level="error")
-                break
+        try:
+            while not self.sentinel_dead:
+                try:
+                    identity, ft_request = self.ft_request_queue.get(timeout=1)
+                    ft_result = self._execute_cmd(ft_request)
+                    self.ft_result_queue.put((identity, ft_result))
+                    self.inproc_res_send_socket.send(msgspec.msgpack.encode(ft_result))
+                except queue.Empty:
+                    pass
+        except zmq.ZMQError:
+            # Socket is closed.
+            pass
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
         for engine_status in self.engine_status_dict.values():
@@ -535,15 +537,16 @@ class ClientSentinel(BaseSentinel):
             timeout=timeout,
             soft_pause=soft_pause,
         )
+        identity_to_index = {
+            identity: index
+            for index, identity in self.engine_core_sentinel_identities.items()
+        }
         for engine_identity, ft_result in responses.items():
             if ft_result.success:
-                for i, identity in self.engine_core_sentinel_identities.items():
-                    if identity == engine_identity:
-                        engine_status = self.engine_status_dict[i]["status"]
-                        if engine_status == EngineStatusType.HEALTHY:
-                            self.engine_status_dict[i] = {
-                                "status": EngineStatusType.PAUSED
-                            }
+                i = identity_to_index[engine_identity]
+                engine_status = self.engine_status_dict[i]["status"]
+                if engine_status == EngineStatusType.HEALTHY:
+                    self.engine_status_dict[i] = {"status": EngineStatusType.PAUSED}
         return success
 
     def _pub_engine_status(self):
@@ -604,45 +607,54 @@ class ClientSentinel(BaseSentinel):
         poller.register(self.fault_receiver_socket, zmq.POLLIN)
         poller.register(self.fault_tolerance_req_socket, zmq.POLLIN)
         poller.register(self.inproc_res_recv_socket, zmq.POLLIN)
-        while not self.sentinel_dead:
-            events = poller.poll(timeout=5000)
-            if not events:
-                continue
-            events = dict(events)
-            if self.fault_receiver_socket in events:
-                # If a fault message is received, alert and attempt to pause.
-                self._alert_and_pause()
-            if self.fault_tolerance_req_socket in events:
-                # Received fault tolerance command from client.
-                # Add corresponding command to the queue.
-                parts = self.fault_tolerance_req_socket.recv_multipart()
-                identity = parts[0]
-                msg_bytes = parts[-1]
-                ft_request = msgspec.msgpack.decode(
-                    msg_bytes, type=FaultToleranceRequest
-                )
-                success = self._dispatch_fault_tolerance_request(ft_request, identity)
-                if not success:
-                    # If we're busy, reply with a busy message.
-                    msg = (
-                        "System busy, vLLM is executing another fault "
-                        "tolerance instruction."
+        try:
+            while not self.sentinel_dead:
+                events = poller.poll(timeout=5000)
+                if not events:
+                    continue
+                events = dict(events)
+                if self.fault_receiver_socket in events:
+                    # If a fault message is received, alert and attempt to pause.
+                    self._alert_and_pause()
+                if self.fault_tolerance_req_socket in events:
+                    # Received fault tolerance command from client.
+                    # Add corresponding command to the queue.
+                    parts = self.fault_tolerance_req_socket.recv_multipart()
+                    identity = parts[0]
+                    msg_bytes = parts[-1]
+                    ft_request = msgspec.msgpack.decode(
+                        msg_bytes, type=FaultToleranceRequest
                     )
-                    res = FaultToleranceResult(ft_request.request_id, False, msg)
-                    resp = msgspec.msgpack.encode(res)
-                    self.fault_tolerance_req_socket.send_multipart(
-                        [identity, b"", resp]
+                    success = self._dispatch_fault_tolerance_request(
+                        ft_request, identity
                     )
-            if self.inproc_res_recv_socket in events:
-                # Send FT execution result back to client.
-                msg = self.inproc_res_recv_socket.recv()
-                recv_res = msgspec.msgpack.decode(msg, type=FaultToleranceResult)
-                identity, ft_result = self.ft_result_queue.get_nowait()
-                assert recv_res.request_id == ft_result.request_id
-                if identity is not None:
-                    self.fault_tolerance_req_socket.send_multipart([identity, b"", msg])
-                self._pub_engine_status()
+                    if not success:
+                        # If we're busy, reply with a busy message.
+                        msg = (
+                            "System busy, vLLM is executing another fault "
+                            "tolerance instruction."
+                        )
+                        res = FaultToleranceResult(ft_request.request_id, False, msg)
+                        resp = msgspec.msgpack.encode(res)
+                        self.fault_tolerance_req_socket.send_multipart(
+                            [identity, b"", resp]
+                        )
+                if self.inproc_res_recv_socket in events:
+                    # Send FT execution result back to client.
+                    msg = self.inproc_res_recv_socket.recv()
+                    recv_res = msgspec.msgpack.decode(msg, type=FaultToleranceResult)
+                    identity, ft_result = self.ft_result_queue.get_nowait()
+                    assert recv_res.request_id == ft_result.request_id
+                    if identity is not None:
+                        self.fault_tolerance_req_socket.send_multipart(
+                            [identity, b"", msg]
+                        )
+                    self._pub_engine_status()
+        except zmq.ZMQError:
+            # Context terminated, exit thread cleanly.
+            pass
 
+    def shutdown(self):
         self.fault_receiver_socket.close()
         self.fault_state_pub_socket.close()
         self.inproc_res_send_socket.close()
@@ -1499,20 +1511,23 @@ class AsyncMPClient(MPClient):
 
     def _engine_status_listener(self):
         while True:
-            # Expect multipart: [topic, payload].
-            frames = self.fault_state_sub_socket.recv_multipart()
-            payload = frames[-1]
-            status_dict = msgspec.msgpack.decode(payload)
-            self.engine_status_dict.clear()
-            self.engine_status_dict.update(status_dict.items())
-            healthy = True
-            for k, v in self.engine_status_dict.items():
-                if v.get("status") != EngineStatusType.HEALTHY:
-                    healthy = False
-                    self.is_faulted.set()
-                    break
-            if healthy:
-                self.is_faulted.clear()
+            try:
+                # Expect multipart: [topic, payload].
+                frames = self.fault_state_sub_socket.recv_multipart()
+                payload = frames[-1]
+                status_dict = msgspec.msgpack.decode(payload)
+                self.engine_status_dict.clear()
+                self.engine_status_dict.update(status_dict.items())
+                healthy = True
+                for k, v in self.engine_status_dict.items():
+                    if v.get("status") != EngineStatusType.HEALTHY:
+                        healthy = False
+                        self.is_faulted.set()
+                        break
+                if healthy:
+                    self.is_faulted.clear()
+            except zmq.ZMQError:
+                break
 
     async def fault_reporter(self):
         # Convert internal enums to external human-readable strings when

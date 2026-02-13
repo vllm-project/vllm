@@ -70,8 +70,6 @@ def test_client_sentinel_initialization():
     assert sentinel.engine_core_sentinel_identities[0] == b"engine_identity"
     assert not sentinel.sentinel_dead
 
-    # engine_status_dict values are dicts with a "status" key
-    assert isinstance(sentinel.engine_status_dict, dict)
     assert 0 in sentinel.engine_status_dict
     assert sentinel.engine_status_dict[0]["status"] == "Healthy"
 

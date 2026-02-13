@@ -1266,9 +1266,9 @@ def generate_identity_group(peer1, peer2, use, n):
     Format: peer1_peer2_use_random number
     Return: list with identities in byte type as elements
     """
-    identitys = list()
+    identities = list()
     uuids = [uuid.uuid4() for _ in range(n)]
     for id in uuids:
         identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
-        identitys.append(identity_str)
-    return identitys
+        identities.append(identity_str)
+    return identities
