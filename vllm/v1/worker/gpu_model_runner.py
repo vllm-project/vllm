@@ -98,6 +98,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.ngram_proposer import ngp as _ngp
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
@@ -190,7 +191,6 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
 
@@ -449,16 +449,14 @@ class GPUModelRunner(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer  # noqa: F823
+                _ngp.NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
             )
             if self.speculative_config.method == "ngram":
-                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
-                self.drafter = NgramProposer(self.vllm_config)
+                self.drafter = _ngp.NgramProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -3952,10 +3950,8 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         assert spec_config is not None
         if spec_config.method == "ngram":
-            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
             assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, NgramProposer)
+            assert isinstance(self.drafter, _ngp.NgramProposer)
             draft_token_ids = self.drafter.propose(
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
