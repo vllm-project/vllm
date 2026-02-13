@@ -104,9 +104,6 @@ class ConfigSet:
             result[platform] = {}
 
             for config_key, config in config_keys_dict.items():
-                # Convert helion.Config to dict using to_json() + json.loads()
-                import json
-
                 result[platform][config_key] = json.loads(config.to_json())
 
         return result

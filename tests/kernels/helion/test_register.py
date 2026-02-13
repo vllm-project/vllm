@@ -554,10 +554,18 @@ class TestKernelRegistry:
     """Test suite for kernel registry functionality."""
 
     def setup_method(self):
-        """Clear the registry before each test."""
+        """Save and clear the registry before each test."""
+        from vllm.kernels.helion.register import _REGISTERED_KERNELS
+
+        self._saved_registry = dict(_REGISTERED_KERNELS)
+        _REGISTERED_KERNELS.clear()
+
+    def teardown_method(self):
+        """Restore the registry after each test."""
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
         _REGISTERED_KERNELS.clear()
+        _REGISTERED_KERNELS.update(self._saved_registry)
 
     def test_get_registered_kernels_returns_copy(self):
         """Test get_registered_kernels returns copy of registry."""
