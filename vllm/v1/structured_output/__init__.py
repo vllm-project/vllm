@@ -63,7 +63,14 @@ class StructuredOutputManager:
             max_workers = max(1, min(multiprocessing.cpu_count() // 2, 8))
             self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)
 
-        if not self.vllm_config.model_config.skip_tokenizer_init:
+        # Defer tokenizer initialization until first use. For GGUF models
+        # in multiprocess mode, eager tokenizer init during __init__ causes
+        # a semaphore leak: the tokenizer builds BPE merges using
+        # multiprocessing primitives that don't clean up in subprocesses,
+        # eventually exhausting the system semaphore limit and hanging.
+        self._tokenizer = None
+        self._skip_tokenizer = self.vllm_config.model_config.skip_tokenizer_init
+        if not self._skip_tokenizer:
             # The default max_workers if not specified is the number of
             # CPUs * 5, which is way too high since these tasks are CPU-bound,
             # not I/O bound. We also know we would never dominate CPU usage
@@ -71,27 +78,43 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = cached_tokenizer_from_config(
-                model_config=self.vllm_config.model_config
-            )
-            reasoning_parser_plugin = (
-                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
-            )
-            if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
-                ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
-
-            reasoning_parser = (
-                self.vllm_config.structured_outputs_config.reasoning_parser
-            )
-            if reasoning_parser:
-                reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         self.enable_in_reasoning = (
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
+
+    @property
+    def tokenizer(self):
+        """Lazily initialize tokenizer on first access.
+
+        Deferring tokenizer init prevents semaphore leaks when
+        StructuredOutputManager is instantiated in forked subprocesses
+        (e.g., during GGUF model loading with multiprocessing).
+        """
+        if self._tokenizer is None:
+            if self._skip_tokenizer:
+                raise RuntimeError(
+                    "Structured output requires a tokenizer, but "
+                    "skip_tokenizer_init is enabled."
+                )
+            self._tokenizer = cached_tokenizer_from_config(
+                model_config=self.vllm_config.model_config
+            )
+            self._init_reasoning_parser()
+        return self._tokenizer
+
+    def _init_reasoning_parser(self) -> None:
+        """Initialize reasoning parser after tokenizer is available."""
+        reasoning_parser_plugin = (
+            self.vllm_config.structured_outputs_config.reasoning_parser_plugin
+        )
+        if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+            ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+        reasoning_parser = self.vllm_config.structured_outputs_config.reasoning_parser
+        if reasoning_parser:
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(reasoning_parser)
+            self.reasoner = reasoner_cls(tokenizer=self._tokenizer)
 
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:
