@@ -34,7 +34,7 @@ run_tests() {
   for cfg in "${configs[@]}"; do
     echo "-> Running with ${cfg} ${extra_args:+and ${extra_args}}"
     # Use 'env' to safely set variables without eval
-    if ! env ${cfg} bash "${SCRIPT}" ${extra_args}; then
+    if ! env "${cfg}" bash "${SCRIPT}" "${extra_args}"; then
       echo "❌ Test failed for config: ${cfg} ${extra_args:+(${extra_args})}"
       exit 1
     fi
