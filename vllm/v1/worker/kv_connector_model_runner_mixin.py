@@ -112,6 +112,7 @@ class KVConnectorModelRunnerMixin:
 
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
 
             if clear_metadata:
                 kv_connector.clear_connector_metadata()
