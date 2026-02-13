@@ -74,7 +74,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
             kw_cls = kwargs_type_annotations[kw_type]
             kw_annotations = {}
             for base in reversed(kw_cls.__mro__):
-                kw_annotations.update(getattr(base, '__annotations__', {}))
+                kw_annotations.update(getattr(base, "__annotations__", {}))
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
