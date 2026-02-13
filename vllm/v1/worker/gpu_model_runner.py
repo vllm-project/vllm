@@ -601,6 +601,7 @@ class GPUModelRunner(
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        self.req_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -1780,9 +1781,10 @@ class GPUModelRunner(
                 non_blocking=True,
             )
 
-        req_indices_gpu = torch.from_numpy(req_indices).to(
-            self.device, non_blocking=True
-        )
+        self.req_indices.np[:total_num_scheduled_tokens] = req_indices
+        self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+        req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
         num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
             self.device, non_blocking=True
