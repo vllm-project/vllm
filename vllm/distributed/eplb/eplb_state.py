@@ -1211,6 +1211,11 @@ def _commit_eplb_maps_for_layer(
     new_logical_replica_count: torch.Tensor,
     layer: int,
 ) -> None:
+    """
+    Per-layer version of _commit_eplb_maps. Copies all of the new_* maps into
+    model_state. After this function completes, the new mappings will become the
+    current mappings and will be visible to the model.
+    """
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map[layer]
     dst = model_state.physical_to_logical_map[layer]
@@ -1237,6 +1242,11 @@ def _commit_eplb_maps(
     new_logical_to_physical_map: torch.Tensor,
     new_logical_replica_count: torch.Tensor,
 ) -> None:
+    """
+    Copies all of the new_* maps into model_state. After this function completes,
+    the new mappings will become the current mappings and will be visible to the
+    model.
+    """
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map
