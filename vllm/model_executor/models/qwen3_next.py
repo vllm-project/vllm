@@ -407,7 +407,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj_qkv = MergedColumnParallelLinear(
+        self.in_proj_qkvz = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[
                 sum((self.key_dim, self.key_dim, self.value_dim)),
@@ -415,7 +415,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             ],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkv",
+            prefix=f"{prefix}.in_proj_qkvz",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
         self.in_proj_ba = MergedColumnParallelLinear(
