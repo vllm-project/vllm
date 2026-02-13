@@ -21,7 +21,6 @@
 # limitations under the License.
 """Inference-only Exaone model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Iterable
 from itertools import islice
 
@@ -83,7 +82,13 @@ def _padded_intermediate_size(
     block_n, block_k = weight_block_size[0], weight_block_size[1]
     if block_n <= 0 or block_k <= 0:
         return intermediate_size
-    alignment = tp_size * math.lcm(block_n, block_k)
+
+    def gcd(a: int, b: int) -> int:
+        while b:
+            a, b = b, a % b
+        return a
+
+    alignment = tp_size * (block_n * block_k // gcd(block_n, block_k))
     return _ceil_div(intermediate_size, alignment) * alignment
 
 
