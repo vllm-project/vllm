@@ -1,5 +1,7 @@
 """CUDA graph manager for vision encoder budget-batch execution."""
 
+import math
+import numpy as np
 import torch
 from dataclasses import dataclass, field
 from typing import Optional, Any
@@ -76,8 +78,122 @@ class EncoderCudaGraphManager:
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
-        # TODO: Implementation in next step
-        pass
+        logger.info(f"Capturing CUDA graph for token_budget={token_budget}")
+
+        # Generate dummy grid config for capture only (not used for runtime batching).
+        # This is just one arbitrary example configuration that produces token_budget tokens.
+        # At runtime, actual images will be packed in any combination that fits the budget.
+        dummy_grid_config = self._generate_grid_config_for_budget(
+            token_budget, self.max_batch_size
+        )
+
+        dummy_pixel_values, dummy_grid_thw = self._prepare_dummy_inputs(dummy_grid_config)
+
+        encoder_metadata = {}
+        encoder_metadata['pos_embeds'] = self.vision_model.fast_pos_embed_interpolate(
+            dummy_grid_thw
+        )
+        rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(dummy_grid_thw)
+        encoder_metadata['rotary_pos_emb_cos'] = rotary_cos
+        encoder_metadata['rotary_pos_emb_sin'] = rotary_sin
+
+        from vllm.model_executor.models.vision import compute_encoder_metadata
+        spatial_merge_size = self.vision_model.spatial_merge_size
+        seq_metadata = compute_encoder_metadata(
+            dummy_grid_thw,
+            device=self.device,
+            spatial_merge_size=spatial_merge_size,
+            pad_to_batch_size=None,
+            per_frame=True,
+        )
+        encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
+
+        max_seqlen = self.vision_model.compute_attn_mask_seqlen(
+            encoder_metadata['cu_seqlens']
+        )
+        encoder_metadata['max_seqlen'] = max_seqlen
+
+        with torch.inference_mode():
+            output = self.vision_model(
+                dummy_pixel_values,
+                dummy_grid_thw,
+                encoder_metadata=encoder_metadata
+            )
+            output_buffer = torch.empty_like(output)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = self.vision_model(
+                dummy_pixel_values,
+                dummy_grid_thw,
+                encoder_metadata=encoder_metadata
+            )
+            output_buffer.copy_(output)
+
+        self.budget_graphs[token_budget] = BudgetGraphMetadata(
+            token_budget=token_budget,
+            max_batch_size=self.max_batch_size,
+            graph=graph,
+            input_buffers={
+                'pixel_values': dummy_pixel_values,
+                'grid_thw': dummy_grid_thw,
+            },
+            output_buffer=output_buffer,
+            metadata_buffers=encoder_metadata,
+        )
+
+        logger.info(
+            f"Captured CUDA graph for budget {token_budget}: "
+            f"output_shape={output_buffer.shape}"
+        )
+
+    def _generate_grid_config_for_budget(
+        self, token_budget: int, max_batch_size: int
+    ) -> list[list[int]]:
+        """Generate dummy grid configuration for CUDA graph capture.
+
+        This creates an arbitrary example that produces token_budget tokens.
+        NOT used for runtime batching decisions - only for generating dummy inputs.
+
+        Uses square grids for simplicity: [1, H, H] where H accounts for spatial merging.
+        """
+        # token_budget refers to output tokens after patch merger
+        # Need to account for spatial downsampling if model has a merger
+        spatial_merge_size = self.vision_model.spatial_merge_size
+
+        # Target output tokens per image
+        target_output_tokens_per_image = token_budget // max_batch_size
+
+        # Input patches needed: output_tokens * (spatial_merge_size^2)
+        target_input_patches_per_image = target_output_tokens_per_image * (spatial_merge_size ** 2)
+
+        # Use square grids: H = W = sqrt(input_patches_per_image)
+        H = int(math.sqrt(target_input_patches_per_image))
+
+        # Create uniform grid config [T, H, W] for all images
+        grid_config = [[1, H, H] for _ in range(max_batch_size)]
+
+        return grid_config
+
+    def _prepare_dummy_inputs(
+        self, grid_config: list[list[int]]
+    ) -> tuple[torch.Tensor, list[list[int]]]:
+        """Create dummy pixel_values and grid_thw for capture."""
+        # Compute total patches from grid config
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+
+        # Get patch dimensions from vision model's patch_embed
+        patch_embed = self.vision_model.patch_embed
+        in_channels = patch_embed.in_channels
+        patch_size = patch_embed.patch_size
+
+        dummy_pixel_values = torch.randn(
+            total_patches, in_channels, patch_size, patch_size,
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        return dummy_pixel_values, grid_config
 
     def find_budget_graph(self, total_tokens: int) -> Optional[int]:
         """Find smallest budget >= total_tokens.
