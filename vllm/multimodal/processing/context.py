@@ -409,6 +409,10 @@ class InputProcessingContext:
 
         return json_map_leaves(_postprocess_one, output)
 
+    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+        mm_config = self.model_config.get_multimodal_config()
+        return mm_config.merge_mm_processor_kwargs(kwargs)
+
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
@@ -424,8 +428,7 @@ class InputProcessingContext:
         """
         assert callable(hf_processor)
 
-        mm_config = self.model_config.get_multimodal_config()
-        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,

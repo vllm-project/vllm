@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
+from transformers import BaseImageProcessor, BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -818,10 +818,9 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
 
@@ -829,13 +828,16 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = mm_kwargs.get("size", image_processor.size)
+
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                min_pixels=size["min_pixels"],
+                max_pixels=size["max_pixels"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -855,12 +857,14 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_image_tokens
 
@@ -870,35 +874,43 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_video_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.get_image_processor()
+
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return max_image_size
 
     def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_image_tokens = self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return num_image_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
@@ -909,7 +921,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=None,
+                image_processor=image_processor,
+                mm_kwargs={},
             )
 
             if next_max_tokens > max_tokens:
@@ -942,13 +955,15 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 

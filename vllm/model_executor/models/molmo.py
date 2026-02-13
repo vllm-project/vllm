@@ -1224,11 +1224,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: MolmoProcessorWrapper | None,
+        processor: MolmoProcessorWrapper,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.get_patches_grid_size(
             image_width=image_width,
             image_height=image_height,

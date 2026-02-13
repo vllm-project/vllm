@@ -487,11 +487,8 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: SkyworkR1VProcessor | None,
+        processor: SkyworkR1VProcessor,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
