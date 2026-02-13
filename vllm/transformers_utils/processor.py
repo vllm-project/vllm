@@ -203,8 +203,8 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                         | _collect_dynamic_keys_from_processing_kwargs(obj)
                     )
             return processor_kwargs
-    except Exception as exc:
-        logger.warning_once("Failed to collect processor kwargs", exc_info=True)
+    except Exception:
+        logger.exception("Failed to collect processor kwargs")
         return set()
 
 
