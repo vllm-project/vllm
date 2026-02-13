@@ -28,7 +28,6 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
-    from vllm.multimodal.cache import BaseMultiModalProcessorCache
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -53,9 +52,23 @@ class BaseRenderer(ABC):
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
-        # Lazy initialization since it's only for MM models
         self._mm_processor: BaseMultiModalProcessor | None = None
+        self._mm_processor_cache: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
+        if config.model_config.is_multimodal_model:
+            from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+
+            mm_processor_cache = mm_registry.processor_cache_from_config(config)
+            self._mm_processor = mm_registry.create_processor(
+                config.model_config,
+                config.observability_config,
+                tokenizer=self.tokenizer,
+                cache=mm_processor_cache,
+            )
+            self._mm_processor_cache = mm_processor_cache
+            self._mm_cache_stats = (
+                MultiModalCacheStats() if mm_processor_cache else None
+            )
 
     @property
     @abstractmethod
@@ -75,38 +88,15 @@ class BaseRenderer(ABC):
 
         return self._async_tokenizer
 
-    @cached_property
+    @property
     def mm_processor(self) -> "BaseMultiModalProcessor | None":
-        vllm_config = self.config
-        if not vllm_config.model_config.is_multimodal_model:
-            return None
-
-        return self.get_mm_processor()
+        return self._mm_processor
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self._mm_processor is None:
-            from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-
-            vllm_config = self.config
-            mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
-            self._mm_processor = mm_registry.create_processor(
-                vllm_config.model_config,
-                vllm_config.observability_config,
-                tokenizer=self.tokenizer,
-                cache=mm_processor_cache,
-            )
-            self._mm_cache_stats = (
-                MultiModalCacheStats() if mm_processor_cache else None
-            )
+            raise ValueError("Multi-modal processor not available for text-only models")
 
         return self._mm_processor
-
-    def get_mm_processor_cache(self) -> "BaseMultiModalProcessorCache | None":
-        mm_processor = self.mm_processor
-        if mm_processor is None:
-            return None
-
-        return mm_processor.cache
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         mm_cache_stats = self._mm_cache_stats
@@ -118,7 +108,7 @@ class BaseRenderer(ABC):
         return mm_cache_stats
 
     def update_mm_cache_stats(self) -> None:
-        mm_processor_cache = self.get_mm_processor_cache()
+        mm_processor_cache = self._mm_processor_cache
         mm_cache_stats = self._mm_cache_stats
 
         if mm_processor_cache and mm_cache_stats:
@@ -126,7 +116,7 @@ class BaseRenderer(ABC):
             mm_cache_stats.record(delta.total, delta.hits)
 
     def clear_mm_cache(self) -> None:
-        mm_processor_cache = self.get_mm_processor_cache()
+        mm_processor_cache = self._mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.clear_cache()
 
@@ -134,7 +124,7 @@ class BaseRenderer(ABC):
             self._mm_cache_stats.reset = True
 
     def shutdown(self) -> None:
-        mm_processor_cache = self.get_mm_processor_cache()
+        mm_processor_cache = self._mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
 
