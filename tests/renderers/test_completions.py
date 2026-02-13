@@ -77,16 +77,17 @@ def _build_renderer(
 ):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    renderer = HfRenderer.from_config(
+    renderer = HfRenderer(
         MockVllmConfig(model_config),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        tokenizer=(
+            None
+            if model_config.skip_tokenizer_init
+            else DummyTokenizer(
+                truncation_side=truncation_side,
+                max_chars_per_token=max_chars_per_token,
+            )
+        ),
     )
-
-    if not model_config.skip_tokenizer_init:
-        renderer._tokenizer = DummyTokenizer(
-            truncation_side=truncation_side,
-            max_chars_per_token=max_chars_per_token,
-        )
 
     return renderer
 
@@ -278,7 +279,7 @@ class TestRenderPrompt:
             )
 
         # Should not even attempt tokenization
-        assert renderer._tokenizer._captured_encode_kwargs == {}
+        assert renderer.tokenizer._captured_encode_kwargs == {}
 
     def test_text_max_length_exceeded_nonobvious(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=2)
@@ -299,8 +300,8 @@ class TestRenderPrompt:
             )
 
         # Should only tokenize the first max_total_tokens + 1 tokens
-        assert renderer._tokenizer._captured_encode_kwargs["truncation"] is True
-        assert renderer._tokenizer._captured_encode_kwargs["max_length"] == 101
+        assert renderer.tokenizer._captured_encode_kwargs["truncation"] is True
+        assert renderer.tokenizer._captured_encode_kwargs["max_length"] == 101
 
     def test_token_max_length_exceeded(self):
         renderer = _build_renderer(MockModelConfig())
