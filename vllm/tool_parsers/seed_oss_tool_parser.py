@@ -53,7 +53,8 @@ class SeedOssToolParser(ToolParser):
         self.think_start_token: str = "<seed:think>"
         self.think_end_token: str = "</seed:think>"
         self.is_tool_call_started: bool = False
-        self.is_thinking_end: bool = False
+        # thinking should be false by default if using reasoning parser
+        self.is_thinking: bool = False
         self.failed_count: int = 0
         self._reset_streaming_state()
 
@@ -107,133 +108,145 @@ class SeedOssToolParser(ToolParser):
         self.accumulated_text = ""
         self.json_started = False
         self.json_closed = False
+        self.is_thinking = False
+
+    def _get_arguments_config(
+        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
+    ) -> dict:
+        """Extract argument configuration for a function."""
+        if tools is None:
+            return {}
+        for config in tools:
+            if not hasattr(config, "type") or not (
+                hasattr(config, "function") and hasattr(config.function, "name")
+            ):
+                continue
+            if config.type == "function" and config.function.name == func_name:
+                if not hasattr(config.function, "parameters"):
+                    return {}
+                params = config.function.parameters
+                if isinstance(params, dict) and "properties" in params:
+                    return params["properties"]
+                elif isinstance(params, dict):
+                    return params
+                else:
+                    return {}
+        logger.debug("Tool '%s' is not defined in the tools list.", func_name)
+        return {}
+
+    def _convert_param_value(
+        self, param_value: str, param_name: str, param_config: dict, func_name: str
+    ) -> Any:
+        """Convert parameter value based on its type in the schema."""
+        # Handle null value for any type
+        if param_value.lower() == "null":
+            return None
+
+        if param_name not in param_config:
+            if param_config != {}:
+                logger.debug(
+                    "Parsed parameter '%s' is not defined in the tool "
+                    "parameters for tool '%s', directly returning the "
+                    "string value.",
+                    param_name,
+                    func_name,
+                )
+            return param_value
+
+        if (
+            isinstance(param_config[param_name], dict)
+            and "type" in param_config[param_name]
+        ):
+            param_type = str(param_config[param_name]["type"]).strip().lower()
+        else:
+            param_type = "string"
+        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
+            return param_value
+        elif (
+            param_type.startswith("int")
+            or param_type.startswith("uint")
+            or param_type.startswith("long")
+            or param_type.startswith("short")
+            or param_type.startswith("unsigned")
+        ):
+            try:
+                return int(param_value)
+            except (ValueError, TypeError):
+                logger.debug(
+                    "Parsed value '%s' of parameter '%s' is not an "
+                    "integer in tool '%s', degenerating to string.",
+                    param_value,
+                    param_name,
+                    func_name,
+                )
+                return param_value
+        elif param_type.startswith("num") or param_type.startswith("float"):
+            try:
+                float_param_value = float(param_value)
+                return (
+                    float_param_value
+                    if float_param_value - int(float_param_value) != 0
+                    else int(float_param_value)
+                )
+            except (ValueError, TypeError):
+                logger.debug(
+                    "Parsed value '%s' of parameter '%s' is not a float "
+                    "in tool '%s', degenerating to string.",
+                    param_value,
+                    param_name,
+                    func_name,
+                )
+                return param_value
+        elif param_type in ["boolean", "bool", "binary"]:
+            param_value = param_value.lower()
+            if param_value not in ["true", "false"]:
+                logger.debug(
+                    "Parsed value '%s' of parameter '%s' is not a boolean "
+                    "(`true` or `false`) in tool '%s', degenerating to "
+                    "false.",
+                    param_value,
+                    param_name,
+                    func_name,
+                )
+            return param_value == "true"
+        else:
+            if (
+                param_type in ["object", "array", "arr"]
+                or param_type.startswith("dict")
+                or param_type.startswith("list")
+            ):
+                try:
+                    param_value = json.loads(param_value)
+                    return param_value
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.debug(
+                        "Parsed value '%s' of parameter '%s' cannot be "
+                        "parsed with json.loads in tool '%s', will try "
+                        "other methods to parse it.",
+                        param_value,
+                        param_name,
+                        func_name,
+                    )
+            try:
+                param_value = ast.literal_eval(param_value)  # safer
+            except (ValueError, SyntaxError, TypeError):
+                logger.debug(
+                    "Parsed value '%s' of parameter '%s' cannot be "
+                    "converted via Python `ast.literal_eval()` in tool "
+                    "'%s', degenerating to string.",
+                    param_value,
+                    param_name,
+                    func_name,
+                )
+            return param_value
 
     def _parse_xml_function_call(
         self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
     ) -> ToolCall | None:
-        def get_arguments_config(func_name: str) -> dict:
-            if tools is None:
-                return {}
-            for config in tools:
-                if not hasattr(config, "type") or not (
-                    hasattr(config, "function") and hasattr(config.function, "name")
-                ):
-                    continue
-                if config.type == "function" and config.function.name == func_name:
-                    if not hasattr(config.function, "parameters"):
-                        return {}
-                    params = config.function.parameters
-                    if isinstance(params, dict) and "properties" in params:
-                        return params["properties"]
-                    elif isinstance(params, dict):
-                        return params
-                    else:
-                        return {}
-            logger.warning("Tool '%s' is not defined in the tools list.", func_name)
-            return {}
-
-        def convert_param_value(
-            param_value: str, param_name: str, param_config: dict, func_name: str
-        ) -> Any:
-            # Handle null value for any type
-            if param_value.lower() == "null":
-                return None
-
-            if param_name not in param_config:
-                if param_config != {}:
-                    logger.warning(
-                        "Parsed parameter '%s' is not defined in "
-                        "the tool parameters for tool '%s', "
-                        "directly returning the string value.",
-                        param_name,
-                        func_name,
-                    )
-                return param_value
-
-            if (
-                isinstance(param_config[param_name], dict)
-                and "type" in param_config[param_name]
-            ):
-                param_type = str(param_config[param_name]["type"]).strip().lower()
-            else:
-                param_type = "string"
-            if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
-                return param_value
-            elif (
-                param_type.startswith("int")
-                or param_type.startswith("uint")
-                or param_type.startswith("long")
-                or param_type.startswith("short")
-                or param_type.startswith("unsigned")
-            ):
-                try:
-                    param_value = int(param_value)  # type: ignore
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' is not an integer in tool "
-                        "'%s', degenerating to string.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-                return param_value
-            elif param_type.startswith("num") or param_type.startswith("float"):
-                try:
-                    float_param_value = float(param_value)
-                    param_value = (
-                        float_param_value  # type: ignore
-                        if float_param_value - int(float_param_value) != 0
-                        else int(float_param_value)  # type: ignore
-                    )
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' is not a float in tool "
-                        "'%s', degenerating to string.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-                return param_value
-            elif param_type in ["boolean", "bool", "binary"]:
-                param_value = param_value.lower()
-                if param_value not in ["true", "false"]:
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' is not a boolean "
-                        "(`true` of `false`) in tool '%s', degenerating to false.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-                return param_value == "true"
-            else:
-                if param_type == "object" or param_type.startswith("dict"):
-                    try:
-                        param_value = json.loads(param_value)
-                        return param_value
-                    except (ValueError, TypeError, json.JSONDecodeError):
-                        logger.warning(
-                            "Parsed value '%s' of parameter '%s' is not a valid JSON "
-                            "object in tool '%s', will try other methods to parse it.",
-                            param_value,
-                            param_name,
-                            func_name,
-                        )
-                try:
-                    param_value = ast.literal_eval(param_value)
-                except (ValueError, SyntaxError):
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' cannot be converted via "
-                        "Python `ast.literal_eval()` in tool '%s', degenerating to string.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-                return param_value
-
         # Extract function name
         end_index = function_call_str.index(">")
         function_name = function_call_str[:end_index]
-        param_config = get_arguments_config(function_name)
+        param_config = self._get_arguments_config(function_name, tools)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match in self.tool_call_parameter_regex.findall(parameters):
@@ -247,7 +260,7 @@ class SeedOssToolParser(ToolParser):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = convert_param_value(
+            param_dict[param_name] = self._convert_param_value(
                 param_value, param_name, param_config, function_name
             )
         return ToolCall(
@@ -412,15 +425,19 @@ class SeedOssToolParser(ToolParser):
                 # Continue processing next tool
                 return None
 
-        # Check if end thinking
-        if not self.is_thinking_end and (
-            self.think_end_token_id in delta_token_ids
-            or self.think_end_token in delta_text
+        # Handle thinking state
+        if (
+            self.think_start_token in delta_text
+            and self.think_end_token not in delta_text
         ):
-            self.is_thinking_end = True
+            self.is_thinking = True
+        # End thinking once we see the end tag
+        if self.is_thinking and self.think_end_token in delta_text:
+            self.is_thinking = False
 
         # If thinking hasn't ended yet, don't process any tool calls
-        if not self.is_thinking_end:
+        if self.is_thinking:
+            # Still in thinking, return content
             return DeltaMessage(content=delta_text)
 
         # Handle normal content before tool calls
@@ -639,22 +656,33 @@ class SeedOssToolParser(ToolParser):
                             if param_value.endswith("\n"):
                                 param_value = param_value[:-1]
 
-                            # Build complete JSON fragment for this parameter
+                            # Get parameter configuration for type conversion
+                            param_config = self._get_arguments_config(
+                                self.current_function_name or "",
+                                request.tools if request else None,
+                            )
+
+                            # Convert param value to appropriate type
+                            converted_value = self._convert_param_value(
+                                param_value,
+                                self.current_param_name,
+                                param_config,
+                                self.current_function_name or "",
+                            )
+
+                            # Build JSON fragment based on the converted type
+                            # Use json.dumps to properly serialize the value
+                            serialized_value = json.dumps(
+                                converted_value, ensure_ascii=False
+                            )
+
                             if self.param_count == 0:
                                 json_fragment = (
-                                    '"'
-                                    + self.current_param_name
-                                    + '": "'
-                                    + json.dumps(param_value)[1:-1]
-                                    + '"'
+                                    f'"{self.current_param_name}": {serialized_value}'
                                 )
                             else:
                                 json_fragment = (
-                                    ', "'
-                                    + self.current_param_name
-                                    + '": "'
-                                    + json.dumps(param_value)[1:-1]
-                                    + '"'
+                                    f', "{self.current_param_name}": {serialized_value}'
                                 )
 
                             self.param_count += 1
