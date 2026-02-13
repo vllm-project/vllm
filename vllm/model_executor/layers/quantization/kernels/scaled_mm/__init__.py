@@ -42,11 +42,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.xpu import (
     XPUFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    QuantKey,
-    ScaleDesc,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
@@ -205,34 +201,10 @@ def init_fp8_linear_kernel(
 
 
 def init_int8_linear_kernel(
-    is_channelwise: bool,
-    is_static_input_scheme: bool,
-    input_symmetric: bool,
+    activation_quant_key: QuantKey,
+    weight_quant_key: QuantKey,
     module_name: str,
 ) -> Int8ScaledMMLinearKernel:
-    weight_group_shape = (
-        GroupShape.PER_TOKEN if is_channelwise else GroupShape.PER_TENSOR
-    )
-    weight_scale_desc = ScaleDesc(
-        dtype=torch.float32, static=True, group_shape=weight_group_shape
-    )
-    weight_quant_key = QuantKey(
-        dtype=torch.int8, scale=weight_scale_desc, symmetric=True
-    )
-
-    # Build activation QuantKey
-    activation_group_shape = (
-        GroupShape.PER_TENSOR if is_static_input_scheme else GroupShape.PER_TOKEN
-    )
-    activation_scale_desc = ScaleDesc(
-        dtype=torch.float32,
-        static=is_static_input_scheme,
-        group_shape=activation_group_shape,
-    )
-    activation_quant_key = QuantKey(
-        dtype=torch.int8, scale=activation_scale_desc, symmetric=input_symmetric
-    )
-
     config = Int8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
