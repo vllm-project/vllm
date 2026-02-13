@@ -241,6 +241,74 @@ class EncoderCudaGraphManager:
         self.graph_hits += 1
         return graph_meta.output_buffer
 
+    def execute(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
+    ) -> list[torch.Tensor] | None:
+        """Execute encoder using CUDA graph.
+
+        Args:
+            pixel_values: Concatenated pixel values
+            grid_thw: Grid dimensions per image
+
+        Returns:
+            List of encoder outputs (one per image), or None if no matching budget.
+        """
+        if isinstance(grid_thw, torch.Tensor):
+            grid_thw_list = grid_thw.tolist()
+        else:
+            grid_thw_list = grid_thw
+
+        spatial_merge_size = self.vision_model.spatial_merge_size
+        total_tokens = sum(
+            (t * (h // spatial_merge_size) * (w // spatial_merge_size))
+            for t, h, w in grid_thw_list
+        )
+
+        token_budget = self.find_budget_graph(total_tokens)
+        if token_budget is None:
+            return None
+
+        encoder_metadata = {}
+        encoder_metadata['pos_embeds'] = self.vision_model.fast_pos_embed_interpolate(
+            grid_thw_list
+        )
+        rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(grid_thw_list)
+        encoder_metadata['rotary_pos_emb_cos'] = rotary_cos
+        encoder_metadata['rotary_pos_emb_sin'] = rotary_sin
+
+        from vllm.model_executor.models.vision import compute_encoder_metadata
+        seq_metadata = compute_encoder_metadata(
+            grid_thw_list,
+            device=self.device,
+            spatial_merge_size=spatial_merge_size,
+            pad_to_batch_size=None,
+            per_frame=True,
+        )
+        encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
+
+        max_seqlen = self.vision_model.compute_attn_mask_seqlen(
+            encoder_metadata['cu_seqlens']
+        )
+        encoder_metadata['max_seqlen'] = max_seqlen
+
+        output = self.run_budget_graph(
+            pixel_values,
+            grid_thw_list,
+            token_budget,
+            encoder_metadata,
+        )
+
+        outputs = []
+        start_idx = 0
+        for t, h, w in grid_thw_list:
+            num_tokens = t * (h // spatial_merge_size) * (w // spatial_merge_size)
+            outputs.append(output[start_idx:start_idx + num_tokens])
+            start_idx += num_tokens
+
+        return outputs
+
     def get_stats(self) -> dict[str, Any]:
         """Get CUDA graph statistics."""
         total_requests = self.graph_hits + self.graph_misses
