@@ -588,6 +588,82 @@ def dp_shard_vision_inputs(
     return local_pixel_values, local_grid_thw_list, meta
 
 
+def dp_gather_vision_outputs(
+    local_per_image_outputs: list[torch.Tensor],
+    meta: DPVisionShardingMeta,
+    device: torch.device,
+    dtype: torch.dtype,
+    hidden_size: int,
+) -> tuple[torch.Tensor, ...]:
+    """Gather vision outputs from all TP ranks and reorder to original sequence.
+
+    Args:
+        local_per_image_outputs: List of tensors, one per local image
+        meta: Sharding metadata from dp_shard_vision_inputs
+        device: Device for empty tensors
+        dtype: Dtype for empty tensors
+        hidden_size: Hidden dimension of output tensors
+
+    Returns:
+        Tuple of tensors in original input order
+    """
+    if len(local_per_image_outputs) > 0:
+        local_output_concat = torch.cat(local_per_image_outputs, dim=0)
+    else:
+        local_output_concat = torch.empty(
+            (0, hidden_size),
+            device=device,
+            dtype=dtype,
+        )
+
+    current_len = local_output_concat.shape[0]
+    if current_len < meta.max_output_tokens_per_rank:
+        padding_size = meta.max_output_tokens_per_rank - current_len
+        padding = torch.empty(
+            (padding_size, local_output_concat.shape[1]),
+            dtype=local_output_concat.dtype,
+            device=local_output_concat.device,
+        )
+        local_output_padded = torch.cat([local_output_concat, padding], dim=0)
+    else:
+        local_output_padded = local_output_concat
+
+    gathered = tensor_model_parallel_all_gather(local_output_padded, dim=0)
+
+    rank_embeddings = []
+    for rank in range(meta.tp_size):
+        start_idx = rank * meta.max_output_tokens_per_rank
+        end_idx = start_idx + (
+            meta.input_patches_per_rank[rank] // meta.spatial_merge_size_squared
+        )
+        rank_embeddings.append(gathered[start_idx:end_idx])
+
+    output_tokens_per_image = [
+        (patches // meta.spatial_merge_size_squared)
+        for patches in meta.patches_per_image
+    ]
+
+    original_order_embeddings = [None] * meta.total_images
+    current_idx = 0
+    for rank in range(meta.tp_size):
+        count = meta.images_per_rank[rank]
+        if count > 0:
+            rank_images = meta.image_rank_assignment[current_idx : current_idx + count]
+            rank_embed = rank_embeddings[rank]
+            embed_start = 0
+            for img_idx in rank_images:
+                img_tokens = output_tokens_per_image[img_idx]
+                original_order_embeddings[img_idx] = rank_embed[
+                    embed_start : embed_start + img_tokens
+                ]
+                embed_start += img_tokens
+            current_idx += count
+
+    return tuple(
+        embed for embed in original_order_embeddings if embed is not None
+    )
+
+
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
