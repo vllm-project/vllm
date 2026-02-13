@@ -24,6 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
+from vllm.v1.spec_decode.eagle_mixin import Eagle3Mixin
 
 from .utils import (
     AutoWeightsLoader,
@@ -262,7 +263,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class Eagle3LlamaForCausalLM(LlamaForCausalLM):
+class Eagle3LlamaForCausalLM(Eagle3Mixin, LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -325,30 +326,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        if self.draft_id_to_target_id is None:
-            assert logits.shape[1] == self.config.vocab_size, (
-                "Expected logits to have shape "
-                f"(*, {self.config.vocab_size}), but got {logits.shape}"
-            )
-            return logits
-
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
-        logits_new = logits.new_full(
-            (
-                logits.shape[0],
-                self.config.vocab_size,
-            ),
-            float("-inf"),
-        )
-        logits_new[:, targets] = logits
-        return logits_new
 
     def combine_hidden_states(
         self,
