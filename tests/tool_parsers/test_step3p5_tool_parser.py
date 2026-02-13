@@ -1123,7 +1123,7 @@ rectangle
 
     # Encode all content tokens at once
     all_token_ids = step3p5_tokenizer.encode(model_output, add_special_tokens=False)
-    eos_token_id = getattr(step3p5_tokenizer, "eos_token_id", None)
+    eos_token_id = step3p5_tokenizer.eos_token_id
 
     # Include EOS token in delta_token_ids if available
     if eos_token_id is not None:

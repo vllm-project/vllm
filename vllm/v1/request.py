@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from typing_extensions import deprecated
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -62,7 +63,6 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
-        eos_token_id: int | None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -80,8 +80,6 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
-        # Because of LoRA, the eos token id can be different for each request.
-        self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
@@ -176,6 +174,17 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+    @property
+    @deprecated(
+        "Request.eos_token_id will be removed in v0.18. "
+        "Please use Request.sampling_params.eos_token_id instead."
+    )
+    def eos_token_id(self) -> int | None:
+        if self.sampling_params is None:
+            return None
+
+        return self.sampling_params.eos_token_id
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -190,7 +199,6 @@ class Request:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
-            eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,

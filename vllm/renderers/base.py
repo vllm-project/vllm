@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+
+logger = init_logger(__name__)
 
 
 class BaseRenderer(ABC):
@@ -62,6 +65,24 @@ class BaseRenderer(ABC):
             self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
 
         return self._async_tokenizer
+
+    def get_bos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for BOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.bos_token_id
+
+    def get_eos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for EOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.eos_token_id
 
     # Step 1: Convert raw inputs to prompts
     def render_prompt(

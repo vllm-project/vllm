@@ -376,8 +376,6 @@ class InputProcessor:
             processed_inputs=processed_inputs,
         )
 
-        eos_token_id = self.input_preprocessor.get_eos_token_id()
-
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
@@ -403,7 +401,7 @@ class InputProcessor:
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
-                None if self.tokenizer is None else self.tokenizer.eos_token_id,
+                self.renderer.get_eos_token_id(),
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
@@ -446,7 +444,6 @@ class InputProcessor:
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
-            eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
