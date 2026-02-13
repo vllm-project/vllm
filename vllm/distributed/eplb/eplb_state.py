@@ -1212,10 +1212,12 @@ def _commit_eplb_maps_for_layer(
     layer: int,
 ) -> None:
     """
-    Per-layer version of _commit_eplb_maps. Copies all of the new_* maps into
-    model_state. After this function completes, the new mappings will become the
-    current mappings and will be visible to the model.
+    Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
+    when running async EPLB. Copies all of the new_* maps into model_state. After this
+    function completes, the new mappings will become the current mappings and will be
+    visible to the model.
     """
+
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map[layer]
     dst = model_state.physical_to_logical_map[layer]
@@ -1247,6 +1249,7 @@ def _commit_eplb_maps(
     the new mappings will become the current mappings and will be visible to the
     model.
     """
+
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map
