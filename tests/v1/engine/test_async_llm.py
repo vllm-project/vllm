@@ -260,7 +260,7 @@ async def test_multi_abort(output_kind: RequestOutputKind):
             )
 
         # Let requests start
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
 
         # Use multi-abort to abort multiple requests at once
         abort_request_ids = [request_ids[i] for i in REQUEST_IDS_TO_ABORT]
