@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -386,24 +387,45 @@ class ServingScores(OpenAIServing):
         # Validate input lens
         _validate_score_input_lens(data_1, data_2)
 
-        # If data_1 has single item, expand to match data_2
-        if len(data_1) == 1:
-            data_1 = data_1 * len(data_2)
-
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        # Build generative score requests for each pair
-        # Each pair becomes: query=data_1[i], items=[data_2[i]]
-        all_results: list[ScoreResponseData] = []
+        # Group documents by query to maximize batching.
+        # create_generative_score already handles multiple items per query
+        # in parallel via merge_async_iterators, so we batch all documents
+        # sharing the same query into a single call.
+        #
+        # Common case: 1 query, N documents -> 1 batched call (not N calls)
+        # N:N case: group by unique query -> 1 call per unique query
+        if len(data_1) == 1:
+            # Fast path: single query, all documents batched in one call
+            query_groups = [
+                (data_1[0], list(data_2), list(range(len(data_2))))
+            ]
+        else:
+            # N:N case: group documents by identical query text
+            groups = OrderedDict()
+            for idx, (q, d) in enumerate(zip(data_1, data_2)):
+                key = q if isinstance(q, str) else str(q)
+                if key not in groups:
+                    groups[key] = ([], [])
+                groups[key][0].append(d)
+                groups[key][1].append(idx)
+            query_groups = [
+                (q, items, indices)
+                for q, (items, indices) in groups.items()
+            ]
+
+        all_results = [None] * len(data_2) if len(data_1) == 1 else [None] * len(data_1)  # type: ignore[list-item]
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        first_token_id = str(request.label_token_ids[0])
 
-        for idx, (d1, d2) in enumerate(zip(data_1, data_2)):
+        for query, items, indices in query_groups:
             gen_request = GenerativeScoreRequest(
                 model=request.model,
-                query=d1,
-                items=[d2],
+                query=query,
+                items=items,
                 label_token_ids=request.label_token_ids,
                 apply_softmax=True,  # Always use softmax for normalized probabilities
                 item_first=False,
@@ -418,18 +440,13 @@ class ServingScores(OpenAIServing):
             if isinstance(gen_response, ErrorResponse):
                 return gen_response
 
-            # Extract the first label token probability as the score
-            if gen_response.results and len(gen_response.results) > 0:
-                token_probs = gen_response.results[0].token_probs
-                # Get probability of the first label token
-                first_token_id = str(request.label_token_ids[0])
-                score = token_probs.get(first_token_id, 0.0)
-
-                all_results.append(
-                    ScoreResponseData(
-                        index=idx,
-                        score=score,
-                    )
+            # Map results back to their original indices
+            for result in gen_response.results:
+                original_idx = indices[result.index]
+                score = result.token_probs.get(first_token_id, 0.0)
+                all_results[original_idx] = ScoreResponseData(
+                    index=original_idx,
+                    score=score,
                 )
 
             total_prompt_tokens += gen_response.usage.prompt_tokens
@@ -439,7 +456,7 @@ class ServingScores(OpenAIServing):
             id=request_id,
             created=created_time,
             model=self.models.model_name(),
-            data=all_results,
+            data=[r for r in all_results if r is not None],
             usage=UsageInfo(
                 prompt_tokens=total_prompt_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
