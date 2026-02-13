@@ -359,9 +359,14 @@ class KimiK25ForConditionalGeneration(
         self.device = current_platform.current_device()
         # Build vision tower directly with KimiK25VisionConfig
         with self._mark_tower_model(vllm_config, "vision_chunk"):
+            try:
+                quant_config_name = type(quant_config).__name__
+            except Exception:
+                quant_config_name = ""
+            quant_config_vit = quant_config if quant_config_name == "AscendModelSlimConfig" else None
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
-                quant_config=quant_config,
+                quant_config=quant_config_vit,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.vision_tower = self.vision_tower.to(
@@ -371,7 +376,7 @@ class KimiK25ForConditionalGeneration(
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
                 use_data_parallel=self.use_data_parallel,
-                quant_config=quant_config,
+                quant_config=quant_config_vit,
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
             self.mm_projector = self.mm_projector.to(
