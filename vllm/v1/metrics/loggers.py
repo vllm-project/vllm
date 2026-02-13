@@ -23,6 +23,7 @@ from vllm.v1.metrics.perf import PerfMetricsLogging
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
+    CompletedTiming,
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
@@ -1140,38 +1141,44 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
-            self.histogram_queue_time_request[engine_idx].observe(
-                finished_request.queued_time
-            )
-            self.histogram_prefill_time_request[engine_idx].observe(
-                finished_request.prefill_time
-            )
-            self.histogram_inference_time_request[engine_idx].observe(
-                finished_request.inference_time
-            )
-            self.histogram_decode_time_request[engine_idx].observe(
-                finished_request.decode_time
-            )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
-            )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
             )
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens
             )
-            self.histogram_request_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
-            )
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+            timing = finished_request.timing
+            if timing is not None:
+                self.histogram_queue_time_request[engine_idx].observe(
+                    timing.queued_time
+                )
+
+            if isinstance(timing, CompletedTiming):
+                self.histogram_prefill_time_request[engine_idx].observe(
+                    timing.prefill_time
+                )
+                self.histogram_inference_time_request[engine_idx].observe(
+                    timing.inference_time
+                )
+                self.histogram_decode_time_request[engine_idx].observe(
+                    timing.decode_time
+                )
+                # prefill KV compute (excludes cached tokens)
+                prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                    finished_request.num_cached_tokens, 0
+                )
+                self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                    prefill_kv_computed
+                )
+                if timing.mean_time_per_output_token is not None:
+                    self.histogram_request_time_per_output_token[engine_idx].observe(
+                        timing.mean_time_per_output_token
+                    )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
