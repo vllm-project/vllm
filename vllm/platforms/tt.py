@@ -134,6 +134,9 @@ class TTPlatform(Platform):
     _enum = PlatformEnum.TT
     device_name: str = "tt"
     device_type: str = "tt"
+    # Disable torch.compile on TT platform - the triton version in tt-metal
+    # is incompatible with torch's inductor backend.
+    simple_compile_backend: str = "eager"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -210,14 +213,8 @@ class TTPlatform(Platform):
 
         # Compat sampling uses the full vLLM sampling pipeline,
         # with logit processors and sampler, instead of our custom sampling.
-        # It is off by default, and enabled only on request
-        # or if any of the requests in the batch require it.
-        # For now, it is only supported with host-side sampling.
-
-        if envs.VLLM_USE_V1:  # type: ignore[attr-defined]
-            logger.warning(
-                "Disabling compatibility sampling as it's not yet support for "
-                "V1 TT backend.")
+        # It is enabled only if any of the requests in the batch requires it,
+        # or if always_compat_sampling is enabled.
 
         always_compat_sampling = False
         if override_tt_config is not None \
@@ -336,26 +333,12 @@ class TTPlatform(Platform):
             raise ValueError(f"Not yet supporting prompt_logprobs on "
                              f"{dev}")
 
-        if envs.VLLM_USE_V1:
-            if params.min_p != 0.0:
-                raise ValueError(f"Not yet supporting min_p on {dev} in V1")
-            if params.bad_words is not None and len(params.bad_words) > 0:
-                raise ValueError(
-                    f"Not yet supporting bad_words on {dev} in V1")
-            if params.logits_processors is not None:
-                raise ValueError(
-                    f"Not yet supporting logits_processors on {dev} in V1")
-            if params.logit_bias is not None:
-                raise ValueError(
-                    f"Not yet supporting logit_bias on {dev} in V1")
-            if params.allowed_token_ids is not None:
-                raise ValueError(
-                    f"Not yet supporting allowed_token_ids on {dev} in V1")
-            if params.min_tokens != 0:
-                raise ValueError(
-                    f"Not yet supporting min_tokens on {dev} in V1")
-            if params.logprobs is not None:
-                raise ValueError(f"Not yet supporting logprobs on {dev} in V1")
+        # Custom logits_processors are rejected by V1 processor before
+        # reaching here, but support has since been added in upstream.
+        # Defensive check so we remember to add support in the future.
+        if envs.VLLM_USE_V1 and params.logits_processors:
+            raise ValueError(
+                f"Custom logits_processors not supported on {dev} in V1")
 
     @staticmethod
     def compat_sampling_required(sampling_params, num_devices) -> bool:

@@ -1255,14 +1255,15 @@ class DPEngineCoreProc(EngineCoreProc):
         all_local_inputs = self.model_executor.collective_rpc(
             "build_dp_model_input", args=(scheduler_output, ))[0]
         (local_input, local_max_blocks, local_has_structured,
-         local_has_penalties, local_reset_batch,
-         local_can_sample_device) = all_local_inputs
+         local_has_penalties, local_reset_batch, local_can_sample_device,
+         local_needs_logprobs) = all_local_inputs
         max_blocks_decode = None  # Only used for decode.
         any_structured_inputs = False  # Only used for decode.
+        any_needs_logprobs = False
 
         if is_decode:
             # Gather max_blocks, has_structured, has_penalties, reset_batch,
-            # and cannot_sample_on_device from all ranks.
+            # cannot_sample_on_device, and needs_logprobs from all ranks.
             input_info_t = torch.tensor(
                 [
                     local_max_blocks,
@@ -1272,6 +1273,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     # Invert so we can use MAX reduction and still compute
                     # "all ranks can sample on device".
                     1 - local_can_sample_device,
+                    local_needs_logprobs,
                 ],
                 dtype=torch.int32)
             dist.all_reduce(input_info_t, op=dist.ReduceOp.MAX, group=group)
@@ -1280,6 +1282,7 @@ class DPEngineCoreProc(EngineCoreProc):
             any_penalties_inputs = input_info_t[2].item() > 0
             any_reset_batch = input_info_t[3].item() > 0
             all_sample_device = input_info_t[4].item() == 0
+            any_needs_logprobs = input_info_t[5].item() > 0
 
             # Build tensorized gather input for decode.
             decode_inputs = self.model_executor.collective_rpc(
@@ -1360,11 +1363,50 @@ class DPEngineCoreProc(EngineCoreProc):
                         gathered_tokens_inputs = pickle.loads(
                             tokens_tensor.numpy().tobytes())
 
+            # Gather host-only sampling params (logprobs, allowed_token_ids,
+            # bad_words, logit_bias, min_p, min_tokens) when sampling on host.
+            gathered_host_only_sample_params = None
+            if not all_sample_device:
+                if rank == 0:
+                    gathered_host_only_sample_params = [
+                        None for _ in range(world)
+                    ]
+                local_host_only_sample_params = decode_inputs.get(
+                    "host_only_sample_params")
+                dist.gather_object(local_host_only_sample_params,
+                                   gathered_host_only_sample_params,
+                                   dst=0,
+                                   group=group)
+
+                if len(self.dp_device_ranks) > 1:
+                    if rank == 0:
+                        # Rank 0 sends gathered host_only params to device ranks
+                        pickled_host_only = pickle.dumps(
+                            gathered_host_only_sample_params)
+                        host_only_tensor = torch.frombuffer(pickled_host_only,
+                                                            dtype=torch.uint8)
+                        host_only_size = torch.tensor(
+                            [host_only_tensor.numel()], dtype=torch.long)
+                        for dst in self.dp_device_ranks[1:]:
+                            dist.send(host_only_size, dst=dst, group=group)
+                            dist.send(host_only_tensor, dst=dst, group=group)
+                    elif local_rank == 0:  # other device ranks
+                        # Other device ranks receive from rank 0
+                        host_only_size = torch.zeros(1, dtype=torch.long)
+                        dist.recv(host_only_size, src=0, group=group)
+                        host_only_tensor = torch.empty(host_only_size.item(),
+                                                       dtype=torch.uint8)
+                        dist.recv(host_only_tensor, src=0, group=group)
+                        gathered_host_only_sample_params = pickle.loads(
+                            host_only_tensor.numpy().tobytes())
+
             if local_rank == 0:
                 gathered_inputs = {
                     "int_inputs": stacked_int,
                     "float_inputs": stacked_float,
                     "sampling_tokens_inputs": gathered_tokens_inputs,
+                    "host_only_sample_params":
+                    gathered_host_only_sample_params,
                     "reset_batch": any_reset_batch,
                     "all_sample_device": all_sample_device,
                 }
@@ -1374,6 +1416,12 @@ class DPEngineCoreProc(EngineCoreProc):
             gathered_inputs = None
             if rank == 0:
                 gathered_inputs = [None for _ in range(world)]  # type: ignore
+
+            # All_reduce to determine if any rank needs logprobs (for prefill).
+            logprobs_flag_t = torch.tensor([local_needs_logprobs],
+                                           dtype=torch.int32)
+            dist.all_reduce(logprobs_flag_t, op=dist.ReduceOp.MAX, group=group)
+            any_needs_logprobs = logprobs_flag_t[0].item() > 0
 
             # Gather to rank 0, then send to other device ranks (local rank 0).
             # Note: if num device ranks == num world ranks, then this could be
@@ -1405,14 +1453,18 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dlog("after_inputs_gather")
 
         # Concatenate and execute DP inputs on local DP rank 0 (device ranks).
+        logprobs_per_dp: list = [None] * world
         if local_rank == 0 and (is_decode or
                                 (isinstance(gathered_inputs, list)
                                  and any(x is not None
                                          for x in gathered_inputs))):
-            send_tensor = self.model_executor.collective_rpc(
+            result = self.model_executor.collective_rpc(
                 "concat_and_execute_dp",
                 args=(gathered_inputs, is_decode, max_blocks_decode,
                       any_structured_inputs))[0]
+            # Result is (send_tensor, logprobs_lists_per_dp)
+            assert isinstance(result, tuple) and len(result) == 2
+            send_tensor, logprobs_per_dp = result
             assert isinstance(send_tensor, torch.Tensor)
         else:
             B = self.vllm_config.scheduler_config.max_num_seqs
@@ -1428,10 +1480,22 @@ class DPEngineCoreProc(EngineCoreProc):
         dist.scatter(my_ids, scatter_list, src=0, group=group)
         self.dlog("after_results_gather my_ids_shape=%s", tuple(my_ids.shape))
 
+        # Scatter logprobs only if any rank needs them
+        # (determined in all_reduce).
+        my_logprobs_val = None
+        if any_needs_logprobs:
+            my_logprobs: list = [None]
+            logprobs_scatter_list = logprobs_per_dp if rank == 0 else None
+            dist.scatter_object_list(my_logprobs,
+                                     logprobs_scatter_list,
+                                     src=0,
+                                     group=group)
+            my_logprobs_val = my_logprobs[0]
+
         # If rank had scheduled tokens, apply results locally and return output
         if local_has_requests:
             output = self.model_executor.collective_rpc(
-                "apply_dp_execution_result", args=(my_ids, ))[0]
+                "apply_dp_execution_result", args=(my_ids, my_logprobs_val))[0]
             return output
         else:
             return EMPTY_MODEL_RUNNER_OUTPUT

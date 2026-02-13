@@ -218,6 +218,21 @@ class LogitsProcessorManager:
         """Iterator over all logits processors."""
         return chain(self.argmax_invariant, self.non_argmax_invariant)
 
+    def has_active_processors(self) -> bool:
+        """Check if any processors have active requests.
+
+        This is used to determine if host sampling is required (e.g., for
+        min_p, logit_bias, min_tokens which are handled by built-in processors).
+        """
+        for proc in self.all:
+            if isinstance(proc, MinPLogitsProcessor) and proc.min_p_count:
+                return True
+            if isinstance(proc, LogitBiasLogitsProcessor) and proc.biases:
+                return True
+            if isinstance(proc, MinTokensLogitsProcessor) and proc.min_toks:
+                return True
+        return False
+
 
 ###### ----- Built-in LogitsProcessor impls below here
 
