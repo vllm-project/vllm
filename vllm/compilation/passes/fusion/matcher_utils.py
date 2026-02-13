@@ -370,6 +370,8 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
         if self.quant_key.scale.group_shape.is_per_group():
+            # for tma_aligned, the scale must be passed to forward_custom
+            # tma_aligned fusion then matches by custom op arguments
             if not self.is_tma_aligned:
                 assert scale is None
                 scale = self.make_scale(input, transposed=self.has_col_major_scales)
