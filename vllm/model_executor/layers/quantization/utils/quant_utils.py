@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+MXFP_SCALE_DTYPE = torch.uint8
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -103,7 +104,7 @@ class QuantKey:
     symmetric: symmetric if True, asymmetric if False
     """
 
-    dtype: scalar_types
+    dtype: torch.dtype
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
     symmetric: bool = True
@@ -117,74 +118,48 @@ class QuantKey:
         )
 
 
-kStaticTensorScale = ScaleDesc(scalar_types.float32, True, GroupShape.PER_TENSOR)
-kFp8StaticTensorSym = QuantKey(
-    scalar_types.float8_e4m3fn, kStaticTensorScale, symmetric=True
-)
+kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
 
-kDynamicTensorScale = ScaleDesc(scalar_types.float32, False, GroupShape.PER_TENSOR)
-kFp8DynamicTensorSym = QuantKey(
-    scalar_types.float8_e4m3fn, kDynamicTensorScale, symmetric=True
-)
+kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
 
-kStaticTokenScale = ScaleDesc(scalar_types.float32, True, GroupShape.PER_TOKEN)
-kFp8StaticTokenSym = QuantKey(
-    scalar_types.float8_e4m3fn, kStaticTokenScale, symmetric=True
-)
+kStaticTokenScale = ScaleDesc(torch.float32, True, GroupShape.PER_TOKEN)
+kFp8StaticTokenSym = QuantKey(FP8_DTYPE, kStaticTokenScale, symmetric=True)
 
-kStaticChannelScale = ScaleDesc(scalar_types.float32, True, GroupShape.PER_CHANNEL)
-kFp8StaticChannelSym = QuantKey(
-    scalar_types.float8_e4m3fn, kStaticChannelScale, symmetric=True
-)
+kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
+kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
 
-kDynamicTokenScale = ScaleDesc(scalar_types.float32, False, GroupShape.PER_TOKEN)
-kFp8DynamicTokenSym = QuantKey(
-    scalar_types.float8_e4m3fn, kDynamicTokenScale, symmetric=True
-)
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
 
-kNvfp4DynamicGroupScale = ScaleDesc(
-    scalar_types.float8_e4m3fn, False, GroupShape(1, 16)
-)
+kNvfp4DynamicGroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
 kNvfp4Dynamic = QuantKey(
-    scalar_types.float4_e2m1f, scale=kNvfp4DynamicGroupScale, scale2=kStaticTensorScale
+    FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kStaticTensorScale
 )
 
-kNvfp4StaticGroupScale = ScaleDesc(scalar_types.float8_e4m3fn, True, GroupShape(1, 16))
+kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(
-    scalar_types.float4_e2m1f, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
+    FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
 )
 
-kDynamic128Scale = ScaleDesc(scalar_types.float32, False, GroupShape(1, 128))
-kFp8Dynamic128Sym = QuantKey(
-    scalar_types.float8_e4m3fn, kDynamic128Scale, symmetric=True
-)
+kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
+kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 
-kStatic128BlockScale = ScaleDesc(scalar_types.float32, True, GroupShape(128, 128))
-kFp8Static128BlockSym = QuantKey(
-    scalar_types.float8_e4m3fn, kStatic128BlockScale, symmetric=True
-)
+kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
+kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
-kDynamic64Scale = ScaleDesc(scalar_types.float32, False, GroupShape(1, 64))
-kFp8Dynamic64Sym = QuantKey(scalar_types.float8_e4m3fn, kDynamic64Scale, symmetric=True)
+kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
+kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
-kMxfp4DynamicGroupScale = ScaleDesc(
-    scalar_types.float8_e8m0fnu, False, GroupShape(1, 32)
-)
-kMxfp4Dynamic = QuantKey(
-    scalar_types.float4_e2m1f, scale=kMxfp4DynamicGroupScale, symmetric=True
-)
+kMxfp4DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale, symmetric=True)
 
-kMxfp8DynamicGroupScale = ScaleDesc(
-    scalar_types.float8_e8m0fnu, False, GroupShape(1, 32)
-)
-kMxfp8Dynamic = QuantKey(
-    scalar_types.float8_e4m3fn, scale=kMxfp8DynamicGroupScale, symmetric=True
-)
+kMxfp8DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=True)
 
-kMxfp4StaticGroupScale = ScaleDesc(scalar_types.float8_e8m0fnu, True, GroupShape(1, 32))
-kMxfp4Static = QuantKey(
-    scalar_types.float4_e2m1f, scale=kMxfp4StaticGroupScale, symmetric=True
-)
+kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
