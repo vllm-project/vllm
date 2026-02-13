@@ -568,8 +568,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.model_executor.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -614,13 +614,43 @@ class EngineCore:
         self.model_executor.reset_encoder_cache()
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        """Put the engine to sleep at the specified level.
+
+        Args:
+            level: Sleep level.
+                - Level 0: Pause scheduling only. Requests are still accepted
+                           but not processed. No GPU memory changes.
+                - Level 1: Offload model weights to CPU, discard KV cache.
+                - Level 2: Discard all GPU memory.
+        """
+        if level == 0:
+            # Level 0: Just pause scheduling, don't touch GPU
+            self.pause_scheduler()
+        else:
+            # Level 1+: Delegate to executor for GPU memory management
+            self.model_executor.sleep(level)
 
     def wake_up(self, tags: list[str] | None = None):
-        self.model_executor.wake_up(tags)
+        """Wake up the engine from sleep.
+
+        Args:
+            tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+        """
+        if tags is not None and "scheduling" in tags:
+            # Level 0 wake up: Resume scheduling
+            self.resume_scheduler()
+            # Remove "scheduling" from tags if there are other tags to process
+            remaining_tags = [t for t in tags if t != "scheduling"]
+            if remaining_tags:
+                self.model_executor.wake_up(remaining_tags)
+        else:
+            # Full wake up
+            self.resume_scheduler()
+            self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        """Check if engine is sleeping at any level."""
+        return self._scheduler_paused or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1023,7 +1053,13 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            #    Skip if scheduling is paused (level 0 sleep)
+            if not self._scheduler_paused:
+                self._process_engine_step()
+            else:
+                # When scheduling is paused, still need to check for wake up
+                # by processing any utility requests that might resume scheduling
+                pass
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1031,7 +1067,7 @@ class EngineCoreProc(EngineCore):
         waited = False
         while (
             not self.engines_running
-            and not self.scheduler.has_requests()
+            and (not self.scheduler.has_requests() or self._scheduler_paused)
             and not self.batch_queue
             and not self._scheduler_paused
         ):
@@ -1414,11 +1450,15 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
+            # Skip processing if scheduling is paused (level 0 sleep)
+            if self._scheduler_paused:
+                continue
+
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

@@ -911,8 +911,8 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def start_profile(self) -> None:
-        coros = [self.engine_core.profile_async(True)]
+    async def start_profile(self, profile_prefix: str | None = None) -> None:
+        coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
         await asyncio.gather(*coros)
@@ -938,7 +938,8 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
-        await self.reset_prefix_cache()
+        if level > 0:
+            await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
         if self.logger_manager is not None:
