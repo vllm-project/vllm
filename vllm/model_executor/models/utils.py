@@ -31,6 +31,7 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
@@ -654,11 +655,16 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
             # one module might have some parameters offloaded and some not
             break
 
-        param_name_parts = name.split(".")
-        if _CPU_OFFLOAD_PARAMS and not any(
-            param in param_name_parts for param in _CPU_OFFLOAD_PARAMS
-        ):
-            continue
+        if _CPU_OFFLOAD_PARAMS:
+            # Check if parameter belongs to the offloading set
+            # Add dots here to ensure we match full segments only
+            # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight" but not
+            # "mlp.experts.w2_weight_scale"
+            should_offload = any(
+                f".{param}." in f".{name}." for param in _CPU_OFFLOAD_PARAMS
+            )
+            if not should_offload:
+                continue
 
         cpu_data = p.data.to(device="cpu")
         if pin_memory:
@@ -720,6 +726,10 @@ def make_layers(
         ]
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+    if _CPU_OFFLOAD_MAX_BYTES > 0:
+        logger.info(
+            "Total CPU offloaded parameters: %s GBs", format_gib(_CPU_OFFLOAD_BYTES)
+        )
     return start_layer, end_layer, modules
 
 
