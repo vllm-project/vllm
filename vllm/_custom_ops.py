@@ -38,8 +38,9 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         input: torch.Tensor,
         input_scale: torch.Tensor,
         is_sf_swizzled_layout: bool,
-    ) -> list[torch.Tensor]:
-        m, n = input.shape[0], input.shape[1]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = input.shape[-1]
+        m = input.numel() // n
         block_size = 16
         output = torch.empty((m, n // 2), dtype=torch.uint8, device=input.device)
         if is_sf_swizzled_layout:
@@ -58,7 +59,7 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
                 dtype=torch.uint8,
                 device=input.device,
             )
-        return [output, output_scale]
+        return (output, output_scale)
 
     @register_fake("_C::scaled_fp4_quant.out")
     def _scaled_fp4_quant_out_fake(
@@ -68,8 +69,11 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         *,
         output: torch.Tensor,
         output_scale: torch.Tensor,
-    ) -> list[torch.Tensor]:
-        return [output, output_scale]
+    ) -> None:
+        return None
+
+    # Tag the out variant so PyTorch's to_out_variant() can discover it
+    torch.ops._C.scaled_fp4_quant.out._tags.append(torch.Tag.out_variant)
 
 
 # page attention ops

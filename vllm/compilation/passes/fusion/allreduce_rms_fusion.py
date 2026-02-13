@@ -545,8 +545,8 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
-            m = input.shape[-2] if input.ndim >= 2 else input.shape[0]
             n = input.shape[-1]
+            m = input.numel() // n
             quant_result = torch.empty(
                 (m, n // 2), device=input.device, dtype=torch.uint8
             )
@@ -642,8 +642,8 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            m = input.shape[-2] if input.ndim >= 2 else input.shape[0]
             n = input.shape[-1]
+            m = input.numel() // n
             quant_result = torch.empty(
                 (m, n // 2), device=input.device, dtype=torch.uint8
             )

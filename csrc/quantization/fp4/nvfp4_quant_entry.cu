@@ -63,11 +63,11 @@ void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
 }
 
 // Functional variant: allocates output and output_scale, returns them
-std::vector<torch::Tensor> scaled_fp4_quant_func(torch::Tensor const& input,
-                                                 torch::Tensor const& input_sf,
-                                                 bool is_sf_swizzled_layout) {
-  int64_t m = input.size(0);
-  int64_t n = input.size(1);
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf,
+    bool is_sf_swizzled_layout) {
+  int64_t n = input.size(-1);
+  int64_t m = input.numel() / n;
   int64_t block_size = 16;
   auto device = input.device();
 
@@ -95,13 +95,11 @@ std::vector<torch::Tensor> scaled_fp4_quant_func(torch::Tensor const& input,
 }
 
 // Out variant with PyTorch standard signature: (input, ..., *, out, out_scale)
-std::vector<torch::Tensor> scaled_fp4_quant_out(torch::Tensor const& input,
-                                                torch::Tensor const& input_sf,
-                                                bool is_sf_swizzled_layout,
-                                                torch::Tensor& output,
-                                                torch::Tensor& output_sf) {
+void scaled_fp4_quant_out(torch::Tensor const& input,
+                          torch::Tensor const& input_sf,
+                          bool is_sf_swizzled_layout, torch::Tensor& output,
+                          torch::Tensor& output_sf) {
   scaled_fp4_quant(output, input, output_sf, input_sf, is_sf_swizzled_layout);
-  return {output, output_sf};
 }
 
 void scaled_fp4_experts_quant(
