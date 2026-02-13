@@ -1178,10 +1178,11 @@ class TTModelRunner:
                                                **enc_dec_kwargs,
                                                enable_trace=enable_trace,
                                                read_from_device=True)
-            # tt_out is a tuple of (logits, logprobs)
-            # v1 currently doesn't handle logprobs from TT models
-            if isinstance(tt_out, tuple):
-                tt_out = tt_out[0]
+
+        # tt_out is a tuple of (logits, logprobs)
+        # v1 currently doesn't handle logprobs from TT models
+        if isinstance(tt_out, tuple):
+            tt_out = tt_out[0]
 
         return self._get_output_tokens(
             tt_out=tt_out,
