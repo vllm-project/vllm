@@ -923,7 +923,7 @@ def apply_top_k_top_p_triton(
         size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
         buffer = logits.new_empty((size, vocab_size))
         _TRITON_BUFFER_CACHE[buf_key] = buffer
-    if NUM_PROGRAMS < buffer.shape[0]:
+    if buffer.shape[0] > NUM_PROGRAMS:
         buffer = buffer[:NUM_PROGRAMS]
 
     # Cache lookup table entries on each device.
