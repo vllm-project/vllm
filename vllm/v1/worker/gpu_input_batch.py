@@ -410,6 +410,10 @@ class InputBatch:
                 self.bad_words_token_ids[req_index] = (
                     sampling_params.bad_words_token_ids
                 )
+
+            self.logits_processing_needs_token_ids[req_index] = (
+                sampling_params.requires_token_ids
+            )
         elif pooling_params := request.pooling_params:
             pooling_states = request.pooling_states
             assert pooling_states is not None
@@ -623,6 +627,14 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
 
+        (
+            self.logits_processing_needs_token_ids[i1],
+            self.logits_processing_needs_token_ids[i2],
+        ) = (
+            self.logits_processing_needs_token_ids[i2],
+            self.logits_processing_needs_token_ids[i1],
+        )
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -745,6 +757,10 @@ class InputBatch:
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
 
+            self.logits_processing_needs_token_ids[empty_index] = (
+                self.logits_processing_needs_token_ids[last_req_index]
+            )
+
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -818,6 +834,7 @@ class InputBatch:
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
+            or self.logits_processing_needs_token_ids[:num_reqs].any()
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)
