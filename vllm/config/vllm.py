@@ -278,7 +278,7 @@ class VllmConfig:
     optimization_level: OptimizationLevel = OptimizationLevel.O2
     """The optimization level. These levels trade startup time cost for
     performance, with -O0 having the best startup time and -O3 having the best
-    performance. -02 is used by defult. See  OptimizationLevel for full
+    performance. -O2 is used by default. See OptimizationLevel for full
     description."""
 
     weight_transfer_config: WeightTransferConfig | None = None
@@ -1110,6 +1110,15 @@ class VllmConfig:
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.cache_config.mamba_cache_mode == "align":
+            assert (
+                self.cache_config.block_size
+                <= self.scheduler_config.max_num_batched_tokens
+            ), (
+                "In Mamba cache align mode, block_size "
+                f"({self.cache_config.block_size}) must be <= "
+                "max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
+            )
             if self.scheduler_config.long_prefill_token_threshold > 0:
                 assert (
                     self.scheduler_config.long_prefill_token_threshold

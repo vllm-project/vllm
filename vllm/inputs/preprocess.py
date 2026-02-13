@@ -16,7 +16,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.renderers import renderer_from_config
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
     DecoderOnlyDictPrompt,
@@ -56,6 +56,7 @@ class InputPreprocessor:
         self,
         model_config: ModelConfig,
         observability_config: ObservabilityConfig | None = None,
+        renderer: BaseRenderer | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -63,7 +64,7 @@ class InputPreprocessor:
 
         self.model_config = model_config
         self.observability_config = observability_config
-        self.renderer = renderer_from_config(model_config)
+        self.renderer = renderer or renderer_from_config(model_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
@@ -76,24 +77,6 @@ class InputPreprocessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
-    def get_bos_token_id(self) -> int | None:
-        if self.tokenizer is None:
-            logger.warning_once(
-                "Using None for BOS token id because tokenizer is not initialized"
-            )
-            return None
-
-        return self.tokenizer.bos_token_id
-
-    def get_eos_token_id(self) -> int | None:
-        if self.tokenizer is None:
-            logger.warning_once(
-                "Using None for EOS token id because tokenizer is not initialized"
-            )
-            return None
-
-        return self.tokenizer.eos_token_id
-
     def get_decoder_start_token_id(self) -> int:
         """
         Obtain the decoder start token id employed by an encoder/decoder
@@ -105,11 +88,10 @@ class InputPreprocessor:
 
         if dec_start_token_id is None:
             logger.warning_once(
-                "Falling back on <BOS> for decoder start token "
-                "id because decoder start token id is not "
-                "available."
+                "Falling back on <BOS> for decoder start token id "
+                "because decoder start token id is not available."
             )
-            dec_start_token_id = self.get_bos_token_id()
+            dec_start_token_id = self.renderer.get_bos_token_id()
 
         if dec_start_token_id is None:
             raise RuntimeError("Cannot find decoder start token id or <BOS>")
