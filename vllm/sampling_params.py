@@ -7,10 +7,15 @@ import json
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
-from pydantic.dataclasses import dataclass
+
+# Use stdlib dataclass for mypy, keep pydantic dataclass at runtime.
+if TYPE_CHECKING:
+    from dataclasses import dataclass
+else:
+    from pydantic.dataclasses import dataclass
 
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
