@@ -25,8 +25,9 @@ class Sampler:
         vocab_size: int,
         device: torch.device,
         logprobs_mode: LogprobsMode = "raw_logprobs",
+        num_speculative_tokens: int = 1,
     ):
-        if logprobs_mode not in ["processed_logprobs", "raw_logprobs"]:
+        if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -34,12 +35,10 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
@@ -62,23 +61,32 @@ class Sampler:
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        cu_num_logits_np: np.ndarray,
         pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
         sampled, processed_logits = self.sample(
-            logits, idx_mapping, idx_mapping_np, pos
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
         if max_num_logprobs != NO_LOGPROBS:
-            logits = (
-                processed_logits
-                if self.logprobs_mode == "processed_logprobs"
-                else logits
+            if self.logprobs_mode == "processed_logprobs":
+                logits = processed_logits
+            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+            cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+            logprobs_tensors = compute_topk_logprobs(
+                logits, max_num_logprobs, sampled, cu_num_logits
             )
-            logprobs_tensors = compute_topk_logprobs(logits, max_num_logprobs, sampled)
         else:
             logprobs_tensors = None
 
@@ -99,6 +107,8 @@ class Sampler:
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -107,7 +117,14 @@ class Sampler:
         self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
 
         # Apply penalties in place.
-        self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
+        self.penalties_state.apply_penalties(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+            self.num_speculative_tokens,
+        )
 
         # Apply temperature in place.
         apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)

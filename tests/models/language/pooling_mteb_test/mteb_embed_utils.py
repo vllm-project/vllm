@@ -187,7 +187,10 @@ def mteb_test_embed_models(
         head_dtype = model_config.head_dtype
 
         # Test embedding_size, isnan and whether to use normalize
-        vllm_outputs = vllm_model.embed(example_prompts, truncate_prompt_tokens=-1)
+        vllm_outputs = vllm_model.embed(
+            example_prompts,
+            tokenization_kwargs=dict(truncate_prompt_tokens=-1),
+        )
         outputs_tensor = torch.tensor(vllm_outputs)
         assert not torch.any(torch.isnan(outputs_tensor))
         embedding_size = model_config.embedding_size

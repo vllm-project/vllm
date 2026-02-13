@@ -8,7 +8,7 @@ import os
 from argparse import Namespace
 from logging import Logger
 from string import Template
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import regex as re
 from fastapi import Request
@@ -22,19 +22,9 @@ from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.completion.protocol import (
-        CompletionRequest,
-    )
-    from vllm.entrypoints.openai.engine.protocol import (
-        StreamOptions,
-    )
+    from vllm.entrypoints.openai.engine.protocol import StreamOptions
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 else:
-    ChatCompletionRequest = object
-    CompletionRequest = object
     StreamOptions = object
     LoRAModulePath = object
 
@@ -182,40 +172,12 @@ def cli_env_setup():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def _validate_truncation_size(
-    max_model_len: int,
-    truncate_prompt_tokens: int | None,
-    tokenization_kwargs: dict[str, Any] | None = None,
-) -> int | None:
-    if truncate_prompt_tokens is not None:
-        if truncate_prompt_tokens <= -1:
-            truncate_prompt_tokens = max_model_len
-
-        if truncate_prompt_tokens > max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size."
-            )
-
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-    else:
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = False
-
-    return truncate_prompt_tokens
-
-
 def get_max_tokens(
     max_model_len: int,
-    request: "ChatCompletionRequest | CompletionRequest",
+    max_tokens: int | None,
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
-    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 

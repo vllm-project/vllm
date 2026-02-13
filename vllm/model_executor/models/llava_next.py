@@ -78,6 +78,7 @@ class LlavaNextImageEmbeddingInputs(TensorSchema):
 LlavaNextImageInputs: TypeAlias = (
     LlavaNextImagePixelInputs | LlavaNextImageEmbeddingInputs
 )
+"""Alias for supported LLaVA-NeXT image input types."""
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
@@ -106,6 +107,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
+        """Get the number of image tokens for the given image dimensions."""
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
@@ -272,7 +274,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -510,7 +511,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -8,9 +8,10 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import get_cu_count
@@ -32,8 +33,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
-    import aiter
-
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
@@ -683,11 +682,13 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        return [16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [64, 128, 256]
+
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -797,7 +798,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             total_tokens=swa_total_tokens,
         )
 
-        aiter.flash_attn_varlen_func(
+        rocm_aiter_ops.flash_attn_varlen_func(
             q=query,
             k=key_fetched,
             v=value_fetched,
@@ -847,7 +848,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
-        out, lse = aiter.flash_attn_varlen_func(
+        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
@@ -894,7 +895,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            suf_out, suf_lse = aiter.flash_attn_varlen_func(
+            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
                 q=query,
                 k=key_fetched,
                 v=value_fetched,
@@ -984,49 +985,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(0)
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
+
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping
-            # is not padded. However, we don't need to do
-            # key[:num_actual_tokens] and value[:num_actual_tokens] because
-            # the reshape_and_cache_flash op uses the slot_mapping's shape
-            # to determine the number of actual tokens.
-            if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                # We may calculate per token quant scale in
-                # reshape_and_cache_shuffle_triton which might differ from
-                # vllm's style when shuffle layout is used.
-                reshape_and_cache_shuffle_triton(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    attn_metadata.k_scale,
-                    attn_metadata.v_scale,
-                )
-            else:
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
@@ -1052,7 +1014,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 prefill_key = key[num_decode_tokens + num_extend_tokens :]
                 prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-                aiter.flash_attn_varlen_func(
+                rocm_aiter_ops.flash_attn_varlen_func(
                     q=prefill_query,
                     k=prefill_key,
                     v=prefill_value,
@@ -1113,35 +1075,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Sliding window with shuffle layout is not supported yet."
                     )
-                    from aiter.ops.triton.unified_attention import (
-                        unified_attention,
-                    )
-
-                    descale_shape = (
-                        attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
-                        key_cache.shape[2],
-                    )
-                    unified_attention(
-                        q=query[:num_decode_tokens],
-                        k=key_cache,
-                        v=value_cache,
-                        out=output[:num_decode_tokens],
-                        cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
-                        max_seqlen_q=1,  # optimize this
-                        seqused_k=attn_metadata.seq_lens[:num_decodes],
-                        max_seqlen_k=attn_metadata.max_seq_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        alibi_slopes=self.alibi_slopes,
-                        window_size=self.sliding_window,
-                        block_table=attn_metadata.block_table[:num_decodes],
-                        softcap=self.logits_soft_cap,
-                        q_descale=None,
-                        k_descale=layer._k_scale.expand(descale_shape),
-                        v_descale=layer._v_scale.expand(descale_shape),
-                    )
-                    return
-                assert attn_metadata.decode_metadata is not None
 
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
@@ -1158,7 +1091,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     new_key_cache = key_cache.view_as(k_cache_template)
                     new_value_cache = value_cache.view_as(v_cache_template)
-                    aiter.pa_fwd_asm(
+                    rocm_aiter_ops.pa_fwd_asm(
                         Q=query[:num_decode_tokens],
                         K=new_key_cache,
                         V=new_value_cache,
@@ -1187,6 +1120,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         device=output.device,
                     )
 
+                    # import so that aiter register the op to the namespace of
+                    # torch.ops.aiter
+                    import aiter  # noqa: F401
+
                     torch.ops.aiter.paged_attention_v1(
                         output[:num_decode_tokens],
                         workspace_buffer,
@@ -1206,6 +1143,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         layer._v_scale,
                         None,
                         _PARTITION_SIZE_ROCM,
+                        1,
+                        self.sliding_window[0] + 1,
                     )
         else:
             raise NotImplementedError(
@@ -1213,3 +1152,67 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: Attention,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ):
+        attn_metadata, _, _ = get_attention_context(layer.layer_name)
+        if attn_metadata is None:
+            # Profiling run.
+            return
+
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping
+            # is not padded. However, we don't need to do
+            # key[:num_actual_tokens] and value[:num_actual_tokens] because
+            # the reshape_and_cache_flash op uses the slot_mapping's shape
+            # to determine the number of actual tokens.
+            if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                # We may calculate per token quant scale in
+                # reshape_and_cache_shuffle_triton which might differ from
+                # vllm's style when shuffle layout is used.
+                k_scale = attn_metadata.k_scale
+                v_scale = attn_metadata.v_scale
+                assert k_scale is not None and v_scale is not None, (
+                    "k_scale and v_scale are required for shuffled update"
+                )
+                reshape_and_cache_shuffle_triton(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                )
+            else:
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )

@@ -43,7 +43,6 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.renderers import RendererLike
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
@@ -183,7 +182,6 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
-        self.output_messages: list[ResponseRawMessageAndToken] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -209,12 +207,22 @@ class SimpleContext(ConversationContext):
                     tokens=output_prompt_token_ids,
                 )
             )
-        self.output_messages.append(
+
+    @property
+    def output_messages(self) -> list[ResponseRawMessageAndToken]:
+        """Return consolidated output as a single message.
+
+        In streaming mode, text and tokens are accumulated across many deltas.
+        This property returns them as a single entry rather than one per delta.
+        """
+        if not self._accumulated_text and not self._accumulated_token_ids:
+            return []
+        return [
             ResponseRawMessageAndToken(
-                message=delta_output.text,
-                tokens=delta_output.token_ids,
+                message=self._accumulated_text,
+                tokens=list(self._accumulated_token_ids),
             )
-        )
+        ]
 
     @property
     def final_output(self) -> RequestOutput | None:
@@ -261,7 +269,7 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        renderer: RendererLike,
+        tokenizer: TokenizerLike,
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
@@ -280,7 +288,6 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
-        tokenizer = renderer.get_tokenizer()
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
             reasoning_parser_cls=reasoning_parser_cls,
@@ -290,8 +297,6 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
-        self.renderer = renderer
-        self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}

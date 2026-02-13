@@ -11,7 +11,6 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -59,8 +58,8 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
 
@@ -290,7 +289,7 @@ class MBartDecoderNoPos(nn.Module):
 
     def forward(
         self,
-        decoder_input_ids: torch.Tensor,
+        decoder_input_ids: torch.Tensor | None,
         *,
         encoder_hidden_states: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -416,6 +415,8 @@ class NemotronParseImageProcessor:
         else:
             self.target_height = self.target_width = int(self.final_size)
 
+        import cv2
+
         self.transform = A.Compose(
             [
                 A.PadIfNeeded(
@@ -457,6 +458,8 @@ class NemotronParseImageProcessor:
             new_height = int(new_width / aspect_ratio)
 
         # Use cv2.INTER_LINEAR like the original
+        import cv2
+
         return cv2.resize(
             image, (new_width, new_height), interpolation=cv2.INTER_LINEAR
         )
@@ -639,6 +642,7 @@ class NemotronParseDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -657,7 +661,7 @@ class NemotronParseMultiModalProcessor(
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         return [0]
 
@@ -894,7 +898,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,

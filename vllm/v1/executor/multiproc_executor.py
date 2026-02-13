@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -391,14 +392,17 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
+        active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        # Give processes time to clean themselves up properly first
+        if wait_for_termination(active_procs(), 4):
+            return
+
         # Send SIGTERM if still running
-        active_procs = [proc for proc in worker_procs if proc.is_alive()]
-        for p in active_procs:
+        for p in active_procs():
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            active_procs = [p for p in active_procs if p.is_alive()]
-            for p in active_procs:
+            for p in active_procs():
                 p.kill()
 
     def shutdown(self):
@@ -524,6 +528,7 @@ class WorkerProc:
                 )
             )
 
+    @instrument(span_name="Worker init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -701,6 +706,9 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
+                logger.debug(
+                    "WorkerProc handling signal %d, raising SystemExit", signum
+                )
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -734,6 +742,15 @@ class WorkerProc:
 
         try:
             reader.close()
+
+            # Initialize tracer
+            rank = kwargs.get("rank", 0)
+            maybe_init_worker_tracer(
+                instrumenting_module_name="vllm.worker",
+                process_kind="worker",
+                process_name=f"Worker_{rank}",
+            )
+
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
 
@@ -773,6 +790,13 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
+
+        except SystemExit as e:
+            # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
+            # the graceful shutdown process did not succeed
+            logger.warning("WorkerProc was terminated")
+            # SystemExit must never be ignored
+            raise e
 
         finally:
             if ready_writer is not None:
