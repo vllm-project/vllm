@@ -631,8 +631,53 @@ class Qwen3CoderToolParser(ToolParser):
                                 # remaining text before function end
                                 param_end_idx = len(value_text)
                             else:
-                                # Still streaming, wait for more content
-                                return None
+                                # Parameter is incomplete - start streaming
+                                # mode instead of waiting for complete param
+                                self.in_param = True
+                                self.current_param_value = ""
+
+                                # Build and send the parameter key header
+                                if self.param_count == 0:
+                                    key_fragment = f'"{self.current_param_name}": "'
+                                else:
+                                    key_fragment = f', "{self.current_param_name}": "'
+
+                                self.param_count += 1
+
+                                # Stream the partial value we have so far
+                                partial_value = value_text
+                                if partial_value.endswith("\n"):
+                                    partial_value = partial_value[:-1]
+
+                                if partial_value:
+                                    # JSON escape the partial value
+                                    escaped_value = json.dumps(
+                                        partial_value, ensure_ascii=False
+                                    )[1:-1]  # Remove surrounding quotes
+                                    self.current_param_value = partial_value
+                                    args = key_fragment + escaped_value
+                                    return DeltaMessage(
+                                        tool_calls=[
+                                            DeltaToolCall(
+                                                index=self.current_tool_index,
+                                                function=DeltaFunctionCall(
+                                                    arguments=args
+                                                ),
+                                            )
+                                        ]
+                                    )
+                                else:
+                                    # No value yet, just send the key header
+                                    return DeltaMessage(
+                                        tool_calls=[
+                                            DeltaToolCall(
+                                                index=self.current_tool_index,
+                                                function=DeltaFunctionCall(
+                                                    arguments=key_fragment
+                                                ),
+                                            )
+                                        ]
+                                    )
 
                     if param_end_idx != -1:
                         # Complete parameter found
@@ -685,12 +730,25 @@ class Qwen3CoderToolParser(ToolParser):
                             ]
                         )
 
-            # Continue parameter value - Not used in the current implementation
-            # since we process complete parameters above
+            # Continue streaming parameter value when in_param is True
             if self.in_param:
-                if self.parameter_end_token in delta_text:
-                    # End of parameter
-                    end_idx = delta_text.find(self.parameter_end_token)
+                # Check for parameter end markers: </parameter>,
+                # <parameter= (next param), or </function>
+                end_marker = None
+                end_idx = -1
+
+                for marker in [
+                    self.parameter_end_token,
+                    self.parameter_prefix,
+                    self.function_end_token,
+                ]:
+                    idx = delta_text.find(marker)
+                    if idx != -1 and (end_idx == -1 or idx < end_idx):
+                        end_idx = idx
+                        end_marker = marker
+
+                if end_marker is not None:
+                    # End of parameter found
                     value_chunk = delta_text[:end_idx]
 
                     # Skip past > if at start
@@ -701,46 +759,44 @@ class Qwen3CoderToolParser(ToolParser):
                     if not self.current_param_value and value_chunk.startswith("\n"):
                         value_chunk = value_chunk[1:]
 
+                    # Remove trailing newline if present
+                    if value_chunk.endswith("\n"):
+                        value_chunk = value_chunk[:-1]
+
                     # Store complete value
                     full_value = self.current_param_value + value_chunk
-                    self.accumulated_params[self.current_param_name] = full_value
+                    if self.current_param_name:
+                        self.accumulated_params[self.current_param_name] = full_value
 
-                    # Get parameter configuration for type conversion
-                    param_config = self._get_arguments_config(
-                        self.current_function_name or "",
-                        self.streaming_request.tools
-                        if self.streaming_request
-                        else None,
-                    )
-
-                    # Convert the parameter value to the appropriate type
-                    converted_value = self._convert_param_value(
-                        full_value,
-                        self.current_param_name or "",
-                        param_config,
-                        self.current_function_name or "",
-                    )
-
-                    # Serialize the converted value
-                    serialized_value = json.dumps(converted_value, ensure_ascii=False)
-
-                    # Since we've been streaming the quoted version,
-                    # we need to close it properly
-                    # This is complex - for now just complete the value
+                    # Reset streaming state
                     self.in_param = False
                     self.current_param_value = ""
 
-                    # Just close the current parameter string
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                function=DeltaFunctionCall(
-                                    arguments='"'
-                                ),  # Close the string quote
-                            )
+                    # Stream the final chunk (escaped) and close the string
+                    if value_chunk:
+                        escaped_chunk = json.dumps(value_chunk, ensure_ascii=False)[
+                            1:-1
                         ]
-                    )
+                        return DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_index,
+                                    function=DeltaFunctionCall(
+                                        arguments=escaped_chunk + '"'
+                                    ),
+                                )
+                            ]
+                        )
+                    else:
+                        # Just close the string quote
+                        return DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_index,
+                                    function=DeltaFunctionCall(arguments='"'),
+                                )
+                            ]
+                        )
                 else:
                     # Continue accumulating value
                     value_chunk = delta_text
