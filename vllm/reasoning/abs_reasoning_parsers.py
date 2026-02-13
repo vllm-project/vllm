@@ -162,11 +162,7 @@ class ReasoningParserManager:
     """
     Central registry for ReasoningParser implementations.
 
-    Supports two registration modes:
-      - Eager registration via `register_module`
-      - Lazy registration via `register_lazy_module`
-
-    Each reasoning parser must inherit from `ReasoningParser`.
+    All registrations are lazy - modules are only imported when first accessed.
     """
 
     reasoning_parsers: dict[str, type[ReasoningParser]] = {}
@@ -175,10 +171,9 @@ class ReasoningParserManager:
     @classmethod
     def get_reasoning_parser(cls, name: str) -> type[ReasoningParser]:
         """
-        Retrieve a registered or lazily registered ReasoningParser class.
+        Retrieve a registered ReasoningParser class.
 
-        If the parser is lazily registered, it will be imported and cached
-        on first access.
+        The parser will be imported and cached on first access.
 
         Raises:
             KeyError: if no parser is found under the given name.
@@ -196,7 +191,7 @@ class ReasoningParserManager:
 
     @classmethod
     def list_registered(cls) -> list[str]:
-        """Return names of all eagerly and lazily registered reasoning parsers."""
+        """Return names of all registered reasoning parsers."""
         return sorted(set(cls.reasoning_parsers.keys()) | set(cls.lazy_parsers.keys()))
 
     @classmethod
@@ -223,83 +218,58 @@ class ReasoningParserManager:
             raise
 
     @classmethod
-    def _register_module(
-        cls,
-        module: type[ReasoningParser],
-        module_name: str | list[str] | None = None,
-        force: bool = True,
-    ) -> None:
-        """Register a ReasoningParser class immediately."""
-        if not issubclass(module, ReasoningParser):
-            raise TypeError(
-                f"module must be subclass of ReasoningParser, but got {type(module)}"
-            )
-
-        if module_name is None:
-            module_names = [module.__name__]
-        elif isinstance(module_name, str):
-            module_names = [module_name]
-        elif is_list_of(module_name, str):
-            module_names = module_name
-        else:
-            raise TypeError("module_name must be str, list[str], or None.")
-
-        for name in module_names:
-            if not force and name in cls.reasoning_parsers:
-                existed = cls.reasoning_parsers[name]
-                raise KeyError(f"{name} is already registered at {existed.__module__}")
-            cls.reasoning_parsers[name] = module
-
-    @classmethod
-    def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
-        """
-        Register a lazy module mapping for delayed import.
-
-        Example:
-            ReasoningParserManager.register_lazy_module(
-                name="qwen3",
-                module_path="vllm.reasoning.parsers.qwen3_reasoning_parser",
-                class_name="Qwen3ReasoningParser",
-            )
-        """
-        cls.lazy_parsers[name] = (module_path, class_name)
-
-    @classmethod
     def register_module(
         cls,
-        name: str | list[str] | None = None,
-        force: bool = True,
-        module: type[ReasoningParser] | None = None,
+        name: str | list[str],
+        module_path: str | None = None,
+        class_name: str | None = None,
     ) -> (
         type[ReasoningParser] | Callable[[type[ReasoningParser]], type[ReasoningParser]]
     ):
         """
-        Register module with the given name or name list. it can be used as a
-        decoder(with module as None) or normal function(with module as not
-        None).
-        """
-        if not isinstance(force, bool):
-            raise TypeError(f"force must be a boolean, but got {type(force)}")
+        Register a ReasoningParser lazily.
 
-        # Immediate registration (explicit call)
-        if module is not None:
-            cls._register_module(module=module, module_name=name, force=force)
-            return module
+        Can be used as a decorator or called directly with module path strings.
+
+        Usage as decorator:
+            @ReasoningParserManager.register_module("qwen3")
+            class Qwen3ReasoningParser(ReasoningParser):
+                ...
+
+        Usage as direct call:
+            ReasoningParserManager.register_module(
+                name="qwen3",
+                module_path="vllm.reasoning.qwen3_reasoning_parser",
+                class_name="Qwen3ReasoningParser",
+            )
+        """
+        # Direct call with module_path and class_name
+        if module_path is not None and class_name is not None:
+            if isinstance(name, str):
+                names = [name]
+            elif is_list_of(name, str):
+                names = name
+            else:
+                raise TypeError("name must be str or list[str].")
+
+            for n in names:
+                cls.lazy_parsers[n] = (module_path, class_name)
+            return None  # type: ignore[return-value]
 
         # Decorator usage
         def _decorator(obj: type[ReasoningParser]) -> type[ReasoningParser]:
-            module_path = obj.__module__
-            class_name = obj.__name__
+            obj_module_path = obj.__module__
+            obj_class_name = obj.__name__
 
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
                 names = name
             else:
-                names = [class_name]
+                names = [obj_class_name]
 
             for n in names:
-                cls.lazy_parsers[n] = (module_path, class_name)
+                cls.lazy_parsers[n] = (obj_module_path, obj_class_name)
 
             return obj
 
