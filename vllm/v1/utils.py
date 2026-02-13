@@ -11,6 +11,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from threading import Thread
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -277,11 +278,21 @@ def wait_for_completion_or_failure(
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
         actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        if engine_manager.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            # Start a thread to monitor engine liveness.
+            # Do not exit when engine is down.
+            Thread(
+                target=engine_manager.monitor_engine_liveness,
+                args=(engine_manager.notify_engine_down,),
+                daemon=True,
+                name="ClientEngineMonitor",
+            ).start()
+        else:
+            if isinstance(engine_manager, CoreEngineProcManager):
+                for proc in engine_manager.processes:
+                    sentinel_to_proc[proc.sentinel] = proc
+            elif isinstance(engine_manager, CoreEngineActorManager):
+                actor_run_refs = engine_manager.get_run_refs()
 
         # Check if any process terminates
         while sentinel_to_proc or actor_run_refs:

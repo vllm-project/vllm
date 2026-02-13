@@ -43,9 +43,9 @@ class FaultToleranceMiddleware:
             engine_client = getattr(app_obj.state, "engine_client", None)
             if engine_client is None:
                 return self.app(scope, receive, send)
-
+            is_faulted_event = getattr(engine_client.engine_core, "is_faulted", None)
             # Check engine is_faulted event.
-            if engine_client.engine_core.is_faulted.is_set():
+            if is_faulted_event is not None and is_faulted_event.is_set():
                 response = JSONResponse(
                     content={
                         "error": "Service is in faulted state, cannot process requests."

@@ -15,10 +15,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar, cast
+from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
-import ray
 import zmq
 import zmq.asyncio
 
@@ -477,7 +476,7 @@ class ClientSentinel(BaseSentinel):
         while not self.sentinel_dead:
             identity, ft_request = self.ft_request_queue.get()
             ft_result = self._execute_cmd(ft_request)
-            self.ft_result_queue.put_nowait((identity, ft_result))
+            self.ft_result_queue.put((identity, ft_result))
             try:
                 self.inproc_res_send_socket.send(msgspec.msgpack.encode(ft_result))
             except zmq.ZMQError as e:
@@ -577,7 +576,12 @@ class ClientSentinel(BaseSentinel):
                         "soft_pause": False,
                     },
                 )
-                self.ft_request_queue.put_nowait((None, pause_request))
+                while not self._dispatch_fault_tolerance_request(pause_request, None):
+                    # If the queue is full, it means another fault tolerance
+                    # command is being executed.
+                    # Wait and retry until we can add the pause command to
+                    # the queue.
+                    time.sleep(0.1)
 
         except zmq.ZMQError:
             # Socket was closed during polling, exit loop.
@@ -585,7 +589,7 @@ class ClientSentinel(BaseSentinel):
             raise
 
     def _dispatch_fault_tolerance_request(
-        self, ft_request: FaultToleranceRequest, identity: bytes
+        self, ft_request: FaultToleranceRequest, identity: bytes | None
     ) -> bool:
         """Add fault tolerance request to queue, return False if busy."""
         try:
@@ -608,7 +612,7 @@ class ClientSentinel(BaseSentinel):
             if self.fault_receiver_socket in events:
                 # If a fault message is received, alert and attempt to pause.
                 self._alert_and_pause()
-            elif self.fault_tolerance_req_socket in events:
+            if self.fault_tolerance_req_socket in events:
                 # Received fault tolerance command from client.
                 # Add corresponding command to the queue.
                 parts = self.fault_tolerance_req_socket.recv_multipart()
@@ -629,9 +633,7 @@ class ClientSentinel(BaseSentinel):
                     self.fault_tolerance_req_socket.send_multipart(
                         [identity, b"", resp]
                     )
-                    continue
-
-            elif self.inproc_res_recv_socket in events:
+            if self.inproc_res_recv_socket in events:
                 # Send FT execution result back to client.
                 msg = self.inproc_res_recv_socket.recv()
                 recv_res = msgspec.msgpack.decode(msg, type=FaultToleranceResult)
@@ -894,10 +896,7 @@ class MPClient(EngineCoreClient):
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
             # Start monitoring engine core processes for unexpected failures
-            if self.vllm_config.parallel_config.data_parallel_backend == "ray":
-                self.start_engine_core_actor_monitor()
-            else:
-                self.start_engine_core_monitor()
+            self.start_engine_core_monitor()
 
             success = True
         finally:
@@ -929,75 +928,31 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
-    def start_engine_core_actor_monitor(self):
-        engine_manager = self.resources.engine_manager
-        if (
-            not isinstance(engine_manager, CoreEngineActorManager)
-            or not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
-        ):
-            return
-
-        def monitor_actors():
-            processed_done_refs = set()
-            while True:
-                actor_run_refs = engine_manager.get_run_refs()
-                if not actor_run_refs:
-                    logger.info(
-                        "There are no actors to monitor currently."
-                        " The monitoring function is about to terminate."
-                    )
-                    return
-                ref_to_index_mapping = {
-                    ref: index for index, ref in enumerate(actor_run_refs)
-                }
-                actor_done_refs, run_refs = ray.wait(actor_run_refs, timeout=5)
-                if actor_done_refs:
-                    for actor_ref in actor_done_refs:
-                        if actor_ref in processed_done_refs:
-                            continue
-                        error_engine_id = ref_to_index_mapping[actor_ref]
-                        fault_info = FaultInfo(
-                            type="engine_actor dead",
-                            message="Engine_actor died unexpectedly.",
-                            engine_id=str(error_engine_id),
-                            additional_info=None,
-                        )
-                        engine_manager.engine_down_socket.send_multipart(
-                            [b"", fault_info.serialize().encode("utf-8")]
-                        )
-                        processed_done_refs.add(actor_ref)
-
-        Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
-
     def start_engine_core_monitor(self):
-        """Start a monitor thread for engine core processes."""
+        """Start a monitor thread for engine core processes or actors."""
         engine_manager = self.resources.engine_manager
-        if (
-            engine_manager is None
-            or not hasattr(engine_manager, "processes")
-            or not engine_manager.processes
-        ):
-            # No engine processes to monitor
+        if engine_manager is None:
             return
-
-        engine_manager = cast(CoreEngineProcManager, self.resources.engine_manager)
         self_ref = weakref.ref(self)
 
-        def shutdown_callback(engine_rank, died_proc):
-            """
-            Callback to shutdown the client.
-            """
+        def shutdown_callback(engine_rank, target):
             _self = self_ref()
             if not _self:
-                return True  # Stop monitoring anyway if self is gone
+                return True
+            target_desc = getattr(target, "name", target)
             logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                died_proc.name,
+                "Engine core %s died unexpectedly, shutting down client.",
+                target_desc,
             )
             engine_manager.shutdown_monitor = True
             _self.resources.engine_dead = True
             _self.shutdown()
 
+        if isinstance(engine_manager, CoreEngineProcManager) and not getattr(
+            engine_manager, "processes", None
+        ):
+            # No engine processes to monitor
+            return
         engine_down_callback = (
             shutdown_callback
             if not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
@@ -1005,11 +960,13 @@ class MPClient(EngineCoreClient):
         )
 
         Thread(
-            target=engine_manager.monitor_engine_process,
+            target=engine_manager.monitor_engine_liveness,
             args=(engine_down_callback,),
             daemon=True,
-            name="MPClientEngineMonitor",
+            name="ClientEngineMonitor",
         ).start()
+
+        return
 
 
 def _process_utility_output(

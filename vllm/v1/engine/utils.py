@@ -226,7 +226,7 @@ class CoreEngineProcManager:
         )
         logger.error("Engine core proc %s died unexpectedly", died_proc.name)
 
-    def monitor_engine_process(self, engine_down_callback):
+    def monitor_engine_liveness(self, engine_down_callback):
         """
         Monitor engine core process liveness.
         """
@@ -456,6 +456,7 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.shutdown_monitor = False
         for actor in self.local_engine_actors + self.remote_engine_actors:
             self.run_refs.append(actor.run.remote())
 
@@ -866,6 +867,44 @@ class CoreEngineActorManager:
 
     def get_run_refs(self):
         return self.run_refs
+
+    def notify_engine_down(self, engine_rank, actor_ref):
+        fault_info = FaultInfo(
+            type="engine_actor dead",
+            message="Engine_actor died unexpectedly.",
+            engine_id=str(engine_rank),
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", fault_info.serialize().encode("utf-8")]
+        )
+        logger.error("Engine actor %s died unexpectedly", engine_rank)
+
+    def monitor_engine_liveness(self, engine_down_callback):
+        import ray
+
+        processed_done_refs = set()
+        while not self.shutdown_monitor:
+            actor_run_refs = self.get_run_refs()
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently."
+                    " The monitoring function is about to terminate."
+                )
+                return
+            ref_to_index_mapping = {
+                ref: index for index, ref in enumerate(actor_run_refs)
+            }
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            if not actor_done_refs:
+                continue
+            for actor_ref in actor_done_refs:
+                if actor_ref in processed_done_refs:
+                    continue
+                error_engine_id = ref_to_index_mapping[actor_ref]
+                engine_down_callback(error_engine_id, actor_ref)
+                processed_done_refs.add(actor_ref)
 
     def close(self):
         import ray

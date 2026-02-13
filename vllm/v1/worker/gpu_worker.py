@@ -222,6 +222,7 @@ class WorkerSentinel(BaseSentinel):
                 nccl_comm.disabled = not active
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
+        # todo: fix why DP1~3 occupies memory on the first GPU
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
             with set_current_vllm_config(self.vllm_config):
