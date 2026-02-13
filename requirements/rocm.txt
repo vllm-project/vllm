@@ -6,7 +6,7 @@ grpcio==1.78.0
 grpcio-reflection==1.78.0
 grpcio-tools==1.78.0
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.63.1 # Required for N-gram speculative decoding
 
 # Dependencies for AMD GPUs
 datasets
