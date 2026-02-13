@@ -194,7 +194,7 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def dp_engines_running(self) -> bool:
-        """Returns True id data parallel engines are collectively in a
+        """Returns True if data parallel engines are collectively in a
         running state."""
         raise NotImplementedError
 
@@ -724,6 +724,7 @@ class SyncMPClient(MPClient):
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
         outputs = self.outputs_queue.get()
+
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         if outputs.wave_complete is not None:
