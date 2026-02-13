@@ -56,6 +56,31 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+_INT32_MAX = 2**31 - 1
+
+
+def _check_moe_int32_overflow(M: int, topk: int, N: int, K: int) -> None:
+    """Check that the largest element offset in the Triton MoE kernel
+    would not overflow int32.
+
+    The critical offset is ``stride_cm * offs_token`` in the output
+    tensor C of shape ``(M*topk, max(N, K))``, where ``stride_cm =
+    max(N, K)`` and the maximum token index is ``M * topk - 1``.
+    When the product exceeds 2^31-1, Triton's default int32 pointer
+    arithmetic silently wraps around, producing an Illegal Memory
+    Access (IMA).  See https://github.com/vllm-project/vllm/issues/5938
+    """
+    max_offset = M * topk * max(N, K)
+    if max_offset > _INT32_MAX:
+        raise ValueError(
+            f"MoE tensor offset ({max_offset}) exceeds int32 range "
+            f"({_INT32_MAX}). M={M}, topk={topk}, N={N}, K={K}. "
+            f"This would cause an Illegal Memory Access in the Triton "
+            f"MoE kernel. Consider reducing batch size or sequence "
+            f"length. See "
+            f"https://github.com/vllm-project/vllm/issues/5938"
+        )
+
 
 @triton.jit
 def write_zeros_to_output(
@@ -98,19 +123,19 @@ def fused_moe_kernel_gptq_awq(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am: tl.int64,
-    stride_ak: tl.int64,
-    stride_be: tl.int64,
-    stride_bk: tl.int64,
-    stride_bn: tl.int64,
-    stride_cm: tl.int64,
-    stride_cn: tl.int64,
-    stride_bse: tl.int64,
-    stride_bsk: tl.int64,
-    stride_bsn: tl.int64,
-    stride_bze: tl.int64,
-    stride_bzk: tl.int64,
-    stride_bzn: tl.int64,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    stride_bze,
+    stride_bzk,
+    stride_bzn,
     block_k_diviable: tl.constexpr,
     group_size: tl.constexpr,
     # Meta-parameters
@@ -332,20 +357,20 @@ def fused_moe_kernel(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am: tl.int64,
-    stride_ak: tl.int64,
-    stride_be: tl.int64,
-    stride_bk: tl.int64,
-    stride_bn: tl.int64,
-    stride_cm: tl.int64,
-    stride_cn: tl.int64,
-    stride_asm: tl.int64,
-    stride_ask: tl.int64,
-    stride_bse: tl.int64,
-    stride_bsk: tl.int64,
-    stride_bsn: tl.int64,
-    stride_bbe: tl.int64,  # bias expert stride
-    stride_bbn: tl.int64,  # bias N stride
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_asm,
+    stride_ask,
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    stride_bbe,  # bias expert stride
+    stride_bbn,  # bias N stride
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -1658,6 +1683,8 @@ def fused_experts_impl(
 
     M = num_tokens
 
+    _check_moe_int32_overflow(M, top_k_num, N, K)
+
     config_dtype = _get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -1989,6 +2016,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states, w1, w2, topk_ids
         )
 
+        _check_moe_int32_overflow(num_tokens, top_k_num, N, K)
+
         if global_num_experts == -1:
             global_num_experts = E
 
@@ -2174,6 +2203,8 @@ class TritonWNA16Experts(TritonExperts):
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
+
+        _check_moe_int32_overflow(num_tokens, top_k_num, N, K)
 
         if global_num_experts == -1:
             global_num_experts = E
