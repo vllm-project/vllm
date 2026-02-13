@@ -17,6 +17,7 @@ aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
     # via
     #   aiohttp-cors
+    #   datasets
     #   fsspec
     #   gpt-oss
     #   lm-eval
@@ -162,7 +163,7 @@ dataproperty==1.0.1
     # via
     #   pytablewriter
     #   tabledata
-datasets==4.0.0
+datasets==3.3.0
     # via
     #   -r requirements/test.in
     #   evaluate
@@ -236,7 +237,7 @@ frozenlist==1.5.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2025.3.0
+fsspec==2024.12.0
     # via
     #   datasets
     #   evaluate
