@@ -202,9 +202,10 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
     not find_spec("flashinfer")
-    or not has_module_attribute("flashinfer.comm", "trtllm_allreduce_fusion"),
+    or not has_module_attribute("flashinfer.comm", "allreduce_fusion")
+    or not has_module_attribute("flashinfer.comm", "create_allreduce_fusion_workspace"),
     reason="flashinfer is not found or flashinfer "
-    "is not compiled with trtllm_allreduce_fusion",
+    "is not compiled with allreduce_fusion",
 )
 def test_all_reduce_fusion_pass_replace(
     test_model: torch.nn.Module,
