@@ -8,8 +8,8 @@ import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -286,6 +286,7 @@ def selective_state_update(
     out=None,
     num_accepted_tokens=None,
     cu_seqlens=None,
+    is_blackwell=False,
 ):
     """
     Argument:
@@ -391,17 +392,26 @@ def selective_state_update(
         if dst_state_batch_indices is not None
         else (0, 0)
     )
-    # We don't want autotune since it will overwrite the state
-    # We instead tune by hand.
-    BLOCK_SIZE_M, num_warps = (
-        (32, 4)
-        if dstate <= 16
-        else (
-            (16, 4)
-            if dstate <= 32
-            else ((8, 4) if dstate <= 64 else ((4, 4) if dstate <= 128 else ((4, 8))))
-        )
-    )
+    # We don't want autotune since it will overwrite the state.
+    # We instead tune by hand based on dstate.
+
+    # Default
+    BLOCK_SIZE_M, num_warps = 4, 8
+
+    if dstate <= 16:
+        BLOCK_SIZE_M, num_warps = 32, 4
+    elif dstate <= 32:
+        BLOCK_SIZE_M, num_warps = 16, 4
+    elif dstate <= 64:
+        BLOCK_SIZE_M, num_warps = 8, 4
+    else:
+        # dstate > 64
+        if is_blackwell:
+            # Optimized for B200 with dstate>64
+            BLOCK_SIZE_M, num_warps = 32, 8
+        elif dstate <= 128:
+            BLOCK_SIZE_M, num_warps = 4, 4
+
     tie_hdim = (
         A.stride(-1) == 0
         and A.stride(-2) == 0

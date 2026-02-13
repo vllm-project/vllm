@@ -24,7 +24,7 @@ RERANK_MODELS = [
         "mixedbread-ai/mxbai-rerank-base-v2",
         architecture="Qwen2ForSequenceClassification",
         hf_overrides=mxbai_rerank_hf_overrides,
-        pooling_type="LAST",
+        seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,

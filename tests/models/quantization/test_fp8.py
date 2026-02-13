@@ -9,7 +9,7 @@ Note: these tests will only pass on L4 GPU.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
-from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_fp8
 from vllm.platforms import current_platform
 from ..utils import check_logprobs_close
 

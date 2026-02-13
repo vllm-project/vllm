@@ -20,7 +20,7 @@ MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
-@pytest.mark.skip_v1  # FIXME: This fails on V1 right now.
+@pytest.mark.skip_v1  # V1 engine does not yet support beam search
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
@@ -62,7 +62,7 @@ def test_beam_search_single_input(
             )
 
 
-@pytest.mark.skip_v1  # FIXME: This fails on V1 right now.
+@pytest.mark.skip_v1  # V1 engine does not yet support beam search
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)

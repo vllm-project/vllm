@@ -233,8 +233,6 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     intermediate_size_per_partition = layer.intermediate_size_per_partition
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.apply_router_weight_on_input
-    # moe marlin requires the activation to be silu
-    supports_activation = layer.activation == "silu"
 
     # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
     # down: (n, k) = (hidden_size, intermediate_size_per_partition)
@@ -244,12 +242,7 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         and intermediate_size_per_partition % max(64, group_size) == 0
     )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return (
-        supports_shape
-        and supports_group_size
-        and supports_router_weight
-        and supports_activation
-    )
+    return supports_shape and supports_group_size and supports_router_weight
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
@@ -496,7 +489,7 @@ def get__quant_fp8_method() -> QuantFP8:
     return _quant_fp8_method
 
 
-def get_marlin_input_dtype(prefix):
+def get_marlin_input_dtype(prefix: str | None = None):
     if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
     elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
@@ -570,7 +563,7 @@ def apply_gptq_marlin_linear(
 
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         reshaped_x,
         None,
         weight,
@@ -635,7 +628,7 @@ def apply_awq_marlin_linear(
         )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         reshaped_x,
         None,
         weight,
@@ -646,67 +639,6 @@ def apply_awq_marlin_linear(
         weight_zp,
         g_idx,
         g_idx_sort_indices,
-        workspace,
-        quant_type,
-        size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=use_fp32_reduce,
-        is_zp_float=False,
-    )
-
-    return output.reshape(out_shape)
-
-
-def apply_rtn_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    workspace: torch.Tensor,
-    quant_type: ScalarType,
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    input_global_scale: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-    input_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (output_size_per_partition,)
-
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=output_size_per_partition,
-        k=reshaped_x.size(1),
-        device=input.device,
-        dtype=input.dtype,
-    )
-
-    a_scales = None
-    if input_dtype == torch.int8:
-        assert quant_type == scalar_types.uint4b8, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
-        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-        a_scales = a_scales * input_global_scale
-    elif input_dtype == torch.float8_e4m3fn:
-        assert quant_type == scalar_types.uint4b8, (
-            "INT8 weight + FP8 activation is not supported."
-        )
-        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-
-    output = ops.gptq_marlin_gemm(
-        reshaped_x,
-        None,
-        weight,
-        bias,
-        weight_scale,
-        a_scales,
-        None,
-        None,
-        None,
-        None,
         workspace,
         quant_type,
         size_m=reshaped_x.shape[0],

@@ -7,12 +7,12 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def causal_conv1d_ref(

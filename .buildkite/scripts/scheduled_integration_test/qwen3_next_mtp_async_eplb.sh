@@ -18,15 +18,18 @@ wait_for_server() {
 
 MODEL="Qwen/Qwen3-Next-80B-A3B-Instruct"
 
-# Set BACKENDS based on platform
+# Set BACKENDS and platform-specific args based on platform
 if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
   # ROCm platform
   BACKENDS=("allgather_reducescatter")
   # Disable MOE padding for ROCm since it is causing eplb to fail
   export VLLM_ROCM_MOE_PADDING=0
+  PLATFORM_ARGS=("--no-async-scheduling")
+  echo "Disabled async scheduling for ROCm platform due to issues with spec decode."
 else
   # Non-ROCm platform (CUDA/other)
   BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+  PLATFORM_ARGS=()
 fi
 
 cleanup() {
@@ -54,6 +57,7 @@ for BACK in "${BACKENDS[@]}"; do
     --trust-remote-code \
     --max-model-len 2048 \
     --gpu-memory-utilization 0.9 \
+    "${PLATFORM_ARGS[@]}" \
     --port $PORT &
   SERVER_PID=$!
   wait_for_server $PORT

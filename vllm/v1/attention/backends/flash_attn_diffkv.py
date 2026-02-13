@@ -4,14 +4,14 @@
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.ops.triton_reshape_and_cache_flash import (
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
-from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 
 if is_flash_attn_varlen_func_available():
-    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
@@ -113,6 +113,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -214,6 +217,11 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 )
                 return output
             else:
+                sliding_window_size = (
+                    list(self.sliding_window)
+                    if self.sliding_window is not None
+                    else None
+                )
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -226,7 +234,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                     softmax_scale=self.scale,
                     causal=attn_metadata.causal,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
+                    window_size=sliding_window_size,
                     block_table=block_table,
                     softcap=self.logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,

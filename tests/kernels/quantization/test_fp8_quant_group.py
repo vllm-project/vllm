@@ -23,7 +23,12 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
 def test_quantfp8_group_functionality(
-    batch_size: int, hidden_dim: int, group_size: int, seed: int, use_ue8m0: bool
+    default_vllm_config,
+    batch_size: int,
+    hidden_dim: int,
+    group_size: int,
+    seed: int,
+    use_ue8m0: bool,
 ) -> None:
     """Test QuantFP8 group quantization with various configurations.
 
@@ -82,7 +87,9 @@ def test_quantfp8_group_functionality(
 @pytest.mark.parametrize("seed", [42])
 @pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
-def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
+def test_quantfp8_group_multidimensional(
+    default_vllm_config, seed: int, use_ue8m0: bool
+) -> None:
     set_random_seed(seed)
 
     group_size = 64
@@ -135,7 +142,7 @@ def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
 
 @pytest.mark.parametrize("seed", [42])
 @torch.inference_mode()
-def test_quantfp8_group_edge_cases(seed: int) -> None:
+def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     set_random_seed(seed)
 
     batch_size = 16

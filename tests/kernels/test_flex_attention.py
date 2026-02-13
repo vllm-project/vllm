@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Integration tests for FlexAttention backend vs default backend"""
 
-import random
-
-import numpy as np
 import pytest
 import torch
 from packaging import version
 
+from tests.utils import set_random_seed
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -25,15 +23,6 @@ from ..models.utils import check_embeddings_close, check_logprobs_close
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
 DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
-
-
-def set_seed(seed):
-    """Set seeds for reproducibility"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 @pytest.mark.skipif(
@@ -57,7 +46,7 @@ def test_flex_attention_vs_default_backend(vllm_runner):
     ]
 
     # Run with flex attention
-    set_seed(seed)
+    set_random_seed(seed)
     with vllm_runner(
         model_name,
         runner="generate",
@@ -71,7 +60,7 @@ def test_flex_attention_vs_default_backend(vllm_runner):
         )
 
     # Run with default backend
-    set_seed(seed)
+    set_random_seed(seed)
     with vllm_runner(
         model_name,
         runner="generate",

@@ -8,12 +8,12 @@ from einops import rearrange, repeat
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn,
     selective_state_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def selective_state_update_ref(

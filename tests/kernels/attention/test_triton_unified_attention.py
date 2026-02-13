@@ -5,10 +5,10 @@
 import pytest
 import torch
 
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]

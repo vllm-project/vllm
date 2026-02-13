@@ -5,7 +5,9 @@ for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
 
+import logging
 import types
+import warnings
 from pathlib import PosixPath
 
 import numpy as np
@@ -30,6 +32,8 @@ from vllm.utils.collection_utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
+
+logger = logging.getLogger(__name__)
 
 
 ####### vLLM output processors functions
@@ -120,8 +124,10 @@ def _llava_vllm_to_hf_output(
         if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    # output_str[0] is not " " in some cases, e.g., Granite Vision,
+    # but for most llava based models, this is the case
+    hf_output_str = output_str[1:] if output_str[0] == " " else output_str
+
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
@@ -575,6 +581,32 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # 2) Patch IsaacModel.forward: add hidden_states to the output
     # ----------------------------
     isaac_model = hf_model.model.model
+
+    # [ROCm] Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    # ----------------------------
+    from ...conftest import patch_hf_vision_attn_for_rocm
+
+    try:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
+    except AttributeError as e:
+        if "vision_config" in str(e):
+            warnings.warn(
+                f"Skipping ROCm vision attention patch for Isaac model: {e}. "
+                "This is expected for models without vision_config in "
+                "attention layers (e.g., Siglip2VariableLengthAttention).",
+                stacklevel=2,
+            )
+        else:
+            logger.error(
+                "Unexpected AttributeError during ROCm vision attention patch: %s. "
+                "Model type: %s. Inner model type: %s.",
+                e,
+                type(hf_model.model).__name__,
+                type(getattr(hf_model.model, "model", None)).__name__,
+            )
+            raise
 
     def patched_forward(
         self,

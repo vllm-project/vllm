@@ -68,7 +68,7 @@ Here is a figure illustrating disaggregate encoder flow:
 
 ![Disaggregated Encoder Flow](../assets/features/disagg_encoder/disagg_encoder_flow.png)
 
-For the PD disaggregation part, the Prefill instance receive cache exactly the same as the disaggregate encoder flow above. Prefill instance executes 1 step (prefill -> 1 token output) and then transfer KV cache to the Decode instance for the remaining execution. The KV transfer part purely happens after the execute of the PDinstance.
+For the PD disaggregation part, the Prefill instance receives cache exactly the same as the disaggregated encoder flow above. Prefill instance executes 1 step (prefill -> 1 token output) and then transfers KV cache to the Decode instance for the remaining execution. The KV transfer part purely happens after the execution of the PD instance.
 
 `docs/features/disagg_prefill.md` shows the brief idea about the disaggregated prefill (v0)
 

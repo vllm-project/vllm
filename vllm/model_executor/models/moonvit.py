@@ -52,9 +52,8 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
-from vllm.config import MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -62,6 +61,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
@@ -308,11 +308,10 @@ class MLP2(nn.Module):
         activation,
         bias: bool = True,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         assert len(dims) == 3
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
         self.fc0 = ColumnParallelLinear(
             dims[0],
             dims[1],
@@ -343,17 +342,12 @@ class MoonVitEncoderLayer(nn.Module):
         hidden_dim: int,
         mlp_dim: int,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
         *,
         activation=F.gelu,
         attn_bias: bool = False,
     ):
         super().__init__()
-        self.use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
@@ -369,7 +363,6 @@ class MoonVitEncoderLayer(nn.Module):
             [hidden_dim, mlp_dim, hidden_dim],
             activation,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=self.use_data_parallel,
         )
         self.wqkv = QKVParallelLinear(
             hidden_size=hidden_dim,
@@ -390,7 +383,7 @@ class MoonVitEncoderLayer(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
-            multimodal_config=multimodal_config,
+            scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
 
@@ -468,7 +461,6 @@ class MoonVitEncoder(nn.Module):
         num_layers: int,
         block_cfg: dict,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -478,7 +470,6 @@ class MoonVitEncoder(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 MoonVitEncoderLayer(
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     **block_cfg,
                 )
@@ -549,7 +540,6 @@ class MoonVitPretrainedModel(PreTrainedModel):
     def __init__(
         self,
         config: MoonViTConfig,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
         *inputs,
         **kwargs,
@@ -578,7 +568,6 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "attn_bias": True,
             },
             prefix=f"{prefix}.encoder",
-            multimodal_config=multimodal_config,
         )
 
     def forward(
