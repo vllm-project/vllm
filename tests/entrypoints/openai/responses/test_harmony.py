@@ -2,17 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
 import json
+import os
 import time
 
 import pytest
 import pytest_asyncio
 import requests
 from openai import BadRequestError, NotFoundError, OpenAI
-from openai_harmony import (
-    Message,
-)
+from openai_harmony import Author, Message, Role, TextContent
 
 from ....utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.responses.context import HarmonyContext
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.serving import (
+    HarmonyStreamingState,
+    OpenAIServingResponses,
+)
+from vllm.entrypoints.openai.responses.protocol import ResponseFileSearchToolCall
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -32,6 +38,11 @@ GET_WEATHER_SCHEMA = {
     "strict": True,
 }
 
+FILE_SEARCH_TOOL = {
+    "type": "file_search",
+    "vector_store_ids": ["vs_demo"],
+}
+
 
 @pytest.fixture(scope="module")
 def server():
@@ -39,7 +50,15 @@ def server():
         "Harmony tests require gpt_oss package to be installed"
     )
 
-    args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
+    args = [
+        "--enforce-eager",
+        "--tool-server",
+        "demo",
+        "--max_model_len",
+        "5000",
+        "--gpu-memory-utilization",
+        "0.85",
+    ]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
@@ -837,6 +856,135 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
         if event.type == "response.completed":
             assert len(event.response.output) > 0
             assert event.response.output_text is not None
+
+
+def _build_file_search_context(with_results: bool) -> tuple[HarmonyContext, Message]:
+    system_msg = Message.from_role_and_content(Role.SYSTEM, "You are concise.")
+    user_msg = Message.from_role_and_content(
+        Role.USER, "Search the knowledge base for Noah's Ark."
+    )
+    assistant_msg = Message.from_role_and_content(
+        Role.ASSISTANT, "{\"query\": \"Noah's Ark\"}"
+    )
+    assistant_msg = assistant_msg.with_channel("commentary")
+    assistant_msg = assistant_msg.with_recipient("functions.file_search")
+
+    context = HarmonyContext([system_msg, user_msg], available_tools=[])
+    context._messages.append(assistant_msg)
+    if with_results:
+        tool_msg = Message(
+            author=Author(role=Role.TOOL, name="functions.file_search"),
+            content=[TextContent(text=json.dumps({"results": []}))],
+            recipient=Role.ASSISTANT,
+            channel="commentary",
+        )
+        context._messages.append(tool_msg)
+
+    return context, assistant_msg
+
+
+def test_file_search_non_stream_includes_results():
+    context, _ = _build_file_search_context(with_results=True)
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Search for Noah's Ark.",
+        tools=[FILE_SEARCH_TOOL],
+        include=["file_search_call.results"],
+    )
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    output_items = serving._make_response_output_items_with_harmony(
+        context, request
+    )
+    file_search_items = [
+        item
+        for item in output_items
+        if isinstance(item, ResponseFileSearchToolCall)
+    ]
+    assert file_search_items, "Expected file_search_call in response output"
+    assert file_search_items[0].queries == ["Noah's Ark"]
+    assert file_search_items[0].results == []
+
+
+def test_file_search_non_stream_without_results():
+    context, _ = _build_file_search_context(with_results=False)
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Search for Noah's Ark.",
+        tools=[FILE_SEARCH_TOOL],
+    )
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    output_items = serving._make_response_output_items_with_harmony(
+        context, request
+    )
+    file_search_items = [
+        item
+        for item in output_items
+        if isinstance(item, ResponseFileSearchToolCall)
+    ]
+    assert file_search_items, "Expected file_search_call in response output"
+    assert file_search_items[0].queries == ["Noah's Ark"]
+    assert file_search_items[0].results is None
+
+
+def test_file_search_stream_includes_results():
+    _, assistant_msg = _build_file_search_context(with_results=True)
+    state = HarmonyStreamingState()
+    state.current_item_id = "fs_test"
+    state.current_output_index = 0
+    state.include_file_search_results = True
+    state.file_search_results = []
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    events = serving._emit_file_search_call_done_events(assistant_msg, state)
+    done_events = [
+        event
+        for event in events
+        if event.type == "response.output_item.done"
+    ]
+    assert done_events, "Expected response.output_item.done for file_search"
+    item = done_events[0].item
+    assert item.results == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=3)
+@pytest.mark.skipif(
+    not os.getenv("VLLM_RUN_GPT_OSS_FILE_SEARCH_IT"),
+    reason="Set VLLM_RUN_GPT_OSS_FILE_SEARCH_IT=1 to run gpt-oss file_search integration test",
+)
+async def test_file_search_integration(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input=(
+            "Call file_search for \"Noah's Ark\". "
+            "Do not output any other text."
+        ),
+        instructions=(
+            "Emit exactly one Harmony tool call to functions.file_search. "
+            "No extra commentary. "
+            "The tool payload must be JSON only, e.g. {\"query\": \"Noah's Ark\"}."
+        ),
+        tools=[FILE_SEARCH_TOOL],
+        include=["file_search_call.results"],
+        stream=False,
+        temperature=0,
+        top_p=0.1,
+        max_output_tokens=256,
+    )
+    assert response is not None
+    print("file_search_integration status:", response.status)
+    print("file_search_integration output:", response.output)
+    if response.output_messages is not None:
+        print("file_search_integration output_messages:", response.output_messages)
+    assert response.status == "completed"
+    file_search_items = [
+        item for item in response.output if item.type == "file_search_call"
+    ]
+    assert file_search_items, "Expected file_search_call in response output"
+    assert file_search_items[0].queries is not None
+    assert len(file_search_items[0].queries) > 0
+    assert file_search_items[0].results is not None
+    assert len(file_search_items[0].results) > 0
 
 
 @pytest.mark.asyncio

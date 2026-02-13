@@ -13,6 +13,9 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseReasoningItem,
 )
+from openai.types.responses.response_file_search_tool_call import (
+    ResponseFileSearchToolCall,
+)
 from openai.types.responses.response_function_web_search import (
     ActionFind,
     ActionOpenPage,
@@ -150,6 +153,40 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     )
 
 
+def _create_file_search_tool_definition(tool: Tool) -> ToolDescription:
+    """Create a Harmony tool description for file_search."""
+    name = getattr(tool, "name", None) or "file_search"
+    description = getattr(tool, "description", None) or "Search the knowledge base."
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "vector_store_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Vector store IDs to search.",
+            },
+            "filters": {"type": "object", "description": "Search filters."},
+            "max_num_results": {
+                "type": "integer",
+                "description": "Maximum number of results.",
+            },
+            "ranking_options": {
+                "type": "object",
+                "description": "Ranking options.",
+            },
+        },
+        "required": ["query"],
+    }
+
+    return ToolDescription.new(
+        name=name,
+        description=description,
+        parameters=parameters,
+    )
+
+
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
@@ -158,7 +195,7 @@ def get_developer_message(
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Tool | ChatCompletionToolsParam] = []
+        function_tools: list[ToolDescription] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -168,15 +205,14 @@ def get_developer_message(
                 pass
 
             elif tool.type == "function":
-                function_tools.append(tool)
+                function_tools.append(create_tool_definition(tool))
+            elif tool.type == "file_search":
+                function_tools.append(_create_file_search_tool_definition(tool))
             else:
                 raise ValueError(f"tool type {tool.type} not supported")
         if function_tools:
-            function_tool_descriptions = [
-                create_tool_definition(tool) for tool in function_tools
-            ]
             dev_msg_content = dev_msg_content.with_function_tools(
-                function_tool_descriptions
+                function_tools
             )
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
@@ -650,7 +686,29 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
         # Function calls (should only happen on commentary channel)
         elif message.channel == "commentary" and recipient.startswith("functions."):
-            output_items.extend(_parse_function_call(message, recipient))
+            if recipient == "functions.file_search":
+                for content in message.content:
+                    try:
+                        args = json.loads(content.text)
+                    except json.JSONDecodeError:
+                        args = {}
+                    queries = []
+                    if isinstance(args, dict):
+                        if isinstance(args.get("queries"), list):
+                            queries = args["queries"]
+                        elif "query" in args:
+                            queries = [args["query"]]
+                    output_items.append(
+                        ResponseFileSearchToolCall(
+                            type="file_search_call",
+                            id=f"fs_{random_uuid()}",
+                            queries=queries,
+                            results=None,
+                            status="completed",
+                        )
+                    )
+            else:
+                output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in MCP tools (python, browser, container)
         elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
@@ -688,6 +746,27 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
         return []
 
     if current_recipient and parser.current_channel in ("commentary", "analysis"):
+        if current_recipient == "functions.file_search":
+            rid = random_uuid()
+            try:
+                args = json.loads(parser.current_content)
+            except json.JSONDecodeError:
+                args = {}
+            queries = []
+            if isinstance(args, dict):
+                if isinstance(args.get("queries"), list):
+                    queries = args["queries"]
+                elif "query" in args:
+                    queries = [args["query"]]
+            return [
+                ResponseFileSearchToolCall(
+                    type="file_search_call",
+                    id=f"fs_{rid}",
+                    queries=queries,
+                    results=None,
+                    status="in_progress",
+                )
+            ]
         if current_recipient.startswith("functions."):
             rid = random_uuid()
             return [

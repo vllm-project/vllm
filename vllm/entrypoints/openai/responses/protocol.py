@@ -15,6 +15,9 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFileSearchCallCompletedEvent,
+    ResponseFileSearchCallInProgressEvent,
+    ResponseFileSearchCallSearchingEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -40,6 +43,9 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.tool import Tool
+from openai.types.responses.response_file_search_tool_call import (
+    ResponseFileSearchToolCall,
+)
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 # Backward compatibility for OpenAI client versions
@@ -624,6 +630,9 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseReasoningTextDoneEvent
     | ResponseReasoningPartAddedEvent
     | ResponseReasoningPartDoneEvent
+    | ResponseFileSearchCallInProgressEvent
+    | ResponseFileSearchCallSearchingEvent
+    | ResponseFileSearchCallCompletedEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent
