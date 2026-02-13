@@ -371,6 +371,7 @@ class KimiK25ForConditionalGeneration(
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
                 use_data_parallel=self.use_data_parallel,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
             self.mm_projector = self.mm_projector.to(

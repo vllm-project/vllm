@@ -658,6 +658,7 @@ class KimiK25MultiModalProjector(nn.Module):
         self,
         config: KimiK25VisionConfig,
         use_data_parallel: bool = False,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -672,12 +673,14 @@ class KimiK25MultiModalProjector(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.linear_1",
         )
         self.linear_2 = ReplicatedLinear(
             self.hidden_size,
             config.mm_hidden_size,
             bias=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.linear_2",
         )
         self.act = GELUActivation()
