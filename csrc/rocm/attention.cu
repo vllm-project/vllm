@@ -67,12 +67,11 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
 // Check if fused short-seq optimization is enabled via environment variable
 // When enabled (default), single-partition sequences skip the reduce kernel
 inline bool is_fused_short_seq_enabled() {
-  static int cached = -1;
-  if (cached == -1) {
+  static const int cached = []() {
     const char* env = std::getenv("VLLM_ROCM_FUSED_SHORT_SEQ");
     // Enabled by default (env not set or "1")
-    cached = (env == nullptr || std::strcmp(env, "1") == 0) ? 1 : 0;
-  }
+    return (env == nullptr || std::strcmp(env, "1") == 0) ? 1 : 0;
+  }();
   return cached == 1;
 }
 
