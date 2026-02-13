@@ -373,9 +373,7 @@ class Qwen3_5Model(Qwen3NextModel):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             # GDN
-            ("in_proj_qkvz", "in_proj_q", 0),
-            ("in_proj_qkvz", "in_proj_k", 1),
-            ("in_proj_qkvz", "in_proj_v", 2),
+            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
             ("in_proj_qkvz", "in_proj_z", 3),
             ("in_proj_ba", "in_proj_b", 0),
             ("in_proj_ba", "in_proj_a", 1),
@@ -758,7 +756,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self,
             skip_prefixes=["mtp."],
         )
-        weights = split_gdn_qkv_weights(weights)
+        # weights = split_gdn_qkv_weights(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
