@@ -44,6 +44,7 @@ from vllm.model_executor.layers.layernorm import (
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -406,17 +407,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj_qkvz = ColumnParallelLinear(
+        self.in_proj_qkv = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.projection_size_qkvz,
+            output_sizes=[
+                sum(self.key_dim, self.key_dim, self.value_dim),
+                self.value_dim,
+            ],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
+            prefix=f"{prefix}.in_proj_qkv",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
-        self.in_proj_ba = ColumnParallelLinear(
+        self.in_proj_ba = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.projection_size_ba,
+            output_sizes=[self.num_v_heads] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
