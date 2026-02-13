@@ -23,6 +23,10 @@ from transformers.processing_utils import ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -359,14 +363,9 @@ class KimiK25ForConditionalGeneration(
         self.device = current_platform.current_device()
         # Build vision tower directly with KimiK25VisionConfig
         with self._mark_tower_model(vllm_config, "vision_chunk"):
-            try:
-                quant_config_name = type(quant_config).__name__
-            except Exception:
-                quant_config_name = ""
-            quant_config_vit = quant_config if quant_config_name == "AscendModelSlimConfig" else None
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
-                quant_config=quant_config_vit,
+                quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.vision_tower = self.vision_tower.to(
@@ -376,7 +375,7 @@ class KimiK25ForConditionalGeneration(
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
                 use_data_parallel=self.use_data_parallel,
-                quant_config=quant_config_vit,
+                quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
             self.mm_projector = self.mm_projector.to(
@@ -395,6 +394,11 @@ class KimiK25ForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        if isinstance(quant_config, CompressedTensorsConfig):
+            return None
+        return quant_config
 
     def _parse_and_validate_media_input(
         self, **kwargs: object
