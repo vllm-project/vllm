@@ -387,6 +387,7 @@ def compute_encoder_metadata(
     device: torch.device,
     spatial_merge_size: int = 1,
     pad_to_batch_size: int | None = None,
+    per_frame: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Compute sequence metadata for vision encoder.
 
@@ -396,8 +397,11 @@ def compute_encoder_metadata(
     transferred to GPU with non_blocking=True, except max_seqlen which stays
     on CPU to avoid GPU sync when .item() is called.
 
-    Works for all standard grid-based ViT models using universal formula:
-    patches_per_image = T * (H // spatial_merge) * (W // spatial_merge)
+    Two modes:
+    - per_frame=False: Treats each video/image as ONE sequence of T*H*W patches
+      (used by lfm2_vl)
+    - per_frame=True: Treats each frame as SEPARATE H*W sequences
+      (used by Qwen2.5-VL, Qwen3-VL)
 
     Args:
         grid_thw: Grid dimensions per image. Can be:
@@ -406,6 +410,8 @@ def compute_encoder_metadata(
         device: Target device for output tensors.
         spatial_merge_size: Downsampling factor (e.g., 2 for Qwen2.5's patch merger).
         pad_to_batch_size: Pad to fixed batch size. If None, no padding.
+        per_frame: If True, use per-frame sequences (H*W repeated T times).
+                   If False, use whole-sequence (T*H*W per video/image).
 
     Returns:
         Dictionary containing:
@@ -438,39 +444,56 @@ def compute_encoder_metadata(
     else:
         grid_thw_np = grid_thw.cpu().numpy()
 
-    # Compute patches per image: T * (H // spatial_merge_size) * (W // spatial_merge_size)
     # grid_thw_np shape: [batch, 3] where each row is [T, H, W]
-    patches_per_image = (
-        grid_thw_np[:, 0]
-        * (grid_thw_np[:, 1] // spatial_merge_size)
-        * (grid_thw_np[:, 2] // spatial_merge_size)
-    )
+
+    if per_frame:
+        # Per-frame sequences: each frame is a separate H*W sequence
+        patches_per_frame = (
+            (grid_thw_np[:, 1] // spatial_merge_size)
+            * (grid_thw_np[:, 2] // spatial_merge_size)
+        )
+        # Repeat for T frames: [H*W, H*W, ..., H*W] (T times per video)
+        patches_per_sequence = np.repeat(patches_per_frame, grid_thw_np[:, 0])
+    else:
+        # Whole-sequence: each video/image is ONE sequence of T*H*W patches
+        patches_per_sequence = (
+            grid_thw_np[:, 0]
+            * (grid_thw_np[:, 1] // spatial_merge_size)
+            * (grid_thw_np[:, 2] // spatial_merge_size)
+        )
 
     # Compute cumulative sequence lengths for variable-length batching
-    # cu_seqlens[i] = sum(patches_per_image[0:i])
     cu_seqlens = np.concatenate([
         np.zeros(1, dtype=np.int32),
-        patches_per_image.cumsum(dtype=np.int32)
+        patches_per_sequence.cumsum(dtype=np.int32)
     ])
 
-    # Pad to fixed batch size if requested
-    if pad_to_batch_size is not None and len(patches_per_image) < pad_to_batch_size:
-        num_pad = pad_to_batch_size - len(patches_per_image)
+    # Pad to fixed batch size if requested (images only)
+    num_items = len(grid_thw_np)  # Number of images/videos
+    if pad_to_batch_size is not None and num_items < pad_to_batch_size:
+        # Guard: padding only supported for images (T=1), not videos
+        if per_frame and np.any(grid_thw_np[:, 0] > 1):
+            raise ValueError(
+                "pad_to_batch_size with per_frame=True only supports images (T=1), "
+                "not videos. Found T > 1 in grid_thw."
+            )
+
+        num_pad = pad_to_batch_size - num_items
         # Append zero-length sequences by repeating last value of cu_seqlens
         cu_seqlens = np.concatenate([
             cu_seqlens,
             np.full(num_pad, cu_seqlens[-1], dtype=np.int32)
         ])
-        patches_per_image = np.concatenate([
-            patches_per_image,
+        patches_per_sequence = np.concatenate([
+            patches_per_sequence,
             np.zeros(num_pad, dtype=np.int32)
         ])
 
     cu_seqlens = torch.from_numpy(cu_seqlens).to(device, non_blocking=True)
-    sequence_lengths = torch.from_numpy(patches_per_image).to(device, non_blocking=True)
+    sequence_lengths = torch.from_numpy(patches_per_sequence).to(device, non_blocking=True)
 
     # max_seqlen stays on CPU to avoid GPU sync when .item() is called
-    max_seqlen = torch.tensor(patches_per_image.max(), dtype=torch.int32)
+    max_seqlen = torch.tensor(patches_per_sequence.max(), dtype=torch.int32)
 
     return {
         'cu_seqlens': cu_seqlens,
