@@ -78,7 +78,10 @@ from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLVisionConfig,
 )
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
+from vllm.transformers_utils.processors.hunyuan_vl_image import (
+    HunYuanVLImageProcessor,
+    smart_resize,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -596,7 +599,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(
         self,
         **kwargs: object,
-    ) -> HunYuanVLProcessor:
+    ) -> HunYuanVLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
@@ -624,7 +627,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: HunYuanVLProcessor,
+        image_processor: HunYuanVLImageProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
@@ -640,8 +643,8 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_merge_size,
-                min_pixels=size["min_pixels"],
-                max_pixels=size["max_pixels"],
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -663,7 +666,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: HunYuanVLProcessor,
+        image_processor: HunYuanVLImageProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(

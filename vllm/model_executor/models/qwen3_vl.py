@@ -720,7 +720,8 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             image_width=target_width,
             image_height=target_height,
             num_frames=2,
-            image_processor=None,
+            image_processor=video_processor,
+            mm_kwargs={},
         )
         return num_video_soft_tokens
 

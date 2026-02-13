@@ -1140,13 +1140,15 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         return max(max_frames_per_video, 1)
 
     def get_max_video_tokens(self, seq_len: int) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len),
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 
