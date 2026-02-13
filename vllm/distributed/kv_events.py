@@ -251,8 +251,9 @@ class ZmqEventPublisher(EventPublisher):
     Parameters
     ----------
     endpoint:
-        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
-        connect.
+        PUB address. Default is `tcp://*:5557`.
+    bind:
+        If True, bind the publisher socket to the endpoint. If False, connect.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
         request missed batches by sending the starting sequence number as an
@@ -274,6 +275,7 @@ class ZmqEventPublisher(EventPublisher):
         self,
         data_parallel_rank: int,
         endpoint: str = "tcp://*:5557",
+        bind: bool = True,
         replay_endpoint: str | None = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
@@ -292,6 +294,7 @@ class ZmqEventPublisher(EventPublisher):
         self._dp_rank = data_parallel_rank
 
         self._endpoint = self.offset_endpoint_port(endpoint, self._dp_rank)
+        self._bind = bind
         self._replay_endpoint = self.offset_endpoint_port(
             replay_endpoint, self._dp_rank
         )
@@ -356,17 +359,11 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
-            # bind stable, connect volatile convention
-            if self._endpoint is not None and (
-                "*" in self._endpoint
-                or "::" in self._endpoint
-                or self._endpoint.startswith("ipc://")
-                or self._endpoint.startswith("inproc://")
-            ):
-                self._pub.bind(self._endpoint)
-            elif self._endpoint is not None:
-                self._pub.connect(self._endpoint)
+            if self._endpoint is not None:
+                if self._bind:
+                    self._pub.bind(self._endpoint)
+                else:
+                    self._pub.connect(self._endpoint)
 
         # Set up replay socket: use ROUTER
         # 1) handles multiple REQ clients (identities)
