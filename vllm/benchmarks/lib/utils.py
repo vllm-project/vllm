@@ -47,6 +47,12 @@ def convert_to_pytorch_benchmark_format(
         return records
 
     for name, benchmark_values in metrics.items():
+        if not isinstance(benchmark_values, list):
+            raise TypeError(
+                f"benchmark_values for metric '{name}' must be a list, "
+                f"but got {type(benchmark_values).__name__}"
+            )
+
         record = {
             "benchmark": {
                 "name": "vLLM benchmark",
