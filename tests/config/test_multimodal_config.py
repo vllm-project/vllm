@@ -3,6 +3,7 @@
 
 import pytest
 
+from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -25,9 +26,18 @@ def test_mm_encoder_attn_backend_hash_updates():
     assert base_hash != overridden_hash
 
 
-def test_language_model_only_does_not_affect_hash():
+def test_language_model_only_does_not_affect_mm_hash():
     """language_model_only does not affect the ViT computation graph,
-    so it should not change the hash."""
+    so it should not change the multimodal config hash."""
     base_hash = MultiModalConfig().compute_hash()
     lm_only_hash = MultiModalConfig(language_model_only=True).compute_hash()
     assert base_hash == lm_only_hash
+
+
+def test_language_model_only_affects_model_hash():
+    """language_model_only affects the LM computation graph,
+    so it should change the model config hash."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    base_hash = ModelConfig(model).compute_hash()
+    lm_only_hash = ModelConfig(model, language_model_only=True).compute_hash()
+    assert base_hash != lm_only_hash
