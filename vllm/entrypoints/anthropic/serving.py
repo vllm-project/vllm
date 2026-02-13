@@ -8,7 +8,7 @@
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 from fastapi import Request
@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
     ChatCompletionToolsParam,
+    DeltaMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
@@ -292,6 +293,49 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         return result
 
+    def _split_delta_message(self, msg: DeltaMessage) -> Generator[DeltaMessage]:
+        """
+        Some tool parsers return content&tool_calls in one DeltaMessage all together.
+        This split it to pieces that message_stream_converter() can work with.
+        """
+        if msg.reasoning is not None:
+            split = msg.model_copy()
+            split.content = None
+            split.tool_calls = []
+            yield split
+        if msg.content is not None:
+            split = msg.model_copy()
+            split.reasoning = None
+            split.tool_calls = []
+            yield split
+        if msg.tool_calls is not None:
+            split_base = msg.model_copy()
+            split_base.content = None
+            split_base.reasoning = None
+            tool_calls = split_base.tool_calls[:]
+            split_base.tool_calls = []
+            for tc in tool_calls:
+                if tc.function:
+                    # split to id+name and arguments
+                    if tc.function.name is not None:
+                        split_name = split_base.model_copy(deep=True)
+                        tc_name = tc.model_copy(deep=True)
+                        tc_name.function.arguments = None  # type: ignore
+                        split_name.tool_calls = [tc_name]
+                        yield split_name
+
+                    if tc.function.arguments is not None:
+                        split_arguments = split_base.model_copy(deep=True)
+                        tc_args = tc.model_copy(deep=True)
+                        tc_args.function.name = None  # type: ignore
+                        tc_args.id = None
+                        split_arguments.tool_calls = [tc_args]
+                        yield split_arguments
+                else:
+                    split = split_base.model_copy(deep=True)
+                    split.tool_calls = [tc]
+                    yield split
+
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
@@ -371,82 +415,91 @@ class AnthropicServingMessages(OpenAIServingChat):
                             finish_reason = origin_chunk.choices[0].finish_reason
                             continue
 
-                        # content
-                        if origin_chunk.choices[0].delta.content is not None:
-                            if not content_block_started:
-                                chunk = AnthropicStreamEvent(
-                                    index=content_block_index,
-                                    type="content_block_start",
-                                    content_block=AnthropicContentBlock(
-                                        type="text", text=""
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_start")
-                                content_block_started = True
-
-                            if origin_chunk.choices[0].delta.content == "":
-                                continue
-                            chunk = AnthropicStreamEvent(
-                                index=content_block_index,
-                                type="content_block_delta",
-                                delta=AnthropicDelta(
-                                    type="text_delta",
-                                    text=origin_chunk.choices[0].delta.content,
-                                ),
-                            )
-                            data = chunk.model_dump_json(exclude_unset=True)
-                            yield wrap_data_with_event(data, "content_block_delta")
-                            continue
-
-                        # tool calls
-                        elif len(origin_chunk.choices[0].delta.tool_calls) > 0:
-                            tool_call = origin_chunk.choices[0].delta.tool_calls[0]
-                            if tool_call.id is not None:
-                                if content_block_started:
-                                    stop_chunk = AnthropicStreamEvent(
+                        for delta in self._split_delta_message(
+                            origin_chunk.choices[0].delta
+                        ):
+                            # content
+                            if delta.content is not None:
+                                if not content_block_started:
+                                    chunk = AnthropicStreamEvent(
                                         index=content_block_index,
-                                        type="content_block_stop",
+                                        type="content_block_start",
+                                        content_block=AnthropicContentBlock(
+                                            type="text", text=""
+                                        ),
                                     )
-                                    data = stop_chunk.model_dump_json(
-                                        exclude_unset=True
-                                    )
+                                    data = chunk.model_dump_json(exclude_unset=True)
                                     yield wrap_data_with_event(
-                                        data, "content_block_stop"
+                                        data, "content_block_start"
                                     )
-                                    content_block_started = False
-                                    content_block_index += 1
+                                    content_block_started = True
 
-                                chunk = AnthropicStreamEvent(
-                                    index=content_block_index,
-                                    type="content_block_start",
-                                    content_block=AnthropicContentBlock(
-                                        type="tool_use",
-                                        id=tool_call.id,
-                                        name=tool_call.function.name
-                                        if tool_call.function
-                                        else None,
-                                        input={},
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_start")
-                                content_block_started = True
-
-                            else:
+                                if delta.content == "":
+                                    continue
                                 chunk = AnthropicStreamEvent(
                                     index=content_block_index,
                                     type="content_block_delta",
                                     delta=AnthropicDelta(
-                                        type="input_json_delta",
-                                        partial_json=tool_call.function.arguments
-                                        if tool_call.function
-                                        else None,
+                                        type="text_delta",
+                                        text=delta.content,
                                     ),
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield wrap_data_with_event(data, "content_block_delta")
-                            continue
+                                continue
+
+                            # tool calls
+                            elif len(delta.tool_calls) > 0:
+                                tool_call = delta.tool_calls[0]
+                                if tool_call.id is not None:
+                                    if content_block_started:
+                                        stop_chunk = AnthropicStreamEvent(
+                                            index=content_block_index,
+                                            type="content_block_stop",
+                                        )
+                                        data = stop_chunk.model_dump_json(
+                                            exclude_unset=True
+                                        )
+                                        yield wrap_data_with_event(
+                                            data, "content_block_stop"
+                                        )
+                                        content_block_started = False
+                                        content_block_index += 1
+
+                                    chunk = AnthropicStreamEvent(
+                                        index=content_block_index,
+                                        type="content_block_start",
+                                        content_block=AnthropicContentBlock(
+                                            type="tool_use",
+                                            id=tool_call.id,
+                                            name=tool_call.function.name
+                                            if tool_call.function
+                                            else None,
+                                            input={},
+                                        ),
+                                    )
+                                    data = chunk.model_dump_json(exclude_unset=True)
+                                    yield wrap_data_with_event(
+                                        data, "content_block_start"
+                                    )
+                                    content_block_started = True
+
+                                else:
+                                    chunk = AnthropicStreamEvent(
+                                        index=content_block_index,
+                                        type="content_block_delta",
+                                        delta=AnthropicDelta(
+                                            type="input_json_delta",
+                                            partial_json=tool_call.function.arguments
+                                            if tool_call.function
+                                            else None,
+                                        ),
+                                    )
+                                    data = chunk.model_dump_json(exclude_unset=True)
+                                    yield wrap_data_with_event(
+                                        data, "content_block_delta"
+                                    )
+                                continue
                 else:
                     error_response = AnthropicStreamEvent(
                         type="error",
