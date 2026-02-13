@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
@@ -20,11 +21,13 @@ from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import VllmConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+
+logger = init_logger(__name__)
 
 
 class BaseRenderer(ABC):
@@ -32,15 +35,15 @@ class BaseRenderer(ABC):
     @abstractmethod
     def from_config(
         cls,
-        config: "ModelConfig",
+        config: "VllmConfig",
         tokenizer_kwargs: dict[str, Any],
     ) -> "BaseRenderer":
         raise NotImplementedError
 
-    def __init__(self, config: "ModelConfig") -> None:
+    def __init__(self, config: "VllmConfig") -> None:
         super().__init__()
 
-        self.config = config
+        self.model_config = config.model_config
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
@@ -63,13 +66,31 @@ class BaseRenderer(ABC):
 
         return self._async_tokenizer
 
+    def get_bos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for BOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.bos_token_id
+
+    def get_eos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for EOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.eos_token_id
+
     # Step 1: Convert raw inputs to prompts
     def render_prompt(
         self,
         prompt: DictPrompt | bytes,
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
-            embeds = safe_load_prompt_embeds(self.config, prompt)
+            embeds = safe_load_prompt_embeds(self.model_config, prompt)
             prompt = EmbedsPrompt(prompt_embeds=embeds)
 
         return prompt
@@ -289,7 +310,7 @@ class BaseRenderer(ABC):
             return
 
         for prompt in prompts:
-            target_prompt = extract_target_prompt(self.config, prompt)
+            target_prompt = extract_target_prompt(self.model_config, prompt)
             target_prompt.update(prompt_extras)  # type: ignore[arg-type]
 
     # Top-level methods
@@ -304,7 +325,7 @@ class BaseRenderer(ABC):
 
         # NOTE: Some MM models have non-default `add_special_tokens`
         # so we handle tokenization in multi-modal processor
-        if self.config.is_multimodal_model:
+        if self.model_config.is_multimodal_model:
             self._apply_prompt_extras(dict_prompts, prompt_extras)
             return dict_prompts
 
