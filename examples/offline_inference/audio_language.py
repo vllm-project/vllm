@@ -503,8 +503,9 @@ def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     # Lazy import kimia_infer since it's only needed for Kimi-Audio
     import kimia_infer.api.prompt_manager  # noqa: F401
 
-    # Use HuggingFace model path.
-    model_path = "moonshotai/Kimi-Audio-7B-Instruct"
+    # Use HuggingFace model path by default.
+    # For local testing, use: --model /data1/moonshotai/Kimi-Audio-7B-Instruct
+    model_path = args.model or "moonshotai/Kimi-Audio-7B-Instruct"
 
     # Build multimodal tensors using the reference Kimi prompt manager.
     # (Same approach as vLLM's KimiAudioForConditionalGeneration.get_generation_prompt)
