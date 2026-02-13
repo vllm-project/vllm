@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.config.attention import AttentionConfig
+from vllm.config.afd import AFDConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
     CompilationConfig,
@@ -72,6 +73,8 @@ __all__ = [
     "KVEventsConfig",
     # From vllm.config.kv_transfer
     "KVTransferConfig",
+    # AFD (Attention FFN Disaggregation) configuration
+    "AFDConfig",
     # From vllm.config.load
     "LoadConfig",
     # From vllm.config.lora

@@ -210,6 +210,9 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
 
+        self.afd_config = self.vllm_config.afd_config
+        self.afd_role = self.afd_config.afd_role if self.afd_config else None
+
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
@@ -582,6 +585,9 @@ class WorkerProc:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+        self.afd_config = vllm_config.afd_config
+        self.afd_role = self.afd_config.afd_role if self.afd_config else None
 
     @staticmethod
     def make_worker_process(

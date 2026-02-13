@@ -25,6 +25,8 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 
 def fused_grouped_topk(
     hidden_states: torch.Tensor,
@@ -73,11 +75,11 @@ def fused_grouped_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-)
+# @torch.compile(
+#     dynamic=True,
+#     backend=current_platform.simple_compile_backend,
+#     options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+# )
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -89,6 +91,7 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    logger.info("jcz group_topk_router")
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
         and current_platform.is_cuda()
