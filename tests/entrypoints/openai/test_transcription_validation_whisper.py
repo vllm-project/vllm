@@ -15,7 +15,7 @@ import soundfile as sf
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "openai/whisper-large-v3"
+MODEL_NAME = "openai/whisper-large-v3-turbo"
 
 
 @pytest.fixture(scope="module")
@@ -297,6 +297,6 @@ async def test_language_auto_detect(
     )
     assert transcription.language == expected_lang
     text_lower = transcription.text.lower()
-    assert any(word in text_lower for word in expected_text), (
+    assert any(word.lower() in text_lower for word in expected_text), (
         f"Expected {expected_lang} text but got: {transcription.text}"
     )
