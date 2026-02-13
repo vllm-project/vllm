@@ -30,7 +30,7 @@ RunPod exposes HTTP services through its proxy. To make port 8000 accessible:
 2. Add `8000` to the list of exposed HTTP ports.
 3. After the pod restarts, RunPod provides a public URL in the format:
 
-    ```
+    ```text
     https://<pod-id>-8000.proxy.runpod.net
     ```
 
