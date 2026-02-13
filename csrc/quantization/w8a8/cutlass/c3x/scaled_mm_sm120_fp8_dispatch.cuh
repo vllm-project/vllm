@@ -70,8 +70,8 @@ struct cutlass_3x_gemm_sm120_custom {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule, void>::CollectiveOp;
 
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 
 template <typename InType, typename OutType,
