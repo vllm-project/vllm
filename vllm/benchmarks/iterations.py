@@ -400,6 +400,7 @@ async def fetch_traces(
                         f"{endpoint}/debug/traces/{trace_file}"
                     )
                     local_path = os.path.join(output_dir, f"endpoint{i}_{trace_file}")
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     with open(local_path, "wb") as f:
                         f.write(await trace_resp.read())
                     logger.info("Downloaded: %s", local_path)

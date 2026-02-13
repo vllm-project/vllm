@@ -50,7 +50,13 @@ async def debug_profile_stop(request: Request):
 
 @router.get("/traces")
 async def debug_list_traces(request: Request):
-    """List available trace files."""
+    """List available trace files.
+
+    Searches recursively under the profiler directory for trace files.
+    Supports both torch profiler (.json, .json.gz) and JAX profiler
+    (.trace.json.gz, .xplane.pb) output formats.
+    Returns relative paths from the profiler directory.
+    """
     vllm_config = request.app.state.vllm_config
     profiler_dir = vllm_config.profiler_config.torch_profiler_dir
     if not profiler_dir:
@@ -59,10 +65,11 @@ async def debug_list_traces(request: Request):
         )
 
     trace_files: list[str] = []
-    for pattern in ["*.json", "*.json.gz"]:
-        trace_files.extend(
-            os.path.basename(f) for f in glob.glob(os.path.join(profiler_dir, pattern))
-        )
+    for pattern in ["**/*.json", "**/*.json.gz", "**/*.xplane.pb"]:
+        for f in glob.glob(os.path.join(profiler_dir, pattern), recursive=True):
+            # Return path relative to profiler_dir so client can download
+            rel_path = os.path.relpath(f, profiler_dir)
+            trace_files.append(rel_path)
     return JSONResponse(
         content={"traces": sorted(trace_files), "directory": profiler_dir}
     )
@@ -84,21 +91,34 @@ async def debug_config(request: Request):
     )
 
 
-@router.get("/traces/{filename}")
+@router.get("/traces/{filename:path}")
 async def debug_get_trace(request: Request, filename: str):
-    """Download a trace file."""
+    """Download a trace file.
+
+    The filename can be a relative path from the profiler directory,
+    e.g. "prefill_ctx1024/plugins/profile/2026_02_13/trace.json.gz".
+    """
     vllm_config = request.app.state.vllm_config
     profiler_dir = vllm_config.profiler_config.torch_profiler_dir
     if not profiler_dir:
         raise HTTPException(status_code=404, detail="No profiler directory configured")
 
-    # Security: only allow files in the profiler directory
-    trace_path = os.path.join(profiler_dir, os.path.basename(filename))
+    # Resolve the path and ensure it stays within profiler_dir (security)
+    trace_path = os.path.normpath(os.path.join(profiler_dir, filename))
+    if not trace_path.startswith(os.path.normpath(profiler_dir)):
+        raise HTTPException(status_code=403, detail="Access denied")
     if not os.path.isfile(trace_path):
         raise HTTPException(status_code=404, detail=f"Trace file not found: {filename}")
 
-    media_type = "application/gzip" if filename.endswith(".gz") else "application/json"
-    return FileResponse(trace_path, media_type=media_type, filename=filename)
+    if filename.endswith(".gz"):
+        media_type = "application/gzip"
+    elif filename.endswith(".pb"):
+        media_type = "application/octet-stream"
+    else:
+        media_type = "application/json"
+    return FileResponse(
+        trace_path, media_type=media_type, filename=os.path.basename(filename)
+    )
 
 
 def register_debug_api_router(app: FastAPI) -> None:
