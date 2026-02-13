@@ -49,7 +49,14 @@ If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
 ```
 
-then install vLLM using:
+Then install the necessary build dependencies:
+
+```
+uv pip install -r requirements/build.txt
+```
+You can also find them in `pyproject.toml[build-system]`
+
+Finally install vLLM using:
 
 ```bash
 uv pip install -e . --no-build-isolation
