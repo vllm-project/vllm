@@ -523,6 +523,71 @@ class DPVisionShardingMeta:
     total_images: int
 
 
+def dp_shard_vision_inputs(
+    pixel_values: torch.Tensor,
+    grid_thw_list: list[list[int]],
+    spatial_merge_size_squared: int,
+) -> tuple[torch.Tensor, list[list[int]], DPVisionShardingMeta]:
+    """Shard vision inputs across TP ranks for data-parallel execution.
+
+    Args:
+        pixel_values: Concatenated pixel values for all images
+        grid_thw_list: Grid dimensions for each image
+        spatial_merge_size_squared: spatial_merge_size^2 for output token calculation
+
+    Returns:
+        local_pixel_values: Pixel values for this rank's images
+        local_grid_thw_list: Grid dimensions for this rank's images
+        meta: Sharding metadata needed for gathering
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    current_rank = get_tensor_model_parallel_rank()
+
+    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+
+    (image_rank_assignment, images_per_rank, input_patches_per_rank) = (
+        get_load_balance_assignment(patches_per_image, tp_size)
+    )
+
+    cum_images_per_rank = [0, *itertools.accumulate(images_per_rank)]
+    local_image_indices = image_rank_assignment[
+        cum_images_per_rank[current_rank] : cum_images_per_rank[current_rank + 1]
+    ]
+
+    if len(local_image_indices) > 0:
+        local_pixel_values = torch.cat(
+            [
+                pixel_values[cum_patches_per_image[i] : cum_patches_per_image[i + 1]]
+                for i in local_image_indices
+            ]
+        )
+    else:
+        local_pixel_values = torch.empty(
+            (0, pixel_values.shape[1]),
+            device=pixel_values.device,
+            dtype=pixel_values.dtype,
+        )
+
+    max_output_tokens_per_rank = max(input_patches_per_rank) // spatial_merge_size_squared
+    local_grid_thw_list = [grid_thw_list[i] for i in local_image_indices]
+
+    meta = DPVisionShardingMeta(
+        image_rank_assignment=image_rank_assignment,
+        images_per_rank=images_per_rank,
+        input_patches_per_rank=input_patches_per_rank,
+        patches_per_image=patches_per_image,
+        spatial_merge_size_squared=spatial_merge_size_squared,
+        max_output_tokens_per_rank=max_output_tokens_per_rank,
+        tp_size=tp_size,
+        current_rank=current_rank,
+        local_image_indices=local_image_indices,
+        total_images=len(grid_thw_list),
+    )
+
+    return local_pixel_values, local_grid_thw_list, meta
+
+
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
