@@ -8,6 +8,7 @@ import weakref
 import msgspec.msgpack
 import zmq
 
+from vllm import envs
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -203,6 +204,8 @@ class DPCoordinatorProc:
             poller.register(publish_front, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
+            heartbeat_interval_s = envs.VLLM_DP_COORDINATOR_HEARTBEAT_INTERVAL_S
+            last_heartbeat_time = time.monotonic()
             while True:
                 elapsed = int(time.time() * 1000) - last_publish_time
                 # Send at stats_update_interval_ms interval if the stats have
@@ -212,6 +215,19 @@ class DPCoordinatorProc:
                 # Wait at least 50ms to ensure we've received all stats for
                 # the current step.
                 min_timeout = 50 if last_step_counts is None else 0
+
+                now = time.monotonic()
+                if (
+                    heartbeat_interval_s > 0
+                    and now - last_heartbeat_time >= heartbeat_interval_s
+                ):
+                    publish_back.send_multipart(
+                        (EngineCoreRequestType.HEARTBEAT.value, b"")
+                    )
+                    last_heartbeat_time = now
+                    logger.debug(
+                        "Send HEARTBEAT multipart to engines from coordinator."
+                    )
 
                 events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
                 if not events:
