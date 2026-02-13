@@ -4,16 +4,12 @@
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 
-
-class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class FpKernel(w8a8_linear.FpKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -30,7 +26,7 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )

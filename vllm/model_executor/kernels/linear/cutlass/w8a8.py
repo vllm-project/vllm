@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -11,13 +12,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-)
 
-
-class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class IntKernel(w8a8_linear.IntKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -27,7 +23,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.IntKernelConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -138,3 +134,34 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return ops.cutlass_scaled_mm(
             x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
         )
+
+
+class FpKernel(w8a8_linear.FpKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "requires CUDA."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        # Fused GEMM_DQ
+        output = ops.cutlass_scaled_mm(
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+        )
+        return output.view(*output_shape)

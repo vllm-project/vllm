@@ -14,11 +14,17 @@ import stability.
 """
 
 import os
-from typing import TypeVar
+from typing import Generic, Protocol, TypeVar
 
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8
+import vllm.model_executor.kernels.linear.cutlass.w8a8 as cutlass_w8a8
+import vllm.model_executor.kernels.linear.flashinfer.w8a8 as flashinfer_w8a8
+import vllm.model_executor.kernels.linear.hip.w8a8 as hip_w8a8
+import vllm.model_executor.kernels.linear.pytorch.w8a8 as pytorch_w8a8
+import vllm.model_executor.kernels.linear.xpu.w8a8 as xpu_w8a8
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
@@ -52,8 +58,6 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUwNa16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
@@ -66,30 +70,24 @@ from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
-    FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-    XPUFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
+
+_FpKernelT = TypeVar("_FpKernelT", bound=w8a8.FpKernel)
+
+
+class _W8A8KernelModule(Protocol, Generic[_FpKernelT]):
+    """Protocol for w8a8 kernel modules that expose an FpKernel class."""
+
+    FpKernel: type[_FpKernelT]
+
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
@@ -102,26 +100,11 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 }
 
 # in priority/performance order (when available)
-_POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CUDA: [
-        FlashInferFP8ScaledMMLinearKernel,
-        CutlassFP8ScaledMMLinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-    ],
-    PlatformEnum.ROCM: [
-        ROCmFP8ScaledMMLinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        RowWiseTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-    ],
-    PlatformEnum.CPU: [
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-    ],
-    PlatformEnum.XPU: [
-        XPUFP8ScaledMMLinearKernel,
-    ],
+_POSSIBLE_FP_W8A8_KERNELS: dict[PlatformEnum, list[_W8A8KernelModule]] = {
+    PlatformEnum.CUDA: [flashinfer_w8a8, cutlass_w8a8, pytorch_w8a8],
+    PlatformEnum.ROCM: [hip_w8a8, pytorch_w8a8],
+    PlatformEnum.CPU: [pytorch_w8a8],
+    PlatformEnum.XPU: [xpu_w8a8],
 }
 
 # in priority/performance order (when available)
@@ -236,33 +219,76 @@ def choose_scaled_mm_linear_kernel(
     )
 
 
+# TODO: unify this method with choose_scaled_mm_linear_kernel
+# after int8 is refactored
+def choose_w8a8_fp_linear_kernel(
+    config: w8a8.FpKernelConfig,
+    possible_kernels: dict[PlatformEnum, list[_W8A8KernelModule]],
+    compute_capability: int | None = None,
+    force_kernel: type[w8a8.FpKernel] | None = None,
+) -> type[w8a8.FpKernel]:
+    if compute_capability is None:
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    failure_reason_list = []
+
+    if force_kernel is not None:
+        maybe_forced_kernel, failure_reason = force_kernel.try_select(
+            config, compute_capability
+        )
+        if maybe_forced_kernel:
+            return maybe_forced_kernel
+
+        logger.info_once(
+            "Tried to force %s, but the kernel couldn't be selected",
+            force_kernel.get_name(),
+            scope="global",
+        )
+
+    for kernel_module in possible_kernels[current_platform._enum]:
+        maybe_kernel, failure_reason = kernel_module.FpKernel.try_select(
+            config, compute_capability
+        )
+        if maybe_kernel:
+            return maybe_kernel
+        failure_reason_list.extend(failure_reason)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reason_list)
+    )
+
+
+# TODO: change the name to init_w8a8_fp_kernel
 def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[w8a8.FpKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel:
-    scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+) -> w8a8.FpKernel:
+    w8a8_fp_kernel_config = w8a8.FpKernelConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         out_dtype=out_dtype,
     )
 
-    kernel_type = choose_scaled_mm_linear_kernel(
-        scaled_mm_linear_kernel_config, _POSSIBLE_FP8_KERNELS, force_kernel=force_kernel
+    kernel_type = choose_w8a8_fp_linear_kernel(
+        w8a8_fp_kernel_config, _POSSIBLE_FP_W8A8_KERNELS, force_kernel=force_kernel
     )
 
     if module_name:
         logger.info_once(
             "Selected %s for %s",
-            kernel_type.__name__,
+            kernel_type.get_name(),
             module_name,
             scope="global",
         )
 
     return kernel_type(
-        scaled_mm_linear_kernel_config,
+        w8a8_fp_kernel_config,
         layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
 
@@ -367,21 +393,13 @@ __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "choose_mp_linear_kernel",
-    "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
-    "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
-    "CutlassFP8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
-    "FlashInferFP8ScaledMMLinearKernel",
-    "ChannelWiseTorchFP8ScaledMMLinearKernel",
-    "PerTensorTorchFP8ScaledMMLinearKernel",
-    "RowWiseTorchFP8ScaledMMLinearKernel",
-    "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",

@@ -6,6 +6,11 @@ import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8
+import vllm.model_executor.kernels.linear.cutlass.w8a8 as cutlass_w8a8
+import vllm.model_executor.kernels.linear.flashinfer.w8a8 as flashinfer_w8a8
+import vllm.model_executor.kernels.linear.hip.w8a8 as hip_w8a8
+import vllm.model_executor.kernels.linear.pytorch.w8a8 as pytorch_w8a8
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
@@ -25,13 +30,6 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
     set_current_vllm_config,
-)
-from vllm.model_executor.kernels.linear import (
-    CutlassFP8ScaledMMLinearKernel,
-    FlashInferFP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
@@ -53,9 +51,7 @@ def is_nvfp4_supported():
 class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
-    def __init__(
-        self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
-    ):
+    def __init__(self, hidden_size: int, force_kernel: type[w8a8.FpKernel], **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
 
@@ -165,11 +161,11 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
         return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
 
 
-ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
+ROCM_KERNELS = [hip_w8a8.FpKernel, pytorch_w8a8.PerTensorFPKernel]
 CUDA_KERNELS = [
-    FlashInferFP8ScaledMMLinearKernel,
-    CutlassFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
+    flashinfer_w8a8.FpKernel,
+    cutlass_w8a8.FpKernel,
+    pytorch_w8a8.PerTensorFPKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
@@ -200,7 +196,7 @@ def test_fusion_silu_and_mul_quant(
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
-    force_kernel: FP8ScaledMMLinearKernel | None,
+    force_kernel: type[w8a8.FpKernel] | None,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")

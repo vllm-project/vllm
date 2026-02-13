@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+import vllm.model_executor.kernels.linear.flashinfer.w8a8 as flashinfer_w8a8
 from vllm.config import PassConfig
 
 from ...utils import multi_gpu_test
@@ -49,7 +50,7 @@ def test_tp2_async_tp_fp8_fusions(
 
     if is_blackwell():
         # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
-        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
+        monkeypatch.setenv("VLLM_DISABLED_KERNELS", flashinfer_w8a8.FpKernel.get_name())
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
