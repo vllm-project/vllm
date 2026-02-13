@@ -124,6 +124,13 @@ __global__ void moe_wna16_gemm_kernel(
           reinterpret_cast<float4*>(expert_scales_groups);
       *expert_scales_groups_tmp =
           reinterpret_cast<const float4*>(expert_scales)[scales_offset_tmp];
+    } else if constexpr (GROUPS == 16) {
+      float4* expert_scales_groups_f4 =
+          reinterpret_cast<float4*>(expert_scales_groups);
+      const float4* expert_scales_f4 =
+          reinterpret_cast<const float4*>(expert_scales);
+      expert_scales_groups_f4[0] = expert_scales_f4[scales_offset_tmp * 2];
+      expert_scales_groups_f4[1] = expert_scales_f4[scales_offset_tmp * 2 + 1];
     }
 
     // load all required qzeros one time
@@ -158,6 +165,12 @@ __global__ void moe_wna16_gemm_kernel(
             reinterpret_cast<uint64_t*>(expert_qzeros_groups);
         *expert_qzeros_groups_tmp =
             reinterpret_cast<const uint64_t*>(expert_qzeros)[qzeros_offset_tmp];
+      } else if constexpr (GROUPS == 16) {
+        uint4* expert_qzeros_groups_u4 =
+            reinterpret_cast<uint4*>(expert_qzeros_groups);
+        const uint4* expert_qzeros_u4 =
+            reinterpret_cast<const uint4*>(expert_qzeros);
+        *expert_qzeros_groups_u4 = expert_qzeros_u4[qzeros_offset_tmp];
       }
     }
 
@@ -249,6 +262,8 @@ void run_moe_wna16_gemm(const scalar_t* input, scalar_t* output,
       kernel = moe_wna16_gemm_kernel<scalar_t, 4, 4>;
     } else if (BLOCK_SIZE_K / group_size == 8) {
       kernel = moe_wna16_gemm_kernel<scalar_t, 4, 8>;
+    } else if (BLOCK_SIZE_K / group_size == 16) {
+      kernel = moe_wna16_gemm_kernel<scalar_t, 4, 16>;
     }
   } else {
     if (BLOCK_SIZE_K / group_size == 1) {
@@ -259,6 +274,8 @@ void run_moe_wna16_gemm(const scalar_t* input, scalar_t* output,
       kernel = moe_wna16_gemm_kernel<scalar_t, 8, 4>;
     } else if (BLOCK_SIZE_K / group_size == 8) {
       kernel = moe_wna16_gemm_kernel<scalar_t, 8, 8>;
+    } else if (BLOCK_SIZE_K / group_size == 16) {
+      kernel = moe_wna16_gemm_kernel<scalar_t, 8, 16>;
     }
   }
 
@@ -310,8 +327,9 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
               "BLOCK_SIZE_K must divisible by group_size");
   TORCH_CHECK(BLOCK_SIZE_M <= 64, "BLOCK_SIZE_M must less or equal to 64");
   TORCH_CHECK(groups_per_block_row == 1 || groups_per_block_row == 2 ||
-                  groups_per_block_row == 4 || groups_per_block_row == 8,
-              "BLOCK_SIZE_K // group_size must be one of [1, 2, 4, 8]");
+                  groups_per_block_row == 4 || groups_per_block_row == 8 ||
+                  groups_per_block_row == 16,
+              "BLOCK_SIZE_K // group_size must be one of [1, 2, 4, 8, 16]");
 
   if (input.scalar_type() == at::ScalarType::Half) {
     run_moe_wna16_gemm<half>(
