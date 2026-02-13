@@ -50,11 +50,13 @@ Once the server is running, test it with a curl request:
 ??? console "Command"
 
     ```bash
-    curl https://<pod-id>-8000.proxy.runpod.net/v1/completions \
+    curl https://<pod-id>-8000.proxy.runpod.net/v1/chat/completions \
         -H "Content-Type: application/json" \
         -d '{
             "model": "<model-name>",
-            "prompt": "Hello, my name is",
+            "messages": [
+                {"role": "user", "content": "Hello, how are you?"}
+            ],
             "max_tokens": 50
         }'
     ```
@@ -63,13 +65,16 @@ Once the server is running, test it with a curl request:
 
     ```json
     {
-        "id": "cmpl-abc123",
-        "object": "text_completion",
+        "id": "chat-abc123",
+        "object": "chat.completion",
         "choices": [
             {
-                "text": " Sarah. I am a software engineer...",
+                "message": {
+                    "role": "assistant",
+                    "content": "I'm doing well, thank you for asking! How can I help you today?"
+                },
                 "index": 0,
-                "finish_reason": "length"
+                "finish_reason": "stop"
             }
         ]
     }
