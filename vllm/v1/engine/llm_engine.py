@@ -312,7 +312,11 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+            if (
+                self.logger_manager is not None
+                and outputs.scheduler_stats is not None
+                and len(outputs.outputs) > 0
+            ):
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
@@ -322,8 +326,8 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self):
-        self.engine_core.profile(True)
+    def start_profile(self, profile_prefix: str | None = None):
+        self.engine_core.profile(True, profile_prefix)
 
     def stop_profile(self):
         self.engine_core.profile(False)
