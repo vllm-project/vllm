@@ -13,7 +13,6 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
 else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
-    KVConnectorKVEvents = object
 
 
 class LogprobsLists(NamedTuple):
@@ -145,7 +143,6 @@ class KVConnectorOutput:
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
-    kv_cache_events: KVConnectorKVEvents | None = None
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
@@ -162,7 +159,6 @@ class KVConnectorOutput:
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
-            and not self.kv_cache_events
             and not self.invalid_block_ids
             and not self.kv_connector_worker_meta
         )
