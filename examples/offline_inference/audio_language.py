@@ -8,26 +8,17 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-import contextlib
 import os
 from dataclasses import asdict
 from typing import Any, NamedTuple
 
-# Lazy import for kimia_infer (only needed for Kimi-Audio)
-import kimia_infer.api.prompt_manager  # noqa: F401
 import librosa
-import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.models.kimi_audio_asr import (
-    KimiAudioForConditionalGeneration,
-    _get_kimia_prompt_manager,
-    _write_wav_tmp,
-)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -491,6 +482,18 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 # Kimi-Audio (ASR)
 def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
     """Kimi-Audio ASR example using kimia_infer for preprocessing."""
+    import contextlib
+
+    # Lazy import kimia_infer since it's only needed for Kimi-Audio
+    import kimia_infer.api.prompt_manager  # noqa: F401
+    import torch
+
+    from vllm.model_executor.models.kimi_audio_asr import (
+        KimiAudioForConditionalGeneration,
+        _get_kimia_prompt_manager,
+        _write_wav_tmp,
+    )
+
     assert audio_count == 1, "Kimi-Audio ASR only supports single audio input"
 
     model_path = args.model or "moonshotai/Kimi-Audio-7B-Instruct"
