@@ -726,7 +726,7 @@ class EngineCore:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
-        if tags:
+        if tags is None or tags:
             self.model_executor.wake_up(tags)
 
         # Resume scheduling (applies to all levels)
