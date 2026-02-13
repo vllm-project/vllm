@@ -728,13 +728,13 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        if (
-            self.optimization_level > OptimizationLevel.O0
-            and self.model_config is not None
-            and self.model_config.enforce_eager
-        ):
-            logger.warning("Enforce eager set, overriding optimization level to -O0")
-            self.optimization_level = OptimizationLevel.O0
+        if self.model_config is not None and self.model_config.enforce_eager:
+            logger.warning(
+                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
+                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+            )
+            self.compilation_config.mode = CompilationMode.NONE
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
