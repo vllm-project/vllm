@@ -215,7 +215,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int = 1,
-    ) -> tuple[ImageSize, int]:
+    ) -> int:
         hf_config = self.get_hf_config()
         vit_config = hf_config.vit_config
         patch_size = vit_config.patch_size
@@ -245,7 +245,6 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=None,
             )
             if next_max_tokens > max_tokens:
                 break
@@ -270,7 +269,6 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: BaseImageProcessor | None,
     ) -> int:
         num_video_tokens = self.get_num_image_tokens(
             image_width=image_width, image_height=image_height, num_frames=num_frames
@@ -287,7 +285,6 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=None,
         )
 
 
