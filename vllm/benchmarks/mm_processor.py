@@ -50,7 +50,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
     prompt update) and encoder forward pass timing, merged by request_id.
 
     Args:
-        engine: The LLM engine (has input_processor and workers).
+        llm_engine: The LLM engine (has input_processor and workers).
 
     Returns:
         Dictionary mapping request_id to merged stats dict containing
