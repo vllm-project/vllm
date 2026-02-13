@@ -59,6 +59,7 @@ decord==0.6.0
 terratorch >= 1.2.2 #Required for Prithvi tests
 imagehash #Required for Prithvi tests
 segmentation-models-pytorch > 0.4.0 #Required for Prithvi tests
+torchcodec
 gpt-oss >= 0.0.7; python_version > '3.11'
 
 perceptron # required for isaac test
