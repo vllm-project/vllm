@@ -68,7 +68,13 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
-            kw_annotations = get_type_hints(kwargs_type_annotations[kw_type])
+            # Use __annotations__ instead of get_type_hints() to avoid
+            # NameError from unresolved forward references (e.g.
+            # PILImageResampling). We only need key names, not types.
+            kw_cls = kwargs_type_annotations[kw_type]
+            kw_annotations = {}
+            for base in reversed(kw_cls.__mro__):
+                kw_annotations.update(getattr(base, '__annotations__', {}))
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
