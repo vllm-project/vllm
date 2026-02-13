@@ -588,10 +588,18 @@ steps:
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
-  # TODO: clean up this comment if not needed. It is used to 
-  # keep track of the tests changes during vLLM IR Ops refactoring.
-  # Use `find` to launch multiple instances of pytest.
-  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+
+# corresponds to .buildkite/test_areas/pytorch.yaml
+- label: PyTorch Compilation Passes Unit Tests
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
+  agent_pool: mi325_1
+  source_file_dependencies:
+    - vllm/
+    - tests/compile/passes
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -1674,7 +1682,7 @@ steps:
 - label: Fusion and Compile Unit Tests (2xMI325 GPUs)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, tj]
   agent_pool: mi325_1 # changed to 1 GPU until the fusion all reduce is enabled then only revert back to 2 GPUs
   source_file_dependencies:
   - csrc/quantization/fp4/
