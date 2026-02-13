@@ -592,6 +592,20 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future[Any] | None:
+        """Pause scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+        return None
+
+    def resume_scheduler(self) -> None:
+        """Resume scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+
+    def is_scheduler_paused(self) -> bool:
+        """Return whether the scheduler is in any pause state. False in base EngineCore
+        and overridden in EngineCoreProc."""
+        return False
+
     def sleep(self, level: int = 1):
         """Put the engine to sleep at the specified level.
 
@@ -629,7 +643,7 @@ class EngineCore:
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
-        return self._scheduler_paused or self.model_executor.is_sleeping
+        return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1042,7 +1056,7 @@ class EngineCoreProc(EngineCore):
         waited = False
         while (
             not self.engines_running
-            and (not self.scheduler.has_requests() or self._scheduler_paused)
+            and not self.scheduler.has_requests()
             and not self.batch_queue
             and not self.per_step_hooks
         ):
@@ -1514,10 +1528,6 @@ class DPEngineCoreProc(EngineCoreProc):
         while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
-
-            # Skip processing if scheduling is paused (level 0 sleep)
-            if self._scheduler_paused:
-                continue
 
             # 2) Step the engine core.
             executed = self._process_engine_step()
