@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
@@ -28,27 +27,15 @@ from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import DictPrompt, TokPrompt
-from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
-from vllm.v1.structured_output.backend_guidance import (
-    has_guidance_unsupported_json_features,
-    validate_guidance_grammar,
-)
-from vllm.v1.structured_output.backend_lm_format_enforcer import (
-    validate_structured_output_request_lm_format_enforcer,
-)
-from vllm.v1.structured_output.backend_outlines import (
-    validate_structured_output_request_outlines,
-)
-from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
 logger = init_logger(__name__)
 
@@ -57,6 +44,8 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        renderer: BaseRenderer | None = None,
+        *,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -64,135 +53,40 @@ class InputProcessor:
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
+        self.renderer = renderer or renderer_from_config(vllm_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
-        self.mm_encoder_cache_size: int | None = None
-        if (
-            mm_registry.supports_multimodal_inputs(model_config)
-            and not model_config.skip_tokenizer_init
-        ):
+        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
+        self.mm_encoder_cache_size = 0
+        self.skip_prompt_length_check = False
+        if self.supports_mm_inputs:
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
             self.mm_encoder_cache_size = mm_budget.encoder_cache_size
+            self.skip_prompt_length_check = (
+                mm_budget.processor.info.skip_prompt_length_check
+            )
             mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
-            model_config,
-            self.observability_config,
-            mm_registry,
+            vllm_config,
+            renderer=renderer,
+            mm_registry=mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
-        return self.input_preprocessor.tokenizer
+        return self.renderer.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        return self.input_preprocessor.get_tokenizer()
-
-    @property
-    def renderer(self) -> BaseRenderer:
-        return self.input_preprocessor.renderer
-
-    def _validate_logprobs(
-        self,
-        params: SamplingParams,
-    ) -> None:
-        max_logprobs = self.model_config.max_logprobs
-        if max_logprobs == -1:
-            max_logprobs = self.model_config.get_vocab_size()
-
-        # Validate sample logprobs.
-        if params.logprobs:
-            num_logprobs = params.logprobs
-            if num_logprobs == -1:
-                num_logprobs = self.model_config.get_vocab_size()
-            if num_logprobs > max_logprobs:
-                raise VLLMValidationError(
-                    f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
-                    parameter="logprobs",
-                    value=num_logprobs,
-                )
-
-        # Validate prompt logprobs.
-        if params.prompt_logprobs:
-            num_prompt_logprobs = params.prompt_logprobs
-            if num_prompt_logprobs == -1:
-                num_prompt_logprobs = self.model_config.get_vocab_size()
-            if num_prompt_logprobs > max_logprobs:
-                raise VLLMValidationError(
-                    f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
-                    parameter="prompt_logprobs",
-                    value=num_prompt_logprobs,
-                )
-
-    def _validate_sampling_params(
-        self,
-        params: SamplingParams,
-    ) -> None:
-        self._validate_structured_output(params)
-        self._validate_logit_bias(params)
-
-        if params.allowed_token_ids is None:
-            return
-        if not params.allowed_token_ids:
-            raise ValueError("allowed_token_ids is not None and empty!")
-        if self.tokenizer is None:
-            # When skip_tokenizer_init=True, we can't validate token IDs
-            # Skip validation and let the model handle invalid tokens
-            return
-        vocab_size = len(self.tokenizer)
-        if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
-            raise ValueError("allowed_token_ids contains out-of-vocab token id!")
-
-    def _validate_logit_bias(
-        self,
-        params: SamplingParams,
-    ) -> None:
-        """Validate logit_bias token IDs are within vocabulary range."""
-        if not params.logit_bias:
-            return
-
-        vocab_size = self.model_config.get_vocab_size()
-        invalid_token_ids = []
-
-        for token_id in params.logit_bias:
-            if token_id < 0 or token_id >= vocab_size:
-                invalid_token_ids.append(token_id)
-
-        if invalid_token_ids:
-            raise VLLMValidationError(
-                f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
-                parameter="logit_bias",
-                value=invalid_token_ids,
-            )
-
-    def _validate_supported_sampling_params(
-        self,
-        params: SamplingParams,
-    ) -> None:
-        # Logits processors not supported.
-        if params.logits_processors:
-            raise ValueError(
-                "vLLM V1 does not support per request user-provided logits processors."
-            )
-
-        # Some sampling parameters are not yet compatible with spec decoding.
-        if self.vllm_config.speculative_config is not None and (
-            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
-        ):
-            raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
-                "are not yet supported with speculative decoding."
-            )
+        return self.renderer.get_tokenizer()
 
     def _validate_params(
         self,
@@ -201,11 +95,15 @@ class InputProcessor:
         # is passed to all `process_inputs` calls
         supported_tasks: tuple[SupportedTask, ...] | None,
     ):
-        """
-        Validate supported SamplingParam.
-        Should raise ValueError if unsupported for API Server.
-        """
-        if isinstance(params, PoolingParams):
+        """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+        if isinstance(params, SamplingParams):
+            params.verify(
+                self.model_config,
+                self.speculative_config,
+                self.structured_outputs_config,
+                self.tokenizer,
+            )
+        elif isinstance(params, PoolingParams):
             if supported_tasks is None:
                 raise RuntimeError("`supported_tasks` must be passed for pooling")
 
@@ -231,12 +129,11 @@ class InputProcessor:
                 )
 
             params.verify(self.model_config)
-
-            return
-
-        self._validate_logprobs(params)
-        self._validate_sampling_params(params)
-        self._validate_supported_sampling_params(params)
+        else:
+            raise TypeError(
+                f"params must be either SamplingParams or PoolingParams, "
+                f"but got {type(params).__name__}"
+            )
 
     def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
         mm_processor = self.input_preprocessor._get_mm_processor()
@@ -331,120 +228,6 @@ class InputProcessor:
                 "with its own tokenizer, consider specifying `--tokenizer "
                 "[lora_path]` to use the LoRA tokenizer."
             )
-
-    def _validate_structured_output(self, params: SamplingParams) -> None:
-        if not params.structured_outputs or not self.structured_outputs_config:
-            return
-
-        if self.model_config.skip_tokenizer_init and params.structured_outputs:
-            raise ValueError(
-                "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
-            )
-
-        backend = self.structured_outputs_config.backend
-        if _backend := params.structured_outputs._backend:
-            # Request-level backend selection is not supported.
-            # The values may differ if `params` is reused and was set
-            # to a specific backend based on `auto` behavior in a previous
-            # request. We remember that it was set as a result of `auto`
-            # using the `_backend_was_auto` field set in the params.
-            if backend != _backend and not (
-                backend == "auto" and params.structured_outputs._backend_was_auto
-            ):
-                raise ValueError(
-                    "Request-level structured output backend selection is not "
-                    f"supported. The request specified '{_backend}', but vLLM "
-                    f"was initialised with '{backend}'. This error can be "
-                    "resolved by removing '_backend' from the request."
-                )
-        else:
-            params.structured_outputs._backend = backend
-
-        # Request content validation
-        if (
-            isinstance(params.structured_outputs.choice, list)
-            and not params.structured_outputs.choice
-        ):
-            # It is invalid for choice to be an empty list
-            raise ValueError(
-                f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
-            )
-        # Reject empty string grammar early to avoid engine-side crashes
-        if (
-            isinstance(params.structured_outputs.grammar, str)
-            and params.structured_outputs.grammar.strip() == ""
-        ):
-            raise ValueError("structured_outputs.grammar cannot be an empty string")
-
-        if backend.startswith("xgrammar"):
-            # xgrammar with no fallback
-            validate_xgrammar_grammar(params)
-        elif backend.startswith("guidance"):
-            # TODO: ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            if isinstance(self.tokenizer, MistralTokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_guidance_grammar(params, tokenizer=None)
-        elif backend == "outlines":
-            # outlines backend
-            validate_structured_output_request_outlines(params)
-        elif backend == "lm-format-enforcer":
-            # lm format enforcer backend
-            if isinstance(self.tokenizer, MistralTokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_structured_output_request_lm_format_enforcer(params)
-        else:
-            # NOTE: backend must be "auto" here, because we have
-            # checked supported_backends above.
-            # In this mode, we set opinionated defaults based on what we think
-            # will satisfy the most use cases without having to worry about
-            # this setting. We include fallback behavior here, but not with any
-            # other setting where a specific backend was specified.
-            try:
-                validate_xgrammar_grammar(params)
-                params.structured_outputs._backend = "xgrammar"
-            except ValueError:
-                # The request either failed validation
-                # or includes some jsonschema feature(s) that
-                # are not supported in xgrammar.
-
-                # Check if schema has features unsupported by guidance
-                so_params = params.structured_outputs
-                skip_guidance = False
-                if so_params.json:
-                    if isinstance(so_params.json, str):
-                        import json
-
-                        schema = json.loads(so_params.json)
-                    else:
-                        schema = so_params.json
-                    skip_guidance = has_guidance_unsupported_json_features(schema)
-
-                if isinstance(self.tokenizer, MistralTokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
-                    validate_structured_output_request_outlines(params)
-                    params.structured_outputs._backend = "outlines"
-                else:
-                    # Fall back to guidance by default.
-                    validate_guidance_grammar(params, tokenizer=None)
-                    params.structured_outputs._backend = "guidance"
-            # Remember that this backend was set automatically
-            params.structured_outputs._backend_was_auto = True
-
-        # Run post-init validation. This is also important to ensure subsequent
-        # roundtrip serialization/deserialization won't fail.
-        params.structured_outputs.__post_init__()
 
     def _extract_singleton_mm_data(
         self, prompt: SingletonPrompt
@@ -592,8 +375,6 @@ class InputProcessor:
             processed_inputs=processed_inputs,
         )
 
-        eos_token_id = self.input_preprocessor.get_eos_token_id()
-
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
@@ -616,8 +397,10 @@ class InputProcessor:
                     prompt_token_ids, prompt_embeds
                 )
                 sampling_params.max_tokens = self.model_config.max_model_len - seq_len
+
             sampling_params.update_from_generation_config(
-                self.generation_config_fields, eos_token_id
+                self.generation_config_fields,
+                self.renderer.get_eos_token_id(),
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
@@ -660,7 +443,6 @@ class InputProcessor:
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
-            eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
@@ -670,76 +452,25 @@ class InputProcessor:
             resumable=resumable,
         )
 
-    def _validate_model_inputs(
-        self, encoder_inputs: SingletonInputs | None, decoder_inputs: SingletonInputs
-    ):
-        if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs, prompt_type="encoder")
-
-        self._validate_model_input(decoder_inputs, prompt_type="decoder")
-
-    def _validate_model_input(
+    def _validate_prompt_len(
         self,
-        prompt_inputs: SingletonInputs,
-        *,
+        prompt_len: int,
         prompt_type: Literal["encoder", "decoder"],
     ):
+        if self.skip_prompt_length_check:
+            return
+
+        if prompt_len == 0 and prompt_type == "decoder":
+            raise ValueError(f"The {prompt_type} prompt cannot be empty")
+
         model_config = self.model_config
-
-        prompt_ids = (
-            None
-            if prompt_inputs["type"] == "embeds"
-            else prompt_inputs["prompt_token_ids"]
+        max_prompt_len = (
+            model_config.max_model_len
+            if prompt_type == "decoder"
+            else self.mm_encoder_cache_size
         )
-        prompt_embeds = (
-            prompt_inputs["prompt_embeds"]
-            if prompt_inputs["type"] == "embeds"
-            else None
-        )
-        prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
-        if not prompt_ids:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
-                pass  # Mllama may have empty encoder inputs for text-only data
-            elif prompt_inputs["type"] == "embeds":
-                pass  # Prompt embeds should not have prompt_ids.
-            else:
-                raise ValueError(f"The {prompt_type} prompt cannot be empty")
-
-        tokenizer = self.tokenizer
-        if tokenizer is not None:
-            max_input_id = max(prompt_ids or (), default=0)
-
-            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
-            # self.model_config.get_vocab_size() is the model’s vocab size.
-            # For Qwen3 models, the language model has extra tokens that do
-            # not exist in the tokenizer, and vice versa for multimodal
-            # placeholder tokens in some multimodal models.
-            # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
-            # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
-
-            # Here we take the max of the two to determine if a token id is
-            # truly out-of-vocabulary.
-            if max_input_id > max(
-                tokenizer.max_token_id, self.model_config.get_vocab_size() - 1
-            ):
-                raise ValueError(f"Token id {max_input_id} is out of vocabulary")
-
-        max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if model_config.is_multimodal_model:
-                mm_registry = self.input_preprocessor.mm_registry
-                model_cls = mm_registry._get_model_cls(model_config)
-                factories = model_cls._processor_factory
-                ctx = mm_registry._create_processing_ctx(
-                    model_config,
-                    tokenizer=tokenizer,
-                )
-                mm_info = factories.info(ctx)
-
-                if mm_info.skip_prompt_length_check:
-                    return
-
-            if model_config.is_multimodal_model:
+            if self.supports_mm_inputs:
                 suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
@@ -757,17 +488,7 @@ class InputProcessor:
                 f"longer than the maximum model length of {max_prompt_len}. "
                 f"{suggestion}"
             )
-
-            # TODO: Find out how many placeholder tokens are there so we can
-            # check that chunked prefill does not truncate them
-            # max_batch_len = self.scheduler_config.max_num_batched_tokens
-
-        if (
-            prompt_len == max_prompt_len
-            and prompt_type == "decoder"
-            and not model_config.is_multimodal_model
-            and self.model_config.runner_type != "pooling"
-        ):
+        elif prompt_len == max_prompt_len and model_config.runner_type == "generate":
             suggestion = (
                 "Make sure that `max_model_len` is no smaller than the "
                 "number of text tokens (prompt + requested output tokens)."
@@ -778,11 +499,29 @@ class InputProcessor:
                 f"model length of {max_prompt_len}. {suggestion}"
             )
 
-        if (
-            prompt_type == "decoder"
-            and prompt_inputs["type"] == "multimodal"
-            and self.mm_encoder_cache_size is not None
-        ):
+    def _validate_model_input(
+        self,
+        prompt_inputs: SingletonInputs,
+        prompt_type: Literal["encoder", "decoder"],
+    ) -> None:
+        model_config = self.model_config
+        tokenizer = self.tokenizer
+
+        prompt_ids = (
+            None
+            if prompt_inputs["type"] == "embeds"
+            else prompt_inputs["prompt_token_ids"]
+        )
+        prompt_embeds = (
+            prompt_inputs["prompt_embeds"]
+            if prompt_inputs["type"] == "embeds"
+            else None
+        )
+
+        prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
+        self._validate_prompt_len(prompt_len, prompt_type)
+
+        if prompt_inputs["type"] == "multimodal":
             decoder_mm_positions = prompt_inputs["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
@@ -796,6 +535,33 @@ class InputProcessor:
                             f"size or increase the encoder cache size "
                             f"by setting --limit-mm-per-prompt at startup."
                         )
+
+        if prompt_ids and tokenizer is not None:
+            max_input_id = max(prompt_ids, default=0)
+
+            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
+            # self.model_config.get_vocab_size() is the model’s vocab size.
+            # For Qwen3 models, the language model has extra tokens that do
+            # not exist in the tokenizer, and vice versa for multimodal
+            # placeholder tokens in some multimodal models.
+            # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
+            # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+
+            # Here we take the max of the two to determine if a token id is
+            # truly out-of-vocabulary.
+            model_vocab_size = model_config.get_vocab_size()
+            if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+                raise ValueError(f"Token id {max_input_id} is out of vocabulary")
+
+    def _validate_model_inputs(
+        self,
+        encoder_inputs: SingletonInputs | None,
+        decoder_inputs: SingletonInputs,
+    ):
+        if encoder_inputs is not None:
+            self._validate_model_input(encoder_inputs, prompt_type="encoder")
+
+        self._validate_model_input(decoder_inputs, prompt_type="decoder")
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()

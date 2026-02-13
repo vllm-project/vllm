@@ -104,9 +104,6 @@ class ConfigSet:
             result[platform] = {}
 
             for config_key, config in config_keys_dict.items():
-                # Convert helion.Config to dict using to_json() + json.loads()
-                import json
-
                 result[platform][config_key] = json.loads(config.to_json())
 
         return result
@@ -134,6 +131,27 @@ class ConfigSet:
 
         return config_set
 
+    def set_config(
+        self, platform: str, config_key: str, config: "helion.Config"
+    ) -> None:
+        platform = platform.lower()
+        if platform not in self._configs:
+            self._configs[platform] = {}
+        self._configs[platform][config_key] = config
+        logger.debug(
+            "Set config for kernel '%s': platform='%s', key='%s'",
+            self._kernel_name,
+            platform,
+            config_key,
+        )
+
+    def has_config(self, platform: str, config_key: str) -> bool:
+        platform = platform.lower()
+        platform_dict = self._configs.get(platform)
+        if platform_dict is None:
+            return False
+        return config_key in platform_dict
+
 
 class ConfigManager:
     """File-level configuration management for Helion kernels (global singleton)."""
@@ -145,7 +163,6 @@ class ConfigManager:
         resolved_base_dir = cls._resolve_base_dir(base_dir)
 
         if cls._instance is not None:
-            # Instance already exists - check for base_dir mismatch
             if cls._instance_base_dir != resolved_base_dir:
                 raise ValueError(
                     f"ConfigManager singleton already exists with base_dir "
@@ -154,14 +171,12 @@ class ConfigManager:
                 )
             return cls._instance
 
-        # Create new instance
         instance = super().__new__(cls)
         cls._instance = instance
         cls._instance_base_dir = resolved_base_dir
         return instance
 
     def __init__(self, base_dir: str | Path | None = None):
-        # Only initialize if not already initialized
         if hasattr(self, "_base_dir"):
             return
 
@@ -196,6 +211,17 @@ class ConfigManager:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         return self._base_dir
 
+    def ensure_base_dir_writable(self) -> None:
+        self.ensure_base_dir_exists()
+        test_file = self._base_dir / ".write_test"
+        try:
+            test_file.write_text("test")
+            test_file.unlink()
+        except OSError as e:
+            raise OSError(
+                f"Config directory '{self._base_dir}' is not writable: {e}"
+            ) from e
+
     def load_config_set(self, kernel_name: str) -> ConfigSet:
         config_path = self.get_config_file_path(kernel_name)
         if not config_path.exists():
@@ -229,3 +255,19 @@ class ConfigManager:
 
         logger.info("Saved config to: %s", config_path)
         return config_path
+
+    def save_configs(
+        self,
+        kernel_name: str,
+        platform: str,
+        configs: dict[str, "helion.Config"],
+    ) -> Path:
+        """Save configs for a kernel/platform, merging with existing."""
+        config_set = self.load_config_set(kernel_name)
+        for config_key, config in configs.items():
+            config_set.set_config(platform, config_key, config)
+        return self.save_config_set(config_set)
+
+    def config_exists(self, kernel_name: str, platform: str, config_key: str) -> bool:
+        config_set = self.load_config_set(kernel_name)
+        return config_set.has_config(platform, config_key)

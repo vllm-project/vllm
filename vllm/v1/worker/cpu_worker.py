@@ -160,12 +160,21 @@ class CPUWorker(Worker):
                 x for x in logical_cpu_list if x.numa_node == selected_numa_node
             ]
         else:
-            assert len(logical_cpu_list) >= self.parallel_config.world_size
-            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
-            sim_cpu_num_per_node = (
-                len(logical_cpu_list) // self.parallel_config.world_size
+            # This is a bit tricky because the internal DP size
+            # is always 1 for non-MoE models
+            world_size_across_dp = (
+                self.parallel_config.world_size
+                * self.parallel_config._api_process_count
             )
-            start_idx = self.local_rank * sim_cpu_num_per_node
+            assert len(logical_cpu_list) >= world_size_across_dp
+            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
+            sim_cpu_num_per_node = len(logical_cpu_list) // world_size_across_dp
+            assert self.parallel_config.data_parallel_rank_local is not None
+            start_idx = (
+                self.local_rank
+                + self.parallel_config.world_size
+                * self.parallel_config.data_parallel_rank_local
+            ) * sim_cpu_num_per_node
             logical_cpu_list = logical_cpu_list[
                 start_idx : (start_idx + sim_cpu_num_per_node)
             ]
@@ -203,7 +212,7 @@ class CPUWorker(Worker):
         )
         return ",".join([str(x.id) for x in logical_cpu_list])
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
