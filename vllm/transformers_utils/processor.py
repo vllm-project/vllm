@@ -18,9 +18,12 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -200,7 +203,8 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                         | _collect_dynamic_keys_from_processing_kwargs(obj)
                     )
             return processor_kwargs
-    except Exception:
+    except Exception as exc:
+        logger.warning_once("Failed to collect processor kwargs: %s", exc)
         return set()
 
 
