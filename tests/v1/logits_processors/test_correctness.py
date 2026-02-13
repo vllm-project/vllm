@@ -197,9 +197,17 @@ def _generate_fake_sampling_metadata(
 
 def _generate_test_fakes(batch_size: int, device: str, enable_spec_decode: bool = False) -> LogitsprocsTestFakes:
     """Generate fake logits and sampling metadata"""
-    fake_logits = create_fake_logits(batch_size, VOCAB_SIZE)
-    # Create one dominant token per batch, to support min-p test
-    for i in range(batch_size):
+    # Calculate the total logits size for speculative decoding
+    if enable_spec_decode:
+        # In speculative decoding, logits size = batch_size + total_spec_tokens_across_all_requests
+        total_spec_tokens = batch_size * NUM_SPEC_TOKENS
+        logits_size = batch_size + total_spec_tokens
+    else:
+        logits_size = batch_size
+    
+    fake_logits = create_fake_logits(logits_size, VOCAB_SIZE)
+    # Create one dominant token per logit position, to support min-p test
+    for i in range(logits_size):
         fake_logits[i, 0] = 10.0  # High logit for first token
         fake_logits[i, 1:] = 1e-2  # Others remain low
     sampling_metadata = _generate_fake_sampling_metadata(
@@ -704,7 +712,7 @@ def _thinking_budget_validate_spec_decode(
 
                 # Validate force_index calculation with spec tokens
                 overflow_position = total_think_tokens - budget
-                expected_force_index = spec_count - overflow_position
+                expected_force_index = max(0, spec_count - overflow_position)
                 actual_force_index = state.get("force_index", -1)
                 
                 if actual_force_index != expected_force_index:
@@ -712,6 +720,8 @@ def _thinking_budget_validate_spec_decode(
                         msg_suffix=(
                             f"Force index mismatch in spec decode: "
                             f"expected {expected_force_index}, got {actual_force_index}"
+                            f" (think_count={think_count}, spec_count={spec_count}, "
+                            f"budget={budget})"
                         ),
                         batch_index=batch_index,
                         request_params=request_params,
@@ -722,10 +732,12 @@ def _thinking_budget_validate_spec_decode(
                 # In speculative decoding, we need to account for the cumulative offset
                 cumulative_offset = 0
                 for i in range(batch_index):
-                    # Add spec tokens count for previous requests
+                    # Add spec tokens count for previous requests + 1 (matching processor logic)
                     prev_state = tb_processor._state.get(i)
                     if prev_state:
-                        cumulative_offset += len(prev_state.get("spec_token_ids", []))
+                        cumulative_offset += len(prev_state.get("spec_token_ids", [])) + 1
+                    else:
+                        cumulative_offset += 1
                 
                 expected_mask_position = cumulative_offset + actual_force_index
                 
@@ -882,7 +894,7 @@ def _generate_fake_step_update(
     # 50% of steps: remove no requests
     # Other 50%: remove a limited number of reqs (less than the number
     # persistent batch reqs remaining, less than an arbitrary max)
-    # If persistent batch is empty: 100% of steps have 0 removals until
+   
     # more requests are added. Assume that removed requests are always
     # drawn from the current batch, before new adds
     num_step_remove = (
@@ -1205,3 +1217,124 @@ def test_thinking_budget_logitsproc_spec_decode(
         )
 
         step_idx += 1
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_thinking_budget_custom_spec_decode(device: str):
+    """Test ThinkingTokenBudgetLogitsProcessor with custom speculative decoding inputs
+    
+    This test allows you to define custom speculative tokens and output tokens
+    to test specific scenarios with the thinking token budget processor.
+    Uses the same rigorous validation logic as test_thinking_budget_logitsproc_spec_decode.
+    
+    To customize your test:
+    1. Modify custom_spec_tokens - the speculative tokens for each request
+    2. Modify custom_output_tokens - the output tokens for each request  
+    3. The test will automatically validate all logic with comprehensive assertions
+    """
+    random.seed(123)  # Fixed seed for reproducible tests
+    torch.set_default_device(device)
+
+    # CUSTOMIZE THESE VALUES FOR YOUR TEST CASES:
+    batch_size = 3
+    
+    # Custom speculative tokens for each request
+    custom_spec_tokens = [
+        [300, 100,400],  # Request 0: thinking tokens in spec
+        [200, 201, 202],                                   # Request 1: random tokens
+        [500,800, 300],                                   # Request 2: multiple end tokens
+    ]
+    
+    # Custom output tokens for each request
+    custom_output_tokens = [
+        [THINK_START_TOKEN_ID, 50, 51, 52, 53],  # Request 0: 8 thinking tokens (exceeds budget)
+        [THINK_START_TOKEN_ID, 60, 61, 62],                          # Request 1: 3 thinking tokens (within budget)
+        [THINK_START_TOKEN_ID,70, 71, 72, 73, 74],                                        # Request 2: no thinking tokens
+    ]
+    
+    # Calculate logits size for spec decode
+    total_spec_tokens = sum(len(spec_tokens) for spec_tokens in custom_spec_tokens)
+    logits_size = batch_size + total_spec_tokens
+    
+    # Create fake logits
+    fake_logits = create_fake_logits(logits_size, VOCAB_SIZE)
+    for i in range(logits_size):
+        fake_logits[i, 0] = 10.0
+        fake_logits[i, 1:] = 1e-2
+
+    # Create VllmConfig for spec decode
+    vllm_config = VllmConfig()
+    vllm_config.reasoning_config = MockReasoningConfig()
+    vllm_config.speculative_config = MockSpeculativeConfig()
+
+    # Create processor manually
+    from vllm.v1.sample.logits_processor import LogitsProcessors
+    thinking_processor = ThinkingTokenBudgetLogitsProcessor(
+        vllm_config, torch.device(device), PIN_MEMORY_AVAILABLE
+    )
+    logitsprocs = LogitsProcessors([thinking_processor])
+
+    # Create sampling metadata
+    prompt_token_ids = [np.random.randint(1, VOCAB_SIZE, size=10).tolist() for _ in range(batch_size)]
+    fake_sampling_metadata = SamplingMetadata(
+        temperature=torch.full((batch_size,), 0.0),
+        all_greedy=True,
+        all_random=False,
+        top_p=None,
+        top_k=None, 
+        generators={},
+        max_num_logprobs=5,
+        prompt_token_ids=create_prompt_tokens_tensor(prompt_token_ids, VOCAB_SIZE, torch.device(device)),
+        output_token_ids=custom_output_tokens,
+        frequency_penalties=create_penalty_tensor(batch_size, 0.0, torch.device(device)),
+        presence_penalties=create_penalty_tensor(batch_size, 0.0, torch.device(device)),
+        repetition_penalties=create_penalty_tensor(batch_size, 1.0, torch.device(device)),
+        no_penalties=True,
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
+        logitsprocs=logitsprocs,
+        spec_token_ids=custom_spec_tokens,
+    )
+    
+    test_fakes = LogitsprocsTestFakes(logits=fake_logits, sampling_metadata=fake_sampling_metadata)
+
+    # Create request params with custom tokens
+    workload_params = []
+    for i in range(batch_size):
+        params = LogitsProcsRequestParams(workload_index=i, logitproc_type=ThinkingTokenBudgetLogitsProcessor)
+        params.out_tokens = custom_output_tokens[i]
+        workload_params.append(params)
+
+    # Build batch update
+    batch_update_builder = BatchUpdateBuilder()
+    for i, req_params in enumerate(workload_params):
+        batch_update_builder.added.append((i, req_params.params, req_params.prompt_tokens, req_params.out_tokens))
+    batch_update = batch_update_builder.get_and_reset(batch_size)
+
+    # Update processor state with custom spec tokens
+    for logitproc in test_fakes.get_logitsprocs():
+        if isinstance(logitproc, ThinkingTokenBudgetLogitsProcessor):
+            logitproc.update_state(batch_update, custom_spec_tokens)
+
+    # Apply processors and get results
+    logits_w_lp = fake_apply_logitsprocs(test_fakes, list(range(batch_size))).cpu()
+
+    # COMPREHENSIVE VALIDATION using the same rigorous logic as test_thinking_budget_logitsproc_spec_decode
+    print("Custom Speculative Decoding Test Results:")
+    
+    # Apply the same validation used in the main test
+    for batch_index, req_params in enumerate(workload_params):
+        
+        # Use the same validation function as the main test
+        _thinking_budget_validate_spec_decode(
+            test_fakes=test_fakes,
+            persistent_batch=workload_params,
+            logits_new=logits_w_lp,
+            batch_index=batch_index,
+            request_params=req_params,
+            step_idx=0,  # Single step test
+        )
+        
+    
+    print("✅ Custom speculative decoding test completed with full validation!")

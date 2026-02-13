@@ -258,9 +258,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     ):
         reasoning_config = vllm_config.reasoning_config
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        if vllm_config.speculative_configs:
+        if vllm_config.speculative_config:
             self.num_spec_tokens = \
-            vllm_config.speculative_configs.num_speculative_tokens
+            vllm_config.speculative_config.num_speculative_tokens
+        else:
+            self.num_spec_tokens = 0  # Default to 0 for non-speculative mode
 
         # Check if thinking is enabled
         self.is_enabled = (
@@ -429,18 +431,21 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 state["check_count_down"] = state["thinking_token_budget"]
 
             # Check if need to transition to end mode
-            if (
-                state["in_think"]
-                and state["think_count"] + len(state["spec_token_ids"])
-                  >= state["thinking_token_budget"]
-            ):
+            total_thinking_tokens = state["think_count"] + len(state["spec_token_ids"])
+            if state["in_think"] and total_thinking_tokens >= state["thinking_token_budget"]:
                 state["in_think"] = False
                 state["in_end"] = True
-                state["end_count"] = 0
+                state["end_count"] = 0 # make changes here
                 state["check_count_down"] = state["thinking_token_budget"]
-                overflow_position = (state["think_count"]+len(state["spec_token_ids"]))\
-                  - state["thinking_token_budget"]
-                state["force_index"] = len(state["spec_token_ids"]) - overflow_position
+                
+                # Calculate force_index: position within spec_token_ids where forcing starts
+                # If we're already over budget without spec tokens, force from position 0
+                if state["think_count"] >= state["thinking_token_budget"]:
+                    state["force_index"] = 0
+                else:
+                    # Force from the position where budget is exceeded
+                    remaining_budget = total_thinking_tokens - state["thinking_token_budget"]
+                    state["force_index"] = len(state["spec_token_ids"]) - remaining_budget
         else:
             # In end mode
             state["end_count"] += 1
@@ -475,14 +480,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
                 thinking_token_budget = params.thinking_token_budget
 
-                if len(self._spec_token_ids[index]) > 0:
-                    self._state["spec_token_ids"] = self._spec_token_ids[index]
-
                 if thinking_token_budget is not None:
                     self._state[index] = self._init_state_entry(
                         prompt_tok_ids, thinking_token_budget
                     )
                     self._state[index]["output_tok_ids"] = output_tok_ids
+                    
+                    # Set spec_token_ids if available
+                    if self._spec_token_ids and len(self._spec_token_ids[index]) > 0:
+                        self._state[index]["spec_token_ids"] = self._spec_token_ids[index]
                 else:
                     # Remove state if no thinking budget
                     self._state.pop(index, None)
@@ -499,10 +505,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                         self._state[i2] = state1
                 else:
                     self._state[i2] = self._state.pop(i1, {})
-        for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-             if index in self._state:
-                self._state[index]["spec_token_ids"] = \
-                self._spec_token_ids[index]
+        
         for state in self._state.values():
             self._update_think_state(state)
 
@@ -510,16 +513,26 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         if not self.is_enabled or not self._state:
             return logits
 
-        batch_size = len(self._state)
-        self.mask[:batch_size*self.num_spec_tokens] = False
+        # Reset mask
+        self.mask[:] = False
+        
+        # Find active sequences and set up masking
         cumulative_offset = 0
-        for i in range(batch_size):
-            state = self._state.get(i)
-            if state and state["in_end"]:
-                self.mask[cumulative_offset + state["force_index"]] = True
-                self.force_token_ids[cumulative_offset + state["force_index"]]\
-                = self.think_end_token_ids[state["end_count"]]
-            cumulative_offset += len(state.get("spec_token_ids", [])) if state else 0
+        for seq_idx in sorted(self._state.keys()):
+            state = self._state[seq_idx]
+            if state and state.get("in_end", False):
+                force_index = state.get("force_index", 0)
+                if 0 <= force_index < self.num_spec_tokens:
+                    mask_idx = cumulative_offset + force_index
+                    if mask_idx < len(self.mask):
+                        self.mask[mask_idx] = True
+                        end_count = state.get("end_count", 0)
+                        if end_count < len(self.think_end_token_ids):
+                            self.force_token_ids[mask_idx] = self.think_end_token_ids[end_count]
+            
+            # Update cumulative offset based on spec token count for this sequence
+            spec_tokens_count = len(state.get("spec_token_ids", [])) if state else 0
+            cumulative_offset += spec_tokens_count + 1
 
         # Check in CPU first not to sync with GPU
         has_active_thinking = any(
@@ -529,8 +542,25 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         if has_active_thinking:
             current_mask = self.mask[:cumulative_offset]
             active_indices = current_mask.nonzero(as_tuple=False).view(-1)
+            
             if len(active_indices) > 0:
                 force_tokens = self.force_token_ids[active_indices]
+                
+                # Debug prints to diagnose the error
+                print("Logits shape:", logits.shape)
+                print("Active indices shape:", active_indices.shape)
+                print("Active indices values:", active_indices)
+                print("Force tokens shape:", force_tokens.shape)
+                print("Force tokens values:", force_tokens)
+                print("Max active index:", int(active_indices.max()) if len(active_indices) > 0 else "None")
+                print("Max force token:", int(force_tokens.max()) if len(force_tokens) > 0 else "None")
+                print("Min force token:", int(force_tokens.min()) if len(force_tokens) > 0 else "None")
+                
+                # Bounds checks
+                assert int(active_indices.max()) < logits.shape[0], f"Index {int(active_indices.max())} >= {logits.shape[0]}"
+                assert int(force_tokens.min()) >= 0, f"Token ID {int(force_tokens.min())} < 0"
+                assert int(force_tokens.max()) < logits.shape[1], f"Token ID {int(force_tokens.max())} >= {logits.shape[1]}"
+                
                 # Apply a large value for the end thinking token id index
                 logits[active_indices, force_tokens] = 1e9
 
