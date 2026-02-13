@@ -224,8 +224,22 @@ class EncoderCudaGraphManager:
         Returns:
             Encoder outputs, or None if graph not captured.
         """
-        # TODO: Implementation in next step
-        pass
+        if token_budget not in self.budget_graphs:
+            self.graph_misses += 1
+            return None
+
+        graph_meta = self.budget_graphs[token_budget]
+
+        graph_meta.input_buffers['pixel_values'].copy_(pixel_values)
+
+        for key in ['pos_embeds', 'rotary_pos_emb_cos', 'rotary_pos_emb_sin',
+                    'cu_seqlens', 'max_seqlen']:
+            graph_meta.metadata_buffers[key].copy_(encoder_metadata[key])
+
+        graph_meta.graph.replay()
+
+        self.graph_hits += 1
+        return graph_meta.output_buffer
 
     def get_stats(self) -> dict[str, Any]:
         """Get CUDA graph statistics."""
