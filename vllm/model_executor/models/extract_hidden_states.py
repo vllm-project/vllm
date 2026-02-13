@@ -300,11 +300,12 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def forward(self, to_cache: torch.Tensor):
+    def forward(self, to_cache: torch.Tensor) -> torch.Tensor:
         """Cache hidden states as KV pairs without computing attention.
 
         Args:
-            hidden_states: shape [num_tokens, num_heads, head_size]
+            to_cache: The tensor to insert into the kv cache.
+                shape [num_tokens, num_heads, head_size]
 
         Returns:
             Dummy output tensor (not used)
