@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helion integration for vLLM."""
 
+import vllm.kernels.helion.ops  # noqa: F401  Auto-register all Helion ops
 from vllm.kernels.helion.config_manager import (
     ConfigManager,
     ConfigSet,
