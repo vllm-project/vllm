@@ -112,6 +112,21 @@ class MultiConnector(KVConnectorBase_V1):
     - Save to all connectors.
     """
 
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        MultiConnector requires PIECEWISE CUDA graph mode if any of its
+        child connectors require it.
+        """
+        connectors_config = extra_config.get("connectors", [])
+        for conn_config in connectors_config:
+            temp_ktc = KVTransferConfig(**conn_config)
+            connector_cls = KVConnectorFactory.get_connector_class(temp_ktc)
+            child_extra_config = conn_config.get("kv_connector_extra_config", {})
+            if connector_cls.requires_piecewise_for_cudagraph(child_extra_config):
+                return True
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
