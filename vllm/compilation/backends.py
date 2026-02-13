@@ -347,9 +347,6 @@ def _is_symint_placeholder(node: fx.Node) -> bool:
         torch.ops.aten.sym_size.default,
     )
 
-    example_value = node.meta.get("example_value")
-    return example_value is not None and isinstance(example_value, torch.SymInt)
-
 
 def _find_tensor_for_symint(
     symint_value: torch.SymInt,
@@ -514,11 +511,7 @@ def split_graph(
         graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True
     )
 
-    # Note: With the simplified approach, _replace_symint_placeholders_with_sym_size
-    # now DELETES SymInt placeholders BEFORE split_module runs. This prevents
-    # split_module from threading SymInt through submodules. The post-split cleanup
-    # _remove_symint_placeholders is still called as a safety net in case any
-    # SymInt placeholders remain (e.g., if they couldn't be replaced).
+    # Remove any remaining SymInt placeholders after split_module.
     _remove_symint_placeholders(split_gm)
 
     outputs = []
@@ -545,231 +538,54 @@ def _remove_symint_placeholders(gm: fx.GraphModule) -> None:
     """
     Remove SymInt placeholders from a GraphModule after split_module.
 
-    After split_module, SymInt placeholders may still exist and may have users
-    (call_module nodes that pass the SymInt to submodules). This function:
-    1. Replaces SymInt arguments in call_module nodes with sym_size.int calls
-    2. Removes the now-unused SymInt placeholders
-
-    This ensures the final graph only requires tensor inputs.
+    Since _replace_symint_placeholders already replaced all SymInt users with
+    sym_size.int calls before split_module, the SymInt placeholders should have
+    no real consumers. However, split_module may still thread them through to
+    call_module nodes via its symbol_to_node tracking. This function removes
+    those spurious references and erases the SymInt placeholders so the final
+    graph only requires tensor inputs.
     """
-    # Collect SymInt and tensor placeholders
-    symint_placeholders: list[fx.Node] = []
-    tensor_placeholders: list[fx.Node] = []
-
+    nodes_to_erase = []
     for node in gm.graph.nodes:
         if node.op != "placeholder":
             continue
         example_value = node.meta.get("example_value")
-        if example_value is None:
-            continue
-        if isinstance(example_value, torch.SymInt):
-            symint_placeholders.append(node)
-        elif isinstance(example_value, torch.Tensor):
-            tensor_placeholders.append(node)
-
-    if not symint_placeholders:
-        return
-
-    # Build mapping from SymInt placeholder to (tensor, dim) that can compute it
-    symint_to_tensor_dim: dict[fx.Node, tuple[fx.Node, int]] = {}
-
-    for symint_node in symint_placeholders:
-        symint_value = symint_node.meta.get("example_value")
-        if symint_value is None:
+        if not isinstance(example_value, torch.SymInt):
             continue
 
-        # Find a tensor with a dynamic dimension matching this SymInt
-        for tensor_node in tensor_placeholders:
-            tensor_value = tensor_node.meta.get("example_value")
-            if tensor_value is None or not hasattr(tensor_value, "shape"):
-                continue
+        # Remove this SymInt from any call_module args that split_module
+        # may have threaded it into.
+        for user in list(node.users.keys()):
+            if user.op == "call_module":
+                new_args = tuple(a for a in user.args if a is not node)
+                user.args = new_args
 
-            for dim, size in enumerate(tensor_value.shape):
-                # Match by identity
-                if size is symint_value:
-                    symint_to_tensor_dim[symint_node] = (tensor_node, dim)
-                    break
-                # Match by underlying symbolic node
-                if (
-                    hasattr(size, "node")
-                    and hasattr(symint_value, "node")
-                    and size.node is symint_value.node
-                ):
-                    symint_to_tensor_dim[symint_node] = (tensor_node, dim)
-                    break
-                # Match by string representation (fallback)
-                if str(size) == str(symint_value):
-                    symint_to_tensor_dim[symint_node] = (tensor_node, dim)
-                    break
+                # Also remove the corresponding placeholder from the
+                # submodule so its signature stays in sync.
+                submodule = getattr(gm, user.target)
+                for submod_node in list(submodule.graph.nodes):
+                    if submod_node.op != "placeholder":
+                        continue
+                    sub_ev = submod_node.meta.get("example_value")
+                    if isinstance(sub_ev, torch.SymInt):
+                        if not submod_node.users:
+                            submodule.graph.erase_node(submod_node)
+                submodule.graph.lint()
+                submodule.recompile()
 
-            if symint_node in symint_to_tensor_dim:
-                break
-
-    logger.debug(
-        "Mapped SymInt placeholders to tensor dims: %s",
-        {n.name: (t.name, d) for n, (t, d) in symint_to_tensor_dim.items()},
-    )
-
-    # For each SymInt placeholder that has users (call_module nodes), replace
-    # the SymInt argument with a sym_size.int call on the corresponding tensor
-    nodes_modified = False
-    for symint_node in symint_placeholders:
-        if not symint_node.users:
-            # No users, can just delete
-            gm.graph.erase_node(symint_node)
-            nodes_modified = True
-            continue
-
-        if symint_node not in symint_to_tensor_dim:
+        if node.users:
             logger.warning(
-                "Could not find tensor dimension for SymInt placeholder %s",
-                symint_node.name,
+                "SymInt placeholder %s still has users: %s",
+                node.name,
+                list(node.users.keys()),
             )
             continue
-
-        tensor_node, dim = symint_to_tensor_dim[symint_node]
-
-        # Replace each use of the SymInt with a sym_size.int call
-        # We need to create a new sym_size node before each user
-        users_list = list(symint_node.users.keys())
-        for user in users_list:
-            if user.op != "call_module":
-                # For non-call_module users, create sym_size before them
-                with gm.graph.inserting_before(user):
-                    sym_size_node = gm.graph.call_function(
-                        torch.ops.aten.sym_size.int,
-                        args=(tensor_node, dim),
-                    )
-                    if symint_node.meta:
-                        sym_size_node.meta = symint_node.meta.copy()
-                user.replace_input_with(symint_node, sym_size_node)
-            else:
-                # For call_module nodes, we need to remove the SymInt from args
-                # and update the submodule to compute sym_size locally
-                _update_submodule_to_compute_symint_locally(
-                    gm, user, symint_node, tensor_node, dim
-                )
-
-        # Now the SymInt placeholder should have no users
-        if not symint_node.users:
-            gm.graph.erase_node(symint_node)
-            nodes_modified = True
-        else:
-            logger.warning(
-                "SymInt placeholder %s still has %d users after processing: %s",
-                symint_node.name,
-                len(symint_node.users),
-                list(symint_node.users.keys()),
-            )
-
-    if nodes_modified:
+        nodes_to_erase.append(node)
+    for node in nodes_to_erase:
+        gm.graph.erase_node(node)
+    if nodes_to_erase:
         gm.graph.lint()
         gm.recompile()
-
-
-def _update_submodule_to_compute_symint_locally(
-    gm: fx.GraphModule,
-    call_module_node: fx.Node,
-    symint_node: fx.Node,
-    tensor_node: fx.Node,
-    dim: int,
-) -> None:
-    """
-    Update a submodule call to compute SymInt locally instead of receiving it.
-
-    This modifies:
-    1. The call_module node's args to remove the SymInt and ensure tensor is passed
-    2. The submodule to compute sym_size.int from the tensor instead of taking
-       SymInt as a parameter
-    """
-    submod_name = call_module_node.target
-    submodule = getattr(gm, submod_name)
-
-    # Find which argument position(s) correspond to symint_node and tensor_node
-    old_args = list(call_module_node.args)
-    symint_arg_indices = [i for i, arg in enumerate(old_args) if arg is symint_node]
-    tensor_arg_indices = [i for i, arg in enumerate(old_args) if arg is tensor_node]
-
-    if not symint_arg_indices:
-        return
-
-    # Get the submodule's placeholder nodes
-    submod_placeholders = [n for n in submodule.graph.nodes if n.op == "placeholder"]
-
-    # Find the placeholder in submodule that corresponds to the SymInt
-    symint_placeholder_idx = symint_arg_indices[0]
-    if symint_placeholder_idx >= len(submod_placeholders):
-        logger.warning(
-            "SymInt arg index %d out of range for submodule %s with %d placeholders",
-            symint_placeholder_idx,
-            submod_name,
-            len(submod_placeholders),
-        )
-        return
-
-    symint_submod_placeholder = submod_placeholders[symint_placeholder_idx]
-
-    # Find or ensure there's a placeholder for the tensor in the submodule
-    tensor_submod_placeholder = None
-    if tensor_arg_indices:
-        tensor_placeholder_idx = tensor_arg_indices[0]
-        if tensor_placeholder_idx < len(submod_placeholders):
-            tensor_submod_placeholder = submod_placeholders[tensor_placeholder_idx]
-
-    if tensor_submod_placeholder is None:
-        # Tensor is not currently passed to this submodule, need to add it
-        # Add tensor to call_module args (at the end)
-        new_args = list(old_args) + [tensor_node]
-        # Also remove the SymInt from args
-        new_args = [
-            arg for i, arg in enumerate(new_args) if i not in symint_arg_indices
-        ]
-        call_module_node.args = tuple(new_args)
-
-        # Add new placeholder to submodule at the end
-        last_placeholder = submod_placeholders[-1]
-        with submodule.graph.inserting_after(last_placeholder):
-            tensor_submod_placeholder = submodule.graph.placeholder("tensor_for_symint")
-            if tensor_node.meta:
-                tensor_submod_placeholder.meta = tensor_node.meta.copy()
-
-    else:
-        # Tensor is already passed, just need to update args to remove SymInt
-        new_args = [
-            arg for i, arg in enumerate(old_args) if i not in symint_arg_indices
-        ]
-        call_module_node.args = tuple(new_args)
-
-    # Find first node to insert sym_size before (after placeholders/get_attr)
-    insert_point = None
-    for node in submodule.graph.nodes:
-        if node.op not in ("placeholder", "get_attr"):
-            insert_point = node
-            break
-
-    if insert_point is None:
-        logger.warning("Could not find insertion point in submodule %s", submod_name)
-        return
-
-    # Create sym_size.int node in submodule
-    with submodule.graph.inserting_before(insert_point):
-        sym_size_node = submodule.graph.call_function(
-            torch.ops.aten.sym_size.int,
-            args=(tensor_submod_placeholder, dim),
-        )
-        if symint_submod_placeholder.meta:
-            sym_size_node.meta = symint_submod_placeholder.meta.copy()
-
-    # Replace all uses
-
-    # Replace all uses of SymInt placeholder with sym_size node
-    symint_submod_placeholder.replace_all_uses_with(sym_size_node)
-
-    # Remove the SymInt placeholder from submodule
-    submodule.graph.erase_node(symint_submod_placeholder)
-
-    submodule.graph.lint()
-    submodule.recompile()
 
 
 compilation_start_time = 0.0
