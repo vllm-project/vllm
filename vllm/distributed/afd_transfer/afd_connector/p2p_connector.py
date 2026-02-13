@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import re
+import time
 from datetime import timedelta
 import pickle
 
@@ -57,10 +58,8 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     print(f"begin afd_p2p_send_impl tensor.shape:{tensor.shape}", flush=True)
     comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
     print("end afd_p2p_send_impl", flush=True)
-    if not torch.cuda.is_current_stream_capturing():
-        print(f"jcz before afd_p2p_send_impl synchronize", flush=True)
-        torch.cuda.synchronize()
-        print(f"jcz end afd_p2p_send_impl synchronize", flush=True)
+    # NOTE: Removed synchronize() to avoid deadlock when FFN side is capturing CUDA graph
+    # The stream-based send will be properly ordered with subsequent operations on the same stream
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     print("afd_p2p_send_fake", flush=True)
@@ -85,10 +84,8 @@ def afd_p2p_recv_impl(
     print(f"begin afd_p2p_recv_impl out.shape:{out.shape}", flush=True)
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
     print("end afd_p2p_recv_impl", flush=True)
-    if not torch.cuda.is_current_stream_capturing():
-        print(f"jcz before afd_p2p_recv_impl synchronize", flush=True)
-        torch.cuda.synchronize()
-        print(f"jcz end afd_p2p_recv_impl synchronize", flush=True)
+    # NOTE: Removed synchronize() to avoid deadlock when one side is capturing CUDA graph
+    # The stream-based recv will be properly ordered with subsequent operations on the same stream
 
 def afd_p2p_recv_fake(
     out: torch.Tensor,
@@ -235,7 +232,8 @@ class P2PAFDConnector(AFDConnectorBase):
         # First min_size Attention: world_rank in [ffn_size, ffn_size + min_size)
         if self.is_vaild_rank_for_inequal_AF(self.world_rank):
             self.p2p_pg = init_afd_process_group(
-                backend="gloo",
+                # backend="gloo",
+                backend="nccl",
                 init_method=(
                     f"tcp://{self.config.afd_config.afd_host}"
                     f":{self.config.afd_config.afd_port}"
@@ -389,24 +387,25 @@ class P2PAFDConnector(AFDConnectorBase):
                     dtype=meta.dtype,
                     device=meta.device,
                 )
-        elif self.config.afd_config.afd_role == "attention" and is_graph_capturing \
-            and not self.config.model_config.enforce_eager:
-            for stage_idx in range(num_of_stages):
-                meta = self._tensor_metadata_list[stage_idx]
-                buffer_key = (stage_idx, tuple(meta.size))
-                existing = self._recv_ffn_buffers.get(buffer_key)
-                if (
-                    existing is not None
-                    and existing.shape == meta.size
-                    and existing.dtype == meta.dtype
-                    and existing.device == meta.device
-                ):
-                    continue
-                self._recv_ffn_buffers[buffer_key] = torch.empty(
-                    tuple(meta.size),
-                    dtype=meta.dtype,
-                    device=meta.device,
-                )
+        # elif self.config.afd_config.afd_role == "attention" and is_graph_capturing \
+        # elif self.config.afd_config.afd_role == "attention" \
+        #     and not self.config.model_config.enforce_eager:
+        #     for stage_idx in range(num_of_stages):
+        #         meta = self._tensor_metadata_list[stage_idx]
+        #         buffer_key = (stage_idx, tuple(meta.size))
+        #         existing = self._recv_ffn_buffers.get(buffer_key)
+        #         if (
+        #             existing is not None
+        #             and existing.shape == meta.size
+        #             and existing.dtype == meta.dtype
+        #             and existing.device == meta.device
+        #         ):
+        #             continue
+        #         self._recv_ffn_buffers[buffer_key] = torch.empty(
+        #             tuple(meta.size),
+        #             dtype=meta.dtype,
+        #             device=meta.device,
+        #         )
         # We do not clear _recv_attn_buffers so that replayed graphs still have
         # valid buffer addresses to write into.
 
@@ -436,16 +435,15 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         ubatch_idx = get_forward_context().afd_metadata.afd_stage_idx
         src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
-        if not self.config.model_config.enforce_eager and self.is_graph_capturing:
+        # if not self.config.model_config.enforce_eager and self.is_graph_capturing:
         # if not self.config.model_config.enforce_eager:
-            meta = self._tensor_metadata_list[ubatch_idx]
-            buffer_key = (ubatch_idx, tuple(meta.size))
-            recv_buffer = self._recv_ffn_buffers.get(buffer_key)
-            # Prefer fixed preallocated buffer to avoid aliasing with the send
-            # source tensor in compiled/fullgraph execution.
-            if recv_buffer is not None:
-                ref_tensor = recv_buffer
-                # print(f"jcz recv_ffn_output recv_buffer is not None:{ref_tensor.shape}")
+        #     meta = self._tensor_metadata_list[ubatch_idx]
+        #     buffer_key = (ubatch_idx, tuple(meta.size))
+        #     recv_buffer = self._recv_ffn_buffers.get(buffer_key)
+        #     # Prefer fixed preallocated buffer to avoid aliasing with the send
+        #     # source tensor in compiled/fullgraph execution.
+        #     if recv_buffer is not None:
+        #         ref_tensor = recv_buffer
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,
@@ -507,14 +505,30 @@ class P2PAFDConnector(AFDConnectorBase):
         is_graph_capturing: bool = False,
         is_warmup: bool = False,
     ):
+        
+        t0 = time.perf_counter()
         self.update_state_from_dp_metadata(data, is_graph_capturing)
         send_data = (data, is_graph_capturing, is_warmup)
+        device = torch.device(f"cuda:{self.local_rank}")
+        # Use explicit device (cuda:local_rank) so multi-process on same node
+        # don't all use cuda:0 and block; sync to isolate from graph stream.
+        print("jcz send_dp_metadata_list before synchronize", flush=True)
+        torch.cuda.synchronize()
+        print("jcz send_dp_metadata_list after synchronize", flush=True)
         for dst in self.dst_list:
             object_bytes = pickle.dumps(send_data)
-            # Use CPU tensor for Gloo backend
-            object_tensor = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
-            size_tensor = torch.tensor([object_tensor.numel()], dtype=torch.long)
-
+            # Use CUDA tensor for NCCL backend on explicit device
+            print("jcz send_dp_metadata_list 2", flush=True)
+            object_tensor_cpu = torch.frombuffer(
+                bytearray(object_bytes), dtype=torch.uint8
+            )
+            print("jcz send_dp_metadata_list 3", flush=True)
+            object_tensor = object_tensor_cpu.to(device)
+            print("jcz send_dp_metadata_list 4", flush=True)
+            size_tensor = torch.tensor(
+                [object_tensor.numel()], dtype=torch.long, device=device
+            )
+            print("jcz send_dp_metadata_list 5", flush=True)
             logger.info(
                 "jcz send_dp_metadata_list dst:%s self.p2p_rank:%s "
                 "is_graph_capturing:%s is_warmup:%s",
@@ -523,23 +537,35 @@ class P2PAFDConnector(AFDConnectorBase):
                 is_graph_capturing,
                 is_warmup,
             )
+            t0 = time.perf_counter()
+            print("jcz send_dp_metadata_list 6", flush=True)
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
+            print("jcz send_dp_metadata_list 7", flush=True)
             torch.distributed.send(object_tensor, dst=dst, group=self.p2p_pg)
+            print("jcz send_dp_metadata_list 8", flush=True)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            logger.info("jcz send_dp_metadata_list elapsed: %.3f ms", elapsed_ms)
 
     def recv_dp_metadata_list(self):
         src = self.p2p_rank % self.min_size + self.ffn_size
         logger.info(f"jcz recv_dp_metadata_list src:{src} self.p2p_rank:{self.p2p_rank}")
 
-        # Use CPU tensor for Gloo backend
-        size_tensor = torch.empty(1, dtype=torch.long)
+        # Use CUDA tensor for NCCL backend
+        device = torch.device(f"cuda:{self.local_rank}")
+        t0 = time.perf_counter()
+        size_tensor = torch.empty(1, dtype=torch.long, device=device)
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
 
-        object_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8)
+        object_tensor = torch.empty(
+            size_tensor.item(), dtype=torch.uint8, device=device
+        )
         rank_object = torch.distributed.recv(object_tensor, src=src, group=self.p2p_pg)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.info("jcz recv_dp_metadata_list elapsed: %.3f ms", elapsed_ms)
 
         assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
 
-        obj = pickle.loads(object_tensor.numpy().tobytes())
+        obj = pickle.loads(object_tensor.cpu().numpy().tobytes())
         if len(obj) == 3:
             data, is_graph_capturing, is_warmup = obj
         else:
