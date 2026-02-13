@@ -46,6 +46,19 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
+- label: Source Build Test
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental]
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - CMakeLists.txt
+  - cmake/
+  - csrc/
+  commands:
+  - VLLM_USE_PRECOMPILED=0 pip install -e .
+  - python -c "import vllm; print('vLLM version:', vllm.__version__)"
+  - bash tests/standalone_tests/smoke-test-server.sh
+
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
