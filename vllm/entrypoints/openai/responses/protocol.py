@@ -43,9 +43,6 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.tool import Tool
-from openai.types.responses.response_file_search_tool_call import (
-    ResponseFileSearchToolCall,
-)
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 # Backward compatibility for OpenAI client versions
@@ -342,8 +339,11 @@ class ResponsesRequest(OpenAIBaseModel):
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
+                structured_outputs_kwargs: dict[str, Any] = {
+                    "json": response_format.schema_
+                }
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
+                    **structured_outputs_kwargs
                 )
 
         stop = self.stop if self.stop else []

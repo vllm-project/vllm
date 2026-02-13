@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Final
 
@@ -148,6 +148,8 @@ class HarmonyStreamingState:
     is_first_function_call_delta: bool = False
     include_file_search_results: bool = False
     file_search_results: list | None = None
+    file_search_results_seen: bool = False
+    pending_file_search_item: OpenAIHarmonyMessage | None = None
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
@@ -155,6 +157,8 @@ class HarmonyStreamingState:
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.file_search_results = None
+        self.file_search_results_seen = False
+        self.pending_file_search_item = None
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -509,8 +513,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         and struct_out.all_non_structural_tag_constraints_none()
                     ):
-                        sampling_params.structured_outputs = replace(
-                            struct_out,
+                        sampling_params.structured_outputs = struct_out.updated(
                             structural_tag=reasoning_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
                             ),
@@ -711,9 +714,7 @@ class OpenAIServingResponses(OpenAIServing):
         output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
-            output = self._make_response_output_items_with_harmony(
-                context, request
-            )
+            output = self._make_response_output_items_with_harmony(context, request)
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
@@ -1002,9 +1003,7 @@ class OpenAIServingResponses(OpenAIServing):
             and isinstance(request.include, list)
             and "file_search_call.results" in request.include
         ):
-            output_items = self._attach_file_search_results(
-                output_items, context
-            )
+            output_items = self._attach_file_search_results(output_items, context)
         return output_items
 
     def _attach_file_search_results(
@@ -1013,7 +1012,7 @@ class OpenAIServingResponses(OpenAIServing):
         context: HarmonyContext,
     ) -> list[ResponseOutputItem]:
         results_payloads: list[list | None] = []
-        for msg in context.messages[context.num_init_messages:]:
+        for msg in context.messages[context.num_init_messages :]:
             if (
                 msg.author.role == OpenAIHarmonyRole.TOOL
                 and msg.author.name == "functions.file_search"
@@ -1034,12 +1033,11 @@ class OpenAIServingResponses(OpenAIServing):
         for item in output_items:
             if isinstance(item, ResponseFileSearchToolCall):
                 results = next(results_iter, None)
-                updated_items.append(
-                    item.model_copy(update={"results": results})
-                )
+                updated_items.append(item.model_copy(update={"results": results}))
             else:
                 updated_items.append(item)
         return updated_items
+
     def _extract_system_message_from_request(
         self, request: ResponsesRequest
     ) -> str | None:
@@ -1653,7 +1651,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[StreamingResponsesResponse]:
         """Emit events when a function call completes."""
         function_name = previous_item.recipient[len("functions.") :]
-        events = []
+        events: list[StreamingResponsesResponse] = []
         events.append(
             ResponseFunctionCallArgumentsDoneEvent(
                 type="response.function_call_arguments.done",
@@ -1738,7 +1736,7 @@ class OpenAIServingResponses(OpenAIServing):
         server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(
             previous_item.recipient, previous_item.recipient
         )
-        events = []
+        events: list[StreamingResponsesResponse] = []
         events.append(
             ResponseMcpCallArgumentsDoneEvent(
                 type="response.mcp_call_arguments.done",
@@ -1791,7 +1789,7 @@ class OpenAIServingResponses(OpenAIServing):
             id=state.current_item_id,
             summary=[],
         )
-        events = []
+        events: list[StreamingResponsesResponse] = []
         events.append(
             ResponseReasoningTextDoneEvent(
                 type="response.reasoning_text.done",
@@ -1833,7 +1831,7 @@ class OpenAIServingResponses(OpenAIServing):
             text=previous_item.content[0].text,
             annotations=[],
         )
-        events = []
+        events: list[StreamingResponsesResponse] = []
         events.append(
             ResponseTextDoneEvent(
                 type="response.output_text.done",
@@ -1880,6 +1878,12 @@ class OpenAIServingResponses(OpenAIServing):
         if previous_item.recipient is not None:
             # Deal with tool call
             if previous_item.recipient == "functions.file_search":
+                if (
+                    state.include_file_search_results
+                    and not state.file_search_results_seen
+                ):
+                    state.pending_file_search_item = previous_item
+                    return []
                 return self._emit_file_search_call_done_events(previous_item, state)
             if previous_item.recipient.startswith("functions."):
                 return self._emit_function_call_done_events(previous_item, state)
@@ -1942,7 +1946,7 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events for final channel text delta streaming."""
-        events = []
+        events: list[StreamingResponsesResponse] = []
         if not state.sent_output_item_added:
             state.sent_output_item_added = True
             state.current_item_id = f"msg_{random_uuid()}"
@@ -1996,7 +2000,7 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events for analysis channel reasoning delta streaming."""
-        events = []
+        events: list[StreamingResponsesResponse] = []
         if not state.sent_output_item_added:
             state.sent_output_item_added = True
             state.current_item_id = f"msg_{random_uuid()}"
@@ -2047,7 +2051,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[StreamingResponsesResponse]:
         """Emit events for MCP tool delta streaming."""
         server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
-        events = []
+        events: list[StreamingResponsesResponse] = []
         if not state.sent_output_item_added:
             state.sent_output_item_added = True
             state.current_item_id = f"mcp_{random_uuid()}"
@@ -2091,7 +2095,7 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events for code interpreter delta streaming."""
-        events = []
+        events: list[StreamingResponsesResponse] = []
         if not state.sent_output_item_added:
             state.sent_output_item_added = True
             state.current_item_id = f"tool_{random_uuid()}"
@@ -2457,7 +2461,7 @@ class OpenAIServingResponses(OpenAIServing):
         if not ctx.is_assistant_action_turn() or len(ctx.parser.messages) == 0:
             return []
 
-        events = []
+        events: list[StreamingResponsesResponse] = []
         previous_item = ctx.parser.messages[-1]
 
         if (
@@ -2592,11 +2596,22 @@ class OpenAIServingResponses(OpenAIServing):
                             payload = {}
                         if isinstance(payload, dict):
                             state.file_search_results = payload.get("results")
+                            state.file_search_results_seen = True
+                        if (
+                            state.pending_file_search_item is not None
+                            and state.file_search_results_seen
+                        ):
+                            for event in self._emit_file_search_call_done_events(
+                                state.pending_file_search_item, state
+                            ):
+                                yield _increment_sequence_number_and_return(event)
+                            state.pending_file_search_item = None
                     for event in self._emit_previous_item_done_events(
                         previous_item, state
                     ):
                         yield _increment_sequence_number_and_return(event)
-                state.reset_for_new_item()
+                if state.pending_file_search_item is None:
+                    state.reset_for_new_item()
 
             # Stream the output of a harmony message
             for event in self._emit_content_delta_events(ctx, state):

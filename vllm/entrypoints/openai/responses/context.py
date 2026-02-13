@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Union
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
-from openai.types.responses.tool import Mcp, Tool as ResponseTool
+from openai.types.responses.tool import Mcp
+from openai.types.responses.tool import Tool as ResponseTool
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
@@ -91,9 +92,7 @@ def _load_file_search_handler() -> Callable[[dict], object] | None:
     try:
         module = importlib.import_module(module_path)
     except Exception:
-        logger.exception(
-            "Failed to import file_search handler module: %s", module_path
-        )
+        logger.exception("Failed to import file_search handler module: %s", module_path)
         return None
     handler = getattr(module, attr_name, None)
     if not callable(handler):
@@ -157,7 +156,6 @@ def _merge_file_search_defaults(
                     merged[key] = value
         break
     return merged
-    return result
 
 
 class TurnMetrics:
@@ -790,11 +788,7 @@ class HarmonyContext(ConversationContext):
                 return [
                     Message(
                         author=Author(role=Role.TOOL, name="functions.file_search"),
-                        content=[
-                            TextContent(
-                                text=json.dumps(payload)
-                            )
-                        ],
+                        content=[TextContent(text=json.dumps(payload))],
                         recipient=Role.ASSISTANT,
                         channel=last_msg.channel,
                     )

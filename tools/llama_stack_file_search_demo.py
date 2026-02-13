@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Llama Stack file_search demo handler for vLLM.
 
 Use:
@@ -72,9 +74,7 @@ def handle(args: dict[str, Any]) -> dict[str, Any]:
         print(f"[llama_stack_file_search_demo] payload={payload}")
         with httpx.Client(timeout=timeout) as client:
             response = client.post(url, json=payload)
-            print(
-                f"[llama_stack_file_search_demo] status={response.status_code}"
-            )
+            print(f"[llama_stack_file_search_demo] status={response.status_code}")
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -100,7 +100,5 @@ def handle(args: dict[str, Any]) -> dict[str, Any]:
         )
         return {"results": []}
 
-    print(
-        f"[llama_stack_file_search_demo] data_len={len(items)}"
-    )
+    print(f"[llama_stack_file_search_demo] data_len={len(items)}")
     return {"results": _to_results(items)}

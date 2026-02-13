@@ -211,9 +211,7 @@ def get_developer_message(
             else:
                 raise ValueError(f"tool type {tool.type} not supported")
         if function_tools:
-            dev_msg_content = dev_msg_content.with_function_tools(
-                function_tools
-            )
+            dev_msg_content = dev_msg_content.with_function_tools(function_tools)
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
 
