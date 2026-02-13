@@ -38,6 +38,11 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
 
 
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
 @pytest.mark.asyncio
 async def test_async_mistral_tokenizer_does_not_block_event_loop():
     expected_tokens = [1, 2, 3]
@@ -50,7 +55,10 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
     mock_model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template = mocked_apply_chat_template
-    mock_renderer = MistralRenderer(mock_model_config, tokenizer_kwargs={})
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_model_config),
+        tokenizer_kwargs={},
+    )
     mock_renderer._tokenizer = mock_tokenizer
 
     task = mock_renderer.render_messages_async([], ChatParams())
