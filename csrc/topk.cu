@@ -349,7 +349,7 @@ void setup_kernel_smem_once() {
 void large_context_topk(
     const torch::Tensor& logits, torch::Tensor& indices,
     const torch::Tensor& seq_lens,
-    c10::optional<torch::Tensor> row_starts = c10::nullopt) {
+    std::optional<torch::Tensor> row_starts = std::nullopt) {
   TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
   TORCH_CHECK(indices.is_cuda(), "indices must be a CUDA tensor");
   TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be a CUDA tensor");
