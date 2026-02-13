@@ -5,7 +5,7 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
@@ -959,14 +959,21 @@ class OpenAIServing:
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
     ) -> list[TokPrompt]:
-        renderer = self.renderer
-        model_config = self.model_config
-
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
+
+        return await self._preprocess_cmpl(request, prompts)
+
+    async def _preprocess_cmpl(
+        self,
+        request: RendererRequest,
+        prompts: Sequence[PromptType | bytes],
+    ) -> list[TokPrompt]:
+        renderer = self.renderer
+        model_config = self.model_config
 
         parsed_prompts = [
             (

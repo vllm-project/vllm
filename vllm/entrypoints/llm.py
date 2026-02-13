@@ -500,7 +500,7 @@ class LLM:
             engine_prompts: Sequence[DictPrompt | TokPrompt] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
-                for engine_prompt in self._preprocess_completion(
+                for engine_prompt in self._preprocess_cmpl(
                     [prompt],
                     tokenization_kwargs=merge_kwargs(
                         tokenization_kwargs,
@@ -509,7 +509,7 @@ class LLM:
                 )
             ]
         else:
-            engine_prompts = self._preprocess_completion(
+            engine_prompts = self._preprocess_cmpl(
                 seq_prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
@@ -889,7 +889,7 @@ class LLM:
             add_special_tokens=not model_config.is_encoder_decoder,
         ).with_kwargs(tokenization_kwargs)
 
-    def _preprocess_completion(
+    def _preprocess_cmpl(
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -901,7 +901,7 @@ class LLM:
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokensPrompts` objects containing the tokenized prompt
+            A list of `TokPrompt` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
         renderer = self.renderer
@@ -943,7 +943,7 @@ class LLM:
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokensPrompts` objects containing the tokenized prompt
+            A list of `TokPrompt` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
         renderer = self.renderer
@@ -1823,11 +1823,11 @@ class LLM:
         if any(param.truncate_prompt_tokens is not None for param in seq_params):
             # TODO: Remove this after deprecating `param.truncate_prompt_tokens`
             # Then, move the code from the `else` block to the top and let
-            # `self._preprocess_completion` handle prompt normalization
+            # `self._preprocess_cmpl` handle prompt normalization
             engine_prompts: Sequence[DictPrompt | TokPrompt] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
-                for engine_prompt in self._preprocess_completion(
+                for engine_prompt in self._preprocess_cmpl(
                     [prompt],
                     tokenization_kwargs=merge_kwargs(
                         tokenization_kwargs,
@@ -1836,7 +1836,7 @@ class LLM:
                 )
             ]
         else:
-            engine_prompts = self._preprocess_completion(
+            engine_prompts = self._preprocess_cmpl(
                 seq_prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
