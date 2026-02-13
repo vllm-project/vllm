@@ -1657,35 +1657,22 @@ class GPUModelRunner(
             and prev_req_id_to_index
         ):
             if current_indices:
-                if batch_index_mapping.indices_match:
-                    n = num_reqs
-                    valid_counts = self.valid_sampled_token_count_gpu[:n]
-                    self.num_computed_tokens[:n] = (
-                        self.input_batch.num_computed_tokens_cpu_tensor[:n].to(
-                            device=self.device, non_blocking=True
-                        )
-                        + valid_counts.int()
-                        - self.prev_num_draft_tokens_gpu[:n]
-                        - 1
+                prev_indices_gpu = torch.tensor(
+                    prev_indices, dtype=torch.int64, device=self.device
+                )
+                current_indices_gpu = torch.tensor(
+                    current_indices, dtype=torch.int64, device=self.device
+                )
+                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                self.num_computed_tokens[current_indices_gpu] = (
+                    self.input_batch.num_computed_tokens_cpu_tensor[current_indices].to(
+                        device=self.device, non_blocking=True
                     )
-                    self.num_accepted_tokens.gpu[:n] = valid_counts
-                else:
-                    prev_indices_gpu = torch.tensor(
-                        prev_indices, dtype=torch.int64, device=self.device
-                    )
-                    current_indices_gpu = torch.tensor(
-                        current_indices, dtype=torch.int64, device=self.device
-                    )
-                    valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
-                    self.num_computed_tokens[current_indices_gpu] = (
-                        self.input_batch.num_computed_tokens_cpu_tensor[
-                            current_indices
-                        ].to(device=self.device, non_blocking=True)
-                        + valid_counts.int()
-                        - self.prev_num_draft_tokens_gpu[prev_indices_gpu]
-                        - 1
-                    )
-                    self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+                    + valid_counts.int()
+                    - self.prev_num_draft_tokens_gpu[prev_indices_gpu]
+                    - 1
+                )
+                self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
             if new_indices:
                 new_indices_gpu = torch.tensor(
