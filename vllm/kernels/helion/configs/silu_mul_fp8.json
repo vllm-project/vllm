@@ -1,0 +1,550 @@
+{
+  "nvidia_h200": {
+    "intermediate_2048_batchsize_256": {
+      "block_sizes": [
+        64,
+        128
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "flatten_loops": [
+        true
+      ],
+      "l2_groupings": [
+        2
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 32,
+      "num_stages": 1,
+      "indexing": [
+        "pointer",
+        "tensor_descriptor",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    },
+    "intermediate_4096_batchsize_256": {
+      "block_sizes": [
+        16,
+        64
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 2,
+      "num_stages": 1,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    },
+    "default": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    }
+  },
+  "nvidia_h100_pcie": {
+    "intermediate_2048_batchsize_256": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    },
+    "intermediate_4096_batchsize_256": {
+      "block_sizes": [
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "flatten_loops": [
+        true
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2
+      ],
+      "range_num_stages": [
+        3
+      ],
+      "range_multi_buffers": [
+        false
+      ],
+      "range_flattens": [
+        true
+      ],
+      "load_eviction_policies": [
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 32,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "persistent_blocked",
+      "range_warp_specializes": []
+    },
+    "default": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    }
+  },
+  "nvidia_h100_sxm5": {
+    "intermediate_2048_batchsize_256": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    },
+    "intermediate_4096_batchsize_256": {
+      "block_sizes": [
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "flatten_loops": [
+        true
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2
+      ],
+      "range_num_stages": [
+        3
+      ],
+      "range_multi_buffers": [
+        false
+      ],
+      "range_flattens": [
+        true
+      ],
+      "load_eviction_policies": [
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 32,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "persistent_blocked",
+      "range_warp_specializes": []
+    },
+    "default": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    }
+  },
+  "nvidia_h100": {
+    "intermediate_2048_batchsize_256": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    },
+    "intermediate_4096_batchsize_256": {
+      "block_sizes": [
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "flatten_loops": [
+        true
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2
+      ],
+      "range_num_stages": [
+        3
+      ],
+      "range_multi_buffers": [
+        false
+      ],
+      "range_flattens": [
+        true
+      ],
+      "load_eviction_policies": [
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 32,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "persistent_blocked",
+      "range_warp_specializes": []
+    },
+    "default": {
+      "block_sizes": [
+        1,
+        512
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "flatten_loops": [
+        false
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_num_stages": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 2,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    }
+  }
+}

@@ -59,11 +59,16 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer(
-        model_config,
+        MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 

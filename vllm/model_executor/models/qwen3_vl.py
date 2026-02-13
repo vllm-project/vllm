@@ -642,13 +642,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor | None,
+        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None and num_frames > 1:
-            image_processor = self.get_video_processor()
-        elif image_processor is None:
-            image_processor = self.get_image_processor()
-
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
         hf_config = self.get_hf_config()
@@ -656,6 +652,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = mm_kwargs.get("size", image_processor.size)
 
         if do_resize:
             if is_video:
@@ -667,12 +666,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             else:
                 smart_resize = image_smart_resize
                 extra_kwargs = {}
+
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
-                min_pixels=image_processor.size["shortest_edge"],
-                max_pixels=image_processor.size["longest_edge"],
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
                 **extra_kwargs,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
@@ -720,7 +720,8 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             image_width=target_width,
             image_height=target_height,
             num_frames=2,
-            image_processor=None,
+            image_processor=video_processor,
+            mm_kwargs={},
         )
         return num_video_soft_tokens
 
@@ -846,6 +847,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             image_height=target_video_height,
             num_frames=target_num_frames,
             image_processor=video_processor,
+            mm_kwargs={},
         )
         # NOTE: we need to do this check here since Qwen3-VL resizes video
         # frames depending on how many frames there are.

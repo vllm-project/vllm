@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -24,15 +24,16 @@ class TerratorchRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
-        config: "ModelConfig",
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "BaseRenderer":
         return cls(config)
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        if not config.skip_tokenizer_init:
+        model_config = self.model_config
+        if not model_config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
 
     @property
@@ -47,7 +48,7 @@ class TerratorchRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -68,7 +69,7 @@ class TerratorchRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
