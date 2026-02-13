@@ -435,8 +435,7 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
-        model_config = self.model_config
-        runner_type = model_config.runner_type
+        runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(
                 "LLM.generate() is only supported for generative models. "
@@ -484,48 +483,21 @@ class LLM:
         Returns:
             A list of request IDs for the enqueued requests.
         """
-        model_config = self.model_config
-        runner_type = model_config.runner_type
+        runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError("LLM.enqueue() is only supported for generative models.")
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        # Use the same preprocessing as _run_completion
-        seq_prompts = prompt_to_seq(prompts)
-        seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
-
-        if any(param.truncate_prompt_tokens is not None for param in seq_params):
-            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
-                engine_prompt
-                for prompt, param in zip(seq_prompts, seq_params)
-                for engine_prompt in self._preprocess_cmpl(
-                    [prompt],
-                    tokenization_kwargs=merge_kwargs(
-                        tokenization_kwargs,
-                        dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
-                    ),
-                )
-            ]
-        else:
-            engine_prompts = self._preprocess_cmpl(
-                seq_prompts,
-                tokenization_kwargs=tokenization_kwargs,
-            )
-
-        request_ids = self._validate_and_add_requests(
-            prompts=engine_prompts,
-            params=seq_params,
+        return self._add_completion_requests(
+            prompts=prompts,
+            params=sampling_params,
             use_tqdm=use_tqdm,
-            lora_request=self._get_modality_specific_lora_reqs(
-                engine_prompts, lora_request
-            ),
-            tokenization_kwargs=tokenization_kwargs,
+            lora_request=lora_request,
             priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
-
-        return request_ids
 
     def wait_for_completion(
         self,
@@ -1803,7 +1775,7 @@ class LLM:
 
         return [0] * num_requests
 
-    def _run_completion(
+    def _add_completion_requests(
         self,
         prompts: PromptType | Sequence[PromptType],
         params: SamplingParams
@@ -1814,7 +1786,7 @@ class LLM:
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ):
+    ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
 
@@ -1839,7 +1811,7 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        self._validate_and_add_requests(
+        return self._validate_and_add_requests(
             prompts=engine_prompts,
             params=seq_params,
             use_tqdm=use_tqdm,
@@ -1850,6 +1822,26 @@ class LLM:
             priority=priority,
         )
 
+    def _run_completion(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        params: SamplingParams
+        | PoolingParams
+        | Sequence[SamplingParams | PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ):
+        self._add_completion_requests(
+            prompts=prompts,
+            params=params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
+        )
         return self._run_engine(use_tqdm=use_tqdm)
 
     def _run_chat(
