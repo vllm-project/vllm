@@ -652,12 +652,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
-        assert layer.activation == MoEActivation.SILU, (
-            f"Only SiLU activation is supported, not {layer.activation}."
-        )
 
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            assert layer.activation == MoEActivation.SILU, (
+                "Only SiLU activation is supported for FlashInfer TRTLLM,"
+                f" not {layer.activation}."
+            )
             assert layer.enable_eplb
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
