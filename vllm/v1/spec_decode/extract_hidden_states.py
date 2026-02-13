@@ -347,9 +347,10 @@ class ExtractHiddenStatesProposer:
         """
         # Get the target model's attention layers before loading draft model
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()  # type: ignore[type-abstract]
         )
 
+        assert self.vllm_config.speculative_config is not None
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
         from vllm.compilation.backends import set_model_tag
 
@@ -360,7 +361,8 @@ class ExtractHiddenStatesProposer:
 
         # Identify draft model's attention layers (difference from target)
         all_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config, AttentionLayerBase
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
         )
         draft_attn_layers = {
             name: layer
