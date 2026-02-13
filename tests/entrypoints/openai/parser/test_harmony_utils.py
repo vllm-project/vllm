@@ -1215,9 +1215,7 @@ class TestParseResponseInputReasoningItem:
         item = {
             "type": "reasoning",
             "id": "rs_123",
-            "content": [
-                {"type": "reasoning_text", "text": "Thinking step by step"}
-            ],
+            "content": [{"type": "reasoning_text", "text": "Thinking step by step"}],
             "summary": [{"type": "summary_text", "text": "Summary"}],
         }
 
@@ -1231,9 +1229,7 @@ class TestParseResponseInputReasoningItem:
         item = {
             "type": "reasoning",
             "id": "rs_123",
-            "summary": [
-                {"type": "summary_text", "text": "Thinking about math"}
-            ],
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
         }
 
         msg = parse_response_input(item, prev_responses=[])
@@ -1247,9 +1243,7 @@ class TestParseResponseInputReasoningItem:
             "type": "reasoning",
             "id": "rs_123",
             "content": None,
-            "summary": [
-                {"type": "summary_text", "text": "Thinking about math"}
-            ],
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
         }
 
         msg = parse_response_input(item, prev_responses=[])

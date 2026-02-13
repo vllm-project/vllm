@@ -224,13 +224,8 @@ def parse_response_input(
     elif response_msg["type"] == "reasoning":
         content = response_msg.get("content")
         if content and len(content) >= 1:
-            msg = Message.from_role_and_content(
-                Role.ASSISTANT, content[0]["text"]
-            )
-        elif (
-            response_msg.get("summary")
-            and len(response_msg["summary"]) >= 1
-        ):
+            msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        elif response_msg.get("summary") and len(response_msg["summary"]) >= 1:
             msg = Message.from_role_and_content(
                 Role.ASSISTANT, response_msg["summary"][0]["text"]
             )
