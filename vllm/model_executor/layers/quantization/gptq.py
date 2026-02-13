@@ -28,6 +28,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
 
@@ -355,6 +356,23 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
+        if current_platform.is_xpu():
+            from vllm_xpu_kernels.quantization._quantize_convert import (
+                GPTQUtils,
+                transpose_onednn_woq_format,
+            )
+
+            if self.quant_config.desc_act and layer.g_idx is not None:
+                gptq_utils = GPTQUtils(bits=4, blocksize=self.quant_config.group_size)
+                qweight_new, g_idx_new = gptq_utils.shuffle(layer.qweight, layer.g_idx)
+                layer.qweight.data.copy_(qweight_new)
+                layer.g_idx.data.copy_(g_idx_new)
+                qweight_new = None
+                g_idx_new = None
+                del qweight_new, g_idx_new
+            transpose_onednn_woq_format(layer, "gptq", True)
+            return
+
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if layer.exllama_state == ExllamaState.UNINITIALIZED:
@@ -373,6 +391,18 @@ class GPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if current_platform.is_xpu():
+            reshaped_x = x.reshape(-1, x.shape[-1])
+            out = torch.ops._xpu_C.int4_gemm_w4a16(
+                reshaped_x,
+                layer.qweight,
+                bias,
+                layer.scales,
+                layer.qzeros,
+                layer.quant_config.group_size,
+                None,
+            )
+            return out
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
