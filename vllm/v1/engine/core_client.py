@@ -24,6 +24,7 @@ from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
 from vllm.utils.network_utils import (
     close_sockets,
@@ -96,6 +97,7 @@ class EngineCoreClient(ABC):
         return InprocClient(vllm_config, executor_class, log_stats)
 
     @staticmethod
+    @instrument(span_name="Overall Loading")
     def make_async_mp_client(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
@@ -103,7 +105,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-    ) -> "MPClient":
+    ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
             vllm_config,
@@ -133,7 +135,7 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True) -> None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -192,7 +194,7 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def dp_engines_running(self) -> bool:
-        """Returns True id data parallel engines are collectively in a
+        """Returns True if data parallel engines are collectively in a
         running state."""
         raise NotImplementedError
 
@@ -208,7 +210,9 @@ class EngineCoreClient(ABC):
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    async def profile_async(self, is_start: bool = True) -> None:
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> None:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -293,8 +297,8 @@ class InprocClient(EngineCoreClient):
     def shutdown(self) -> None:
         self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True) -> None:
-        self.engine_core.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+        self.engine_core.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -650,6 +654,7 @@ def _process_utility_output(
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
+    @instrument(span_name="SyncMPClient init")
     def __init__(
         self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
     ):
@@ -721,6 +726,7 @@ class SyncMPClient(MPClient):
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
         outputs = self.outputs_queue.get()
+
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         if outputs.wave_complete is not None:
@@ -761,8 +767,8 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True) -> None:
-        self.call_utility("profile", is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+        self.call_utility("profile", is_start, profile_prefix)
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -819,6 +825,7 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
+    @instrument(span_name="AsyncMPClient init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -972,8 +979,20 @@ class AsyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def profile_async(self, is_start: bool = True) -> None:
-        await self.call_utility_async("profile", is_start)
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+        Blocks until the EngineCore acknowledges the pause.
+        """
+        await self.call_utility_async("pause_scheduler")
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        await self.call_utility_async("resume_scheduler")
+
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> None:
+        await self.call_utility_async("profile", is_start, profile_prefix)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1183,6 +1202,18 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue."""
+        raise NotImplementedError(
+            "pause_scheduler_async is not yet supported for data parallel"
+        )
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        raise NotImplementedError(
+            "resume_scheduler_async is not yet supported for data parallel"
+        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
