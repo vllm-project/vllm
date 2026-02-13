@@ -85,7 +85,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
-        self.a1_dtype = quant_config._a1
 
     @property
     def expects_unquantized_inputs(self) -> bool:
