@@ -222,6 +222,10 @@ class ServerConfig:
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     world_size: int = 1
+    # Real values from platform sharding config (e.g., TPU).
+    # Used for display only, not for batch size calculation.
+    real_data_parallel_size: int | None = None
+    real_tensor_parallel_size: int | None = None
 
 
 async def fetch_server_config(
@@ -239,6 +243,8 @@ async def fetch_server_config(
                 tensor_parallel_size=data.get("tensor_parallel_size", 1),
                 pipeline_parallel_size=data.get("pipeline_parallel_size", 1),
                 world_size=data.get("world_size", 1),
+                real_data_parallel_size=data.get("real_data_parallel_size"),
+                real_tensor_parallel_size=data.get("real_tensor_parallel_size"),
             )
     except Exception as e:
         logger.warning("Failed to fetch server config: %s", e)
@@ -326,22 +332,30 @@ async def run_single_iteration(
     rotator: EndpointRotator,
     benchmark_prompt: str,
     batch_size: int,
+    num_tokens_to_generate: int = 0,
+    warmup_tokens: int = 0,
 ) -> tuple[float, int, int]:
-    """Run one iteration: sleep → queue requests → wake → measure."""
+    """Run one iteration: sleep → queue requests → wake → measure.
+
+    If warmup_tokens > 0 (TPU decode mode), uses streaming on one request
+    to precisely exclude the first warmup_tokens iterations from timing.
+    The server generates num_tokens_to_generate tokens total; timing starts
+    after warmup_tokens are received and stops when all tokens are done.
+    """
 
     # 1. Pause scheduling on ALL endpoints
     await call_debug_endpoint(session, rotator, "/debug/sleep", {"level": "0"})
 
     # 2. Build requests and start sending them (they queue while server sleeps)
-    # We use asyncio.ensure_future to actually start the requests immediately,
-    # not just create coroutines. The requests will be sent to the server
-    # and queue there while scheduling is paused.
-    max_tokens = 1 if config.mode == "prefill" else config.iterations
-    tasks = []
-    for _ in range(batch_size):
-        endpoint = rotator.next()
+    max_tokens = 1 if config.mode == "prefill" else num_tokens_to_generate
+    use_streaming = warmup_tokens > 0 and config.mode == "decode"
 
-        # ensure_future schedules the coroutine immediately
+    tasks = []
+    streaming_task = None
+    for i in range(batch_size):
+        endpoint = rotator.next()
+        # First request uses streaming if we need to track warmup
+        is_first = (i == 0 and use_streaming)
         task = asyncio.ensure_future(
             session.post(
                 f"{endpoint}/v1/completions",
@@ -349,32 +363,88 @@ async def run_single_iteration(
                     "model": config.model,
                     "prompt": benchmark_prompt,
                     "max_tokens": max_tokens,
-                    "stream": False,
+                    "stream": is_first,
                 },
             )
         )
-        tasks.append(task)
+        if is_first:
+            streaming_task = task
+        else:
+            tasks.append(task)
 
     # Small delay to ensure requests are queued on server
     await asyncio.sleep(0.1)
 
-    # 3. Resume scheduling on ALL endpoints and time the batch
-    start = time.perf_counter()
+    # 3. Resume scheduling on ALL endpoints
     await call_debug_endpoint(session, rotator, "/debug/wake_up")
-    responses = await asyncio.gather(*tasks)
-    elapsed_ms = (time.perf_counter() - start) * 1000
 
-    # 4. Count tokens
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    for resp in responses:
-        try:
-            data = await resp.json()
-            prompt_tokens, completion_tokens = count_tokens(data)
-            total_prompt_tokens += prompt_tokens
-            total_completion_tokens += completion_tokens
-        except Exception as e:
-            logger.warning("Failed to parse response: %s", e)
+    if use_streaming and streaming_task is not None:
+        # Wait for the streaming response and track per-token timing
+        streaming_resp = await streaming_task
+        token_count = 0
+        measure_start = None
+
+        async for line in streaming_resp.content:
+            text = line.decode("utf-8").strip()
+            if not text or not text.startswith("data:"):
+                continue
+            if text == "data: [DONE]":
+                break
+            token_count += 1
+            if token_count == warmup_tokens + 1:
+                # Warmup done — start timing from here
+                measure_start = time.perf_counter()
+
+        # Wait for all other (non-streaming) requests to complete
+        if tasks:
+            responses = await asyncio.gather(*tasks)
+        else:
+            responses = []
+
+        if measure_start is not None:
+            elapsed_ms = (time.perf_counter() - measure_start) * 1000
+        else:
+            # Fallback: not enough tokens for warmup
+            logger.warning(
+                "Only received %d tokens, less than warmup (%d). "
+                "Timing includes all tokens.",
+                token_count, warmup_tokens,
+            )
+            elapsed_ms = 0.0
+
+        # Count tokens from non-streaming responses
+        total_prompt_tokens = 0
+        total_completion_tokens = token_count  # streaming request
+        for resp in responses:
+            try:
+                data = await resp.json()
+                pt, ct = count_tokens(data)
+                total_prompt_tokens += pt
+                total_completion_tokens += ct
+            except Exception as e:
+                logger.warning("Failed to parse response: %s", e)
+
+        logger.info(
+            "  Warmup: skipped first %d tokens, measured %d tokens",
+            warmup_tokens, token_count - warmup_tokens,
+        )
+    else:
+        # Non-streaming path (GPU or prefill)
+        start = time.perf_counter()
+        all_tasks = ([streaming_task] if streaming_task else []) + tasks
+        responses = await asyncio.gather(*all_tasks)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        for resp in responses:
+            try:
+                data = await resp.json()
+                pt, ct = count_tokens(data)
+                total_prompt_tokens += pt
+                total_completion_tokens += ct
+            except Exception as e:
+                logger.warning("Failed to parse response: %s", e)
 
     return elapsed_ms, total_prompt_tokens, total_completion_tokens
 
@@ -400,6 +470,7 @@ async def fetch_traces(
                         f"{endpoint}/debug/traces/{trace_file}"
                     )
                     local_path = os.path.join(output_dir, f"endpoint{i}_{trace_file}")
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     with open(local_path, "wb") as f:
                         f.write(await trace_resp.read())
                     logger.info("Downloaded: %s", local_path)
@@ -428,10 +499,15 @@ async def run_benchmark(
         # Fetch server config once
         server_config = await fetch_server_config(session, rotator)
         dp_size = server_config.data_parallel_size
+        display_dp = server_config.real_data_parallel_size or dp_size
+        display_tp = (
+            server_config.real_tensor_parallel_size
+            or server_config.tensor_parallel_size
+        )
         logger.info(
             "Server config: DP=%d, TP=%d, PP=%d",
-            dp_size,
-            server_config.tensor_parallel_size,
+            display_dp,
+            display_tp,
             server_config.pipeline_parallel_size,
         )
 
@@ -455,6 +531,13 @@ async def run_benchmark(
         # For prefill: 1 output token. For decode: config.iterations tokens.
         num_output_tokens = 1 if config.mode == "prefill" else config.iterations
 
+        # On TPU, the first few decode iterations include XLA compilation
+        # overhead. Generate extra tokens and exclude them from the per-iter
+        # latency calculation (total_time / measured_iters, not total_iters).
+        is_tpu = server_config.real_data_parallel_size is not None
+        tpu_warmup_iters = 3 if (is_tpu and config.mode == "decode") else 0
+        num_tokens_to_generate = num_output_tokens + tpu_warmup_iters
+
         # Track all trace prefixes for fetching at the end
         trace_prefixes: list[str] = []
 
@@ -470,13 +553,14 @@ async def run_benchmark(
 
             logger.info(
                 "Running: mode=%s, ctx=%d, input=%d, batch=%d/dp (global=%d), "
-                "output_tokens=%d",
+                "output_tokens=%d (+ %d TPU warmup)",
                 config.mode,
                 ctx_len,
                 in_len,
                 batch_size_per_dp,
                 global_batch_size,
                 num_output_tokens,
+                tpu_warmup_iters,
             )
 
             # Prefix cache warmup: populate KV cache before profiling
@@ -510,6 +594,8 @@ async def run_benchmark(
                 rotator,
                 benchmark_prompt,
                 global_batch_size,
+                num_tokens_to_generate,
+                warmup_tokens=tpu_warmup_iters,
             )
 
             # Stop profiling for this param combo
@@ -593,9 +679,14 @@ def print_results_summary(
     print("=" * 110)
 
     if server_config:
+        dp = server_config.real_data_parallel_size or server_config.data_parallel_size
+        tp = (
+            server_config.real_tensor_parallel_size
+            or server_config.tensor_parallel_size
+        )
         print(
-            f"Server: DP={server_config.data_parallel_size}, "
-            f"TP={server_config.tensor_parallel_size}, "
+            f"Server: DP={dp}, "
+            f"TP={tp}, "
             f"PP={server_config.pipeline_parallel_size}, "
             f"World={server_config.world_size}"
         )
