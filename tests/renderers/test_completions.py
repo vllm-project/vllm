@@ -41,6 +41,11 @@ class MockModelConfig:
 
 
 @dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
+@dataclass
 class DummyTokenizer:
     truncation_side: str = "left"
     max_chars_per_token: int = 1
@@ -72,7 +77,7 @@ def _build_renderer(
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     renderer = HfRenderer(
-        model_config,
+        MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
