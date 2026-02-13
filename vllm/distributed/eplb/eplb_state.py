@@ -1257,7 +1257,7 @@ def _commit_eplb_maps(
     # Rare Case: When the number of physical experts has changed, discard the old
     # physical to logical expert map and use the new one. Otherwise copy the new
     # map into the old one
-    if src.shape[1] == dst.shape[1]:
+    if src.shape[1] != dst.shape[1]:
         model_state.physical_to_logical_map = src.to(dst.device)
     else:
         dst.copy_(src, non_blocking=True)
