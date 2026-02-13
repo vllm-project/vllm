@@ -87,6 +87,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     use_large_context_topk: bool
+    use_flashinfer_topk: bool
     offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
@@ -320,16 +321,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
 
             # Use CPU to avoid GPU sync; breaking async scheduling
-            requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
+            requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()  # noqa: E501
 
-            # Decide which top-k kernel to use based on batch size and sequence length
-            batch_size = num_decodes
-            _is_large_context = common_attn_metadata.max_seq_len > 8192
-
-            # Decision logic based on micro-benchmark results:
-            # - large_context_topk wins for batch <= 128 and seq_len > 8K
-            # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
-            use_large_context_topk = batch_size <= 128 and _is_large_context
+            # Decision logic based on micro-benchmark results.
+            # See: https://github.com/vllm-project/vllm/pull/34265
+            max_seq_len = common_attn_metadata.max_seq_len
+            use_flashinfer_topk = max_seq_len >= 65536
+            use_large_context_topk = max_seq_len == 2048 or (8192 < max_seq_len < 65536)
 
             next_n = 1 + self.num_speculative_tokens
             if next_n > 1:
@@ -349,6 +347,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
                 use_large_context_topk=use_large_context_topk,
+                use_flashinfer_topk=use_flashinfer_topk,
                 offsets=offsets,
             )
 
