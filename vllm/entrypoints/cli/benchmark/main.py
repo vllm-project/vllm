@@ -4,6 +4,14 @@
 import argparse
 import typing
 
+# Import all subcommands to register them via __subclasses__()
+from vllm.entrypoints.cli.benchmark import iterations as _iterations  # noqa: F401
+from vllm.entrypoints.cli.benchmark import latency as _latency  # noqa: F401
+from vllm.entrypoints.cli.benchmark import mm_processor as _mm_processor  # noqa: F401
+from vllm.entrypoints.cli.benchmark import serve as _serve  # noqa: F401
+from vllm.entrypoints.cli.benchmark import startup as _startup  # noqa: F401
+from vllm.entrypoints.cli.benchmark import sweep as _sweep  # noqa: F401
+from vllm.entrypoints.cli.benchmark import throughput as _throughput  # noqa: F401
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
