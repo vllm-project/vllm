@@ -567,9 +567,8 @@ def _remove_symint_placeholders(gm: fx.GraphModule) -> None:
                     if submod_node.op != "placeholder":
                         continue
                     sub_ev = submod_node.meta.get("example_value")
-                    if isinstance(sub_ev, torch.SymInt):
-                        if not submod_node.users:
-                            submodule.graph.erase_node(submod_node)
+                    if isinstance(sub_ev, torch.SymInt) and not submod_node.users:
+                        submodule.graph.erase_node(submod_node)
                 submodule.graph.lint()
                 submodule.recompile()
 
