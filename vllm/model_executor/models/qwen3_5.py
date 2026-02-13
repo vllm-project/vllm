@@ -119,10 +119,8 @@ class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
     def fix_query_key_value_ordering(
         self,
-        mixed_qkv,
-        z,
-        b,
-        a,
+        mixed_qkvz: torch.Tensor,
+        mixed_ba: torch.Tensor,
     ):
         raise NotImplementedError(
             "Qwen3.5 Series dont need to fix query key value ordering"
