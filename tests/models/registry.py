@@ -915,6 +915,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_6ForCausalLM": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
+    ),
+    "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+    ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
         trust_remote_code=True,

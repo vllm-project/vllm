@@ -425,6 +425,8 @@ _MULTIMODAL_MODELS = {
     ),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "Ovis2_6ForCausalLM": ("ovis2_5", "Ovis2_5"),
+    "Ovis2_6_MoeForCausalLM": ("ovis2_5", "Ovis2_5"),
     "PaddleOCRVLForConditionalGeneration": (
         "paddleocr_vl",
         "PaddleOCRVLForConditionalGeneration",
