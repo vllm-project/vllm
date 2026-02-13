@@ -2569,6 +2569,80 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     assert scheduled_cached_reqs.all_token_ids[request_low.request_id][31] == 100
 
 
+def test_priority_scheduling_preemption_when_current_request_preempted():
+    """Test that when the request being preempted is the current one,
+    it will continue to schedule the subsequent requests with higher priority."""
+    scheduler = create_scheduler_with_priority(
+        max_num_batched_tokens=200,
+        num_blocks=8,
+    )
+    # Add two priority requests first.
+    priority_requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[3, 4],
+        arrival_times=[1.0, 2.0],
+        num_tokens=15,
+        starting_idx=1,
+    )
+
+    for request in priority_requests:
+        scheduler.add_request(request)
+    # After scheduling, transfer from the waiting queue to the running queue.
+    # At this time, 2 blocks have been allocated, and 5 available blocks remain.
+    output = scheduler.schedule()
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in priority_requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(priority_requests)},
+        sampled_token_ids=[[1] for _ in priority_requests],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Add tow high priority requests.
+    high_priority_requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[1, 2],
+        arrival_times=[3.0, 4.0],
+        num_tokens=8,
+        starting_idx=3,
+    )
+    for request in high_priority_requests:
+        scheduler.add_request(request)
+
+    # the IDs of the requests in the running queue are: 1, 2, 3, 4
+    # At this time, 6 blocks have been allocated,
+    # and 1 available blocks remain.
+    output = scheduler.schedule()
+
+    merge_requests = priority_requests + high_priority_requests
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in merge_requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(merge_requests)},
+        sampled_token_ids=[[2] for _ in merge_requests],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # At this time, the request with the lowest priority
+    # (request.id = 2) will be preempted, freeing up 2 blocks,
+    # which will trigger the condition (preempted_req == request)
+    output = scheduler.schedule()
+
+    assert output.scheduled_cached_reqs.num_reqs == 3
+    assert len(scheduler.waiting) == 1
+    running_req_ids = [req.request_id for req in scheduler.running]
+
+    assert running_req_ids == ["1", "3", "4"]
+
+
 @pytest.mark.parametrize(
     ("enable_chunked_prefill", "is_encoder_decoder", "expect_enabled"),
     [
