@@ -754,7 +754,10 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer_kwargs={},
+    )
     mock_renderer._tokenizer = mock_tokenizer
     # Force the Mistral chat template renderer to return token IDs.
     # Choose a prompt length that is < max_model_len, but large enough that
@@ -793,7 +796,10 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer_kwargs={},
+    )
     mock_renderer._tokenizer = mock_tokenizer
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
