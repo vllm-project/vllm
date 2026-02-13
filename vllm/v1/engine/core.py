@@ -616,10 +616,11 @@ class EngineCore:
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
         """
-        if level == 0:
-            # Level 0: Just pause scheduling, don't touch GPU
-            self.pause_scheduler()
-        else:
+
+        # Pause scheduler before sleeping.
+        clear_prefix_cache = level > 0
+        self.pause_scheduler(mode="keep", clear_cache=clear_prefix_cache)
+        if level > 0:
             # Level 1+: Delegate to executor for GPU memory management
             self.model_executor.sleep(level)
 
@@ -630,16 +631,14 @@ class EngineCore:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
         """
         if tags is not None and "scheduling" in tags:
-            # Level 0 wake up: Resume scheduling
-            self.resume_scheduler()
-            # Remove "scheduling" from tags if there are other tags to process
-            remaining_tags = [t for t in tags if t != "scheduling"]
-            if remaining_tags:
-                self.model_executor.wake_up(remaining_tags)
-        else:
-            # Full wake up
-            self.resume_scheduler()
+            # Remove "scheduling" from tags if there are other tags to process.
+            tags = [t for t in tags if t != "scheduling"]
+
+        if tags:
             self.model_executor.wake_up(tags)
+
+        # Resume scheduling (applies to all levels)
+        self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1532,8 +1531,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
 
+            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

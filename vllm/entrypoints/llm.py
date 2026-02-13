@@ -1726,8 +1726,6 @@ class LLM:
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
         """
-        if level > 0:
-            self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
     def wake_up(self, tags: list[str] | None = None):
@@ -1995,9 +1993,7 @@ class LLM:
         return engine_request.request_id
 
     def _run_engine(
-        self,
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
+        self, *, use_tqdm: bool | Callable[..., tqdm] = True
     ) -> list[RequestOutput | PoolingRequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
