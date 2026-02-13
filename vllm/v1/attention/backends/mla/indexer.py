@@ -212,7 +212,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         if self.num_speculative_tokens > 1:
             raise ValueError(
-                "Sparse MLA (DeepSeekV3.2 indexer) only supports "
+                "Sparse MLA only supports "
                 "num_speculative_tokens <= 1 because the DeepGEMM "
                 "fp8_paged_mqa_logits kernel does not support next_n > 2. "
                 f"Got num_speculative_tokens={self.num_speculative_tokens}."
