@@ -108,6 +108,7 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=not model_config.is_encoder_decoder,
             max_total_tokens_param="max_model_len",
         )
 
