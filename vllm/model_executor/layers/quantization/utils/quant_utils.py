@@ -170,12 +170,19 @@ kFp8Dynamic64Sym = QuantKey(scalar_types.float8_e4m3fn, kDynamic64Scale, symmetr
 kMxfp4DynamicGroupScale = ScaleDesc(
     scalar_types.float8_e8m0fnu, False, GroupShape(1, 32)
 )
-kNvfp4Dynamic = QuantKey(
+kMxfp4Dynamic = QuantKey(
     scalar_types.float4_e2m1f, scale=kMxfp4DynamicGroupScale, symmetric=True
 )
 
+kMxfp8DynamicGroupScale = ScaleDesc(
+    scalar_types.float8_e8m0fnu, False, GroupShape(1, 32)
+)
+kMxfp8Dynamic = QuantKey(
+    scalar_types.float8_e4m3fn, scale=kMxfp8DynamicGroupScale, symmetric=True
+)
+
 kMxfp4StaticGroupScale = ScaleDesc(scalar_types.float8_e8m0fnu, True, GroupShape(1, 32))
-kNvfp4Static = QuantKey(
+kMxfp4Static = QuantKey(
     scalar_types.float4_e2m1f, scale=kMxfp4StaticGroupScale, symmetric=True
 )
 
