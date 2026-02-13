@@ -12,15 +12,15 @@ from typing import Any, Literal, TypeAlias
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata
 from packaging.version import Version
-from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_MAPPING_NAMES,
 )
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
-from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
+from transformers import GenerationConfig, PretrainedConfig
+from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
@@ -100,6 +100,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen3_5="Qwen3_5Config",
+    qwen3_5_moe="Qwen3_5MoeConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
