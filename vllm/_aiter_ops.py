@@ -426,6 +426,35 @@ def _rocm_aiter_gemm_a8w8_fake(
     return Y
 
 
+def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter import gemm_a8w8_bpreshuffle
+
+    output = gemm_a8w8_bpreshuffle(A, B, As, Bs, None, output_dtype)
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
+def _rocm_aiter_gemm_a8w8_bpreshuffle_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    return torch.empty(m, n, dtype=output_dtype, device=A.device)
+
+
 def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1086,6 +1115,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
+                op_func=_rocm_aiter_gemm_a8w8_bpreshuffle_impl,
+                fake_impl=_rocm_aiter_gemm_a8w8_bpreshuffle_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
@@ -1247,6 +1282,19 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def gemm_a8w8_bpreshuffle(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_bpreshuffle(
+            A, B, As, Bs, bias, output_dtype
+        )
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
@@ -1623,7 +1671,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight(
-        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
 

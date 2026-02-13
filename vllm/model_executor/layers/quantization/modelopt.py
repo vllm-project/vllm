@@ -440,12 +440,6 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8StaticTensorSym,
-            weight_quant_key=kFp8StaticTensorSym,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
 
     def create_weights(
         self,
@@ -495,6 +489,14 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8StaticTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            out_dtype=torch.get_default_dtype(),
+            weight_shape=(output_size_per_partition, input_size_per_partition),
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
@@ -505,6 +507,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -526,12 +529,6 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
 
     def create_weights(
         self,
@@ -577,9 +574,18 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTokenSym,
+            out_dtype=torch.get_default_dtype(),
+            weight_shape=(output_size_per_partition, input_size_per_partition),
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1187,13 +1193,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        del layer.input_scale
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
-        del layer.weight_scale_2
+        # global scales:
+        input_scale_2 = layer.input_scale.max().to(torch.float32)
+        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
+
+        weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
 
         # Pre-compute alpha and inverse for runtime quantization
         layer.alpha = Parameter(
