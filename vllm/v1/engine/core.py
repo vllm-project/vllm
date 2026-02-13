@@ -24,6 +24,7 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
@@ -208,6 +209,10 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Pause state for "keep" mode - freezes requests in queue.
+        self._scheduler_paused = False
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -217,6 +222,7 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+    @instrument(span_name="Prepare model")
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
@@ -320,6 +326,20 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pause_scheduler(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+
+        Requests are kept frozen in queue and can be resumed later.
+        """
+        self._scheduler_paused = True
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler after a pause.
+
+        Resumes processing of frozen requests in the queue.
+        """
+        self._scheduler_paused = False
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -373,6 +393,10 @@ class EngineCore:
         was executed.
         """
 
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -423,6 +447,10 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
+
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -540,8 +568,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.model_executor.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -586,13 +614,43 @@ class EngineCore:
         self.model_executor.reset_encoder_cache()
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        """Put the engine to sleep at the specified level.
+
+        Args:
+            level: Sleep level.
+                - Level 0: Pause scheduling only. Requests are still accepted
+                           but not processed. No GPU memory changes.
+                - Level 1: Offload model weights to CPU, discard KV cache.
+                - Level 2: Discard all GPU memory.
+        """
+        if level == 0:
+            # Level 0: Just pause scheduling, don't touch GPU
+            self.pause_scheduler()
+        else:
+            # Level 1+: Delegate to executor for GPU memory management
+            self.model_executor.sleep(level)
 
     def wake_up(self, tags: list[str] | None = None):
-        self.model_executor.wake_up(tags)
+        """Wake up the engine from sleep.
+
+        Args:
+            tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+        """
+        if tags is not None and "scheduling" in tags:
+            # Level 0 wake up: Resume scheduling
+            self.resume_scheduler()
+            # Remove "scheduling" from tags if there are other tags to process
+            remaining_tags = [t for t in tags if t != "scheduling"]
+            if remaining_tags:
+                self.model_executor.wake_up(remaining_tags)
+        else:
+            # Full wake up
+            self.resume_scheduler()
+            self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        """Check if engine is sleeping at any level."""
+        return self._scheduler_paused or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -658,6 +716,7 @@ class EngineCoreProc(EngineCore):
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
 
+    @instrument(span_name="EngineCoreProc init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -926,8 +985,18 @@ class EngineCoreProc(EngineCore):
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name=f"EngineCore_DP{dp_rank}",
+                )
                 set_process_title("EngineCore", f"DP{dp_rank}")
             else:
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name="EngineCore",
+                )
                 set_process_title("EngineCore")
             decorate_logs()
 
@@ -956,6 +1025,7 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_rank = 0
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
+            assert engine_core is not None
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -983,7 +1053,13 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            #    Skip if scheduling is paused (level 0 sleep)
+            if not self._scheduler_paused:
+                self._process_engine_step()
+            else:
+                # When scheduling is paused, still need to check for wake up
+                # by processing any utility requests that might resume scheduling
+                pass
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -991,8 +1067,9 @@ class EngineCoreProc(EngineCore):
         waited = False
         while (
             not self.engines_running
-            and not self.scheduler.has_requests()
+            and (not self.scheduler.has_requests() or self._scheduler_paused)
             and not self.batch_queue
+            and not self._scheduler_paused
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1373,11 +1450,15 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
+            # Skip processing if scheduling is paused (level 0 sleep)
+            if self._scheduler_paused:
+                continue
+
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
@@ -1485,6 +1566,13 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        # Initialize tracer for distributed tracing if configured.
+        maybe_init_worker_tracer(
+            instrumenting_module_name="vllm.engine_core",
+            process_kind="engine_core",
+            process_name=f"DPEngineCoreActor_DP{dp_rank}",
+        )
+
         self.addresses = addresses
         vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank

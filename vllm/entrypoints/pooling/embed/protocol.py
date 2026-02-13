@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import Field
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
@@ -13,8 +14,11 @@ from vllm.entrypoints.pooling.base.protocol import (
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 def _get_max_total_output_tokens(
@@ -55,15 +59,25 @@ class EmbeddingCompletionRequest(
             max_output_tokens_param="max_model_len - max_embed_len",
         )
 
+    def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
+        return PoolingParams(
+            task="embed",
+            dimensions=self.dimensions,
+            use_activation=self.use_activation,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+        )
+
 
 class EmbeddingChatRequest(
     PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
 ):
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -80,6 +94,21 @@ class EmbeddingChatRequest(
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_model_len - max_embed_len",
+        )
+
+    def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
+        return PoolingParams(
+            task="embed",
+            dimensions=self.dimensions,
+            use_activation=self.use_activation,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 

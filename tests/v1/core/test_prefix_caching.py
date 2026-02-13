@@ -75,13 +75,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -856,6 +858,8 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     assert blocks is not None
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
+
+    manager.new_step_starts()
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)

@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from typing import Any, TypeAlias, cast
 
+import torch
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
@@ -32,6 +33,23 @@ ScoreContentPartParam: TypeAlias = (
     | ChatCompletionContentPartTextParam
     | ChatCompletionContentPartVideoParam
 )
+
+
+def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
+    """
+    Compute ColBERT MaxSim score.
+
+    Args:
+        q_emb: Query token embeddings [query_len, dim]
+        d_emb: Document token embeddings [doc_len, dim]
+
+    Returns:
+        MaxSim score (sum over query tokens of max similarity to any doc token)
+    """
+    # [query_len, doc_len]
+    token_scores = torch.matmul(q_emb, d_emb.T)
+    # Max over document tokens, sum over query tokens
+    return token_scores.amax(dim=-1).sum()
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
