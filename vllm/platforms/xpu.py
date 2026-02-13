@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -132,6 +133,12 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
+
+    @classmethod
+    @lru_cache
+    def get_sm_count(cls, device: torch.device) -> int:
+        props = torch.xpu.get_device_properties(device)
+        return props.max_compute_units
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
