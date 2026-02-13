@@ -86,6 +86,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
+from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -1677,7 +1678,7 @@ class LLM:
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         """
         Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
@@ -1697,8 +1698,10 @@ class LLM:
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
+            mode: How to handle any existing requests, can be "abort", "wait",
+                or "keep".
         """
-        self.llm_engine.sleep(level=level)
+        self.llm_engine.sleep(level=level, mode=mode)
 
     def wake_up(self, tags: list[str] | None = None):
         """

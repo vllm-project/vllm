@@ -678,7 +678,7 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -687,14 +687,34 @@ class EngineCore:
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
+            mode: Pause mode - how to deal with any existing requests, see
+                documentation of pause_scheduler method.
         """
 
         # Pause scheduler before sleeping.
-        clear_prefix_cache = level > 0
-        self.pause_scheduler(mode="keep", clear_cache=clear_prefix_cache)
-        if level > 0:
-            # Level 1+: Delegate to executor for GPU memory management
-            self.model_executor.sleep(level)
+        clear_prefix_cache = level >= 1
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        if level < 1:
+            return pause_future
+
+        # Level 1+: Delegate to executor for GPU memory management
+        model_executor = self.model_executor
+        if pause_future is None:
+            model_executor.sleep(level)
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()  # propagate any exception
+                future.set_result(model_executor.sleep(level))
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info("Waiting for in-flight requests to complete before sleeping...")
+        pause_future.add_done_callback(pause_complete)
+        return future
 
     def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep.
