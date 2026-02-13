@@ -334,6 +334,7 @@ class scalar_types:
     float8_e8m0fnu = ScalarType(8, 0, False, 0, True, NanRepr.EXTD_RANGE_MAX_MIN)
     float16_e8m7 = ScalarType.float_IEEE754(8, 7)
     float16_e5m10 = ScalarType.float_IEEE754(5, 10)
+    float32_e8m23 = ScalarType.float_IEEE754(8, 23)
 
     # fp6, https://github.com/usyd-fsalab/fp6_llm/tree/main
     # and https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
@@ -353,3 +354,4 @@ class scalar_types:
     # colloquial names
     bfloat16 = float16_e8m7
     float16 = float16_e5m10
+    float32 = float32_e8m23
