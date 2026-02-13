@@ -57,14 +57,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "MistralRenderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        model_config = self.model_config
+        model_config = config.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
@@ -73,6 +66,13 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
                 **tokenizer_kwargs,
             )
 
+        return cls(config, tokenizer)
+
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer: MistralTokenizer | None,
+    ) -> None:
         super().__init__(config, tokenizer)
 
         self._apply_chat_template_executor = ThreadPoolExecutor(max_workers=1)

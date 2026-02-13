@@ -28,14 +28,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "Grok2Renderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        model_config = self.model_config
+        model_config = config.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
@@ -44,7 +37,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
                 **tokenizer_kwargs,
             )
 
-        super().__init__(config, tokenizer)
+        return cls(config, tokenizer)
 
     def render_messages(
         self,
