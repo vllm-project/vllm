@@ -18,7 +18,7 @@ import dataclasses
 import json
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -30,12 +30,16 @@ from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.import_utils import PlaceholderModule
-from vllm.v1.engine.llm_engine import LLMEngine
 
 try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
+
+if TYPE_CHECKING:  # Avoid having to mock during docs build
+    from vllm.v1.engine.llm_engine import LLMEngine
+else:
+    LLMEngine = object
 
 
 def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, float]]:
