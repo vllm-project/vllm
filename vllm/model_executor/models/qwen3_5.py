@@ -116,157 +116,18 @@ class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
         return self.ctx.get_hf_config(Qwen3_5MoeConfig)
 
 
-# class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
-#     def __init__(
-#         self,
-#         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig,
-#         model_config: ModelConfig | None = None,
-#         cache_config: CacheConfig | None = None,
-#         quant_config: QuantizationConfig | None = None,
-#         speculative_config: SpeculativeConfig | None = None,
-#         prefix: str = "",
-#     ) -> None:
-#         super(Qwen3NextGatedDeltaNet, self).__init__()
-#         self.tp_size = get_tensor_model_parallel_world_size()
-#         self.tp_rank = get_tensor_model_parallel_rank()
-#         self.hidden_size = config.hidden_size
-#         self.num_v_heads = config.linear_num_value_heads
-#         self.num_k_heads = config.linear_num_key_heads
-#         self.head_k_dim = config.linear_key_head_dim
-#         self.head_v_dim = config.linear_value_head_dim
-#         self.key_dim = self.head_k_dim * self.num_k_heads
-#         self.value_dim = self.head_v_dim * self.num_v_heads
-
-#         self.conv_kernel_size = config.linear_conv_kernel_dim
-#         self.layer_idx = extract_layer_index(prefix)
-#         self.activation = config.hidden_act
-#         self.act = ACT2FN[config.hidden_act]
-#         self.layer_norm_epsilon = config.rms_norm_eps
-#         self.prefix = prefix
-
-#         self.config = config
-#         self.model_config = model_config
-#         self.cache_config = cache_config
-#         self.quant_config = quant_config
-#         self.speculative_config = speculative_config
-#         self.num_spec = (
-#             self.speculative_config.num_speculative_tokens
-#             if self.speculative_config
-#             else 0
-#         )
-
-#         # QKV
-#         self.conv_dim = self.key_dim * 2 + self.value_dim
-#         self.conv1d = ColumnParallelLinear(
-#             input_size=self.conv_kernel_size,
-#             output_size=self.conv_dim,
-#             bias=False,
-#             prefix=f"{prefix}.conv1d",
-#         )
-#         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-
-#         self.in_proj_qkv = MergedColumnParallelLinear(
-#             input_size=self.hidden_size,
-#             output_sizes=[self.key_dim, self.key_dim, self.value_dim],
-#             bias=False,
-#             quant_config=quant_config,
-#             prefix=f"{prefix}.in_proj_qkv",
-#         )
-#         self.in_proj_z = ColumnParallelLinear(
-#             input_size=self.hidden_size,
-#             output_size=self.value_dim,
-#             bias=False,
-#             quant_config=quant_config,
-#             prefix=f"{prefix}.in_proj_z",
-#         )
-#         self.in_proj_b = ColumnParallelLinear(
-#             input_size=self.hidden_size,
-#             output_size=self.num_v_heads,
-#             bias=False,
-#             quant_config=quant_config,
-#             prefix=f"{prefix}.in_proj_b",
-#         )
-#         self.in_proj_a = ColumnParallelLinear(
-#             input_size=self.hidden_size,
-#             output_size=self.num_v_heads,
-#             bias=False,
-#             quant_config=quant_config,
-#             prefix=f"{prefix}.in_proj_a",
-#         )
-
-#         query_key_settings = (self.key_dim, 0, False)
-#         value_settings = (self.value_dim, 0, False)
-
-#         delattr(self.conv1d.weight, "weight_loader")
-#         set_weight_attrs(
-#             self.conv1d.weight,
-#             {
-#                 "weight_loader": mamba_v2_sharded_weight_loader(
-#                     [
-#                         query_key_settings,
-#                         query_key_settings,
-#                         value_settings,
-#                     ],
-#                     self.tp_size,
-#                     self.tp_rank,
-#                 )
-#             },
-#         )
-
-#         # selective projection used to make dt, B and C input dependant
-
-#         # time step projection (discretization)
-#         # instantiate once and copy inv_dt in init_weights of PretrainedModel
-#         self.dt_bias = nn.Parameter(
-#             torch.ones(self.num_v_heads // self.tp_size),
-#         )
-#         self.A_log = nn.Parameter(
-#             torch.empty(
-#                 divide(self.num_v_heads, self.tp_size),
-#             )
-#         )
-
-#         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-#         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-
-#         self.norm = RMSNormGated(
-#             self.head_v_dim,
-#             eps=self.layer_norm_epsilon,
-#             group_size=None,
-#             norm_before_gate=True,
-#             device=current_platform.current_device(),
-#             dtype=config.dtype,
-#         )
-
-#         self.out_proj = RowParallelLinear(
-#             self.value_dim,
-#             self.hidden_size,
-#             bias=False,
-#             input_is_parallel=True,
-#             quant_config=quant_config,
-#             prefix=f"{prefix}.out_proj",
-#         )
-
-#         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
-
-#         compilation_config = get_current_vllm_config().compilation_config
-#         if prefix in compilation_config.static_forward_context:
-#             raise ValueError(f"Duplicate layer name: {prefix}")
-#         compilation_config.static_forward_context[prefix] = self
-
-#     def fix_query_key_value_ordering(
-#         self,
-#         mixed_qkv,
-#         z,
-#         b,
-#         a,
-#     ):
-#         raise NotImplementedError(
-#             "Qwen3.5 Series dont need to fix query key value ordering"
-#         )
-
-
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
+    def fix_query_key_value_ordering(
+        self,
+        mixed_qkv,
+        z,
+        b,
+        a,
+    ):
+        raise NotImplementedError(
+            "Qwen3.5 Series dont need to fix query key value ordering"
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
