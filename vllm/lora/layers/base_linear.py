@@ -13,8 +13,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import aux_stream, current_stream, direct_register_custom_op
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
@@ -39,23 +38,21 @@ def _lora_apply_impl(
         device=x.device,
     )
 
-    layer.lora_stream.wait_stream(current_stream())
-    x.record_stream(layer.lora_stream)
+    layer.punica_wrapper.lora_stream.wait_stream(current_stream())
 
-    with torch.cuda.stream(layer.lora_stream):
-        layer.punica_wrapper.add_lora_linear(
-            lora_delta,
-            x,
-            layer.lora_a_stacked,
-            layer.lora_b_stacked,
-            1.0,
-            layer.output_slices,
-        )
+    with torch.cuda.stream(layer.punica_wrapper.lora_stream):
+        output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
+        output_flat = output.flatten(0, 1) if output.ndim == 3 else output
+    layer.punica_wrapper.add_lora_linear(
+        lora_delta,
+        x,
+        layer.lora_a_stacked,
+        layer.lora_b_stacked,
+        1.0,
+        layer.output_slices,
+    )
 
-    output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
-    output_flat = output.flatten(0, 1) if output.ndim == 3 else output
-
-    current_stream().wait_stream(layer.lora_stream)
+    current_stream().wait_stream(layer.punica_wrapper.lora_stream)
     output_flat.add_(lora_delta)
 
     return output_flat
@@ -91,7 +88,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
-        self.lora_stream = aux_stream()
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
@@ -189,7 +185,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
-    """
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         original_shape = x.shape if x.ndim == 3 else None
         x_flat = x.flatten(0, 1) if x.ndim == 3 else x
@@ -199,8 +194,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if original_shape is not None:
             return output_flat.view(*original_shape[:-1], -1)
         return output_flat
-    """
 
+    """
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
@@ -225,6 +220,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+    """
 
     @property
     def weight(self) -> torch.Tensor:

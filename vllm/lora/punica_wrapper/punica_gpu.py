@@ -25,6 +25,7 @@ if HAS_TRITON:
     )
 
 from vllm import _custom_ops as ops
+from vllm.lora.punica_wrapper.utils import lora_stream
 
 from .punica_base import PunicaWrapperBase
 
@@ -71,6 +72,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             device=device,
             captured_lora_counts=captured_lora_counts,
         )
+
+        self.lora_stream = lora_stream()
 
     def update_metadata(
         self,
