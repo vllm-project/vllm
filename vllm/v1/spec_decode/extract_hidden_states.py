@@ -235,6 +235,7 @@ class ExtractHiddenStatesProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
+        assert self.model is not None, "Model must be initialized before dummy_run"
         num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
             num_tokens_unpadded=num_tokens,
             num_tokens_padded=num_tokens,
