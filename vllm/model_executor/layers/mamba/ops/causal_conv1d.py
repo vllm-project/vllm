@@ -1080,6 +1080,7 @@ def causal_conv1d_update(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    use_cuda=False,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -1159,6 +1160,22 @@ def causal_conv1d_update(
 
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
+    if use_cuda:
+        from vllm._custom_ops import causal_conv1d_update_cuda
+
+        causal_conv1d_update_cuda(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation == "silu",
+            cache_seqlens=None,
+            conv_state_indices=conv_state_indices,
+            pad_slot_id=pad_slot_id,
+        )
+        if unsqueeze:
+            x = x.squeeze(-1)
+        return x.to(original_x_dtype)
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
     out = x
