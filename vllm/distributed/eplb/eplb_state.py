@@ -987,6 +987,9 @@ class EplbState:
             model_state.buffer_consumed_event = consumed_event
 
             transferred_layer = model_state.layer_to_transfer
+            assert model_state.new_physical_to_logical_map is not None
+            assert model_state.new_logical_to_physical_map is not None
+            assert model_state.new_logical_replica_count is not None
             _commit_eplb_maps_for_layer(
                 model_state,
                 new_physical_to_logical_map=model_state.new_physical_to_logical_map,
@@ -1208,14 +1211,8 @@ def _commit_eplb_maps_for_layer(
     new_logical_replica_count: torch.Tensor,
     layer: int,
 ) -> None:
-    # These should only be unset during the profile run or in-between
-    # EPLB runs, having them unset in this function is invalid.
-    assert model_state.new_physical_to_logical_map is not None
-    assert model_state.new_logical_to_physical_map is not None
-    assert model_state.new_logical_replica_count is not None
-
     # Commit physical_to_logical_map
-    src = model_state.new_physical_to_logical_map[layer]
+    src = new_physical_to_logical_map[layer]
     dst = model_state.physical_to_logical_map[layer]
     # The number of physical experts must stay the same while running Async EPLB
     assert src.shape == dst.shape
@@ -1223,12 +1220,12 @@ def _commit_eplb_maps_for_layer(
 
     # Commit logical_to_physical_map
     _pad_out_tensor(
-        src=model_state.new_logical_to_physical_map[layer],
+        src=new_logical_to_physical_map[layer],
         dst=model_state.logical_to_physical_map[layer],
     )
 
     # Commit logical_replica_count
-    src = model_state.new_logical_replica_count[layer]
+    src = new_logical_replica_count[layer]
     dst = model_state.logical_replica_count[layer]
     assert src.shape == dst.shape
     dst.copy_(src, non_blocking=True)
